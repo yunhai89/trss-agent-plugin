@@ -100,7 +100,9 @@ export class HumanizeReplyComposer {
     const c = cfg || this._cfgFn()
     const rcfg = c.reply || {}
     const maxBubbles = rcfg.maxBubbles ?? 3
-    const segments = splitSegments(text, { maxBubbles })
+    // 先剥除文本中的 [sticker:...] 标记（防泄漏到正文）
+    const cleanText = this.stickerManager ? this.stickerManager.applyText(text, new Map()) : text
+    const segments = splitSegments(cleanText, { maxBubbles })
     if (!segments.length) return { sentIds: [], cancelled: true, cancelReason: 'no_segments' }
 
     const gen = runtime.plannerGeneration

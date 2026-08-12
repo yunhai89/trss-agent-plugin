@@ -67,8 +67,12 @@ export class StickerWatch extends plugin {
     const selfIds = selfIdsOf(e)
     if (selfIds.length && selfIds.includes(String(e.user_id))) return false
 
-    // 提取 image 段
-    const segs = Array.isArray(e.message) ? e.message.filter((s) => s && s.type === 'image') : []
+    // 提取 image 段：只收集 QQ 协议标记为表情的（sub_type≠0）
+    // sub_type=0 是普通图片（照片/截图/文档），sub_type=1/7 是表情/动画
+    // 参考 MaiBot：它依赖适配器层 image vs emoji 段类型分流，这里用 sub_type 做等价
+    const segs = Array.isArray(e.message)
+      ? e.message.filter((s) => s && s.type === 'image' && Number(s.sub_type) !== 0)
+      : []
     if (!segs.length) return false
     Log.info('[sticker-watch] 捕获图片消息', gid, 'segs=' + segs.length, 'seg[0]keys=' + Object.keys(segs[0] || {}).join(','), 'url=' + (segs[0]?.url || segs[0]?.data?.url || '无'), 'e.img=' + JSON.stringify(e.img?.[0]?.slice?.(0, 80) || e.img?.length || 0))
 
