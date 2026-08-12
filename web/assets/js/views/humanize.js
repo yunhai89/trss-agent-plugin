@@ -96,9 +96,13 @@
 
       const syncForm = (snap) => {
         dirtySuppressed = true
-        // 清空后重填（防止字段残留）
+        // 清空后重填（防止字段残留）。深拷贝 snap：form 不得与 store 的 reactive 对象共享引用
+        // （否则数组字段 form.groups 会别名 M.config.humanize.groups，导致 v-model 回写后
+        // buildChanges 比较 origSnapshot 与 form 时偶发判等异常，保存提示「无改动」）。
+        // 注：config.js 在调用处深拷贝 M.config；本页调用处未拷贝，故在此处补拷贝，效果等价。
+        const detached = withDefaults(JSON.parse(JSON.stringify(snap || {})))
         for (const k of Object.keys(form)) delete form[k]
-        Object.assign(form, withDefaults(snap))
+        Object.assign(form, detached)
         origSnapshot = JSON.parse(JSON.stringify(form))
         dirty.value = false
         nextTick(() => { dirtySuppressed = false })

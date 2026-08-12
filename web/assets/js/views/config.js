@@ -40,6 +40,64 @@
     </div>`,
   }
 
+  /* 模型选择器：可搜索下拉（按当前 protocol/baseURL/apiKey/preset 拉厂商 /models）+ 手输兜底 */
+  const ModelPicker = {
+    name: 'ModelPicker',
+    props: {
+      modelValue: { type: String, default: '' },
+      protocol: { type: String, default: '' },
+      baseUrl: { type: String, default: '' },
+      apiKey: { type: String, default: '' },
+      preset: { type: String, default: '' },
+      placeholder: { type: String, default: '模型 ID（可手输或点拉取列表）' },
+    },
+    emits: ['update:modelValue'],
+    setup(props, { emit }) {
+      const { ref, computed } = Vue
+      const { toast } = window.UI
+      const open = ref(false)
+      const loading = ref(false)
+      const models = ref([])
+      const search = ref('')
+      const filtered = computed(() => {
+        const q = search.value.trim().toLowerCase()
+        const all = models.value
+        if (!q) return all.slice(0, 100)
+        return all.filter((m) => (m.id || '').toLowerCase().includes(q) || (m.name || '').toLowerCase().includes(q)).slice(0, 100)
+      })
+      const setModel = (id) => { emit('update:modelValue', id); open.value = false; search.value = '' }
+      const load = async () => {
+        loading.value = true
+        try {
+          models.value = await window.api.get('/models', { protocol: props.protocol, baseURL: props.baseUrl, apiKey: props.apiKey, preset: props.preset })
+          open.value = true
+          toast(`已加载 ${models.value.length} 个模型`, 'success')
+        } catch (e) { toast(e.message, 'error') }
+        finally { loading.value = false }
+      }
+      return { open, loading, models, search, filtered, setModel, load }
+    },
+    template: `
+    <div style="position:relative;min-width:240px">
+      <div class="flex gap6">
+        <input class="input mono" style="flex:1;min-width:140px" :value="modelValue" @input="$emit('update:modelValue', $event.target.value)" :placeholder="placeholder">
+        <button type="button" class="btn btn-soft btn-sm" @click="load" :disabled="loading">{{ loading ? '加载中…' : '拉取列表' }}</button>
+      </div>
+      <div v-if="open" @click="open = false" style="position:fixed;inset:0;z-index:20"></div>
+      <div v-if="open" style="position:absolute;z-index:30;top:calc(100% + 4px);left:0;right:0;background:var(--surface,#fff);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.12);max-height:260px;display:flex;flex-direction:column">
+        <div style="padding:6px;border-bottom:1px solid var(--border)">
+          <input class="input" style="width:100%;font-size:12px;padding:4px 8px" v-model="search" placeholder="搜索模型 id / 名称（无匹配可直接上方手填）">
+        </div>
+        <div style="overflow:auto;flex:1">
+          <div v-if="!filtered.length" class="muted-3" style="padding:10px;font-size:12px">无匹配模型，可直接在输入框手填</div>
+          <div v-for="m in filtered" :key="m.id" @click="setModel(m.id)" style="padding:6px 10px;cursor:pointer;border-bottom:1px solid var(--border);font-size:12px">
+            <b class="mono">{{ m.id }}</b> <span v-if="m.name && m.name !== m.id" class="muted-3">{{ m.name }}</span>
+          </div>
+        </div>
+      </div>
+    </div>`,
+  }
+
   const OPT = {
     trigger: [['at', '@机器人触发'], ['command', '触发词触发'], ['both', '两者皆可']],
     protocol: [['openai', 'OpenAI 兼容'], ['anthropic', 'Anthropic 兼容'], ['gemini', 'Gemini 原生(官方SDK)']],
@@ -57,7 +115,7 @@
 
   window.VIEWS.config = {
     name: 'ConfigView',
-    components: { CfgRow, TagEditor },
+    components: { CfgRow, TagEditor, ModelPicker },
     setup() {
       const { ref, reactive, watch, computed, onMounted, onUnmounted, nextTick } = Vue
       const { toast } = window.UI
@@ -100,9 +158,15 @@
         Object.assign(form, snap)
         origSnapshot = JSON.parse(JSON.stringify(snap))
         mcpServersToUi()
-        // 兜底：确保 stagehand/terminal 子对象存在（防旧 config 无此字段时 v-model 报错）
+        // 兜底：确保 stagehand/terminal/sticker 子对象存在（防旧 config 无此字段时 v-model 报错）
         if (!form.stagehand) form.stagehand = {}
         if (!form.terminal) form.terminal = {}
+        if (!form.sticker) form.sticker = {}
+        // sticker 数组字段兜底（TagEditor 要求 modelValue 为 Array）
+        const st = form.sticker
+        for (const k of ['githubProxies', 'excludeDirs', 'excludeKeywords', 'discoverGroups']) {
+          if (!Array.isArray(st[k])) st[k] = st[k] == null ? [] : [st[k]]
+        }
         dirty.value = false
         nextTick(() => { dirtySuppressed = false })
       }
@@ -149,6 +213,7 @@
         { id: 'evolution', name: '自进化', icon: 'evolution', grad: 'var(--grad-rose)' },
         { id: 'security', name: '权限 / 安全 / 日志', icon: 'shield', grad: 'var(--grad-primary)' },
         { id: 'mcp', name: 'MCP 服务', icon: 'tool', grad: 'var(--grad-teal)' },
+        { id: 'sticker', name: '表情包', icon: 'smile', grad: 'var(--grad-amber)' },
         { id: 'ext', name: '多模态 / 工具 / 扩展', icon: 'tool', grad: 'var(--grad-sky)' },
       ]
       // 仅「基础/模型」默认展开，其余收起（配置多时便于查找）
@@ -376,8 +441,8 @@
             <cfg-row name="API Key" desc="主模型密钥(明文)">
               <input class="input mono" style="width:260px" v-model="form.apiKey" placeholder="sk-...">
             </cfg-row>
-            <cfg-row name="主模型 ID" desc="对话主模型">
-              <input class="input" style="width:180px" v-model="form.model">
+            <cfg-row full name="主模型 ID" desc="对话主模型；可手输，或点「拉取列表」按当前厂商拉取可用模型">
+              <model-picker v-model="form.model" :protocol="form.protocol" :base-url="form.baseURL" :api-key="form.apiKey" :preset="form.preset"/>
             </cfg-row>
             <div class="full" v-if="form.preset === 'openrouter'" style="margin-top:6px;padding:10px;border:1px dashed var(--border);border-radius:10px">
               <div class="flex between mb8">
@@ -666,6 +731,87 @@
           </div></div>
         </div>
 
+        <!-- ===== 表情包 ===== -->
+        <div :id="'cfg-sticker'" class="card cfg-section" :class="{open: open.sticker}">
+          <div class="cfg-section-head" @click="open.sticker = !open.sticker">
+            <span class="ico" style="background:var(--grad-amber)"><v-icon name="smile"/></span>
+            <div><div class="card-title" style="font-size:14px">表情包</div><div class="card-sub">LLM 自主附带表情包 · 官方仓库获取 + 频率管控 + 自动发现</div></div>
+            <v-icon class="arrow" name="chevron"/>
+          </div>
+          <div class="cfg-body" v-show="open.sticker"><div class="cfg-grid">
+            <cfg-row name="启用表情包" desc="总开关；未下载/未开则不注入清单、不解析（零影响）">
+              <v-switch v-model="form.sticker.enable"/>
+            </cfg-row>
+            <cfg-row name="官方仓库地址" desc="作者维护；留空=尚未接入（表情包安装会提示）">
+              <input class="input mono" style="width:260px" v-model="form.sticker.repo" placeholder="https://github.com/...stickers.git">
+            </cfg-row>
+            <cfg-row name="git http.proxy" desc="fetch 兜底代理（如 http://127.0.0.1:7890）">
+              <input class="input mono" style="width:220px" v-model="form.sticker.gitProxy" placeholder="留空=直连">
+            </cfg-row>
+            <cfg-row full name="克隆加速代理前缀" desc="追加在内置 ghfast.top/gh-proxy.com/ghproxy.net/gitclone.com 之上，安装时测速选最快">
+              <tag-editor v-model="form.sticker.githubProxies" placeholder="如 https://ghproxy.com/"/>
+            </cfg-row>
+            <cfg-row name="manifest 文件名" desc="留空=自动识别根目录第一个合规 .json（含 id/name/tags/docs）">
+              <input class="input" style="width:180px" v-model="form.sticker.manifest" placeholder="留空=自动">
+            </cfg-row>
+            <cfg-row full name="目录黑名单" desc="不复制进 images/ 的目录名">
+              <tag-editor v-model="form.sticker.excludeDirs" placeholder="回车添加目录名"/>
+            </cfg-row>
+            <cfg-row full name="文件名关键词黑名单" desc="追加在内置 nsfw/色情 等之上（正则，i 标志）">
+              <tag-editor v-model="form.sticker.excludeKeywords" placeholder="回车添加关键词"/>
+            </cfg-row>
+            <cfg-row name="prompt 清单条数上限" desc="listTopN；超出按高频+最近发现加权">
+              <input type="number" class="input" style="width:100px" min="5" max="200" v-model.number="form.sticker.listTopN">
+            </cfg-row>
+
+            <div class="full" style="margin-top:6px;padding-top:10px;border-top:1px dashed var(--border)">
+              <div class="muted" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="zap"/> 频率管控（防"每条都带 → 反而更 AI"）</div>
+              <div class="cfg-grid">
+                <cfg-row name="单条最多贴纸数" desc="maxPerReply">
+                  <input type="number" class="input" style="width:90px" min="1" max="5" v-model.number="form.sticker.maxPerReply">
+                </cfg-row>
+                <cfg-row name="同会话冷却(秒)" desc="两次带图回复最小间隔">
+                  <input type="number" class="input" style="width:100px" min="0" v-model.number="form.sticker.cooldown">
+                </cfg-row>
+                <cfg-row name="带图概率 sendRate" desc="门控通过后实际带图概率（0~1）">
+                  <div class="flex gap10" style="width:200px">
+                    <input type="range" class="slider" min="0" max="1" step="0.05" v-model.number="form.sticker.sendRate">
+                    <b class="num" style="width:34px;text-align:right">{{ Number(form.sticker.sendRate||0).toFixed(2) }}</b>
+                  </div>
+                </cfg-row>
+                <cfg-row name="防连发" desc="上一条带过则本条不带">
+                  <v-switch v-model="form.sticker.antiConsecutive"/>
+                </cfg-row>
+                <cfg-row name="仅群聊启用" desc="私聊不带表情包">
+                  <v-switch v-model="form.sticker.groupOnly"/>
+                </cfg-row>
+                <cfg-row name="send_sticker 工具" desc="注册按情绪跨全库选图工具（不受目录 top-N 限制）">
+                  <v-switch v-model="form.sticker.sendStickerTool"/>
+                </cfg-row>
+              </div>
+            </div>
+
+            <div class="full" style="margin-top:6px;padding-top:10px;border-top:1px dashed var(--border)">
+              <div class="muted" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="search"/> 自动发现（MaiBot 式：被动采集群内 image → 视觉判定+打标 → 入库）</div>
+              <div class="muted-3" style="font-size:11px;margin-bottom:8px">需 sticker.enable 开启 + agent.vision.model 已配。被动采集群内 image 段，视觉模型判定并打标后入库。</div>
+              <div class="cfg-grid">
+                <cfg-row name="自动发现总开关" desc="被动采集群内表情并入库">
+                  <v-switch v-model="form.sticker.autoDiscover"/>
+                </cfg-row>
+                <cfg-row full name="采集群白名单" desc="群号字符串；空数组=所有群都采集">
+                  <tag-editor v-model="form.sticker.discoverGroups" placeholder="输入群号回车"/>
+                </cfg-row>
+                <cfg-row name="自动发现条数上限" desc="超限按 usageCount 升序淘汰冷门">
+                  <input type="number" class="input" style="width:100px" min="10" v-model.number="form.sticker.maxDiscovered">
+                </cfg-row>
+                <cfg-row name="单张采集大小上限(MB)" desc="0=不限">
+                  <input type="number" class="input" style="width:100px" min="0" v-model.number="form.sticker.discoverMaxSizeMB">
+                </cfg-row>
+              </div>
+            </div>
+          </div></div>
+        </div>
+
         <!-- ===== §1.7 多模态 / 工具 / 扩展 ===== -->
         <div :id="'cfg-ext'" class="card cfg-section" :class="{open: open.ext}">
           <div class="cfg-section-head" @click="open.ext = !open.ext">
@@ -683,8 +829,8 @@
             <cfg-row name="视觉子模型" desc="主模型无视觉时图转文；各字段留空=复用主配置">
               <v-switch v-model="form.vision.enable"/>
             </cfg-row>
-            <cfg-row name="视觉模型 ID" desc="视觉模型名(如 qwen-vl-max/gpt-4o/glm-4v)；留空=复用主模型">
-              <input class="input mono" style="width:240px" v-model="form.vision.model" placeholder="留空=复用主模型">
+            <cfg-row full name="视觉模型 ID" desc="视觉模型名；留空=复用主模型。可手输或点「拉取列表」（按视觉接口或主接口拉取）">
+              <model-picker v-model="form.vision.model" :protocol="form.vision.protocol || form.protocol" :base-url="form.vision.baseURL || form.baseURL" :api-key="form.vision.apiKey || form.apiKey" :preset="form.vision.preset || form.preset" placeholder="留空=复用主模型"/>
             </cfg-row>
             <cfg-row name="视觉接口地址" desc="baseURL；留空=复用主(跨厂商时填，如 https://dashscope.aliyuncs.com/compatible-mode/v1)">
               <input class="input mono" style="width:240px" v-model="form.vision.baseURL" placeholder="留空=复用主 baseURL">
@@ -740,9 +886,6 @@
             </cfg-row>
             <cfg-row name="语音转写 STT" desc="whisper 兼容接口">
               <v-switch v-model="form.stt.enable"/>
-            </cfg-row>
-            <cfg-row name="表情包系统" desc="sticker.enable">
-              <v-switch v-model="form.sticker.enable"/>
             </cfg-row>
             <cfg-row name="Python 计算沙盒" desc="calc:python3 超时秒">
               <div class="flex gap6">

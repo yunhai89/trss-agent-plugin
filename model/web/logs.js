@@ -117,32 +117,47 @@ export function queryLogFiles(dir, { from, to, event, q, limit = 10 } = {}) {
 }
 
 /**
- * 聚合近 N 日 stats（供 /api/overview）：tokenTrend（按天 input/output）+ toolTop（工具计数 TopK）。
+ * 聚合近 N 日 stats（供 /api/overview）：tokenTrend（按天 input/output）+ requestTrend（按天请求/对话轮次）
+ * + toolTop（工具计数 TopK）+ 汇总（totalRequests/totalToolCalls/totalTokens）。
  * 仅扫文件名日期 >= since 的文件，避免全扫。
  */
 export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
-  const dayMap = {}
+  const dayMap = {} // day → { input, output, requests }
   const toolMap = {}
+  let totalRequests = 0
+  let totalToolCalls = 0
+  let totalTokens = 0
   for (const f of listLogFiles(dir)) {
     if (f.ts < since) continue
     for (const e of readLogFile(dir, f.file)) {
       if (!e || !e.time) continue
       const day = String(e.time).slice(5, 10) // ISO → MM-DD
-      if (e.event === 'run_end' && e.usage) {
-        const u = e.usage.raw || e.usage
-        const din = u.input ?? u.input_tokens ?? u.prompt_tokens ?? 0
-        const dout = u.output ?? u.output_tokens ?? u.completion_tokens ?? 0
-        if (din || dout) (dayMap[day] ||= { input: 0, output: 0 }), (dayMap[day].input += din), (dayMap[day].output += dout)
+      if (e.event === 'run_end') {
+        totalRequests++
+        ;(dayMap[day] ||= { input: 0, output: 0, requests: 0 }).requests++
+        if (e.usage) {
+          const u = e.usage.raw || e.usage
+          const din = u.input ?? u.input_tokens ?? u.prompt_tokens ?? 0
+          const dout = u.output ?? u.output_tokens ?? u.completion_tokens ?? 0
+          if (din || dout) {
+            dayMap[day].input += din
+            dayMap[day].output += dout
+            totalTokens += din + dout
+          }
+        }
       }
-      if (e.event === 'tool' && e.name) toolMap[e.name] = (toolMap[e.name] || 0) + 1
+      if (e.event === 'tool' && e.name) {
+        toolMap[e.name] = (toolMap[e.name] || 0) + 1
+        totalToolCalls++
+      }
     }
   }
-  const tokenTrend = Object.entries(dayMap)
-    .sort(([a], [b]) => a < b ? -1 : 1)
-    .map(([day, v]) => ({ day, input: v.input, output: v.output }))
+  const days = Object.keys(dayMap).sort((a, b) => (a < b ? -1 : 1))
+  const tokenTrend = days.map((day) => ({ day, input: dayMap[day].input, output: dayMap[day].output }))
+  const requestTrend = days.map((day) => ({ day, count: dayMap[day].requests }))
   const toolTop = Object.entries(toolMap)
     .sort((a, b) => b[1] - a[1])
     .slice(0, topK)
     .map(([name, count]) => ({ name, count }))
-  return { tokenTrend, toolTop }
+  return { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens }
 }

@@ -12,7 +12,8 @@
   const MOCK = window.MOCK = reactive({
     config: null, scopes: [], memories: {}, recall: {}, personas: [], skills: [], tools: [], kb: [],
     conversations: [], sessions: {}, logFiles: [], logFilesTotal: 0, schedules: [], confirms: [],
-    suggestions: [], perceptions: [], tokenTrend: [], toolTop: [],
+    suggestions: [], perceptions: [], tokenTrend: [], requestTrend: [], toolTop: [],
+    totalRequests: 0, totalToolCalls: 0, totalTokens: 0,
   })
 
   const TOKEN_KEY = 'agents_token'
@@ -84,7 +85,9 @@
     async loadSuggestions(scopeId, status) { MOCK.suggestions = await api.get('/suggestions', { scopeId, status }) },
     async loadOverview() {
       const d = await api.get('/overview')
-      MOCK.tokenTrend = d.tokenTrend; MOCK.toolTop = d.toolTop; MOCK.perceptions = d.perceptions
+      MOCK.tokenTrend = d.tokenTrend; MOCK.requestTrend = d.requestTrend; MOCK.toolTop = d.toolTop
+      MOCK.perceptions = d.perceptions
+      MOCK.totalRequests = d.totalRequests || 0; MOCK.totalToolCalls = d.totalToolCalls || 0; MOCK.totalTokens = d.totalTokens || 0
       if (d.counts) MOCK.counts = d.counts
     },
   }

@@ -28,22 +28,49 @@
             icon: 'confirm', grad: 'var(--grad-amber)', label: '待审批 / 待审建议', value: (M.confirms || []).length + (M.suggestions || []).filter((s) => s.status === 'pending').length,
             sub: '审批为纯内存,重启清空', count: true,
           },
+          {
+            icon: 'zap', grad: 'var(--grad-rose)', label: '近 7 日请求', value: M.totalRequests || 0,
+            sub: '对话轮次 (run_end 聚合)', count: true,
+          },
+          {
+            icon: 'tool', grad: 'var(--grad-sky)', label: '工具调用次数', value: M.totalToolCalls || 0,
+            sub: '近 7 日累计', count: true,
+          },
         ]
       })
 
-      /* Token 面积图(SVG 手绘) —— computed 依赖 M.tokenTrend,loadOverview 后重算 */
+      /* Token 面积图(SVG 手绘) —— computed 依赖 M.tokenTrend,loadOverview 后重算。
+       * 注意 trend.length===1 时不能除以 (length-1)=0 → 用 denom=(length-1)||1 兜底，单点补圆点 */
       const chart = computed(() => {
         const W = 560, Hgt = 180, PAD = 8
         const trend = M.tokenTrend || []
-        if (!trend.length) return { W, H: Hgt, lineIn: '', lineOut: '', areaIn: '', areaOut: '', days: [] }
+        const empty = { W, H: Hgt, lineIn: '', lineOut: '', areaIn: '', areaOut: '', days: [], dots: [], single: false }
+        if (!trend.length) return empty
         const maxV = Math.max(...trend.map((d) => d.input + d.output)) || 1
-        const pt = (i, v) => [PAD + (i * (W - PAD * 2)) / (trend.length - 1), Hgt - PAD - (v / maxV) * (Hgt - PAD * 2 - 14)]
+        const denom = (trend.length - 1) || 1
+        const pt = (i, v) => [PAD + (i * (W - PAD * 2)) / denom, Hgt - PAD - (v / maxV) * (Hgt - PAD * 2 - 14)]
         const line = (key) => trend.map((d, i) => pt(i, d[key]).map((n) => n.toFixed(1)).join(',')).join(' ')
         const area = (key) => {
           const pts = trend.map((d, i) => pt(i, d[key]))
           return `M${pts[0][0]},${Hgt - PAD} ` + pts.map((p) => `L${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ') + ` L${pts[pts.length - 1][0]},${Hgt - PAD} Z`
         }
-        return { W, H: Hgt, lineIn: line('input'), lineOut: line('output'), areaIn: area('input'), areaOut: area('output'), days: trend.map((d) => d.day) }
+        const dots = trend.length === 1 ? [{ x: pt(0, 0)[0], yIn: pt(0, trend[0].input)[1], yOut: pt(0, trend[0].output)[1] }] : []
+        return { W, H: Hgt, lineIn: line('input'), lineOut: line('output'), areaIn: area('input'), areaOut: area('output'), days: trend.map((d) => d.day), dots, single: trend.length === 1 }
+      })
+
+      /* 请求趋势柱状图（每日对话轮次 = run_end 计数）—— MinBot 风格简洁柱图 */
+      const reqChart = computed(() => {
+        const W = 560, Hgt = 180, PAD = 8
+        const trend = M.requestTrend || []
+        if (!trend.length) return { W, H: Hgt, bars: [], days: [], max: 0 }
+        const maxV = Math.max(...trend.map((d) => d.count)) || 1
+        const slot = (W - PAD * 2) / trend.length
+        const bw = Math.max(4, slot - 6)
+        const bars = trend.map((d, i) => {
+          const h = (d.count / maxV) * (Hgt - PAD * 2 - 14)
+          return { x: PAD + i * slot + (slot - bw) / 2, y: Hgt - PAD - h, w: bw, h, count: d.count }
+        })
+        return { W, H: Hgt, bars, days: trend.map((d) => d.day), max: maxV }
       })
 
       const toolTop = computed(() => M.toolTop || [])
@@ -72,7 +99,7 @@
         try { await window.store.loadConfig() } catch { /* 忽略 */ }
       })
 
-      return { stats, chart, toolTop, toolMax, switches, perceptions, totalTokens, fmt }
+      return { stats, chart, reqChart, toolTop, toolMax, switches, perceptions, totalTokens, fmt }
     },
     template: `
     <div>
@@ -131,6 +158,10 @@
               pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:1;animation:dashIn 1.4s .2s var(--ease-out) forwards"/>
             <polyline :points="chart.lineOut" fill="none" stroke="#14b8a6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
               pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:1;animation:dashIn 1.4s .5s var(--ease-out) forwards"/>
+            <template v-if="chart.single && chart.dots.length">
+              <circle :cx="chart.dots[0].x" :cy="chart.dots[0].yIn" r="3.5" fill="#3b82f6"/>
+              <circle :cx="chart.dots[0].x" :cy="chart.dots[0].yOut" r="3.5" fill="#14b8a6"/>
+            </template>
           </svg>
           <div class="flex between" style="padding:0 8px;font-size:11px;color:var(--text-3)">
             <span v-for="d in chart.days" :key="d">{{ d }}</span>
@@ -151,6 +182,31 @@
               </div>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- 请求趋势柱状图（近 7 日对话轮次） -->
+      <div class="card card-pad hoverable mt16" style="--i:9">
+        <div class="flex between">
+          <div>
+            <div class="card-title"><v-icon name="zap"/>请求趋势（每日对话轮次）</div>
+            <div class="card-sub">按 devLog run_end 计数 · 近 7 日 · 共 {{ fmt.num(totalRequests || 0) }} 次</div>
+          </div>
+          <span class="chip chip-primary" style="font-size:11px">峰值 {{ reqChart.max }} / 日</span>
+        </div>
+        <svg :viewBox="'0 0 ' + reqChart.W + ' ' + reqChart.H" style="width:100%;margin-top:14px;display:block">
+          <defs>
+            <linearGradient id="agReq" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#6366f1" stop-opacity=".9"/><stop offset="100%" stop-color="#6366f1" stop-opacity=".45"/>
+            </linearGradient>
+          </defs>
+          <rect v-for="(b, i) in reqChart.bars" :key="i" :x="b.x" :y="b.y" :width="b.w" :height="b.h" rx="3"
+            fill="url(#agReq)" :style="{ animation: 'fadeUp .5s var(--ease-out) backwards', animationDelay: (i * 70 + 120) + 'ms' }">
+            <title>{{ b.count }} 次</title>
+          </rect>
+        </svg>
+        <div class="flex between" style="padding:0 8px;font-size:11px;color:var(--text-3)">
+          <span v-for="d in reqChart.days" :key="d">{{ d }}</span>
         </div>
       </div>
 

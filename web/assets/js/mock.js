@@ -281,6 +281,19 @@
     { name: 'render', count: 18 },
     { name: 'sticker', count: 15 },
   ]
+  /* 近 7 日请求趋势（每日对话轮次 run_end 计数）+ 汇总 */
+  const requestTrend = [
+    { day: '07-23', count: 18 },
+    { day: '07-24', count: 24 },
+    { day: '07-25', count: 31 },
+    { day: '07-26', count: 15 },
+    { day: '07-27', count: 27 },
+    { day: '07-28', count: 42 },
+    { day: '07-29', count: 9 },
+  ]
+  const totalRequests = requestTrend.reduce((s, d) => s + d.count, 0)
+  const totalToolCalls = toolTop.reduce((s, t) => s + t.count, 0)
+  const totalTokens = tokenTrend.reduce((s, d) => s + d.input + d.output, 0)
 
   /* 包成 Vue.reactive:各视图直接修改 MOCK 即可驱动界面更新(模拟写操作) */
   const tevoTools = [
@@ -292,6 +305,7 @@
   window.MOCK = Vue.reactive({
     config, scopes, memories, recall, personas, skills,
     conversations, sessions, logFiles, schedules, confirms,
-    suggestions, perceptions, tokenTrend, toolTop, tevoTools,
+    suggestions, perceptions, tokenTrend, requestTrend, toolTop,
+    totalRequests, totalToolCalls, totalTokens, tevoTools,
   })
 })()

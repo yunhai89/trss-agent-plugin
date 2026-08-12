@@ -10,6 +10,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import Config from '../../utils/Config.js'
 import { setPath } from '../../utils/path.js'
+import { presets as openaiPresets } from '../openai/presets.js'
+import { presets as anthropicPresets } from '../anthropic/presets.js'
 import { getRuntime, fireReminder, makeFireDispatch } from '../../apps/agent.js'
 import { parseCron } from '../agent/schedule.js'
 import { redactConfig } from './redact.js'
@@ -259,7 +261,7 @@ router.get('/overview', asyncHandler(async (req, res) => {
   if (_overviewCache && Date.now() - _overviewCache.at < 60000) return ok(res, _overviewCache.data)
   const r = await getRuntime().catch(() => null)
   const since = Date.now() - 7 * 86400000
-  const { tokenTrend, toolTop } = aggregateStats(Config.path.logs, { since, topK: 5 })
+  const { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens } = aggregateStats(Config.path.logs, { since, topK: 5 })
   // perceptions（kv.scan）
   const perceptions = []
   if (r?.kv) {
@@ -288,7 +290,7 @@ router.get('/overview', asyncHandler(async (req, res) => {
     scopes: fs.existsSync(Config.path.memories) ? fs.readdirSync(Config.path.memories).length : 0,
     conversations,
   }
-  const data = { tokenTrend, toolTop, perceptions, counts }
+  const data = { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, perceptions, counts }
   _overviewCache = { at: Date.now(), data }
   return ok(res, data)
 }))
@@ -315,6 +317,75 @@ router.get('/openrouter/key', asyncHandler(async (req, res) => {
   }
   const data = await r.json().catch(() => null)
   return ok(res, data?.data || data)
+}))
+
+// ── 通用模型列表（按当前 protocol/baseURL/apiKey/preset 拉取厂商可用模型，供配置中心模型 ID 选择）──
+// GET /api/models?protocol=&baseURL=&apiKey=&preset= —— 返回 [{id, name?}]；纯代理不落盘。
+router.get('/models', asyncHandler(async (req, res) => {
+  const agent = Config.get().agent || {}
+  const protocol = String(req.query.protocol || agent.protocol || 'openai').toLowerCase()
+  const preset = String(req.query.preset || agent.preset || '').toLowerCase()
+  const apiKey = String(req.query.apiKey || agent.apiKey || '')
+  // 解析 baseURL：查询参 > preset 预设 > config.agent.baseURL（去尾部斜杠）
+  let baseURL = String(req.query.baseURL || '').trim().replace(/\/+$/, '')
+  if (!baseURL) {
+    try {
+      const map = protocol === 'anthropic' ? anthropicPresets : openaiPresets
+      baseURL = (map[preset]?.baseURL || agent.baseURL || '').trim().replace(/\/+$/, '')
+    } catch { baseURL = String(agent.baseURL || '').trim().replace(/\/+$/, '') }
+  }
+  if (!baseURL) return fail(res, CODE.BAD, '未配置 baseURL，且无法从厂商预设解析（请在表单填接口地址）')
+  if (!apiKey) return fail(res, CODE.BAD, '未配置 apiKey，无法拉取模型列表')
+
+  const timeout = () => AbortSignal.timeout(15000)
+  try {
+    let list = []
+    if (protocol === 'gemini') {
+      // Gemini 原生：GET .../v1beta/models?key=
+      // preset.baseURL 形如 .../v1beta/openai（OpenAI 兼容入口）：去掉 /openai 后缀复用其 /v1beta 根。
+      // root 已含 /v1beta 则直接 /models，否则补 /v1beta/models（兼容用户填裸域名）。
+      const root = baseURL.replace(/\/openai\/?$/, '').replace(/\/+$/, '')
+      const gpath = /\/v1beta(\/|$)/.test(root) ? '/models' : '/v1beta/models'
+      const r = await fetch(`${root}${gpath}?key=${encodeURIComponent(apiKey)}&pageSize=1000`, { signal: timeout() }).catch(() => null)
+      if (!r?.ok) {
+        const t = await r?.text().catch(() => '')
+        return fail(res, CODE.INTERNAL, `Gemini 模型列表获取失败（HTTP ${r?.status || '网络错误'}）${t ? '：' + t.slice(0, 120) : ''}`)
+      }
+      const data = await r.json().catch(() => null)
+      list = (data?.models || []).map((m) => ({ id: String(m.name || '').replace(/^models\//, ''), name: m.displayName }))
+    } else if (protocol === 'anthropic') {
+      // Anthropic 兼容：GET {baseURL}/v1/models（client 同款 /v1 前缀）+ x-api-key + anthropic-version
+      // 去尾部 /v1（防用户填带 /v1 的地址导致 /v1/v1/models）
+      const ap = anthropicPresets[preset] || {}
+      const authHeader = ap.authHeader || 'x-api-key'
+      const headers = { [authHeader]: apiKey, 'anthropic-version': ap.version || '2023-06-01' }
+      const ab = baseURL.replace(/\/v1\/?$/, '').replace(/\/+$/, '')
+      const r = await fetch(`${ab}/v1/models`, { headers, signal: timeout() }).catch(() => null)
+      if (!r?.ok) {
+        const t = await r?.text().catch(() => '')
+        return fail(res, CODE.INTERNAL, `模型列表获取失败（HTTP ${r?.status || '网络错误'}）${t ? '：' + t.slice(0, 120) : ''}`)
+      }
+      const data = await r.json().catch(() => null)
+      list = (data?.data || data?.models || []).map((m) => ({ id: m.id || m.name, name: m.display_name || m.name }))
+    } else {
+      // OpenAI 兼容（deepseek/dashscope/zhipu/moonshot/mimo/minimax/openrouter/opencode 等）：GET {baseURL}/models
+      const r = await fetch(`${baseURL}/models`, { headers: { Authorization: `Bearer ${apiKey}` }, signal: timeout() }).catch(() => null)
+      if (!r?.ok) {
+        const t = await r?.text().catch(() => '')
+        return fail(res, CODE.INTERNAL, `模型列表获取失败（HTTP ${r?.status || '网络错误'}）${t ? '：' + t.slice(0, 120) : ''}`)
+      }
+      const data = await r.json().catch(() => null)
+      list = (data?.data || data?.models || []).map((m) => ({ id: m.id || m.name, name: m.name || m.id }))
+    }
+    // 去空 id + 去重 + 按 id 排序
+    const seen = new Set()
+    list = list
+      .filter((m) => m.id && !seen.has(m.id) && seen.add(m.id))
+      .sort((a, b) => (a.id < b.id ? -1 : 1))
+    return ok(res, list)
+  } catch (e) {
+    return fail(res, CODE.INTERNAL, `模型列表获取异常：${e?.message || e}`)
+  }
 }))
 
 // ───────────────── 写操作（9 类，成功触发 Config 热加载或落盘） ─────────────────

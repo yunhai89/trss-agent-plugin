@@ -93,7 +93,7 @@ try {
 
 /* 5. mock 结构抽样断言(对齐数据规范 §1-§3) */
 const assert = (cond, msg) => (cond ? ok(msg) : (failed++, console.error('  ✘ ' + msg)))
-assert(MOCK.config.apiKey.configured === true && typeof MOCK.config.apiKey.preview === 'string', 'config.apiKey 为 MaskedValue')
+assert(typeof MOCK.config.apiKey === 'string' && MOCK.config.apiKey, 'config.apiKey 为明文字符串（自用面板不脱敏）')
 assert(MOCK.scopes.every((s) => /^(u_|g)/.test(s.scopeId)), 'scopeId 规则合法')
 assert(Object.values(MOCK.memories).every((m) => m.memory && m.user), 'memories 含 MEMORY/USER 双文件')
 const evts = new Set(MOCK.logFiles.flatMap((f) => f.events.map((e) => e.event)))
