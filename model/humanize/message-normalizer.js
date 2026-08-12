@@ -86,7 +86,9 @@ export function collectSelfIds(e, extra = []) {
 export function fingerprintId({ platform = 'qq', groupId = '', userId = '', timestamp = Date.now(), text = '', mediaIds = [] } = {}) {
   const norm = String(text).replace(/\s+/g, '')
   const mediaKey = Array.isArray(mediaIds) ? mediaIds.join(',') : ''
-  const key = [platform, groupId, userId, Math.floor(Number(timestamp) || Date.now() / 1000), norm, mediaKey].join('|')
+  // 指南 §24：floor(timestamp/1000) 秒级桶（防止同秒重复入队；operator-precedence 已修正）
+  const tsSec = Math.floor((Number(timestamp) || Date.now()) / 1000)
+  const key = [platform, groupId, userId, tsSec, norm, mediaKey].join('|')
   return 'fp_' + createHash('sha256').update(key).digest('hex').slice(0, 16)
 }
 

@@ -91,11 +91,17 @@ export class GroupRuntime {
   /** 该 generation 是否仍是当前代（异步结果落地前必验）。 */
   isCurrent(gen) { return gen === this.plannerGeneration }
 
-  /** 中止当前规划（新消息到达时）。 */
+  /**
+   * 中止当前规划（新消息到达 / 配置变更 / 取消时）。
+   * 关键：除 abort 信号外，**必须 bump generation**——部分 Provider 可能忽略 AbortSignal，
+   * 单调代是真正的兜底（指南 §10）。bump 后，任何旧代异步结果 isCurrent() 必为 false，只写 trace、不发送。
+   */
   abortPlanning(reason = 'new_message') {
     if (this.abortController) {
       try { this.abortController.abort(new Error(reason)) } catch { /* noop */ }
     }
+    // 即使 Provider 忽略 abort 信号，代已变化 → 旧结果落地时 isCurrent 检查会丢弃
+    this.plannerGeneration += 1
   }
 
   // ─────────────── debounce 定时器 ───────────────

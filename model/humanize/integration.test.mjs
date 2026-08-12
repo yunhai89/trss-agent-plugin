@@ -187,6 +187,58 @@ await test('端到端：handledByDirectAgent 消息不触发', async () => {
   ok(plannerCalled === false, '@消息（Direct 接管）不触发环境模式')
 })
 
+// ───────── P0 回归：晚到的 planner 结果（Provider 忽略 AbortSignal）不能发送 ─────────
+await test('P0：cancelAll 后晚到的 planner 结果不发送（代兜底）', async () => {
+  const { runtime } = mkCtx()
+  const cfg = () => validateHumanizeConfig({
+    enable: true, groups: ['g1'], shadow: false, threshold: 80, talkValue: 0.35,
+    debounceMs: 200, cooldownSeconds: 1, planner: { maxRounds: 2 }, replyer: { maxChars: 200 },
+  }).config
+  // planner.decide 挂起，直到外部手动 resolve（模拟 Provider 忽略 abort、晚返回）
+  let resolvePlanner = null
+  const planner = {
+    decide: () => new Promise((res) => { resolvePlanner = () => res({ type: 'human_reply', targetMessageId: 'late_t', replyGuide: 'g', quote: false, toolCallId: 'c1' }) }),
+  }
+  let composerDelivered = false
+  const replyer = { generate: async () => ({ text: '晚到的回复' }) }
+  const composer = { deliver: async () => { composerDelivered = true; return { sentIds: ['late'], cancelled: false } } }
+  const send = async () => 'late_sent'
+  const sched = new TurnScheduler({ runtime, cfg, planner, replyer, composer, send })
+
+  await sched.onMessage(mkMsg('小猫你觉得呢', { mentionsBotName: true, id: 'late_t' }))
+  await sleep(320) // 等 debounce(200ms) → 进 planner.decide（挂起中）
+  // 此时 planner 正挂起；模拟配置热重载关闭 / 新消息取消：cancelAll 应 bump 代
+  runtime.cancelAll('test_cancel')
+  ok(resolvePlanner != null, 'planner.decide 已挂起')
+  // 模拟 Provider 忽略 abort 信号、晚返回结果
+  resolvePlanner()
+  await sleep(60)
+  ok(composerDelivered === false, 'cancelAll 后晚到的 planner 结果被代兜底丢弃，不发送（P0）')
+})
+
+await test('P0：新消息中断规划后，旧代结果不发送', async () => {
+  const { runtime } = mkCtx()
+  const cfg = () => validateHumanizeConfig({
+    enable: true, groups: ['g1'], shadow: false, threshold: 80, talkValue: 0.35,
+    debounceMs: 200, cooldownSeconds: 1, planner: { maxRounds: 2 }, replyer: { maxChars: 200 },
+  }).config
+  let resolvePlanner = null
+  const planner = {
+    decide: () => new Promise((res) => { resolvePlanner = () => res({ type: 'human_reply', targetMessageId: 'm1', replyGuide: 'g', quote: false, toolCallId: 'c1' }) }),
+  }
+  let composerDelivered = false
+  const composer = { deliver: async () => { composerDelivered = true; return { sentIds: ['x'], cancelled: false } } }
+  const sched = new TurnScheduler({ runtime, cfg, planner, replyer: { generate: async () => ({ text: 'r' }) }, composer, send: async () => 'x' })
+  await sched.onMessage(mkMsg('小猫你觉得呢', { mentionsBotName: true, id: 'm1' }))
+  await sleep(320) // 进 planner（挂起）
+  // 新消息到达 → onMessage 中止规划（abortPlanning bump 代）+ 重排 debounce
+  await sched.onMessage(mkMsg('继续聊', { id: 'm2' }))
+  ok(resolvePlanner != null, 'planner 已挂起')
+  resolvePlanner() // 旧代晚返回
+  await sleep(60)
+  ok(composerDelivered === false, '新消息中断后，旧代 planner 结果不发送')
+})
+
 // ───────── 总结 ─────────
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

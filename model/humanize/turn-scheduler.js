@@ -224,6 +224,14 @@ export class TurnScheduler {
       return
     }
 
+    // 落地前再次校验：代未变 + 仍启用（热重载关停 / 新消息重规划后取消发送；防 Provider 忽略 abort 信号）
+    if (!rt.isCurrent(gen) || !this._enabled()) {
+      rt.trace?.record('delivery_cancelled', { turnId, reason: !rt.isCurrent(gen) ? 'stale_gen' : 'disabled' })
+      rt.markObserved(batch)
+      rt.setPhase('idle')
+      return
+    }
+
     // shadow 模式：只记录，不真实发送
     if (c.shadow !== false) {
       rt.trace?.record('shadow_reply', { turnId, text: text.slice(0, 200), target: action.targetMessageId, quote: !!action.quote })

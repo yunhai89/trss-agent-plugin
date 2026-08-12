@@ -56,8 +56,8 @@ function buildReadTools(rt, hcfg) {
   for (const name of allowed) {
     const t = rt.tools.get?.(name)
     if (!t || typeof t.execute !== 'function') continue
-    // 再保险：剔除危险工具名（validateHumanizeConfig 已过滤，这里双保险）
-    if (/^(?:send_|delete_|terminal|group_(kick|mute|set_|notice)|stagehand|file_to_pdf|upload_)/i.test(name)) continue
+    // 再保险：剔除危险工具名（与 default-config.js FORBIDDEN_READ_TOOLS 对齐；validateHumanizeConfig 已先过滤）
+    if (/^(?:send_|delete_|remove_|group_(kick|mute|set_|notice)|terminal|stagehand|file_to_pdf|upload_|create_group|transfer_|schedule_task|reminder_set|reload_skills|memory$)/i.test(name)) continue
     out.push({
       name: t.name, description: t.description, parameters: t.parameters,
       execute: async (args) => {
