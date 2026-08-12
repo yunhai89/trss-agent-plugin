@@ -7,7 +7,7 @@ agent:
   isolation:
     enable: true  # 多用户数据隔离（默认开）。true=每个群每个用户完全独立（会话/长期记忆/recall/群历史可见范围）；false=同群完全共享（群体型 bot，会话+记忆+群历史全群共用）。跨群始终隔离；私聊始终按用户。提醒/笔记/人设始终按用户。
   protocol: openai  # openai | anthropic | gemini（gemini=原生官方 @google/genai SDK + Interactions API，填 apiKey 即用，无需 baseURL/preset）
-  preset: deepseek  # 厂商预设（openai/deepseek/gemini/dashscope/zhipu/moonshot/mimo/openrouter/opencode=按量 /opencode-go=月付订阅$5起）；gemini 原生协议时仅占位
+  preset: deepseek  # 厂商预设（openai/deepseek/gemini/dashscope/zhipu/moonshot/mimo/minimax/openrouter/opencode=按量 /opencode-go=月付订阅$5起）；gemini 原生协议时仅占位
   baseURL: ""
   apiKey: ""               # ★必填：API Key（OpenAI/Anthropic 兼容或 Gemini 原生均填此）；留空则插件不初始化
   model: "deepseek-chat"
@@ -211,15 +211,37 @@ agent:
     model: "whisper-1"     # 模型名
     language: ""            # 语言提示（如 zh/en，留空自动检测）
   terminal:
-    # shell 命令在 Docker 沙盒执行（即焚容器，默认无网+tmpfs，确保主机安全）。详见下方 image/network。
-    # ⚠️ 即便沙盒化，仍属任意命令执行；enable: true 即表示你知晓风险、同意自担后果，与开发者无关。默认关闭。
+    # shell 命令在主机直接执行（无容器隔离）。仅 terminal 主人可用（验证码认领，自包含、不读框架配置）。
+    # 认领流程（类似 Yunzai #设置主人）：发 #agents设置主人 → 控制台打印验证码 → 直接发验证码认领。
+    # 安全闸：仅 terminal 主人 + 每条命令主人 #确认 + 黑名单(rm -rf 等)硬拦。
+    # ⚠️ 真机任意命令执行，比沙盒危险得多；enable: true 即表示你知晓风险、同意自担后果，与开发者无关。默认关闭。
     enable: false
     maxTimeout: 600
-    image: "archlinux:latest"  # 沙盒镜像（需 docker pull；archlinux 自带 pacman 全工具链）
-    network: "none"            # none(默认无网,最安全) | auto(检测 pip/curl 等需网命令自动开网) | host(始终有网)
-    mounts: []                 # 主机目录挂载到沙盒（如 ["/root/Yunzai/plugins/agents-plugin/data/temp:/data:ro"]）；默认空=不挂(最安全)
-    blocklist: []
-    allowlist: []          # 只读安全命令正则集（空=用默认 ls/cat/grep/git status 等；命中且无重定向时免审批）
+    blocklist: []          # 灾难命令正则集（空=用默认 rm -rf / mkfs / dd of=/dev/ / 关机重启 等；即使已确认也硬拦）
+    skipConfirm: false     # ⚠️ true=terminal 主人命令免 #确认 直跑（黑名单仍硬拦）；真机任意命令执行，高危，默认 false
+  stagehand:
+    # Stagehand 浏览器自动化（act/extract/observe 自然语言原语，LLM 把指令映射到页面元素）。
+    # 仅框架主人可用（category:system）；act 写动作额外需 #确认。会话 per-scopeUserId 隔离 + 5min idle 自动关。
+    # 依赖 @browserbasehq/stagehand + zod（云崽根 pnpm install 随 workspace 装入插件）；本地模式另需 chromium+系统库。
+    enable: false
+    mode: local            # local（本地 Playwright+chromium，默认）| cloud（Browserbase 云浏览器）
+    headless: true         # 本地模式是否无头
+    executablePath: ""     # 本地 chrome 可执行路径（空=Stagehand 自定/CHROME_PATH；可填复用已装 chrome）
+    browserbaseApiKey: ""  # 云模式必填（bb_live_...）
+    region: ""             # 云模式可选：us-west-2(默认)/us-east-1/eu-central-1/ap-southeast-1
+    modelName: ""          # Stagehand 原生模型（如 google/gemini-2.5-flash；空=复用插件 provider，仅 OpenAI 兼容；云模式空=Model Gateway 自动选）
+    modelApiKey: ""        # 原生模型 apiKey（云模式部分 provider 可空）
+    idleTimeoutMs: 300000  # 会话空闲多久自动关（默认 5 分钟）
+    domSettleTimeoutMs: 3000  # act 前 DOM 稳定等待（毫秒）
+  download:
+    # 媒体下载工具（yt-dlp；仅框架主人，受约束）。下载视频/音频时 LLM 优先用 web_download，不走 terminal 裸 shell。
+    # 依赖系统 yt-dlp + ffmpeg（合并格式）。默认开。
+    enable: true
+    maxMB: 600              # 单文件大小上限（yt-dlp --max-filesize，超限中止）
+    sendLimitMB: 100        # 超过此大小不自动发 QQ（返回本地路径，供 SFTP 取）
+    maxTimeoutSec: 600      # 单次下载超时上限（秒）
+    bin: ""                 # yt-dlp 可执行路径（空=PATH 中的 yt-dlp）
+    dir: ""                 # 输出目录（空=插件 data/temp/downloads）
   webApi:
     enable: true           # Web 管理面板（独立 HTTP 服务，脱离锅巴）：主人私聊发 #agents登录 取得带 token 的访问地址（24h 有效）
     port: 6098             # 监听端口（0.0.0.0）；默认避开 Yunzai 2536 / 锅巴 6099

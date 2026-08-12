@@ -8,6 +8,9 @@ import {
   msg,
   parseToolArguments,
   extractReasoning,
+  splitInlineThink,
+  createThinkStripper,
+  extractToolCallsOpenAI,
   APIError,
   TimeoutError,
 } from './index.js'
@@ -319,6 +322,106 @@ await test('重新适配：Moonshot temperature 原样透传（移除强制钩�
   })
   eq(sentBody.temperature, 0.3, 'temperature 原样保留（不再强制为 1）')
   ok(sentUrl.startsWith('https://api.moonshot.'), 'moonshot baseURL')
+})
+
+// ---------- 6c. MiniMax 预设：reasoning_split 注入（从根上避免 <think> 内联泄漏）----------
+await test('MiniMax 预设：注入 reasoning_split + baseURL + reasoning_content', async () => {
+  let sentUrl = null
+  let sentBody = null
+  const fetcher = async (url, opts) => {
+    sentUrl = url
+    sentBody = JSON.parse(opts.body)
+    return jsonRes({ id: 'ok', choices: [{ index: 0, message: { role: 'assistant', content: '答案', reasoning_content: '推理' }, finish_reason: 'stop' }] })
+  }
+  const client = createClient({ ...presets.minimax, apiKey: 'sk-mm', fetch: fetcher })
+  await client.chat.completions.create({
+    model: 'MiniMax-M3',
+    messages: [msg.user('x')],
+    thinking: { type: 'adaptive' },
+  })
+  ok(sentUrl.startsWith('https://api.minimaxi.com/v1/chat/completions'), 'MiniMax OpenAI baseURL（中国区）')
+  eq(sentBody.reasoning_split, true, '默认注入 reasoning_split:true（思考分离到 reasoning_content，避免 <think> 内联泄漏）')
+  eq(sentBody.thinking, { type: 'adaptive' }, 'thinking 透传')
+  eq(extractReasoning({ reasoning_content: 'r' }, client.reasoningFields), 'r', 'reasoningFields 含 reasoning_content')
+
+  // 用户显式设置 reasoning_split 时不被覆盖
+  const fetcher2 = async (url, opts) => { sentBody = JSON.parse(opts.body); return jsonRes({ id: 'ok', choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }] }) }
+  const client2 = createClient({ ...presets.minimax, apiKey: 'sk-mm', fetch: fetcher2 })
+  await client2.chat.completions.create({ model: 'MiniMax-M3', messages: [msg.user('x')], reasoning_split: false })
+  eq(sentBody.reasoning_split, false, '用户显式 reasoning_split:false 时不被 preset 覆盖')
+})
+
+// ---------- <think> 内联推理剥离（文档 §9.1：中间说明泄漏修复）----------
+test('splitInlineThink 剥离内联 <think>', () => {
+  // 1. 生产日志里的实际形态：思考 + 真实回复
+  eq(
+    splitInlineThink('<think>解除成功。回复用户即可。</think>\n\n已解禁 ✅ 3876826150 现在可以正常发言了').content,
+    '已解禁 ✅ 3876826150 现在可以正常发言了',
+    'think 块被剥离，只剩真实回复'
+  )
+  // 2. 思考内容路由到 reasoning
+  eq(
+    splitInlineThink('<think>我要澄清一下目标对象。</think>\n\n要禁言哪位群友呢？').reasoning,
+    '我要澄清一下目标对象。',
+    'think 内容进入 reasoning 通道'
+  )
+  // 3. 多个 think 块全剥离 + 与字段 reasoning 合并
+  const r = splitInlineThink('<think>a</think>中间<think>b</think>正文', 'field')
+  eq(r.content, '中间正文', '多个 think 块全剥离')
+  eq(r.reasoning, 'field\n\na\n\nb', '字段 reasoning + 内联 think 合并')
+  // 4. 无 think 标签：原样
+  eq(splitInlineThink('普通回复', 'rr'), { content: '普通回复', reasoning: 'rr' }, '无 think 原样返回')
+  // 5. 未闭合 think（流式残缺）：视为思考，content 清空
+  eq(splitInlineThink('<think>未闭合的思考').content, '', '未闭合 think 视为思考丢弃')
+  // 6. 容忍 <think> 上的属性
+  eq(splitInlineThink('<think type="x">t</think>答案').content, '答案', '容忍 <think> 属性')
+  // 7. 边界：空 content 安全
+  eq(splitInlineThink('').content, '', '空 content 安全')
+})
+
+test('createThinkStripper 流式跨 delta 剥离', () => {
+  // 整块在一个 delta
+  const s = createThinkStripper()
+  eq(s.feed('<think>x</think>ok'), 'ok', '整块一次 feed 剥离')
+  // 标签拆到多个 delta
+  const s2 = createThinkStripper()
+  eq(s2.feed('abc<thi'), 'abc', '<thi 缓冲，abc 外发')
+  eq(s2.feed('nk>隐藏'), '', '进入 think，隐藏不外发')
+  eq(s2.feed('</thin'), '', '</thin 缓冲')
+  eq(s2.feed('k>可见'), '可见', '闭合后外发可见')
+  // 普通文本里的 < > 不误伤（只有尾部前缀才缓冲）
+  const s3 = createThinkStripper()
+  eq(s3.feed('a < b && c > d'), 'a < b && c > d', '普通 < > 不误伤')
+  // 字面 "<thinking" 不含 '>'，不当作 think 标签
+  const s4 = createThinkStripper()
+  eq(s4.feed('see <thinking hard'), 'see <thinking hard', '字面 <think 前缀（无 >）不误剥')
+})
+
+// ---------- extractToolCallsOpenAI（文档 §9.2：tool_call 结构不丢失）----------
+test('extractToolCallsOpenAI 兼容标准 + 旧版 function_call', () => {
+  // 标准 chat-completions tool_calls
+  const std = extractToolCallsOpenAI({ tool_calls: [
+    { id: 'call_1', type: 'function', function: { name: 'group_mute', arguments: '{"userId":"123","duration":60}' } },
+  ] })
+  eq(std.length, 1, '标准 tool_calls 解析出 1 个')
+  eq(std[0].id, 'call_1', '保留 id')
+  eq(std[0].name, 'group_mute', '取到 name')
+  eq(std[0].arguments, { userId: '123', duration: 60 }, 'arguments 解析为对象')
+  // 多个并行工具调用
+  const multi = extractToolCallsOpenAI({ tool_calls: [
+    { id: 'a', function: { name: 'x', arguments: '{}' } },
+    { id: 'b', function: { name: 'y', arguments: '{}' } },
+  ] })
+  eq(multi.map((t) => t.name).join(','), 'x,y', '多个工具调用都解析')
+  // 旧版 v1 单调用 function_call（无 id → 合成）
+  const legacy = extractToolCallsOpenAI({ function_call: { name: 'unban_user', arguments: '{"user_id":"387"}' } })
+  eq(legacy.length, 1, '旧版 function_call 解析出 1 个')
+  eq(legacy[0].name, 'unban_user', '旧版 name 取到')
+  eq(legacy[0].arguments, { user_id: '387' }, '旧版 arguments 解析')
+  ok(!!legacy[0].id, '旧版无 id 时合成 id（避免回传 tool_call_id 为空）')
+  // 无工具调用
+  eq(extractToolCallsOpenAI({ content: '纯文本回复' }), [], '无工具调用返回空数组')
+  eq(extractToolCallsOpenAI({}), [], '空 message 安全')
 })
 
 // ---------- 总结 ----------

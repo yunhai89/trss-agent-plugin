@@ -67,6 +67,22 @@ export const presets = {
     reasoningFields: ['reasoning_content'],
   },
 
+  /** MiniMax（OpenAI 兼容）。模型：MiniMax-M3（百万上下文）。
+   *  中国区：https://api.minimaxi.com/v1 ；国际区：https://api.minimax.io/v1（在 config baseURL 覆盖）。
+   *  Token Plan（订阅 key）与按量 key 走同一端点，仅 key 不同。
+   *  ⚠️ M3 默认开启 thinking，OpenAI 协议下必须 reasoning_split:true，思考才进 reasoning_content 字段；
+   *  否则会内联成 <think>…</think> 混进 content、泄漏进最终回复。本预设默认注入 reasoning_split。
+   *  建议配合 agent.thinking:{type:'adaptive'}（自适应思考）。Anthropic 协议入口见 model/anthropic/presets.js。 */
+  minimax: {
+    name: 'minimax',
+    baseURL: 'https://api.minimaxi.com/v1',
+    reasoningFields: ['reasoning_content'],
+    prepareBody(body) {
+      // M3 默认 thinking 开启：reasoning_split:true 把思考分离到 reasoning_content，避免内联 <think> 泄漏
+      if (body.reasoning_split == null) body.reasoning_split = true
+    },
+  },
+
   /**
    * Azure OpenAI：URL 与认证方式异构，需调用方提供
    * resource / deployment / apiVersion，例如：

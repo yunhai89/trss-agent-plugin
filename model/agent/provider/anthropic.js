@@ -8,6 +8,7 @@
  *   - max_tokens 必填：未给默认 4096
  */
 import { createClient, extractText, extractThinking, extractToolUses } from '../../anthropic/index.js'
+import { splitInlineThink, createThinkStripper } from '../../openai/index.js' // 纯函数：剥离内联 <think>（防御某些 Anthropic 兼容聚合层把思考内联进 text block）
 import { Provider, toolsToList, mapToolChoice, clientOpts } from './base.js'
 import { parseArgs } from '../messages.js'
 
@@ -81,11 +82,15 @@ export function toAnthropicMessages(messages, system) {
 
 function resultFromResponse(res) {
   const content = res.content || []
+  // 防御：若 text block 里被内联了 <think>，剥离到 reasoning（原生 Anthropic 走 thinking block，此处为 no-op）
+  const { content: cleanText, reasoning: inlineReasoning } = splitInlineThink(extractText(content))
+  const thinking = extractThinking(content)
+  const reasoning = [thinking, inlineReasoning].filter(Boolean).join('\n\n').trim()
   return {
     role: 'assistant',
-    content: extractText(content),
+    content: cleanText,
     toolCalls: extractToolUses(content),
-    reasoning: extractThinking(content),
+    reasoning: reasoning || null,
     finishReason: res.stop_reason ?? null,
     usage: res.usage ?? null,
     rawMessage: res,
@@ -93,11 +98,13 @@ function resultFromResponse(res) {
 }
 
 function resultFromStream(s) {
+  const { content: cleanText, reasoning: inlineReasoning } = splitInlineThink(s.text ?? '')
+  const reasoning = [s.thinking, inlineReasoning].filter(Boolean).join('\n\n').trim()
   return {
     role: 'assistant',
-    content: s.text,
+    content: cleanText,
     toolCalls: s.toolUses,
-    reasoning: s.thinking,
+    reasoning: reasoning || null,
     finishReason: s.stopReason,
     usage: s.usage,
     rawMessage: s.assistantMessage,
@@ -144,8 +151,10 @@ export class AnthropicProvider extends Provider {
 
     if (stream) {
       const s = await this.client.messages.create({ ...body, signal })
+      // 流式 live 旁路：剥掉内联 <think>，避免中途播报(onDelta)泄漏思考
+      const stripper = onDelta ? createThinkStripper() : null
       for await (const ev of s) {
-        if (ev.text && onDelta) onDelta(ev.text)
+        if (ev.text && onDelta) { const c = stripper.feed(ev.text); if (c) onDelta(c) }
         if (ev.thinking && onReasoning) onReasoning(ev.thinking)
       }
       return resultFromStream(s)

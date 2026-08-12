@@ -306,6 +306,14 @@ export class Agent {
         usage: result.usage || null, ms: __ms, toolsSent: toolList.length, breakdown, ...(discoveryOn ? { activeTotal: this.activeTools.size } : {}),
       }, taskId, ctx?.devScope)
 
+      // 诊断（文档 §9.2/§12）：finishReason 表明要调工具，却没解析到 tool_calls
+      // → 工具调用结构丢失，循环将误判为"纯文本最终回复"而中断（工具不执行、无后续）。
+      // 记下原始结构，便于定位是否通道用了非标准 tool_call 格式。
+      if (!result.toolCalls?.length && result.finishReason && /tool|function/i.test(result.finishReason)) {
+        this.logger('warn', `[adapter] finish_reason=${result.finishReason} 但未解析到 tool_calls（工具循环将中断，疑似通道非标准格式）rawKeys=[${Object.keys(result.rawMessage || {}).join(',')}]`)
+        this.devLog?.('adapter_warn', { kind: 'finish_reason_without_tool_calls', finishReason: result.finishReason, contentLen: (result.content || '').length, rawKeys: Object.keys(result.rawMessage || {}) }, taskId, ctx?.devScope)
+      }
+
       // 防 API 报错："assistant message content or tool_calls must be set"
       // deepseek 等模型偶尔返回空 content + 无 tool_calls（如纯 thinking 无正文），
       // 空消息被追加到历史后，下次 run 读历史时 API 拒绝。给占位避免。
@@ -680,7 +688,7 @@ export class Agent {
         content = typeof intercepted === 'string' ? intercepted : stringifyArgs(intercepted)
       } else {
         try {
-          const raw = await tool.execute(tc.arguments, ctx || execCtx)
+          const raw = await tool.execute(tc.arguments ?? {}, ctx || execCtx)
           content = typeof raw === 'string' ? raw : stringifyArgs(raw)
         } catch (e) {
           // 错误日志已由 AOP 切面打印；这里归一为 {error} 结果供模型下一轮重试

@@ -41,6 +41,19 @@ export const presets = {
     authHeader: 'api-key',
   },
 
+  /** MiniMax（Anthropic 兼容端点）。模型：MiniMax-M3。
+   *  中国区：https://api.minimaxi.com/anthropic ；国际区：https://api.minimax.io/anthropic（config baseURL 覆盖）。
+   *  认证 x-api-key 或 Bearer 均可（官方 SDK 用 x-api-key，本库默认 x-api-key）。
+   *  baseURL 停在 /anthropic，client 自动拼 /v1/messages。
+   *  thinking 走 content[] 的 thinking 块（原生分离，无 OpenAI 协议的 reasoning_split / <think> 问题）；
+   *  建议配合 agent.thinking:{type:'adaptive'}。Token Plan 与按量 key 同一端点，仅 key 不同。 */
+  minimax: {
+    name: 'minimax',
+    baseURL: 'https://api.minimaxi.com/anthropic',
+    version: '2023-06-01',
+    authHeader: 'x-api-key',
+  },
+
   /** OpenCode Zen（Anthropic 兼容 /messages 端点：Claude / Qwen / MiniMax 系列）。
    *  ⚠️ baseURL 不带 /v1 —— Anthropic client 会自动拼 /v1/messages（带 /v1 会变双 /v1）。
    *  认证 x-api-key（官方文档：/messages 端点 x-api-key 或 Bearer 均可）。

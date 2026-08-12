@@ -43,15 +43,16 @@
   const OPT = {
     trigger: [['at', '@机器人触发'], ['command', '触发词触发'], ['both', '两者皆可']],
     protocol: [['openai', 'OpenAI 兼容'], ['anthropic', 'Anthropic 兼容'], ['gemini', 'Gemini 原生(官方SDK)']],
-    preset: [['deepseek', 'DeepSeek'], ['openai', 'OpenAI'], ['gemini', 'Gemini'], ['dashscope', '通义(DashScope)'], ['zhipu', '智谱'], ['moonshot', 'Kimi(Moonshot)'], ['mimo', '小米(MiMo)'], ['anthropic', 'Anthropic'], ['openrouter', 'OpenRouter(聚合)'], ['opencode', 'OpenCode Zen'], ['opencode-go', 'OpenCode Go(订阅)']],
+    preset: [['deepseek', 'DeepSeek'], ['openai', 'OpenAI'], ['gemini', 'Gemini'], ['dashscope', '通义(DashScope)'], ['zhipu', '智谱'], ['moonshot', 'Kimi(Moonshot)'], ['mimo', '小米(MiMo)'], ['minimax', 'MiniMax(M3)'], ['anthropic', 'Anthropic'], ['openrouter', 'OpenRouter(聚合)'], ['opencode', 'OpenCode Zen'], ['opencode-go', 'OpenCode Go(订阅)']],
     permission: [['master', '仅主人'], ['admin', '管理员'], ['owner', '群主'], ['all', '所有人']],
     guardAction: [['block', '拦截(block)'], ['flag', '隔离标注(flag)'], ['sanitize', '脱敏(sanitize)']],
     guardSensitivity: [['low', '低 (0.95)'], ['medium', '中 (0.7)'], ['high', '高 (0.5)']],
     reflect: [['off', '关闭'], ['auto', '自动'], ['always', '总是']],
     replyMode: [['image', '图片渲染'], ['text', '纯文本']],
-    termNet: [['none', 'none 无网(推荐)'], ['auto', 'auto 按需开网'], ['host', 'host 始终有网']],
     degrade: [['describe', 'describe 转文字描述'], ['ignore', 'ignore 忽略']],
     researchPerm: [['master', '仅主人(防滥用)'], ['all', '所有人']],
+    shMode: [['local', 'local 本地(Playwright+chromium,默认)'], ['cloud', 'cloud Browserbase 云']],
+    shRegion: [['', '默认 us-west-2'], ['us-east-1', 'us-east-1'], ['eu-central-1', 'eu-central-1'], ['ap-southeast-1', 'ap-southeast-1']],
   }
 
   window.VIEWS.config = {
@@ -77,6 +78,8 @@
         zhipu: 'https://open.bigmodel.cn/api/paas/v4',
         moonshot: 'https://api.moonshot.ai/v1',
         mimo: 'https://api.xiaomimimo.com/v1',
+        // MiniMax 双协议：openai 走 /v1（chat/completions）；anthropic 走 /anthropic（client 自动拼 /v1/messages，不能带 /v1）
+        minimax: { openai: 'https://api.minimaxi.com/v1', anthropic: 'https://api.minimaxi.com/anthropic' },
         anthropic: 'https://api.anthropic.com',
         openrouter: 'https://openrouter.ai/api/v1',
         // OpenCode 两套端点：openai 走 /chat/completions（baseURL 带 /v1）；anthropic 走 /messages（client 自动拼 /v1，baseURL 不能带）
@@ -97,6 +100,9 @@
         Object.assign(form, snap)
         origSnapshot = JSON.parse(JSON.stringify(snap))
         mcpServersToUi()
+        // 兜底：确保 stagehand/terminal 子对象存在（防旧 config 无此字段时 v-model 报错）
+        if (!form.stagehand) form.stagehand = {}
+        if (!form.terminal) form.terminal = {}
         dirty.value = false
         nextTick(() => { dirtySuppressed = false })
       }
@@ -748,21 +754,50 @@
 
             <div class="full" style="border:1.5px dashed #f0b6c2;border-radius:12px;padding:14px;background:linear-gradient(180deg,#fff,#fff8f9)">
               <div class="flex gap10 mb10" style="font-weight:800;color:var(--rose)"><v-icon name="warn"/>终端执行(高危)</div>
+              <div class="desc mb10" style="color:var(--rose)">主机直接执行 shell（无容器隔离）。仅 terminal 主人可用：发 <code>#agents设置主人</code>→控制台验证码→直接发码认领。每条命令需 <code>#确认</code>；黑名单硬拦。</div>
               <div class="cfg-grid">
-                <cfg-row name="启用 shell 执行" desc="即使有审批/黑白名单也无法 100% 安全" danger>
+                <cfg-row name="启用 shell 执行" desc="真机任意命令执行，无法 100% 安全" danger>
                   <v-switch v-model="form.terminal.enable"/>
                 </cfg-row>
                 <cfg-row name="命令超时上限(秒)">
                   <input type="number" class="input" style="width:110px" min="1" max="3600" v-model.number="form.terminal.maxTimeout">
                 </cfg-row>
-                <cfg-row name="沙盒镜像" desc="需先 docker pull">
-                  <input class="input mono" style="width:170px" v-model="form.terminal.image">
-                </cfg-row>
-                <cfg-row name="沙盒网络">
-                  <select class="select" style="width:190px" v-model="form.terminal.network"><option v-for="o in OPT.termNet" :value="o[0]">{{ o[1] }}</option></select>
-                </cfg-row>
-                <cfg-row class="full" name="命令黑名单" desc="命中硬拦">
+                <cfg-row class="full" name="命令黑名单" desc="灾难命令正则（即使已确认也硬拦；空=用默认 rm -rf / mkfs / dd of=/dev 等）">
                   <tag-editor v-model="form.terminal.blocklist" placeholder="回车添加"/>
+                </cfg-row>
+              </div>
+            </div>
+
+            <div class="full" style="border:1.5px dashed #b6c8f0;border-radius:12px;padding:14px;background:linear-gradient(180deg,#fff,#f6f8ff)">
+              <div class="flex gap10 mb10" style="font-weight:800;color:#3b6">🌐 Stagehand 浏览器自动化</div>
+              <div class="desc mb10">act/extract/observe 自然语言原语；仅框架主人可用，act 写动作需 <code>#确认</code>。会话 per-scope 隔离 + 5min idle 自动关。</div>
+              <div class="cfg-grid">
+                <cfg-row name="启用浏览器自动化" desc="依赖 @browserbasehq/stagehand+zod（云崽根 pnpm install）">
+                  <v-switch v-model="form.stagehand.enable"/>
+                </cfg-row>
+                <cfg-row name="浏览器模式">
+                  <select class="select" style="width:190px" v-model="form.stagehand.mode"><option v-for="o in OPT.shMode" :value="o[0]">{{ o[1] }}</option></select>
+                </cfg-row>
+                <cfg-row name="无头模式(本地)" desc="服务器建议开">
+                  <v-switch v-model="form.stagehand.headless"/>
+                </cfg-row>
+                <cfg-row name="chrome 路径(本地,可选)" desc="空=默认/CHROME_PATH；可填复用已装 chrome">
+                  <input class="input mono" style="width:200px" v-model="form.stagehand.executablePath" placeholder="留空=默认">
+                </cfg-row>
+                <cfg-row name="Browserbase apiKey" desc="云模式必填（bb_live_...）">
+                  <input class="input mono" style="width:200px" v-model="form.stagehand.browserbaseApiKey" placeholder="bb_live_...">
+                </cfg-row>
+                <cfg-row name="云区域(可选)">
+                  <select class="select" style="width:190px" v-model="form.stagehand.region"><option v-for="o in OPT.shRegion" :value="o[0]">{{ o[1] }}</option></select>
+                </cfg-row>
+                <cfg-row name="Stagehand 原生模型(可选)" desc="如 google/gemini-2.5-flash；空=复用插件 provider(仅 OpenAI 兼容)；云模式空=自动选">
+                  <input class="input mono" style="width:200px" v-model="form.stagehand.modelName" placeholder="留空=复用插件 provider">
+                </cfg-row>
+                <cfg-row name="原生模型 apiKey(可选)">
+                  <input class="input mono" style="width:200px" v-model="form.stagehand.modelApiKey">
+                </cfg-row>
+                <cfg-row name="会话空闲超时(毫秒)">
+                  <input type="number" class="input" style="width:130px" min="60000" step="60000" v-model.number="form.stagehand.idleTimeoutMs">
                 </cfg-row>
               </div>
             </div>

@@ -169,39 +169,24 @@ img { max-width: 100%; border-radius: 10px; }
 `
 
 /**
- * 回复图专用暗色覆盖样式（REPLY_CSS）——经 buildHtml 的 extraCss 注入，覆盖 THEME_CSS 的浅色。
- * 只影响 AI 回复图（renderReplyImage），不影响帮助图/聊天列表/人设列表（它们仍用 THEME_CSS 浅色）。
- * github-dark 风：深色背景/卡片 + 代码 token 配色。
+ * 回复图专用浅色覆盖样式（REPLY_CSS）——经 buildHtml 的 extraCss 注入，叠加在 THEME_CSS（浅色蓝）之上。
+ * 只影响 AI 回复图（renderReplyImage），不影响帮助图/聊天列表/人设列表（它们用 THEME_CSS 浅色）。
+ *
+ * 配色与 web 管理面板（main.css · modern-minimal 浅色冷蓝）+ THEME_CSS 完全统一：
+ * 冷白画布 / 白卡片 / 蓝 #3b82f6 强调 / github-light 代码高亮。
+ * THEME_CSS 本就是目标浅色蓝调，此处仅做两层克制定制，给回复图一个可识别身份而不破坏统一：
+ *   ① 顶部 3px 蓝色发丝线（回复卡识别标记，区别于帮助图）；
+ *   ② 略强的卡片阴影（回复图常单独发送，需更明确的浮起感）。
+ * 其余（链接 / inline code / 代码块 / 引用 / 表格 / 徽标）一律继承 THEME_CSS 的浅色蓝。
  */
 export const REPLY_CSS = `
-html, body { background: #0d1117; }
+html, body { background: #eef1f6; }
 #container {
-  background: #161b22; border: 1px solid #30363d; color: #c9d1d9;
-  box-shadow: 0 12px 40px rgba(0,0,0,.45);
+  background: #ffffff; border: 1px solid #e5e9f0; color: #1f2937;
+  border-top: 3px solid #3b82f6;            /* 回复图识别：顶部蓝色发丝线 */
+  box-shadow: 0 14px 44px rgba(20,30,60,.10);
 }
-#container .footer { border-top: 1px solid #30363d; color: #6e7681; }
-h1, h2, h3, h4, h5, h6 { color: #e6edf3; }
-h1 { border-bottom-color: #30363d; } h2 { border-bottom-color: #21262d; }
-p { color: #c9d1d9; }
-a { color: #58a6ff; } strong, b { color: #f0f6fc; } em, i { color: #8b949e; } del { color: #6e7681; }
-:not(pre) > code { color: #ff7b72; background: #30363d; border-color: #3b4250; }
-pre { background: #161b22; border: 1px solid #30363d; }
-pre code { color: #c9d1d9; }
-pre[data-lang]::before { color: #6e7681; background: #21262d; }
-.hljs { color: #c9d1d9; background: transparent; }
-.hljs-comment, .hljs-quote { color: #6e7681; font-style: italic; }
-.hljs-keyword, .hljs-literal, .hljs-type, .hljs-name { color: #ff7b72; }
-.hljs-string, .hljs-attr, .hljs-template-string, .hljs-addition { color: #a5d6ff; }
-.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-link, .hljs-meta { color: #d2a8ff; }
-.hljs-title, .hljs-title.function_, .hljs-built_in, .hljs-section { color: #d2a8ff; font-weight: 600; }
-.hljs-variable, .hljs-template-variable, .hljs-property { color: #79c0ff; }
-.hljs-tag { color: #7ee787; }
-.hljs-deletion { color: #ffa198; background: #67060c; }
-blockquote { border-left-color: #58a6ff; background: #161b22; color: #b6b8bb; }
-table th { background: #21262d; color: #e6edf3; } table th, table td { border-color: #30363d; }
-tbody tr:nth-child(even) { background: #161b22; }
-hr { border-top-color: #30363d; }
-.head { border-bottom-color: #21262d; } .head .title { color: #e6edf3; } .head .sub { color: #6e7681; }
+#container .footer { border-top: 1px solid #eef0f3; color: #9aa3b2; }
 `
 
 /** 微信聊天界面样式（renderReplyImage 传 chat 参数时启用，覆盖卡片为聊天排版） */

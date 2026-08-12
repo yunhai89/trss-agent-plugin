@@ -45,6 +45,7 @@ const OPT = {
     { label: '智谱', value: 'zhipu' },
     { label: 'Kimi(Moonshot)', value: 'moonshot' },
     { label: '小米(MiMo)', value: 'mimo' },
+    { label: 'MiniMax(M3)', value: 'minimax' },
     { label: 'Anthropic', value: 'anthropic' },
   ],
   permission: [
@@ -216,14 +217,24 @@ export function supportGuoba() {
         {
           field: 'agent.terminal.enable',
           label: '启用终端(shell)执行【高危】',
-          helpMessage: '高危工具！即使有 allowlist 免审/黑名单/审批等防护，也无法做到 100% 安全。',
-          bottomHelpMessage: '⚠️ 高危：shell 可在主机执行任意命令，即便有 allowlist/黑名单/审批等防护也无法保证 100% 安全。开启此项即表示你知晓风险、同意自担后果，与开发者无关；开发者会尽量保证安全性。默认关闭。',
+          helpMessage: '高危工具！真机任意命令执行，无容器隔离，比沙盒危险得多。仅 terminal 主人可用 + 每条命令 #确认 + 黑名单硬拦。',
+          bottomHelpMessage: '⚠️ 高危：shell 在主机直接执行任意命令（无容器隔离）。仅 terminal 主人可用（验证码认领，不读框架配置：发 #agents设置主人 → 控制台查看验证码 → 直接发验证码认领，类似 Yunzai #设置主人）。每条命令需主人 #确认；灾难命令黑名单硬拦。开启即视为你知晓风险、自担后果，与开发者无关。默认关闭。',
           component: 'Switch',
         },
         { field: 'agent.terminal.maxTimeout', label: '命令超时上限(秒)', component: 'InputNumber', componentProps: { min: 1, max: 3600 } },
-        { field: 'agent.terminal.image', label: '沙盒镜像', bottomHelpMessage: 'terminal 命令在 Docker 沙盒执行（即焚容器）。镜像名如 archlinux:latest；需先 docker pull', component: 'Input', componentProps: { placeholder: 'archlinux:latest' } },
-        { field: 'agent.terminal.network', label: '沙盒网络', bottomHelpMessage: 'none=默认无网(最安全) | auto=检测 pip/curl 等需网命令自动开网 | host=始终有网', component: 'Select', componentProps: { options: [{ label: 'none 无网(推荐)', value: 'none' }, { label: 'auto 按需开网', value: 'auto' }, { label: 'host 始终有网', value: 'host' }] } },
-        { field: 'agent.terminal.mounts', label: '主机挂载(可选)', bottomHelpMessage: '主机目录挂到沙盒，格式 主机路径:容器路径[:ro]，多个英文逗号分隔；默认空=不挂(最安全)', component: 'Input', componentProps: { placeholder: '留空=不挂' } },
+        { field: 'agent.terminal.blocklist', label: '黑名单正则(可选)', bottomHelpMessage: '灾难命令正则数组（空=用默认 rm -rf / mkfs / dd of=/dev/ / 关机重启 等）；即使已确认也硬拦', component: 'Input', componentProps: { placeholder: '留空=用默认黑名单' } },
+
+        // —— Stagehand 浏览器自动化 ——
+        { label: 'Stagehand 浏览器自动化', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.stagehand.enable', label: '启用浏览器自动化', bottomHelpMessage: 'act/extract/observe 自然语言原语；仅框架主人可用，act 写动作需 #确认。依赖 @browserbasehq/stagehand+zod（云崽根 pnpm install）', component: 'Switch' },
+        { field: 'agent.stagehand.mode', label: '浏览器模式', component: 'Select', componentProps: { options: [{ label: 'local 本地(默认)', value: 'local' }, { label: 'cloud Browserbase', value: 'cloud' }] } },
+        { field: 'agent.stagehand.headless', label: '无头模式(本地)', bottomHelpMessage: '本地模式是否无头；服务器建议开', component: 'Switch' },
+        { field: 'agent.stagehand.executablePath', label: 'chrome 路径(可选)', bottomHelpMessage: '本地 chrome 可执行路径（空=Stagehand 自定/CHROME_PATH；可填复用已装 chrome）', component: 'Input', componentProps: { placeholder: '留空=默认' } },
+        { field: 'agent.stagehand.browserbaseApiKey', label: 'Browserbase apiKey', bottomHelpMessage: '云模式必填（bb_live_...）；本地模式留空', component: 'Input', componentProps: { placeholder: 'bb_live_...' } },
+        { field: 'agent.stagehand.region', label: '云区域(可选)', component: 'Select', componentProps: { options: [{ label: '默认 us-west-2', value: '' }, { label: 'us-east-1', value: 'us-east-1' }, { label: 'eu-central-1', value: 'eu-central-1' }, { label: 'ap-southeast-1', value: 'ap-southeast-1' }] } },
+        { field: 'agent.stagehand.modelName', label: 'Stagehand 原生模型(可选)', bottomHelpMessage: '如 google/gemini-2.5-flash、openai/gpt-5；空=复用插件 provider(仅 OpenAI 兼容)；云模式空=Model Gateway 自动选', component: 'Input', componentProps: { placeholder: '留空=复用插件 provider' } },
+        { field: 'agent.stagehand.modelApiKey', label: '原生模型 apiKey(可选)', bottomHelpMessage: '原生模型 apiKey；云模式部分 provider 可空', component: 'Input' },
+        { field: 'agent.stagehand.idleTimeoutMs', label: '会话空闲超时(毫秒)', component: 'InputNumber', componentProps: { min: 60000, step: 60000 } },
       ],
       // 获取配置数据（前端展示）
       getConfigData() {

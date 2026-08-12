@@ -119,7 +119,7 @@
           <svg :viewBox="'0 0 ' + chart.W + ' ' + chart.H" style="width:100%;margin-top:14px;display:block">
             <defs>
               <linearGradient id="agIn" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="#6366f1" stop-opacity=".28"/><stop offset="100%" stop-color="#6366f1" stop-opacity="0"/>
+                <stop offset="0%" stop-color="#3b82f6" stop-opacity=".28"/><stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
               </linearGradient>
               <linearGradient id="agOut" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stop-color="#14b8a6" stop-opacity=".25"/><stop offset="100%" stop-color="#14b8a6" stop-opacity="0"/>
@@ -127,7 +127,7 @@
             </defs>
             <path :d="chart.areaIn" fill="url(#agIn)"/>
             <path :d="chart.areaOut" fill="url(#agOut)"/>
-            <polyline :points="chart.lineIn" fill="none" stroke="#6366f1" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
+            <polyline :points="chart.lineIn" fill="none" stroke="#3b82f6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
               pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:1;animation:dashIn 1.4s .2s var(--ease-out) forwards"/>
             <polyline :points="chart.lineOut" fill="none" stroke="#14b8a6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
               pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:1;animation:dashIn 1.4s .5s var(--ease-out) forwards"/>

@@ -54,7 +54,9 @@ import { PromptRegistry, PromptTemplate, regressionGate, evolveTemplate, TEMPLAT
 import { TraceStore } from '../model/evolution/trace.js'
 import { SelfReviewer, listPendingSuggestions, removeSuggestion } from '../model/evolution/review.js'
 import { buildSituationalContext } from '../model/perception.js'
-import { makeTerminalTool, DEFAULT_BLOCKLIST, DEFAULT_ALLOWLIST } from '../model/terminal/index.js'
+import { makeTerminalTool, DEFAULT_BLOCKLIST, requestClaim, claim, getMaster as getTerminalMaster, isMaster as isTerminalMaster, resolveApproval as resolveTerminalApproval, listApprovals as listTerminalApprovals } from '../model/terminal/index.js'
+import { makeStagehand } from '../model/stagehand/index.js'
+import { makeDownloadTool } from '../model/download/index.js'
 import { calcTool } from '../model/calc/index.js'
 import { sendFileTool } from '../model/document/sendfile.js'
 import { readPdfTool } from '../model/document/pdf.js'
@@ -281,7 +283,9 @@ function makeReplyStream(e, {
  *   #模型切换 <id>（master）                    切换模型
  *   #启用mcp <名> / #停止mcp <名>（master）     MCP 服务端启停
  *   #mcp（master）                             MCP 状态
- * 主人判定用 Yunzai 原生 permission:'master'（即 e.isMaster / cfg.master）。
+ * 主人判定：大部分主人指令用 Yunzai 原生 permission:'master'（即 e.isMaster / cfg.master）。
+ * 例外：terminal 工具用自包含的「terminal 主人」（验证码认领，model/terminal/master.js），
+ *   #确认/#拒绝/#待确认 放宽为「框架主人 OR terminal 主人」均可。
  */
 
 let _runtime = null
@@ -487,10 +491,29 @@ async function buildRuntime() {
   }
   if (loaded.packs.length) Log.info('[toolkit] 已加载工具包：', loaded.packs.map((p) => `${p.name}(${p.count})`).join(', '))
 
-  // 终端执行能力（危险，默认关；开启后每条命令在调度层强制主人确认 + 黑名单）
+  // 终端执行能力（高危，默认关；真机执行 + 仅验证码认领的 terminal 主人 + 每条命令 #确认 + 黑名单）
   if (cfg.terminal?.enable) {
     tools.register(makeTerminalTool())
-    Log.info('[terminal] 已启用终端执行工具（每条命令需主人 #确认）')
+    const tm = getTerminalMaster()
+    Log.info(`[terminal] 已启用主机终端执行工具（仅 terminal 主人可用；当前主人：${tm || '未认领，发 #agents设置主人 认领'}）`)
+  }
+
+  // 媒体下载（yt-dlp；受约束、仅框架主人；默认开。给 LLM 专用下载入口，避免它去抓 terminal 裸 shell）
+  if (cfg.download?.enable !== false) {
+    try { tools.register(makeDownloadTool()) } catch (e) { Log.warn('[download] 注册失败', e?.message || e) }
+  }
+
+  // Stagehand 浏览器自动化（可选，默认关；goto/observe/extract/act；仅框架主人；act 需 #确认）
+  let stagehand = null
+  if (cfg.stagehand?.enable) {
+    try {
+      const { pack, sessionMgr } = makeStagehand({ cfg: cfg.stagehand, agent: cfg })
+      for (const t of pack.resolve({})) {
+        try { tools.register(t) } catch (e) { Log.warn('[stagehand] 注册失败', t.name, e?.message || e) }
+      }
+      stagehand = { sessionMgr }
+      Log.info(`[stagehand] 已启用浏览器自动化工具（${cfg.stagehand.mode || 'local'} 模式；4 个工具 stagehand__goto/observe/extract/act）`)
+    } catch (e) { Log.warn('[stagehand] 初始化失败（@browserbasehq/stagehand 未装或浏览器不可用？）', e?.message || e) }
   }
 
   // Python 精确计算工具（数学/统计等；沙箱内执行，默认开）
@@ -682,7 +705,7 @@ async function buildRuntime() {
     }
   }
 
-  return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo }
+  return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand }
 }
 
 const getRuntime = async () => {
@@ -706,6 +729,9 @@ function invalidateRuntime() {
   if (_runtime?.toolEvo) {
     try { _runtime.toolEvo.runner?.stop?.() } catch { /* noop */ } // 关闭隔离 worker（审计 §4.2）
     try { _runtime.toolEvo.closeDb() } catch { /* noop */ }
+  }
+  if (_runtime?.stagehand?.sessionMgr) {
+    try { _runtime.stagehand.sessionMgr.closeAll() } catch { /* noop */ } // 关闭所有浏览器会话
   }
   _runtime = null
   _runtimePromise = null
@@ -847,6 +873,11 @@ export const makeFireDispatch = (rt) => {
 const MCP_ADD_PENDING_TTL = 120000 // 2 分钟
 const mcpAddPending = new Map() // userId(String) -> { at }
 
+// #agents设置主人 交互式监听：发命令后控制台打印验证码，该用户接下来直接发验证码认领（无需另发命令）。
+// 群聊/私聊均可；per-user 监听，其他人消息不受影响。验证码错误不消费、可重发，直到正确或超时。
+const TERMINAL_CLAIM_TTL_MS = 5 * 60 * 1000 // 5 分钟（与 master.js 验证码 TTL 一致）
+const terminalClaimPending = new Map() // userId(String) -> { at, expires }
+
 export class Chat extends plugin {
   constructor() {
     super({
@@ -859,9 +890,9 @@ export class Chat extends plugin {
         { reg: '^#启用mcp\\s+(.+)', fnc: 'enableMcp', permission: 'master' },
         { reg: '^#停止mcp\\s+(.+)', fnc: 'disableMcp', permission: 'master' },
         { reg: '^#模型切换\\s+(.+)', fnc: 'switchModel', permission: 'master' },
-        { reg: '^#确认\\s*(\\d+)', fnc: 'approve', permission: 'master' },
-        { reg: '^#拒绝\\s*(\\d+)', fnc: 'reject', permission: 'master' },
-        { reg: '^#待确认$', fnc: 'pending', permission: 'master' },
+        { reg: '^#确认\\s*(\\d+)', fnc: 'approve' }, // 审批：框架主人 OR terminal 主人均可用（内部 guard）
+        { reg: '^#拒绝\\s*(\\d+)', fnc: 'reject' },
+        { reg: '^#待确认$', fnc: 'pending' },
         { reg: '^#mcp$', fnc: 'mcpStatus', permission: 'master' },
         { reg: '^#添加[Mm][Cc][Pp]', fnc: 'addMcp', permission: 'master' },
         { reg: '^#agents重载$', fnc: 'agentsReload', permission: 'master' },
@@ -885,6 +916,9 @@ export class Chat extends plugin {
         { reg: '^#取消定时任务\\s+(\\S+)', fnc: 'cancelCronTask', permission: 'master' },
         { reg: '^#LLM进化$', fnc: 'llmEvolve', permission: 'master' },
         // —— 所有用户 ——
+        // terminal 主人认领（自包含，不读框架配置；安全靠控制台验证码）
+        // #agents设置主人 → 控制台打印验证码 → 直接发验证码认领（监听下一条消息，类似 Yunzai #设置主人）
+        { reg: '^#agents设置主人$', fnc: 'terminalRequestClaim' },
         { reg: '^#聊天列表$', fnc: 'chatList' },
         { reg: '^#进入聊天\\s*(\\d+)', fnc: 'enterChat' },
         { reg: '^#new$', fnc: 'newChat' },
@@ -937,6 +971,24 @@ export class Chat extends plugin {
       const p = mcpAddPending.get(__uid)
       if (Date.now() - p.at > MCP_ADD_PENDING_TTL) mcpAddPending.delete(__uid) // 超时自清
       else return this._consumeMcpAddJson(this.e.msg)
+    }
+    // #agents设置主人 交互式认领：该用户处于监听态时，下一条消息作为验证码消费（群聊/私聊均生效）
+    if (terminalClaimPending.has(__uid)) {
+      const p = terminalClaimPending.get(__uid)
+      if (Date.now() > p.expires) {
+        terminalClaimPending.delete(__uid) // 超时自清
+      } else {
+        const code = (this.e.msg || '').trim()
+        const r = claim(code, __uid)
+        if (r.ok) {
+          terminalClaimPending.delete(__uid) // 认领成功，退出监听
+          await this.e.reply(`✅ 认领成功！你（${r.userId}）已成为 terminal 主人。\n现在可让 AI 使用 terminal 工具在主机执行命令（每条命令仍需你 #确认，灾难命令黑名单硬拦）。`)
+        } else {
+          // 验证码错误：保持监听，用户可在超时前继续重发（code 不变，无需重新 #agents设置主人）
+          await this.e.reply(`❌ ${r.reason}，请直接重新发送验证码（控制台查看 ${Math.round((p.expires - Date.now()) / 1000)} 秒内有效）。`)
+        }
+        return true
+      }
     }
     const cfg = Config.get().agent || {}
     const mode = cfg.trigger || 'at' // at | command | both
@@ -1022,15 +1074,21 @@ export class Chat extends plugin {
         return rt.schedule.add({ type: 'task', cron, prompt: info.prompt, userId: ctx.scopeUserId, groupId: ctx.groupId || null, selfId: ctx.selfId }, makeFireDispatch(rt))
       },
     }
-    // terminal 工具运行时配置（黑名单/超时/工作目录 + 沙盒 image/network/mounts）
+    // terminal 工具运行时配置（主机执行；黑名单/超时/工作目录 + 审批超时）
     ctx.terminal = {
       cwd: Config.path.yunzai,
       maxTimeout: cfg.terminal?.maxTimeout || 600,
       blocklist: cfg.terminal?.blocklist || DEFAULT_BLOCKLIST,
-      allowlist: cfg.terminal?.allowlist || DEFAULT_ALLOWLIST,
-      image: cfg.terminal?.image,
-      network: cfg.terminal?.network,
-      mounts: cfg.terminal?.mounts,
+      confirmTimeout: cfg.confirmTimeout || 300, // 主人 #确认 超时（秒），复用 agent.confirmTimeout
+      skipConfirm: cfg.terminal?.skipConfirm === true, // terminal 主人免 #确认 直跑（黑名单仍硬拦；高危）
+    }
+    // web_download 工具运行时配置（yt-dlp 下载；目录/大小/超时上限，单位 MB→字节）
+    ctx.download = {
+      dir: cfg.download?.dir || undefined,
+      maxBytes: cfg.download?.maxMB ? cfg.download.maxMB * 1024 * 1024 : undefined,
+      sendLimitBytes: cfg.download?.sendLimitMB ? cfg.download.sendLimitMB * 1024 * 1024 : undefined,
+      maxTimeoutSec: cfg.download?.maxTimeoutSec || undefined,
+      ytDlpBin: cfg.download?.bin || undefined,
     }
     const media = createMediaService({
       bot: ctx.bot, e: this.e, caps, protocol, config: mediaCfg, fetcher: ctx.fetcher,
@@ -1239,13 +1297,16 @@ export class Chat extends plugin {
       if (!delivered) {
         // 文本模式（或图片渲染失败）：表情包混排（无图→纯文本；有图→segment 数组）
         const seg = acceptMap ? rt.sticker.applyText(body, acceptMap) : (body || '(无回复)')
-        if (typeof seg === 'string') {
-          const txt = `${seg}${suffix ? `\n${suffix}` : ''}`
-          await this.e.reply(atSender ? [atSender, txt] : txt)
-        } else {
-          await this.e.reply(atSender ? [atSender, ...seg] : seg)
-          if (suffix) await this.e.reply(suffix)
-        }
+        try {
+          if (typeof seg === 'string') {
+            const txt = `${seg}${suffix ? `\n${suffix}` : ''}`
+            await this.e.reply(atSender ? [atSender, txt] : txt)
+          } else {
+            await this.e.reply(atSender ? [atSender, ...seg] : seg)
+            if (suffix) await this.e.reply(suffix)
+          }
+          delivered = true
+        } catch (e) { Log.warn('[render] 文本回复发送失败', e?.message || e) }
       } else if (suffix) {
         await this.e.reply(suffix) // 图片已发，max_turns 提示作附注
       }
@@ -1744,27 +1805,47 @@ export class Chat extends plugin {
     return true
   }
 
-  // —— 审批 ——
+  // —— 审批 ——（框架主人 OR terminal 主人均可；双路由：框架 ConfirmStore + terminal 自包含）
   async approve() {
     const id = this.e.msg.match(/\d+/)?.[0]
+    if (!this.e.isMaster && !isTerminalMaster(this.e.user_id)) return this.e.reply('无权限：仅主人可审批'), true
     const rt = await getRuntime()
-    await this.e.reply(rt.confirm.resolve(id, true) ? `已批准 #${id}` : `未找到待审 #${id}`)
+    if (rt.confirm.resolve(id, true)) return this.e.reply(`已批准 #${id}`), true
+    if (resolveTerminalApproval(id, true)) return this.e.reply(`已批准 terminal #${id}`), true
+    await this.e.reply(`未找到待审 #${id}`)
     return true
   }
 
   async reject() {
     const id = this.e.msg.match(/\d+/)?.[0]
+    if (!this.e.isMaster && !isTerminalMaster(this.e.user_id)) return this.e.reply('无权限：仅主人可审批'), true
     const rt = await getRuntime()
-    await this.e.reply(rt.confirm.resolve(id, false) ? `已拒绝 #${id}` : `未找到待审 #${id}`)
+    if (rt.confirm.resolve(id, false)) return this.e.reply(`已拒绝 #${id}`), true
+    if (resolveTerminalApproval(id, false)) return this.e.reply(`已拒绝 terminal #${id}`), true
+    await this.e.reply(`未找到待审 #${id}`)
     return true
   }
 
   async pending() {
+    if (!this.e.isMaster && !isTerminalMaster(this.e.user_id)) return this.e.reply('无权限：仅主人可查看'), true
     const rt = await getRuntime()
     const list = rt.confirm.list()
-    if (!list.length) return this.e.reply('当前无待审批'), true
-    const lines = list.map((p) => `#${p.id} ${p.tool} ${JSON.stringify(p.args || {}).slice(0, 80)}`)
+    const termList = listTerminalApprovals()
+    if (!list.length && !termList.length) return this.e.reply('当前无待审批'), true
+    const lines = []
+    for (const p of list) lines.push(`#${p.id} ${p.tool} ${JSON.stringify(p.args || {}).slice(0, 80)}`)
+    for (const t of termList) lines.push(`#${t.id} 🖥️terminal $ ${String(t.info?.command || '').slice(0, 80)}`)
     await this.e.reply(lines.join('\n'))
+    return true
+  }
+
+  // —— terminal 主人认领（自包含、验证码；不读框架配置）——
+  // #agents设置主人 → 控制台打印验证码 + 进入监听态，用户接下来直接发验证码认领（类似 Yunzai #设置主人）
+  async terminalRequestClaim() {
+    const { ttlMs } = requestClaim()
+    const uid = String(this.e.user_id)
+    terminalClaimPending.set(uid, { at: Date.now(), expires: Date.now() + ttlMs })
+    await this.e.reply(`✅ terminal 主人认领验证码已打印到控制台（${Math.round(ttlMs / 1000)} 秒有效）。\n请在控制台查看验证码，然后直接把它发到这里完成认领（无需加任何命令前缀，${Math.round(ttlMs / 1000)} 秒内可重发）。认领成功即成为 terminal 主人（替换旧主人）。`)
     return true
   }
 

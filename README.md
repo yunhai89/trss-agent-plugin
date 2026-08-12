@@ -48,14 +48,15 @@
 | 能力 | 说明 | 状态 |
 | --- | --- | --- |
 | 💬 多模型对话 | OpenAI / Anthropic 双协议，接 DeepSeek / Kimi / MiMo / 通义 / 智谱 / Gemini 等 | ✅ 稳定 |
-| 🖼️ 图片渲染回复 | markdown → 精美**暗色卡片**图片（完整语法 + 代码高亮 + 底部会话/对话id），失败退文本 | ✅ 稳定 |
+| 🖼️ 图片渲染回复 | markdown → 精美**浅色卡片**图片（完整语法 + 代码高亮 + 底部会话/对话id），失败退文本 | ✅ 稳定 |
 | 🔧 工具调用 | ReAct 内核、并行调用、RBAC + 主人审批、工具开发 SDK | ✅ 稳定 |
 | 🧠 长期记忆 | MEMORY.md/USER.md 人可编辑 + `memory_search` 主动召回（参考 OpenClaw） | ✅ 稳定 |
 | 🎭 人设系统 | 内置 6 角色 + 自建，替换身份层不缩水工具/记忆 | ✅ 稳定 |
 | 🖼️ 多模态识图 | 视觉子模型（主模型无视觉时图转文） | ✅ 稳定 |
 | 🔌 MCP | 完整 MCP 客户端（stdio / HTTP）、多服务端、按工具 RBAC | ✅ 稳定 |
 | 👥 群聊工具 | 群信息 / 群管理 / 米游社搜索 | ✅ 稳定 |
-| 💻 终端执行 | **Docker 沙盒**执行（即焚容器，默认无网+只读根，allowlist 免审 + 黑名单 + 主人审批） | ⚠️ 高危可选 |
+| 💻 终端执行 | **主机直接执行**（仅验证码认领的 terminal 主人可用 + 每条命令 #确认 + 黑名单硬拦） | ⚠️ 高危可选 |
+| 🌐 浏览器自动化 | **Stagehand**：goto/observe/extract/act 自然语言原语，本地或 Browserbase 云，会话跨调用保持 | 🧪 早期 |
 | 🎭 表情包 | LLM 自主在回复内嵌表情包（图片模式内嵌进图 / 文本混排，频率受控） | ❌ 暂不可用（官方仓库未就绪） |
 | 💬 私聊对话 | 私聊任何消息直接触发（不需 #ai/@），独立会话与记忆 | ✅ 稳定 |
 | 🌐 代理访问 | HTTP/SOCKS 代理（国内服务器访问 GPT/Gemini 等海外 LLM） | ✅ 稳定 |
@@ -112,10 +113,10 @@
 
 本插件提供**终端（shell）执行能力**，属于**高危工具**：
 
-- shell 可在主机上执行**任意命令**——读写/删除文件、安装软件、访问网络、调用系统权限。
-- 插件已做多层防护（仅主人可用、allowlist 只读命令免审、未知/写命令需主人 `#确认`、黑名单硬拦灾难性命令），**但任何防护都无法保证 100% 安全**——命令组合、解释器、环境差异等都可能绕过静态规则。
+- shell 在**主机直接执行**任意命令（无容器隔离）——读写/删除文件、安装软件、访问网络、调用系统权限。
+- terminal 仅「terminal 主人」可用：**不读 Yunzai 框架配置**，认领流程类似 Yunzai `#设置主人`——`#agents设置主人`（控制台打印验证码 + 进入监听）→ 直接发验证码认领，单主人（换人即重置）。每条命令需主人 `#确认`；灾难命令（`rm -rf /` 等）黑名单硬拦。**但任何防护都无法保证 100% 安全**——命令组合、解释器、环境差异等都可能绕过静态规则。
 - **终端默认关闭**（`agent.terminal.enable` 默认 `false`），需在配置里**单独手动开启**。
-- **开启 `agent.terminal.enable: true` 即表示你已知晓上述风险、同意自行承担一切后果，与开发者无关。** 开发者会尽量保证安全性，但不作任何担保。
+- **开启 `agent.terminal.enable: true` 即表示你已知晓上述风险（含真机执行）、同意自行承担一切后果，与开发者无关。** 开发者会尽量保证安全性，但不作任何担保。
 
 > 如不接受该风险，请保持 `terminal.enable: false`（默认）。不启用终端时，本插件不涉及任何主机命令执行，无此风险。
 
@@ -136,8 +137,8 @@ cd ./plugins/agents-plugin && npm install      # 安装 markdown 渲染依赖（
 
 ### 🖼️ 图片回复（默认开启）
 
-机器人回复**默认渲染成精美暗色卡片图片**（完整 markdown + 代码语法高亮），渲染失败自动退文本。配置 `agent.reply.mode`：
-- `image`（默认）：markdown → 暗色卡片图片（标题/列表/代码高亮/表格/引用全支持）
+机器人回复**默认渲染成精美浅色卡片图片**（完整 markdown + 代码语法高亮），渲染失败自动退文本。配置 `agent.reply.mode`：
+- `image`（默认）：markdown → 浅色卡片图片（标题/列表/代码高亮/表格/引用全支持）
 - `text`：纯文本回复
 
 > 配置文件在插件目录内（不在 Yunzai 根）。若你之前用的是旧版 `Yunzai/config/agents-plugin.yaml`，首次加载会**自动迁移**到插件目录并删除旧文件（apiKey/masters 等全部保留）。
@@ -154,7 +155,7 @@ cd ./plugins/agents-plugin && npm install      # 安装 markdown 渲染依赖（
 ```yaml
 agent:
   protocol: openai        # 或 anthropic
-  preset: deepseek        # 厂商预设：openai/deepseek/gemini/dashscope/zhipu/moonshot/mimo（anthropic: anthropic/deepseek/mimo）
+  preset: deepseek        # 厂商预设：openai/deepseek/gemini/dashscope/zhipu/moonshot/mimo/minimax（anthropic: anthropic/deepseek/mimo/minimax）
   apiKey: "sk-xxx"        # 你的 API Key
   model: "deepseek-chat"  # 模型 ID
 ```
@@ -412,31 +413,19 @@ mcp:
 
 ---
 
-## 💻 终端执行 + 审批（allowlist 自动放行）
+## 💻 终端执行 + 审批（主人验证码认领）
 
 > **⚠️ 高危**：见上方「安全声明」。`terminal` 默认关闭，需 `agent.terminal.enable: true` **单独开启**；开启即视为你知晓风险并自担后果。
 
-`terminal` 工具让 Agent 在 **Docker 沙盒**执行 shell 命令（即焚容器：`--network none` + `--read-only` + `--tmpfs` + `--cap-drop=ALL`，env 不泄漏 apiKey/proxy，主机零暴露）。之上是纵深防御（参考 OpenClaw）：
+`terminal` 工具让 Agent 在**主机直接执行** shell 命令（无容器隔离，比沙盒危险得多）。安全模型（纵深防御）：
 
-- **allowlist 自动放行**：只读安全命令（`ls`/`cat`/`grep`/`git status`/`npm list`/`node --version` 等，见 `terminal.allowlist`）**免审批直接执行**；含重定向(`>`)/命令替换/写操作的命令不自动放行。
-- **审批门**：未知命令 / 写操作 → 主人收到 DM（含命令预览 + 风险提示：⚠️写入/🌐网络/🔐提权/📦安装），`#确认 <id>` / `#拒绝 <id>`，超时自拒。每次动作一次性审批。
-- **黑名单**：灾难性命令（`rm -rf /` / `mkfs` / `dd of=/dev/` / 关机重启 等）即使已确认也硬拦。
-- 仅主人可用；`terminal.allowlist` 非空则替换默认只读集，`terminal.blocklist` 追加禁令。
-- **沙盒配置**（`agent.terminal`）：`image`（镜像名）、`network`（`none` 无网 / `auto` 检测 pip/curl 等自动开网 / `host` 始终有网）、`mounts`（主机目录挂载，默认空=不挂最安全）。
-
-### 🐳 沙盒镜像（archlinux）安装
-
-terminal 命令在 Docker 即焚容器里跑，需要一个 Linux 镜像（默认 `archlinux`，自带 pacman 全工具链）。先拉镜像：
-
-```bash
-docker pull archlinux:latest
-# 国内拉不动（docker.io 被墙）用镜像源：
-docker pull docker.m.daocloud.io/library/archlinux:latest
-# 打个短名标签，config 里就能填 archlinux:latest：
-docker tag docker.m.daocloud.io/library/archlinux:latest archlinux:latest
-```
-
-> 换其他镜像也行（alpine/ubuntu/自定义），在 `agent.terminal.image` 填对应镜像名即可。未装 docker 或未拉镜像，terminal 会报错（不降级主机执行，强制沙盒）。
+- **terminal 主人（自包含，不读框架配置）**：不沿用 Yunzai 的 `e.isMaster` / `agent.masters`。认领流程（类似 Yunzai `#设置主人`）：
+  1. 任意人发 `#agents设置主人` → **控制台打印**一个验证码（只有服务器持有者能看到），并进入监听态。
+  2. 服务器持有者**直接把验证码发到当前会话**（无需任何命令前缀）→ 校验通过即成为 terminal 主人。验证码错误可在超时前重发。
+  - **单主人 + 验证码重置**：每次 `#agents设置主人` 生成新验证码并重置监听，新码被认领后**替换旧主人**（换人即重置）。持久化到插件 `data/terminal-master.json`，重启不丢。
+- **审批门**：terminal **每条命令都需主人 `#确认`**（不再有 allowlist 免审——真机执行没有「安全的只读命令」）。主人收到 DM（含命令预览 + 风险提示：⚠️写入/🌐网络/🔐提权/📦安装），`#确认 <id>` / `#拒绝 <id>`，超时自拒。
+- **黑名单**：灾难性命令（`rm -rf /` / `mkfs` / `dd of=/dev/` / 关机重启 等）即使已确认也**硬拦**。
+- 配置（`agent.terminal`）：`maxTimeout`（命令超时上限）、`blocklist`（追加灾难命令正则；空=用默认集）。
 
 ### 🔍 SearXNG（自建免费搜索后端）安装
 
@@ -456,6 +445,37 @@ search:
 ```
 
 > 生产建议给 SearXNG 加 reverse proxy + auth（见 [SearXNG 文档](https://docs.searxng.org)）。插件按其 JSON API 调用，无需额外适配。
+
+---
+
+## 🌐 Stagehand 浏览器自动化（🧪 早期）
+
+> 基于 [@browserbasehq/stagehand](https://docs.stagehand.dev) v4。Agent 用自然语言驱动真实浏览器：打开页面、点击、填表、抽取动态渲染后的结构化数据（弥补 web_crawl 不执行 JS 的不足）。
+
+**4 个工具**（`category:'system'`，仅框架主人；`stagehand__act` 写动作额外需 `#确认`）：
+- `stagehand__goto({url})` — 打开 URL（多步任务起点，页面跨调用保持）
+- `stagehand__observe({instruction?})` — 列出可交互元素（只读）
+- `stagehand__extract({instruction, schema})` — 按自然语言 + JSON Schema 抽结构化数据
+- `stagehand__act({instruction})` — 点击/输入/提交（写动作，需 `#确认`）
+
+**会话**：per-scopeUserId 懒启动 + 5min idle 自动关；同一会话复用同一页面，支持"打开 A 站→登录→抓数据"多步任务。
+
+**配置**（`agent.stagehand`，默认关）：
+```yaml
+stagehand:
+  enable: true
+  mode: local          # local(本地 Playwright+chromium，默认) | cloud(Browserbase)
+  headless: true
+  executablePath: ""   # 本地 chrome 路径(空=默认/CHROME_PATH；可填复用已装 chrome)
+  browserbaseApiKey: ""# 云模式必填
+  modelName: ""        # Stagehand 原生模型(如 google/gemini-2.5-flash)；空=复用插件 provider(仅 OpenAI 兼容)；云模式空=自动选
+  modelApiKey: ""
+  idleTimeoutMs: 300000
+```
+
+- **LLM**：Stagehand 每次原语调用要一次 LLM 推理。`modelName` 留空时**复用插件已配的 OpenAI 兼容 provider**（deepseek/openai/mimo 等，走 json_schema 结构化输出）；插件协议为 anthropic 或想用更强模型，填 `modelName`（五大 provider：openai/anthropic/google/groq/cerebras）。
+- **依赖**：`@browserbasehq/stagehand` + `zod`（云崽根 `pnpm install` 随 workspace 装入插件）；本地模式另需 chromium + 系统库（`libnss3 libatk-bridge2.0-dev libgtk-3-dev libxss1 libasound2`）。
+- 云模式（Browserbase）不在主机跑浏览器、无需本地 chromium，但需 apiKey + 外网。
 
 ---
 

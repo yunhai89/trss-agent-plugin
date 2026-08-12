@@ -1,7 +1,7 @@
 /**
  * OpenAIProvider —— 包装 model/openai，统一消息↔OpenAI Chat Completions 格式。
  */
-import { createClient, extractReasoning, parseToolArguments } from '../../openai/index.js'
+import { createClient, extractReasoning, splitInlineThink, createThinkStripper, extractToolCallsOpenAI } from '../../openai/index.js'
 import { Provider, toolsToList, mapToolChoice, clientOpts } from './base.js'
 import { stringifyArgs } from '../messages.js'
 
@@ -68,8 +68,11 @@ export class OpenAIProvider extends Provider {
   async _create(body, { signal, stream, onDelta, onReasoning }) {
     if (stream) {
       const s = await this.client.chat.completions.create({ ...body, signal })
+      // 流式 live 旁路：剥掉内联 <think> 推理块，避免中途播报(onDelta)把思考泄漏给用户
+      const stripper = onDelta ? createThinkStripper() : null
       for await (const part of s) {
-        if (part.delta?.content && onDelta) onDelta(part.delta.content)
+        const dc = part.delta?.content
+        if (dc && onDelta) { const c = stripper.feed(dc); if (c) onDelta(c) }
         if (part.delta?.reasoning && onReasoning) onReasoning(part.delta.reasoning)
       }
       return this._resultFromStream(s)
@@ -121,16 +124,16 @@ export class OpenAIProvider extends Provider {
   _resultFromResponse(res) {
     const choice = res.choices?.[0]
     const message = choice?.message || {}
-    const toolCalls = (message.tool_calls || []).map((tc) => ({
-      id: tc.id,
-      name: tc.function?.name,
-      arguments: parseToolArguments(tc),
-    }))
-    const reasoning = extractReasoning(message, this.reasoningFields)
-    // content 空 + 无 tool_calls + 有 reasoning：用 reasoning 占位 content（防空消息进历史）
-    let content = message.content ?? ''
-    if (!content && !toolCalls.length && reasoning) {
-      content = reasoning  // thinking 模式下正文空但有思考：用思考内容当正文
+    const toolCalls = extractToolCallsOpenAI(message)
+    const fieldReasoning = extractReasoning(message, this.reasoningFields)
+    // 剥离内联 <think> 推理块：部分通道把思考内联在 content 里，不剥离会泄漏进最终回复
+    const { content: cleanContent, reasoning: inlineReasoning } = splitInlineThink(message.content ?? '')
+    let content = cleanContent
+    const reasoning = [fieldReasoning, inlineReasoning].filter(Boolean).join('\n\n').trim()
+    // content 空 + 无 tool_calls + 有【字段】reasoning：用 reasoning 占位 content（防空消息进历史）。
+    // 注：只用字段 reasoning 占位，不拿刚剥掉的内联 think 凑，避免把推理又塞回正文
+    if (!content && !toolCalls.length && fieldReasoning) {
+      content = fieldReasoning
     }
     return {
       role: 'assistant',
@@ -145,11 +148,13 @@ export class OpenAIProvider extends Provider {
 
   _resultFromStream(s) {
     const toolCalls = s.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments }))
+    const { content, reasoning: inlineReasoning } = splitInlineThink(s.content ?? '')
+    const reasoning = [s.reasoning, inlineReasoning].filter(Boolean).join('\n\n').trim()
     return {
       role: 'assistant',
-      content: s.content,
+      content,
       toolCalls,
-      reasoning: s.reasoning,
+      reasoning,
       finishReason: s.finishReason,
       usage: s.usage,
       rawMessage: s.assistantMessage,

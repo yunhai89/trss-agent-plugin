@@ -17,7 +17,7 @@ import {
   ConnectionError,
   isRetryableError,
 } from './errors.js'
-import { parseToolArguments, extractReasoning, toolArgumentsString } from './helpers.js'
+import { parseToolArguments, extractReasoning, toolArgumentsString, splitInlineThink, createThinkStripper, extractToolCallsOpenAI } from './helpers.js'
 
 /** 工厂：合并预设与配置后构造客户端 */
 export function createClient(config = {}) {
@@ -71,4 +71,7 @@ export {
   parseToolArguments,
   extractReasoning,
   toolArgumentsString,
+  splitInlineThink,
+  createThinkStripper,
+  extractToolCallsOpenAI,
 }
