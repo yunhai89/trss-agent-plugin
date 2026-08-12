@@ -25,7 +25,7 @@
         { id: 'evolution', name: '工具进化', icon: 'tool', badge: () => (window.MOCK?.tevoTools || []).filter((v) => v.status === 'verified').length },
       ],
     },
-    { group: '系统', items: [{ id: 'config', name: '配置中心', icon: 'config' }] },
+    { group: '系统', items: [{ id: 'config', name: '配置中心', icon: 'config' }, { id: 'humanize', name: '伪人模式', icon: 'group' }] },
   ]
   const TITLES = {
     dashboard: ['概览', '插件运行状态与核心指标'],
@@ -41,6 +41,7 @@
     suggestions: ['进化建议', '自评审产出的待审改进项'],
     evolution: ['工具进化', 'Tool Evolution · 候选生成/验证/审批/版本'],
     config: ['配置中心', 'config.yaml 全量配置项'],
+    humanize: ['伪人模式', '群聊环境参与者 · 旁听/门控/决策/发送'],
   }
 
   const App = {
