@@ -248,6 +248,18 @@ agent:
     maxTimeoutSec: 600      # 单次下载超时上限（秒）
     bin: ""                 # yt-dlp 可执行路径（空=PATH 中的 yt-dlp）
     dir: ""                 # 输出目录（空=插件 data/temp/downloads）
+  multiagent:
+    # 子代理编排：主 Agent 可自主创建子代理委派任务。LLM 自己判断何时需要拆分。
+    # 子代理是隔离 Agent（看不到主对话历史），只做被委派的任务，返回结果文本。
+    # 安全：子代理只能用 query 类工具（搜索/记忆/计算），群管/系统/终端不可；不会递归创建子代理。
+    enable: true
+    maxConcurrent: 3            # 同时运行的子代理数上限
+    maxSpawnsPerConversation: 5 # 单次对话最多创建几个子代理
+    workerMaxTurns: 10          # 子代理工具循环上限（防失控烧 token）
+    workerModel: ""             # 子代理模型（空=复用主模型；填便宜模型可降本）
+    defaultTools:               # 子代理默认可用工具（模型未指定时）
+      - web_search
+      - memory_search
   webApi:
     enable: true           # Web 管理面板（独立 HTTP 服务，脱离锅巴）：主人私聊发 #agents登录 取得带 token 的访问地址（24h 有效）
     port: 6098             # 监听端口（0.0.0.0）；默认避开 Yunzai 2536 / 锅巴 6099

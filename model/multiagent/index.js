@@ -15,6 +15,7 @@
  */
 
 export { SubagentSpec, makeDelegationTool } from './subagent.js'
+export { makeSpawnSubagentTool } from './spawn-tool.js'
 export { Orchestrator, DEFAULT_ORCHESTRATOR_PROMPT } from './orchestrator.js'
 export { pipeline, parallel, router, evaluatorOptimizer, runStep } from './patterns.js'
 export { Semaphore, Trace, SharedState } from './support.js'

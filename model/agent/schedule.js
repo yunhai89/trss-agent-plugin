@@ -237,3 +237,65 @@ export const scheduleTaskTool = {
     }
   },
 }
+
+/**
+ * reminder_list 工具：列出当前用户的所有提醒/定时任务。
+ */
+export const reminderListTool = {
+  name: 'reminder_list',
+  description: '查看当前用户的所有提醒和定时任务（包括一次性提醒和 cron 重复任务）。用户问"我有哪些提醒/定时任务"或需要取消前先查看时用。',
+  category: 'personal',
+  parameters: { type: 'object', properties: {}, additionalProperties: false },
+  async execute(_p, ctx) {
+    try {
+      const reminders = ctx?.reminder?.list ? await ctx.reminder.list(ctx.scopeUserId) : []
+      const crons = ctx?.cronTask?.list ? await ctx.cronTask.list() : []
+      const items = []
+      for (const r of reminders) {
+        const at = new Date(r.at).toLocaleString('zh-CN')
+        items.push({ id: r.id, type: r.prompt ? '任务链' : '提醒', at, message: (r.message || r.prompt || '').slice(0, 60) })
+      }
+      for (const c of crons) {
+        items.push({ id: c.id, type: 'cron重复', cron: c.cron, prompt: (c.prompt || '').slice(0, 60) })
+      }
+      if (!items.length) return { count: 0, note: '当前没有任何提醒或定时任务' }
+      return { count: items.length, items }
+    } catch (e) {
+      return { error: `查询失败：${e?.message || e}` }
+    }
+  },
+}
+
+/**
+ * reminder_cancel 工具：取消指定 id 的提醒或定时任务。
+ */
+export const reminderCancelTool = {
+  name: 'reminder_cancel',
+  description: '取消指定 id 的提醒或定时任务。用户说"取消我的提醒/定时任务"时用。id 从 reminder_list 获取。',
+  category: 'personal',
+  parameters: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: '要取消的提醒/任务 id（从 reminder_list 获取）' },
+    },
+    required: ['id'],
+    additionalProperties: false,
+  },
+  async execute(p, ctx) {
+    const id = String(p.id || '').trim()
+    if (!id) return { error: '需要提供 id（从 reminder_list 获取）' }
+    try {
+      if (ctx?.reminder?.cancel) {
+        const ok = await ctx.reminder.cancel(id)
+        if (ok) return { ok: true, id, note: '已取消提醒' }
+      }
+      if (ctx?.cronTask?.cancel) {
+        const ok = await ctx.cronTask.cancel(id)
+        if (ok) return { ok: true, id, note: '已取消定时任务' }
+      }
+      return { error: `未找到 id=${id} 的提醒或定时任务。用 reminder_list 查看当前列表。` }
+    } catch (e) {
+      return { error: `取消失败：${e?.message || e}` }
+    }
+  },
+}

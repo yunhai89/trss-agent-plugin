@@ -16,6 +16,8 @@ import {
   RecallStore,
   ScheduleStore,
   reminderSetTool,
+  reminderListTool,
+  reminderCancelTool,
   parseCron,
   scheduleTaskTool,
   ConfirmStore,
@@ -57,6 +59,7 @@ import { buildSituationalContext } from '../model/perception.js'
 import { makeTerminalTool, DEFAULT_BLOCKLIST, requestClaim, claim, getMaster as getTerminalMaster, isMaster as isTerminalMaster, resolveApproval as resolveTerminalApproval, listApprovals as listTerminalApprovals } from '../model/terminal/index.js'
 import { makeStagehand } from '../model/stagehand/index.js'
 import { makeDownloadTool } from '../model/download/index.js'
+import { makeSpawnSubagentTool, Semaphore } from '../model/multiagent/index.js'
 import { calcTool } from '../model/calc/index.js'
 import { sendFileTool } from '../model/document/sendfile.js'
 import { readPdfTool } from '../model/document/pdf.js'
@@ -474,6 +477,8 @@ async function buildRuntime() {
       .register(...forwardTools) // 合并转发：发送/获取
       .register(...miyousheTools)
       .register(reminderSetTool) // reminder_set：对话设提醒（到时间 fireReminder 主动发消息）
+      .register(reminderListTool) // reminder_list：查看当前用户提醒/定时任务
+      .register(reminderCancelTool) // reminder_cancel：取消指定 id 的提醒/定时任务
       .register(scheduleTaskTool) // schedule_task：对话设 cron 重复任务链（到点跑 Agent + 发结果）
   }
 
@@ -712,6 +717,21 @@ async function buildRuntime() {
     } catch (e) {
       Log.warn('[vision] 视觉子模型装配失败，主模型不支持视觉时图片将降级', e?.message || e)
     }
+  }
+
+  // 子代理编排：主 Agent 可自主创建子代理委派任务（复用 multiagent 基础设施）
+  if (cfg.multiagent?.enable !== false) {
+    try {
+      tools.register(makeSpawnSubagentTool({
+        provider, model: cfg.multiagent?.workerModel || null,
+        sourceRegistry: tools,
+        semaphore: new Semaphore(cfg.multiagent?.maxConcurrent ?? 3),
+        maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
+        defaultTools: cfg.multiagent?.defaultTools || ['web_search', 'memory_search'],
+        maxSpawns: cfg.multiagent?.maxSpawnsPerConversation ?? 5,
+      }))
+      Log.info('[multiagent] spawn_subagent 工具已注册（主 Agent 可自主委派子任务）')
+    } catch (e) { Log.warn('[multiagent] spawn_subagent 注册失败', e?.message || e) }
   }
 
   return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand }
@@ -1086,6 +1106,11 @@ export class Chat extends plugin {
         if (!cron) return { error: `无法识别时间「${info.when || ''}」，支持：每天8点/每2小时/工作日9点/每周一8点30/每30分钟` }
         return rt.schedule.add({ type: 'task', cron, prompt: info.prompt, userId: ctx.scopeUserId, groupId: ctx.groupId || null, selfId: ctx.selfId }, makeFireDispatch(rt))
       },
+      list: async () => {
+        const all = await rt.schedule.listAll()
+        return all.filter((r) => r.type === 'task')
+      },
+      cancel: (id) => rt.schedule.cancel(id),
     }
     // terminal 工具运行时配置（主机执行；黑名单/超时/工作目录 + 审批超时）
     ctx.terminal = {
@@ -1259,7 +1284,7 @@ export class Chat extends plugin {
           let cleanBody = body
           if (acceptMap && acceptMap.size) {
             try {
-              cleanBody = rt.sticker.applyImage(body, new Map())
+              cleanBody = rt.sticker.applyImage(body, new Map()).replace(/[\s\n]+$/, '')
               stickerImgs = [...acceptMap.values()].map((e) => rt.sticker._imgDataUri(e.abs || e.path)).filter(Boolean)
             } catch { cleanBody = body }
           }
@@ -1310,7 +1335,7 @@ export class Chat extends plugin {
       if (!delivered) {
         // 文本模式（或图片渲染失败）：正文先发（剥除所有表情包标记，不在正文内联）；
         // 表情包作为主内容之后的【独立消息】依次发送（不与文字混排在同一条）。
-        const cleanBody = acceptMap ? rt.sticker.applyText(body, new Map()) : (body || '(无回复)')
+        const cleanBody = acceptMap ? rt.sticker.applyText(body, new Map()).replace(/[\s\n]+$/, '') : (body || '(无回复)')
         try {
           const txt = `${cleanBody}${suffix ? `\n${suffix}` : ''}`
           await this.e.reply(atSender ? [atSender, txt] : txt)
