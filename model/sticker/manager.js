@@ -19,13 +19,25 @@ import Config from '../../utils/Config.js'
 import { spawn, exec } from 'node:child_process'
 import {
   paths, ensureDirs, scanRepo, buildIndex, loadIndex, saveIndex, imageAbsOf, dirSize, buildCatalog,
+  findByHash, addDiscoveredEntry, evictDiscoveredToCap,
 } from './index.js'
 import { parseMarkers, composeString, composeSegments } from './parser.js'
+import { hashImage, judgeAndTag, pickByEmotion as pickByEmotionFrom } from './discover.js'
 
 const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }
 const IMG_EXT = new Set(Object.keys(MIME))
 
 function shellQuote(s) { return `"${String(s).replace(/"/g, '\\"')}"` }
+
+/** mime → 扩展名（无匹配默认 png）。 */
+function mimeToExt(mime) {
+  const m = String(mime || '').toLowerCase()
+  if (m.includes('png')) return 'png'
+  if (m.includes('gif')) return 'gif'
+  if (m.includes('webp')) return 'webp'
+  if (m.includes('jpeg') || m.includes('jpg')) return 'jpg'
+  return 'png'
+}
 
 function _trunc(s, max = 8000) {
   const t = String(s == null ? '' : '')
@@ -90,6 +102,73 @@ export class StickerManager {
   catalog() {
     if (!this.enabled()) return ''
     return buildCatalog(this.getIndex(), { listTopN: this.cfg.listTopN ?? 30 })
+  }
+
+  // ───────────────────────── 自动发现（MaiBot 式） ─────────────────────────
+
+  /**
+   * 从一张群聊图片自动发现+打标+入库。
+   * 流程：sha256 去重 → 视觉判定+打标（拒绝照片/文档）→ 存盘 → 入 index → 超限淘汰冷门。
+   * @param {Buffer} buffer 图片字节
+   * @param {string} mime
+   * @param {object} opts { vision?, maxDiscovered? }
+   * @returns {Promise<{status:'added'|'dup'|'rejected'|'noVision', name?:string, tags?:string[], hash?:string, reason?:string}>}
+   */
+  async discover(buffer, mime, { vision = null, maxDiscovered } = {}) {
+    if (!this.enabled()) return { status: 'rejected', reason: 'sticker disabled' }
+    if (!buffer || !mime) return { status: 'rejected', reason: 'no_buffer' }
+    // 大小闸（cfg.discoverMaxSizeMB，默认 5；0=不限）
+    const maxMB = Number(this.cfg.discoverMaxSizeMB ?? 5)
+    if (maxMB > 0 && buffer.length > maxMB * 1024 * 1024) return { status: 'rejected', reason: 'too_large' }
+    const hash = hashImage(buffer)
+    const index = this.getIndex()
+    if (findByHash(index, hash)) return { status: 'dup', hash }
+    // 视觉判定+打标
+    const judged = await judgeAndTag(vision, { buffer, mime })
+    if (!judged.isSticker) return { status: 'rejected', reason: 'not_sticker', hash }
+    // 存盘：images/discovered/<hash>.<ext>
+    const ext = mimeToExt(mime)
+    const fileRel = `discovered/${hash}.${ext}`
+    ensureDirs()
+    const abs = path.join(paths.IMAGES_DIR, fileRel)
+    try {
+      fs.mkdirSync(path.dirname(abs), { recursive: true })
+      fs.writeFileSync(abs, buffer)
+    } catch (e) {
+      this.logger('warn', '[sticker] discover 存盘失败', e?.message || e)
+      return { status: 'rejected', reason: 'save_failed', hash }
+    }
+    // 入 index（去重双保险）+ 超限淘汰
+    let next = addDiscoveredEntry(index, { name: judged.name, file: fileRel, desc: judged.desc, tags: judged.tags, hash, source: 'discovered' })
+    if (next.dup) return { status: 'dup', hash }
+    const cap = Math.max(1, Number(maxDiscovered ?? this.cfg.maxDiscovered ?? 200))
+    const ev = evictDiscoveredToCap(next.index, cap)
+    for (const f of ev.removedFiles) { try { fs.unlinkSync(f) } catch { /* noop */ } }
+    this._indexCache = ev.index
+    try { saveIndex(ev.index) } catch (e) { this.logger('warn', '[sticker] discover 写盘失败', e?.message || e) }
+    this.logger('mark', `[sticker] 自动发现+入库：${next.name}（${judged.tags.join('/') || '无标签'}）${judged.noVision ? ' [无视觉模型，未打标]' : ''}`)
+    return { status: 'added', name: next.name, tags: judged.tags, desc: judged.desc, hash }
+  }
+
+  /**
+   * 按情绪/意图跨全库选一张表情名（供 send_sticker 工具/自动附图用；不受目录 top-N 限制）。
+   * @returns {string|null} 表情名
+   */
+  pickByEmotion(emotion, opts = {}) {
+    const index = this.getIndex()
+    const entries = Object.entries(index?.stickers || {}).filter(([, e]) => {
+      // 只选文件存在的
+      try { return fs.existsSync(imageAbsOf(e)) } catch { return false }
+    })
+    return pickByEmotionFrom(entries, emotion, opts)
+  }
+
+  /** 取某表情的图片绝对路径（供 send_sticker 工具发图）。 */
+  imageOf(name) {
+    const e = this.getIndex()?.stickers?.[name]
+    if (!e) return null
+    const abs = imageAbsOf(e)
+    return fs.existsSync(abs) ? abs : null
   }
 
   // ───────────────────────── 发送层：双模式渲染 ─────────────────────────

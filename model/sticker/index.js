@@ -139,6 +139,7 @@ export function scanRepo({ manifest, excludeDirs = [], excludeKeywords = [] } = 
 /**
  * 由 items 构建 stickers 映射（manifest 为准取 name/tags/desc；按 file 合并保留旧 usageCount）。
  * 同名追加 _2/_3。
+ * 关键：保留旧 index 中 source='discovered' 的条目（自动发现的图不在 _repo，否则 #表情包更新 会丢）。
  */
 export function buildIndex(items, oldIndex, { commit } = {}) {
   const oldByFile = new Map()
@@ -161,9 +162,66 @@ export function buildIndex(items, oldIndex, { commit } = {}) {
       source: it.source || 'root',
       usageCount: old?.usageCount || 0,
       nsfw: old?.nsfw || false,
+      ...(it.hash || old?.hash ? { hash: it.hash || old?.hash } : {}),
+      addedAt: old?.addedAt || Date.now(),
+    }
+    oldByFile.delete(it.file)
+  }
+  // 保留旧 index 里自动发现的条目（不在 _repo，但图在 images/discovered 下）
+  for (const [name, entry] of Object.entries(oldIndex?.stickers || {})) {
+    if (entry?.source === 'discovered' && !usedNames.has(name) && fs.existsSync(imageAbsOf(entry))) {
+      stickers[name] = entry
+      usedNames.add(name)
     }
   }
-  return { version: 4, commit: commit ?? oldIndex?.commit ?? null, updatedAt: Date.now(), stickers }
+  return { version: 5, commit: commit ?? oldIndex?.commit ?? null, updatedAt: Date.now(), stickers }
+}
+
+/** 按 hash 查条目（去重用）。 */
+export function findByHash(index, hash) {
+  if (!hash) return null
+  for (const [, e] of Object.entries(index?.stickers || {})) {
+    if (e.hash === hash) return e
+  }
+  return null
+}
+
+/**
+ * 新增一个自动发现的表情条目到 index（含 hash 去重）。
+ * @returns {{index:object, name:string, dup?:boolean}} dup=true 表示已存在（按 hash）
+ */
+export function addDiscoveredEntry(index, { name, file, desc, tags, hash, source = 'discovered' }) {
+  const stickers = { ...(index?.stickers || {}) }
+  if (hash && findByHash(index, hash)) return { index, name, dup: true }
+  let nm = name || `表情_${(hash || '').slice(0, 6) || Date.now().toString(36)}`
+  if (stickers[nm]) { let i = 2; while (stickers[`${nm}_${i}`]) i++; nm = `${nm}_${i}` }
+  stickers[nm] = {
+    file, desc: desc || nm, tags: Array.isArray(tags) ? tags : [],
+    source, usageCount: 0, nsfw: false,
+    ...(hash ? { hash } : {}),
+    addedAt: Date.now(),
+  }
+  return { index: { version: 5, commit: index?.commit ?? null, updatedAt: Date.now(), stickers }, name: nm, dup: false }
+}
+
+/**
+ * 把自动发现条目裁到 maxDiscovered 个：按 usageCount 升序淘汰最冷门的 discovered（不动 repo 条目）。
+ * 返回 {index, removedFiles[]}（removedFiles 供调用方删盘）。
+ */
+export function evictDiscoveredToCap(index, maxDiscovered = 200) {
+  const entries = Object.entries(index?.stickers || {})
+  const disc = entries.filter(([, e]) => e?.source === 'discovered')
+  if (disc.length <= maxDiscovered) return { index, removedFiles: [] }
+  disc.sort((a, b) => (a[1].usageCount || 0) - (b[1].usageCount || 0))
+  const removeCount = disc.length - maxDiscovered
+  const toRemove = disc.slice(0, removeCount)
+  const removedFiles = []
+  const stickers = { ...(index?.stickers || {}) }
+  for (const [name, e] of toRemove) {
+    delete stickers[name]
+    removedFiles.push(imageAbsOf(e))
+  }
+  return { index: { version: 5, commit: index?.commit ?? null, updatedAt: Date.now(), stickers }, removedFiles }
 }
 
 export function loadIndex() {
@@ -205,24 +263,40 @@ export function dirSize(dir) {
 
 /**
  * 产 prompt 注入块文本（catalog）。语义信息 = tags ｜ docs，供模型语义匹配（而非靠名称猜）。
- * ≤ listTopN 全量列出；超 listTopN 取 usageCount 高频 listTopN 个，注明总数。
+ * ≤ listTopN 全量列出；超 listTopN 取 usageCount 高频 + **最近自动发现加权**（新图 usage=0 不被埋没）。
  */
 export function buildCatalog(index, { listTopN = 30 } = {}) {
   const entries = index?.stickers ? Object.entries(index.stickers) : []
   if (!entries.length) return ''
   const sorted = entries.sort((a, b) => (b[1].usageCount || 0) - (a[1].usageCount || 0))
-  const top = sorted.slice(0, listTopN).map(([name, e]) => {
+  // 最近自动发现加权：取 addedAt 最新的若干个 discovered，合入候选（去重后不超 listTopN*1.3）
+  const newBoostMax = Math.max(4, Math.floor(listTopN / 3))
+  const recentDiscovered = entries
+    .filter(([, e]) => e?.source === 'discovered')
+    .sort((a, b) => (b[1].addedAt || 0) - (a[1].addedAt || 0))
+    .slice(0, newBoostMax)
+  const topNames = new Set(sorted.slice(0, listTopN).map((x) => x[0]))
+  const boosted = sorted.slice(0, listTopN)
+  for (const [name] of recentDiscovered) {
+    if (topNames.has(name)) continue
+    boosted.push([name, index.stickers[name]])
+    topNames.add(name)
+    if (boosted.length >= Math.ceil(listTopN * 1.3)) break
+  }
+  const lines = boosted.map(([name, e]) => {
     const tags = e.tags?.length ? e.tags.join('/') : ''
     const desc = e.desc && e.desc !== name ? e.desc : ''
     const sem = [tags, desc].filter(Boolean).join('｜')
-    return `- ${name}: ${sem || name}`
+    const src = e.source === 'discovered' ? '✨' : ''
+    return `- ${src}${name}: ${sem || name}`
   })
   return [
     '## 表情包',
     '你可以在回复中插入 [sticker:名称] 附带表情包。但带不带完全由对话语境决定，绝不是每条回复都要带。',
-    '可用表情（名称: 标签｜语义；用 [sticker:名称] 引用，名称须与下表完全一致）：',
-    ...top,
-    ...(entries.length > listTopN ? [`……（共 ${entries.length} 个，仅列高频 ${listTopN}）`] : []),
+    '可用表情（名称: 标签｜语义；用 [sticker:名称] 引用，名称须与下表完全一致；✨=群聊新发现）：',
+    ...lines,
+    ...(entries.length > boosted.length ? [`……（共 ${entries.length} 个，仅列高频+新发现 ${boosted.length}）`] : []),
+    '另外：表情很多时，可调用 send_sticker 工具按情绪自动选图（无需记名称）。',
     '是否带表情包的判断（重要）：',
     '- 该用：轻松闲聊、调侃、玩笑、情绪表达、活跃气氛、回应夸赞或善意——且表情的语义确实贴合此刻这句话才用。',
     '- 不该用：故障排查、技术解答、指令操作、步骤说明、事实陈述、正经讨论、求助投诉、对方情绪低落或认真求助；这类信息性/严肃回复一律不带。',

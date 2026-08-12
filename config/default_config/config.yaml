@@ -199,6 +199,12 @@ agent:
     excludeDirs: []          # 目录黑名单（不复制进 images/）
     excludeKeywords: []      # 文件名关键词黑名单（追加在内置表之上）
     listTopN: 30             # prompt 注入清单条数上限
+    # ── 自动发现（MaiBot 式）：被动采集群内 image 段 → 视觉判定+打标 → 入库 ──
+    autoDiscover: false      # 自动发现总开关（需 sticker.enable + agent.vision.model）
+    discoverGroups: []       # 采集群白名单（群号字符串；空数组=所有群都采集）
+    maxDiscovered: 200       # 自动发现条目上限（超限按 usageCount 升序淘汰冷门）
+    discoverMaxSizeMB: 5     # 单张采集大小上限 MB（0=不限）
+    sendStickerTool: true    # 注册 send_sticker 工具：按情绪跨全库选图（不受目录 top-N 限制）
   calc:
     enable: true            # Python 精确计算工具（数学/统计/大数等，沙箱执行，避免模型心算出错）
     python: "python3"       # python 可执行文件（容器内路径不同可改，如 /usr/sbin/python3）

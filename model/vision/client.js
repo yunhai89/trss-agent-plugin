@@ -94,4 +94,31 @@ export class VisionService {
     }
     return (res?.content || '').trim()
   }
+
+  /**
+   * 用**自定义 prompt** 识别图片 → 文本（不拼默认 OCR 描述指令）。
+   * 供表情包自动打标等需要结构化输出的场景：调用方传完整指令，模型只看该指令。
+   * @param {object} image { buffer:Buffer, mime:string, name?:string }
+   * @param {string} prompt 完整自定义指令（如「只返回 JSON ...」）
+   * @param {object} opts { maxTokens?:number }
+   * @returns {Promise<string>} 模型返回文本；失败返回空串
+   */
+  async analyze({ buffer, mime, name } = {}, prompt, { maxTokens } = {}) {
+    if (!buffer || !mime || !prompt) return ''
+    const media = [{ name: name || 'image', mime, buffer, bytes: buffer.length, kind: 'image' }]
+    const content = buildUserContent(prompt, media, { protocol: this.protocol, caps: { vision: true } })
+    let res
+    try {
+      res = await this.provider.chat({
+        model: this.model,
+        messages: [{ role: 'user', content }],
+        max_tokens: maxTokens || this.maxTokens,
+        stream: false,
+      })
+    } catch (e) {
+      this.logger('warn', `[vision] analyze 失败 ${name || ''}：${e?.message || e}`)
+      return ''
+    }
+    return (res?.content || '').trim()
+  }
 }

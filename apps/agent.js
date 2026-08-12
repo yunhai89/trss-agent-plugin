@@ -528,6 +528,14 @@ async function buildRuntime() {
   // skill 工具：模型主动调用 skill 的通道（按 name 加载说明书正文）—— 渐进式披露的载入入口
   tools.register(makeSkillTool(skills))
 
+  // send_sticker 工具：按情绪跨全库选图（表情包启用且未显式关闭时注册）
+  if (cfg.sticker?.enable && cfg.sticker?.sendStickerTool !== false) {
+    try {
+      const { makeSendStickerTool } = await import('../model/sticker/send-tool.js')
+      tools.register(makeSendStickerTool(getStickerManager()))
+    } catch (e) { Log.warn('[sticker] send_sticker 工具注册失败', e?.message || e) }
+  }
+
   // 技能热加载工具：安装 SkillHub 技能后免重启即可用
   tools.register({
     name: 'reload_skills',
