@@ -14,6 +14,7 @@
  */
 
 import fs from 'node:fs'
+import Log from '../../utils/Log.js'
 import path from 'node:path'
 import Config from '../../utils/Config.js'
 import { spawn, exec } from 'node:child_process'
@@ -115,7 +116,7 @@ export class StickerManager {
    * @returns {Promise<{status:'added'|'dup'|'rejected'|'noVision', name?:string, tags?:string[], hash?:string, reason?:string}>}
    */
   async discover(buffer, mime, { vision = null, maxDiscovered } = {}) {
-    if (!this.enabled()) return { status: 'rejected', reason: 'sticker disabled' }
+    if (this.cfg.enable !== true) return { status: 'rejected', reason: 'sticker disabled' }
     if (!buffer || !mime) return { status: 'rejected', reason: 'no_buffer' }
     // 大小闸（cfg.discoverMaxSizeMB，默认 5；0=不限）
     const maxMB = Number(this.cfg.discoverMaxSizeMB ?? 5)
@@ -531,6 +532,6 @@ export class StickerManager {
 /** 进程级单例：buildRuntime 与 apps/sticker.js 共享，保证 usageCount/冷却状态全局一致 */
 let _mgr = null
 export function getStickerManager(opts) {
-  if (!_mgr) _mgr = new StickerManager(opts || {})
+  if (!_mgr) _mgr = new StickerManager({ logger: (lvl, ...a) => { const fn = Log[lvl] || Log.info; fn(...a) }, ...(opts || {}) })
   return _mgr
 }

@@ -79,9 +79,8 @@ export async function judgeAndTag(vision, { buffer, mime, name } = {}) {
   }
   const j = extractJson(raw)
   if (!j || typeof j !== 'object') {
-    // JSON 解析失败：保守判定。明显否定词→拒绝；否则放行但无标签
-    const neg = /不是|false|照片|截图|文档|不适|私密/i.test(raw)
-    return { isSticker: !neg, name: autoName(buffer), desc: '', tags: [], raw: raw.slice(0, 160), parseFailed: true }
+    // JSON 解析失败 = LLM 异常（内容审核拒绝/超时/返回非 JSON）：一律拒绝，不入库
+    return { isSticker: false, name: '', desc: '', tags: [], raw: raw.slice(0, 160), parseFailed: true }
   }
   const isSticker = j.isSticker !== false && j.isSticker !== 'false'
   return {

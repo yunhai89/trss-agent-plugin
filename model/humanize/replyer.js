@@ -68,11 +68,12 @@ export class HumanizeReplyer {
       { includeIds: false },
     )
 
+    const personaVoice = await this.getPersonaVoice(groupId)
     const system = buildReplyerSystem({
       personaName: c.personaName || '机器人',
       replyGuide: action.replyGuide || '',
       referenceInfo: action.referenceInfo || '',
-      personaVoice: this.getPersonaVoice(groupId),
+      personaVoice,
       approvedStyleExamples: this.getStyleExamples(groupId),
       recentMessages: recent,
     })
@@ -120,7 +121,8 @@ export class HumanizeReplyer {
         model, system,
         messages: [{ role: 'user', content: '请直接输出这条群聊回复的正文文本，不要包含任何解释或前缀。' }],
         tools: undefined, tool_choice: { mode: 'none' },
-        temperature, max_tokens: maxTokens, signal, stream: false,
+        temperature, max_tokens: maxTokens, thinking: { type: 'disabled' },
+        signal, stream: false,
       })
       return res?.content || ''
     } catch (e) {
@@ -136,7 +138,7 @@ export class HumanizeReplyer {
         system,
         messages: [{ role: 'user', content: `下面这段回复太长，请压缩到不超过 ${maxChars} 字，保留核心意思，像群聊接话一样自然，只输出正文：\n\n${original}` }],
         tools: undefined, tool_choice: { mode: 'none' },
-        temperature: 0.4, max_tokens: Math.min(800, maxChars * 2), signal, stream: false,
+        temperature: 0.4, max_tokens: Math.min(800, maxChars * 2), thinking: { type: 'disabled' }, signal, stream: false,
       })
       return (res?.content || '').trim()
     } catch {

@@ -143,7 +143,7 @@
               <span class="flex gap6"><i style="width:10px;height:10px;border-radius:3px;background:var(--teal)"></i>输出</span>
             </div>
           </div>
-          <svg :viewBox="'0 0 ' + chart.W + ' ' + chart.H" style="width:100%;margin-top:14px;display:block">
+          <svg v-if="chart.lineIn" :viewBox="'0 0 ' + chart.W + ' ' + chart.H" style="width:100%;margin-top:14px;display:block">
             <defs>
               <linearGradient id="agIn" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stop-color="#3b82f6" stop-opacity=".28"/><stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
@@ -163,15 +163,19 @@
               <circle :cx="chart.dots[0].x" :cy="chart.dots[0].yOut" r="3.5" fill="#14b8a6"/>
             </template>
           </svg>
-          <div class="flex between" style="padding:0 8px;font-size:11px;color:var(--text-3)">
+          <div v-if="chart.lineIn" class="flex between" style="padding:0 8px;font-size:11px;color:var(--text-3)">
             <span v-for="d in chart.days" :key="d">{{ d }}</span>
+          </div>
+          <div v-else style="padding:34px 16px;text-align:center;color:var(--text-3)">
+            <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:var(--text-2)">暂无数据</div>
+            <div style="font-size:11.5px">产生对话（@机器人 / #ai）后自动统计</div>
           </div>
         </div>
 
         <div class="card card-pad hoverable" style="--i:6">
           <div class="card-title"><v-icon name="tool"/>工具调用 Top5</div>
           <div class="card-sub">按 tool 事件计数 · 近 7 日</div>
-          <div class="mt16" style="display:flex;flex-direction:column;gap:13px">
+          <div v-if="toolTop.length" class="mt16" style="display:flex;flex-direction:column;gap:13px">
             <div v-for="(t, i) in toolTop" :key="t.name" :style="{'--i': i}" class="stagger" style="animation:fadeUp .5s var(--ease-out) backwards">
               <div class="flex between" style="font-size:12.5px;margin-bottom:5px">
                 <span class="mono" style="font-weight:700">{{ t.name }}</span>
@@ -181,6 +185,10 @@
                 <i :style="{width: (t.count / toolMax * 100) + '%', transitionDelay: (i * 90 + 200) + 'ms'}"></i>
               </div>
             </div>
+          </div>
+          <div v-else style="padding:34px 16px;text-align:center;color:var(--text-3)">
+            <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:var(--text-2)">暂无数据</div>
+            <div style="font-size:11.5px">产生对话后自动统计</div>
           </div>
         </div>
       </div>
@@ -194,7 +202,7 @@
           </div>
           <span class="chip chip-primary" style="font-size:11px">峰值 {{ reqChart.max }} / 日</span>
         </div>
-        <svg :viewBox="'0 0 ' + reqChart.W + ' ' + reqChart.H" style="width:100%;margin-top:14px;display:block">
+        <svg v-if="reqChart.bars.length" :viewBox="'0 0 ' + reqChart.W + ' ' + reqChart.H" style="width:100%;margin-top:14px;display:block">
           <defs>
             <linearGradient id="agReq" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stop-color="#6366f1" stop-opacity=".9"/><stop offset="100%" stop-color="#6366f1" stop-opacity=".45"/>
@@ -205,8 +213,12 @@
             <title>{{ b.count }} 次</title>
           </rect>
         </svg>
-        <div class="flex between" style="padding:0 8px;font-size:11px;color:var(--text-3)">
+        <div v-if="reqChart.bars.length" class="flex between" style="padding:0 8px;font-size:11px;color:var(--text-3)">
           <span v-for="d in reqChart.days" :key="d">{{ d }}</span>
+        </div>
+        <div v-else style="padding:34px 16px;text-align:center;color:var(--text-3)">
+          <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:var(--text-2)">暂无数据</div>
+          <div style="font-size:11.5px">产生对话（@机器人 / #ai）后自动统计</div>
         </div>
       </div>
 

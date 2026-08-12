@@ -686,9 +686,10 @@ async function buildRuntime() {
 
   // 视觉子模型（A 方案）：主模型不支持视觉时，由它把图片转成文本描述喂给主模型
   let vision = null
-  if (cfg.vision?.enable !== false && cfg.vision?.model) {
+  if (cfg.vision?.enable === true && (cfg.vision?.model || cfg.model)) {
     try {
       const vcfg = cfg.vision
+      if (!vcfg.model && cfg.model) Log.info('[vision] vision.model 未配，复用主模型', cfg.model)
       const vProtocol = vcfg.protocol || protocol
       const vPresetMap = vProtocol === 'anthropic' ? anthropicPresets : openaiPresets
       const vPreset = vcfg.preset ? vPresetMap[vcfg.preset] : preset
@@ -697,11 +698,11 @@ async function buildRuntime() {
         ...vPreset,
         ...(vcfg.baseURL ? { baseURL: vcfg.baseURL } : {}),
         apiKey: vcfg.apiKey || cfg.apiKey,
-        model: vcfg.model,
+        model: vcfg.model || cfg.model,
       })
       vision = new VisionService({
         provider: vProvider,
-        model: vcfg.model,
+        model: vcfg.model || cfg.model,
         protocol: vProtocol,
         describePrompt: vcfg.describePrompt || undefined,
         maxTokens: vcfg.maxTokens || 1024,
@@ -720,7 +721,11 @@ const getRuntime = async () => {
   if (_runtime) return _runtime
   // 失败缓存：apiKey 等配置类错误一旦发生，直接抛缓存原因，不再每条消息重新 buildRuntime
   // （否则每条群消息都重建+抛错+回复，刷屏 + 日志爆炸）。配置热加载后 invalidateRuntime 清缓存重试。
-  if (_runtimeFailed) throw _runtimeFailed
+  if (_runtimeFailed) {
+    // 配置已有 apiKey（原失败原因已解决）→ 清缓存重试，而非永远抛旧错误
+    if (Config.get().agent?.apiKey) { _runtimeFailed = null; _initErrLogged = false }
+    else throw _runtimeFailed
+  }
   // 并发安全：启动期各 apps 构造器 / 首条消息可能并发调 getRuntime，
   // 复用同一个 in-flight buildRuntime()，避免运行时被构建多次（否则 MCP 会重复连接注册、日志打两遍）。
   if (!_runtimePromise) {
@@ -1303,17 +1308,19 @@ export class Chat extends plugin {
         } catch (e) { Log.warn('[render] 回复图片渲染失败，回退文本', e?.message || e) }
       }
       if (!delivered) {
-        // 文本模式（或图片渲染失败）：表情包混排（无图→纯文本；有图→segment 数组）
-        const seg = acceptMap ? rt.sticker.applyText(body, acceptMap) : (body || '(无回复)')
+        // 文本模式（或图片渲染失败）：正文先发（剥除所有表情包标记，不在正文内联）；
+        // 表情包作为主内容之后的【独立消息】依次发送（不与文字混排在同一条）。
+        const cleanBody = acceptMap ? rt.sticker.applyText(body, new Map()) : (body || '(无回复)')
         try {
-          if (typeof seg === 'string') {
-            const txt = `${seg}${suffix ? `\n${suffix}` : ''}`
-            await this.e.reply(atSender ? [atSender, txt] : txt)
-          } else {
-            await this.e.reply(atSender ? [atSender, ...seg] : seg)
-            if (suffix) await this.e.reply(suffix)
-          }
+          const txt = `${cleanBody}${suffix ? `\n${suffix}` : ''}`
+          await this.e.reply(atSender ? [atSender, txt] : txt)
           delivered = true
+          // 表情包：主内容发完后，作为独立消息依次发送
+          if (acceptMap && acceptMap.size && typeof segment !== 'undefined') {
+            for (const abs of acceptMap.values()) {
+              try { await this.e.reply(segment.image(abs)) } catch (e) { Log.warn('[render] 表情包单独发送失败', e?.message || e) }
+            }
+          }
         } catch (e) { Log.warn('[render] 文本回复发送失败', e?.message || e) }
       } else if (suffix) {
         await this.e.reply(suffix) // 图片已发，max_turns 提示作附注

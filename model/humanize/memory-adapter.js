@@ -95,7 +95,5 @@ export class MemoryAdapter {
 /** 安全格式化群公开记忆为 Prompt 片段。 */
 export function formatPublicMemories(memories) {
   if (!Array.isArray(memories) || !memories.length) return ''
-  const fmt = (this.recall?.formatForPrompt) // 若 RecallStore 提供
-  if (typeof fmt === 'function') return fmt(memories) || ''
   return memories.slice(0, 5).map((m) => `- ${typeof m === 'string' ? m : (m?.text || m?.content || JSON.stringify(m))}`).join('\n')
 }

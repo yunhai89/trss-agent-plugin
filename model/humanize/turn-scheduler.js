@@ -18,6 +18,7 @@
  */
 
 import { evaluate } from './necessity-scorer.js'
+import Log from '../../utils/Log.js'
 import { topicMatchScore } from './behavior-policy.js'
 
 export class TurnScheduler {
@@ -69,29 +70,36 @@ export class TurnScheduler {
   /** debounce 到期：门控 + 规划。 */
   async _onDebounced(rt) {
     const c = this.cfg()
-    if (!this._enabled()) { rt.setPhase('idle'); return }
+    if (!this._enabled()) {  rt.setPhase('idle'); return }
 
-    const snapshot = rt.buffer.snapshotAfter(rt.lastProcessedSeq)
-    const external = snapshot.filter((m) => m && !m.isSelf && !m.handledByDirectAgent && !m.isCommand)
-    if (!external.length) { rt.setPhase('idle'); return }
+    let snapshot, external, decision
+    try {
+      snapshot = rt.buffer.snapshotAfter(rt.lastProcessedSeq)
+      // 防 cursor > buffer（重启后 buffer 清空但 cursor 从持久化恢复 → 所有消息被当"已处理"跳过）
+      if (!snapshot.length && rt.buffer.size > 0 && rt.lastProcessedSeq > 0) {
+        rt.lastProcessedSeq = 0
+        snapshot = rt.buffer.snapshotAfter(0)
+      }
+      external = snapshot.filter((m) => m && !m.isSelf && !m.handledByDirectAgent && !m.isCommand)
+    } catch (e) { Log.warn('[humanize] snapshot 异常', e?.message || e); rt.setPhase('idle'); return }
+    if (!external.length) {  return }
 
     const now = Date.now()
     const hasStrongSignal = external.some((m) => m.atBot || m.quotesBot || m.mentionsBotName)
 
-    // 硬冷却：强信号绕过（指南 §10 Cooldown→Debouncing：强关联消息绕过）
+    // 硬冷却：强信号绕过
     if (rt.isCoolingDown(now) && !hasStrongSignal) {
-      rt.trace?.record('cooldown_block', { remaining: Math.ceil((rt.cooldownUntil - now) / 1000) })
-      rt.setPhase('cooldown')
-      return
+      Log.info('[humanize] debounce 跳过：冷却中 剩余' + Math.ceil((rt.cooldownUntil - now) / 1000) + 's')
+      rt.setPhase('cooldown'); return
     }
 
-    // 回复频率上限（behaviorPolicy.maxRepliesPer10Minutes）
+    // 回复频率上限
     const maxRate = c.behaviorPolicy?.maxRepliesPer10Minutes ?? rt.maxRepliesPer10Minutes
     if (maxRate > 0 && rt.replyCountIn(10 * 60 * 1000, now) >= maxRate && !hasStrongSignal) {
-      rt.trace?.record('rate_limit', { count: rt.recentReplyTs.length, max: maxRate })
-      rt.setPhase('idle')
-      return
+      Log.info('[humanize] debounce 跳过：频率上限 ' + rt.replyCountIn(10 * 60 * 1000, now) + '/' + maxRate)
+      rt.setPhase('idle'); return
     }
+
 
     // presence + 评分
     const presence = rt.buffer.presenceStats((c.presenceWindowSeconds ?? 300) * 1000)
@@ -99,7 +107,8 @@ export class TurnScheduler {
     const topicText = (external[external.length - 1] || {}).text || ''
     const topicBonus = topicMatchScore(topicText, policy.topics)
 
-    const decision = evaluate({
+    try {
+      decision = evaluate({
       messages: external, presence, now,
       cfg: {
         threshold: c.threshold ?? 80,
@@ -110,6 +119,7 @@ export class TurnScheduler {
         behaviorPolicy: policy,
       },
     })
+    } catch (e) { Log.warn('[humanize] 评分异常', e?.message || e); rt.setPhase('idle'); return }
     const turnId = rt.trace?.newTurnId?.() || null
     rt.trace?.record('gate_decision', {
       turnId, batchSize: external.length, finalScore: decision.finalScore,
@@ -117,6 +127,7 @@ export class TurnScheduler {
       forcedCandidate: decision.forcedCandidate, reasons: { positive: decision.positiveReasons, negative: decision.negativeReasons },
       targetMessageId: decision.targetMessage?.id || null,
     })
+    Log.mark('[humanize] 门控', `群${rt.groupId} 批${external.length}条 分${decision.finalScore}/${decision.threshold}`, `+${(decision.positiveReasons || []).join('/') || '0'}`, `-${(decision.negativeReasons || []).join('/') || '0'}`, decision.shouldPlan ? '→ 进Planner' : '→ 跳过(沉默)')
 
     if (!decision.shouldPlan) {
       rt.markObserved(external) // 推进游标，避免重复评估
@@ -207,10 +218,13 @@ export class TurnScheduler {
     // Replyer 生成可见文本（内部含输出校验/泄漏拦截）
     let text = ''
     try {
+      Log.info('[humanize] Replyer 开始生成回复', `群${rt.groupId}`)
       const res = await this.replyer.generate({ action, batch, decision, target, runtime: rt, signal: rt.signal, cfg: c })
-      if (!rt.isCurrent(gen)) return
+      if (!rt.isCurrent(gen)) { Log.info('[humanize] Replyer 完成但代已过期，取消'); return }
       text = (res?.text || '').trim()
+      Log.mark('[humanize] Replyer 完成', `len=${text.length}`, res?.cancelReason ? '取消:' + res.cancelReason : '"' + text.slice(0, 60) + '"')
     } catch (e) {
+      Log.warn('[humanize] Replyer 失败', e?.message || e)
       rt.trace?.record('replyer_error', { turnId, msg: String(e?.message || e) })
       rt.backoff.recordNoAction()
       rt.setPhase('idle')
@@ -234,6 +248,7 @@ export class TurnScheduler {
 
     // shadow 模式：只记录，不真实发送
     if (c.shadow !== false) {
+      Log.mark('[humanize] shadow 回复', `群${rt.groupId}`, '"' + text.slice(0, 80) + '"')
       rt.trace?.record('shadow_reply', { turnId, text: text.slice(0, 200), target: action.targetMessageId, quote: !!action.quote })
       try { await rt.store.markSent(rt.groupId, action.targetMessageId) } catch { /* noop */ }
       rt.enterCooldown(c.cooldownSeconds ?? 45)

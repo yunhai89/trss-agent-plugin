@@ -12,6 +12,7 @@
  */
 
 import { stringifyArgs } from '../agent/messages.js'
+import Log from '../../utils/Log.js'
 import { ACTION_TOOLS, pickSingleAction, TERMINAL_ACTIONS } from './action-tools.js'
 import { buildPlannerSystem, formatGroupContext, highlightTarget } from './prompts.js'
 
@@ -106,12 +107,14 @@ export class HumanizePlanner {
         result = await this.provider.chat({
           model, system, messages: internalMessages, tools,
           tool_choice: { mode: 'auto' }, temperature, max_tokens: maxTokens,
+          thinking: { type: 'disabled' },
           signal: combinedSignal, stream: false,
         })
       } catch (e) {
         if (/abort/i.test(String(e?.message || e))) throw e
         // 非中断错误：记录并当作 ignore（不发送）
         runtime?.trace?.record('planner_call_error', { round, msg: String(e?.message || e) })
+        Log.mark('[humanize] 决策', `群${runtime?.groupId} → 沉默(规划失败: ${String(e?.message || e).slice(0, 60)})`)
         return { type: 'human_ignore', reason: 'planner_call_failed', toolCallId: null }
       }
 
@@ -131,6 +134,7 @@ export class HumanizePlanner {
 
       if (!toolCalls.length) {
         // 无工具 = 本轮终结（沉默）—— MaiBot planner_no_tool_end，不重试
+        Log.mark('[humanize] 决策', `群${runtime?.groupId} → 沉默(无工具)`)
         return { type: 'human_ignore', reason: 'no_tool', toolCallId: null }
       }
 
@@ -143,6 +147,7 @@ export class HumanizePlanner {
         const hasTarget = (id) => !!snapshot.find((m) => m.id === String(id))
         const { action, violations } = pickSingleAction(actionCalls, { hasTarget })
         if (violations.length) runtime?.trace?.record('planner_schema_violation', { round, violations })
+        Log.mark('[humanize] 决策', `群${runtime?.groupId} → ${action.type}${action.targetMessageId ? ' 目标#' + String(action.targetMessageId).slice(-6) : ''}${violations.length ? ' 违规' + violations.length : ''}`)
         return action
       }
 

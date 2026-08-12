@@ -12,6 +12,8 @@
  * 输入延迟（指南 §13）：min(maxDelay, max(minDelay, (zh*260 + other*90)/typingSpeed))。
  */
 
+import Log from '../../utils/Log.js'
+
 const URL_RE = /https?:\/\/[^\s<>""')]+/g
 const CODE_RE = /```[\s\S]*?```|`[^`\n]+`/g
 
@@ -33,29 +35,36 @@ function restore(s, tokens) {
  * @param {object} opts { maxBubbles?:number }
  * @returns {string[]} 段落数组（已恢复 URL/代码）
  */
-export function splitSegments(text, { maxBubbles = 3 } = {}) {
+export function splitSegments(text, { maxBubbles = 3, rand = Math.random } = {}) {
   const max = Math.max(1, Math.min(5, maxBubbles | 0))
   if (!text) return []
   const { masked, tokens } = protect(text)
-  // 句末标点切（保留标点到段尾）
+  const textLen = [...masked].length
+  if (textLen < 3) return [restore(masked, tokens)]
+  // 1. 按句末标点 + 换行切
   let parts = masked.split(/(?<=[。！？!?…\n])\s*/).map((s) => s.trim()).filter(Boolean)
-  // 不足且文本较长 → 再按逗号/分号/空格切
-  if (parts.length < 2 && [...masked].length > 40) {
+  // 2. 不足 2 段且较长 → 按逗号/分号/空格切
+  if (parts.length < 2 && textLen > 40) {
     parts = masked.split(/(?<=[，,；;])\s*/).map((s) => s.trim()).filter(Boolean)
     if (parts.length < 2) parts = masked.split(/\s+/).filter(Boolean)
   }
+  // 3. 概率合并（MaiBot split_strength by length：短文高合并率，长文低合并率）
+  if (parts.length > 1) {
+    const splitStrength = textLen < 12 ? 0.2 : textLen < 32 ? 0.6 : 0.7
+    const mergeProb = 1.0 - splitStrength
+    const merged = [parts[0]]
+    for (let i = 1; i < parts.length; i++) {
+      if (rand() < mergeProb) merged[merged.length - 1] += parts[i]
+      else merged.push(parts[i])
+    }
+    parts = merged
+  }
+  // 4. 超过 max → 均衡合并
   if (parts.length <= max) return parts.map((p) => restore(p, tokens))
-  // 合并到 max 段（均衡长度：ceil 均分）
   const groupSize = Math.ceil(parts.length / max)
   const out = []
-  for (let i = 0; i < parts.length; i += groupSize) {
-    out.push(parts.slice(i, i + groupSize).join(''))
-  }
-  // 防止四舍五入产生 max+1 段：尾段合并
-  while (out.length > max) {
-    out[out.length - 2] += out[out.length - 1]
-    out.pop()
-  }
+  for (let i = 0; i < parts.length; i += groupSize) out.push(parts.slice(i, i + groupSize).join(''))
+  while (out.length > max) { out[out.length - 2] += out[out.length - 1]; out.pop() }
   return out.map((p) => restore(p, tokens))
 }
 
@@ -64,7 +73,7 @@ export function typingDelayMs(text, cfg = {}) {
   const zh = (String(text || '').match(/[\u3400-\u9fff]/g) || []).length
   const other = Math.max(0, [...String(text || '')].length - zh)
   const speed = Math.max(0.1, Number(cfg.typingSpeed) || 1.0)
-  const raw = (zh * 260 + other * 90) / speed
+  const raw = (zh * 300 + other * 150) / speed // MaiBot: zh=0.3s/字 en=0.15s/字
   const min = Number(cfg.minDelayMs) || 600
   const max = Number(cfg.maxDelayMs) || 3500
   return Math.round(Math.min(max, Math.max(min, raw)))
@@ -128,6 +137,9 @@ export class HumanizeReplyComposer {
           replyToId: null, atBot: false, mentionsBotName: false, quotesBot: false,
           isCommand: false, isSelf: true, handledByDirectAgent: false, media: [],
         })
+      } else {
+        // send 返回 null = 静默失败 → 中止后续段（防"失败后继续发"）
+        return { sentIds, cancelled: true, cancelReason: 'send_failed' }
       }
     }
 
@@ -135,6 +147,8 @@ export class HumanizeReplyComposer {
     if (rcfg.allowSticker !== false && this.stickerManager?.enabled?.() && runtime.isCurrent(gen) && !signal?.aborted) {
       try {
         const acceptMap = this.stickerManager.decide(text, { isGroup: true, groupId: runtime.groupId })
+        const sn = acceptMap ? [...acceptMap.keys()] : []
+        Log.mark('[humanize] 表情包', `群${runtime.groupId} ${sn.length ? '附加 ' + sn.join(',') : '未附加（门控未过/无匹配）'}`)
         if (acceptMap && acceptMap.size) {
           // 取一个 sticker 作为独立气泡（文本模式 applyText 返回 segment 数组）
           const seg = this.stickerManager.applyText('', acceptMap)
@@ -142,10 +156,10 @@ export class HumanizeReplyComposer {
             try {
               const sid = await send(seg, { quoteTargetId: null })
               if (sid) sentIds.push(sid)
-            } catch { /* sticker 发送失败忽略 */ }
+            } catch (e) { Log.warn('[humanize] 表情包发送失败', e?.message || e) }
           }
         }
-      } catch { /* sticker 不可用忽略 */ }
+      } catch (e) { Log.warn('[humanize] 表情包附加异常', e?.message || e) }
     }
 
     return { sentIds, cancelled: false }

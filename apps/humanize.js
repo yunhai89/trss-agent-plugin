@@ -105,7 +105,12 @@ async function buildHumanize() {
   })
   const makeReplyer = (gid) => new H.HumanizeReplyer({
     provider: rt.provider, cfg: cfgFn,
-    getPersonaVoice: () => '',
+    getPersonaVoice: async (gid) => {
+      try {
+        const { persona } = await rt.persona.resolve('g' + (gid || ''))
+        return persona?.systemPrompt || ''
+      } catch { return '' }
+    },
     getRecentBotText: () => {
       try {
         const ent = manager?.getOrCreate?.(gid)
@@ -202,10 +207,10 @@ export class Humanize extends plugin {
     if (!e.isGroup) return false
 
     let h
-    try { h = await getHumanize() } catch { return false } // runtime 未就绪：静默跳过
+    try { h = await getHumanize() } catch (e) { Log.warn('[humanize] getHumanize 失败', e?.message || e); return false }
     const cfg = h.cfgFn()
     // 2. 功能关 / 群不在白名单：跳过（但仍 return false）
-    if (cfg.enable !== true || !Array.isArray(cfg.groups) || !cfg.groups.includes(String(e.group_id))) return false
+    if (cfg.enable !== true || !Array.isArray(cfg.groups) || !cfg.groups.map(String).includes(String(e.group_id))) return false
 
     const selfIds = botSelfIds(e)
     const botNames = [cfg.personaName, botNickname()].filter(Boolean)
@@ -236,6 +241,7 @@ export class Humanize extends plugin {
 
     // 路由到对应群运行时（写缓冲 + 必要时唤醒 debounce）
     try {
+      Log.info('[humanize] 路由', norm.groupId, 'isSelf=' + norm.isSelf, 'isCmd=' + norm.isCommand, 'handled=' + norm.handledByDirectAgent, 'text="' + (norm.text || '').slice(0, 20) + '"')
       await h.manager.route(norm.groupId, norm)
     } catch (err) {
       Log.warn('[humanize] 路由失败', norm.groupId, err?.message || err)

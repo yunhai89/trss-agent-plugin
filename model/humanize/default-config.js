@@ -68,7 +68,7 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
     blockCommands: true,
     blockDestructiveTools: true,
     privateMemoryInGroup: false, // 不可改的硬约束
-    maxConcurrentGroups: 1,
+    maxConcurrentGroups: 2,
   },
   redactSecrets: true,
 })

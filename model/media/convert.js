@@ -25,7 +25,7 @@ export function toOpenaiBlocks(media, { caps = {}, degrade = 'note' } = {}) {
     }
     if (isImage(mf.mime)) {
       if (caps.vision) {
-        blocks.push({ type: 'image_url', image_url: { url: dataUrl(mf), detail: 'auto' } })
+        blocks.push({ type: 'image_url', image_url: { url: dataUrl(mf) } })
       } else {
         const t = degradeBlock(mf, degrade)
         if (t) blocks.push({ type: 'text', text: t })

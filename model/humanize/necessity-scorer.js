@@ -87,11 +87,12 @@ function scoreContent(text, { isDirectContext }) {
   if (isQuestion && len >= 2) { score += 15; reasons.push('question') }
 
   // 请求/求助/邀请（指南 +20）；弱请求仅在直接上下文计
+  const forOtherAI = /^(?:DeepSeek|ChatGPT|Grok|豆包|千问|元宝|通义|Kimi|Claude|文心)[，,、\s]/.test(t)
   if (DIRECT_REQUEST_TERMS.some((w) => t.includes(w))) { score += 20; reasons.push('request') }
-  else if (isDirectContext && WEAK_REQUEST_TERMS.some((w) => t.includes(w))) { score += 20; reasons.push('weak_request') }
+  else if (isDirectContext && !forOtherAI && WEAK_REQUEST_TERMS.some((w) => t.includes(w))) { score += 20; reasons.push('weak_request') }
 
   // 观点（指南 +20）
-  if (OPINION_TERMS.some((w) => t.includes(w))) { score += 20; reasons.push('opinion') }
+  if (!forOtherAI && OPINION_TERMS.some((w) => t.includes(w))) { score += 20; reasons.push('opinion') }
 
   // 长度（指南 +5 if 20-80 字；+10 if >80 字，上限 10）
   if (len >= 80) { score += 10; reasons.push('length_long') }

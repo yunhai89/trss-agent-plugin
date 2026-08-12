@@ -257,6 +257,9 @@ agent:
   # 红线：环境模式普通 assistant 文本永不发送；只有 human_reply/human_react 才产生对外消息。
   # 默认全关 + shadow（只记录决策不实发）；需显式白名单 groups 才生效。详见 trss-agent-plugin-humanlike-mode-development-guide-v1.0.md
   humanize:
+    # ⚠️ 伪人模式为早期开发，很不稳定，默认关闭。开启前请仔细阅读 model/humanize/ 源码。
+    # 已知问题：评分粗糙（纯关键词）、无效果追踪、无表达学习、Planner 可能抢答/重复。
+    # 建议：shadow=true 观察 #伪人决策 质量后再放量。
     enable: false                  # 总开关（即便 true，groups 为空也不开启）
     groups: []                     # 显式白名单群号（字符串）；空数组=不开启
     shadow: true                   # true=只记录决策 trace、不真实发送（先观察再放量）

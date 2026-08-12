@@ -24,14 +24,14 @@ const URL_DEDUP_MS = 10 * 60 * 1000
 async function fetchImageBuffer(url) {
   if (!url || !/^https?:\/\//i.test(url)) return null
   try {
-    const r = await fetch(url)
-    if (!r.ok) return null
+    const r = await fetch(url, { signal: AbortSignal.timeout(15000) })
+    if (!r.ok) { Log.warn('[sticker-watch] 图片下载失败 HTTP ' + r.status, url.slice(0, 80)); return null }
     const ab = await r.arrayBuffer()
-    if (!ab || ab.byteLength < 512) return null // 太小：头像/占位图跳过
+    if (!ab || ab.byteLength < 512) { Log.debug('[sticker-watch] 图片太小 ' + (ab?.byteLength || 0) + 'B'); return null }
     const mime = (r.headers.get('content-type') || '').split(';')[0].trim() || 'image/jpeg'
-    if (!/image\//i.test(mime)) return null
+    if (!/image\//i.test(mime)) { Log.debug('[sticker-watch] 非 image mime: ' + mime); return null }
     return { buffer: Buffer.from(ab), mime }
-  } catch { return null }
+  } catch (e) { Log.warn('[sticker-watch] 图片下载异常', e?.message || e); return null }
 }
 
 function selfIdsOf(e) {
@@ -50,7 +50,7 @@ export class StickerWatch extends plugin {
       dsc: '被动采集群内表情图 → 视觉判定+打标 → 入库',
       event: 'message',
       priority: 2, // 早于 agent.js(9999) 跑，旁听后 return false
-      rule: [{ reg: '^[\\s\\S]+$', fnc: 'onWatch', log: false }],
+      rule: [{ reg: '^[\\s\\S]*$', fnc: 'onWatch', log: false }],
     })
   }
 
@@ -61,7 +61,7 @@ export class StickerWatch extends plugin {
     if (cfg.enable !== true || cfg.autoDiscover !== true) return false
     // 白名单：discoverGroups 空=所有群
     const gid = String(e.group_id)
-    if (Array.isArray(cfg.discoverGroups) && cfg.discoverGroups.length && !cfg.discoverGroups.includes(gid)) return false
+    if (Array.isArray(cfg.discoverGroups) && cfg.discoverGroups.length && !cfg.discoverGroups.map(String).includes(gid)) return false
 
     // 跳过 self（机器人自己发的图，防环）
     const selfIds = selfIdsOf(e)
@@ -70,17 +70,18 @@ export class StickerWatch extends plugin {
     // 提取 image 段
     const segs = Array.isArray(e.message) ? e.message.filter((s) => s && s.type === 'image') : []
     if (!segs.length) return false
+    Log.info('[sticker-watch] 捕获图片消息', gid, 'segs=' + segs.length, 'seg[0]keys=' + Object.keys(segs[0] || {}).join(','), 'url=' + (segs[0]?.url || segs[0]?.data?.url || '无'), 'e.img=' + JSON.stringify(e.img?.[0]?.slice?.(0, 80) || e.img?.length || 0))
 
-    // 取运行时（vision + sticker manager）；未就绪静默跳过
+    // 取运行时（vision + sticker manager）；未就绪跳过（不再静默——打 warn 诊断）
     let rt
-    try { rt = await getRuntime() } catch { return false }
+    try { rt = await getRuntime() } catch (err) { Log.warn('[sticker-watch] getRuntime 失败', err?.message || err); return false }
     const manager = rt.sticker
     const vision = rt.vision
-    if (!manager?.enabled?.()) return false
+    // 不检查 manager.enabled()（它要求索引有条目，会导致空索引时自动发现死锁：没索引→不能发现→永远没索引）
 
     // 串行化处理每张图（append 到链）
     for (const seg of segs) {
-      const url = seg.url || seg.file
+      const url = seg.url || seg.data?.url || (e.img && e.img[0]) || seg.file
       if (!url) continue
       // 短窗 url 去重（同一链接 10 分钟内不重复处理）
       const now = Date.now()
@@ -95,8 +96,12 @@ export class StickerWatch extends plugin {
   }
 
   async _discoverOne(manager, vision, url, groupId, cfg) {
+    // 无视觉模型 → 跳过（避免空标签/自动名的无用入库；配 agent.vision.model 后启用打标）
+    if (!vision) { Log.debug('[sticker-watch] 无视觉模型，跳过（配 agent.vision.model 后启用）'); return }
+    Log.info('[sticker-watch] 开始下载+分析', url.slice(0, 60))
     const fetched = await fetchImageBuffer(url)
-    if (!fetched) return
+    if (!fetched) return // fetchImageBuffer 已打日志说明原因
+    Log.info('[sticker-watch] 下载成功', fetched.buffer.length + 'B ' + fetched.mime)
     try {
       const res = await manager.discover(fetched.buffer, fetched.mime, { vision, maxDiscovered: cfg.maxDiscovered })
       if (res.status === 'added') {
