@@ -246,3 +246,67 @@ agent:
     enable: true           # Web 管理面板（独立 HTTP 服务，脱离锅巴）：主人私聊发 #agents登录 取得带 token 的访问地址（24h 有效）
     port: 6098             # 监听端口（0.0.0.0）；默认避开 Yunzai 2536 / 锅巴 6099
     publicUrl: ""          # 对外访问地址（留空自动探测本机 LAN IP；填 http://1.2.3.4:6098 覆盖）
+  # ─────────────── 伪人模式（群聊环境参与者）───────────────
+  # 在现有任务型 Agent 旁新增一条「持续旁听→低成本门控→工具化决策→独立表达→可中断发送」的流水线。
+  # 红线：环境模式普通 assistant 文本永不发送；只有 human_reply/human_react 才产生对外消息。
+  # 默认全关 + shadow（只记录决策不实发）；需显式白名单 groups 才生效。详见 trss-agent-plugin-humanlike-mode-development-guide-v1.0.md
+  humanize:
+    enable: false                  # 总开关（即便 true，groups 为空也不开启）
+    groups: []                     # 显式白名单群号（字符串）；空数组=不开启
+    shadow: true                   # true=只记录决策 trace、不真实发送（先观察再放量）
+    triggerMode: necessity         # necessity（评分触发，推荐）| frequency
+    talkValue: 0.35                # 0~1 主动性基线（不等于回复概率）
+    mentionHandledByDirectAgent: true  # @机器人 由现有 Direct Agent 独占，环境不从此触发
+    debounceMs: 1200               # 消息安静窗口（ms）：burst 后等此窗口再评估
+    plannerTimeoutMs: 30000        # 单轮 Planner 超时（ms）；超时默认沉默
+    maxPlannerRounds: 4            # Planner 内部工具循环最大轮数
+    contextMessages: 30            # 注入 Prompt 的最近消息条数（存储 150，注入 30）
+    threshold: 80                  # 必要性评分阈值（final>=80 才进 Planner）
+    cooldownSeconds: 45            # 成功回复后冷却（秒）
+    presenceWindowSeconds: 300     # 在场占比统计窗口（秒，默认 5 分钟）
+    maxRepliesPer10Minutes: 4      # 10 分钟内最大回复数（频率硬上限）
+    bufferCapacity: 150            # 单群消息缓冲条数
+    bufferTtlHours: 2              # 缓冲 TTL（小时）
+    idleBackoffBaseSeconds: 15     # 连续无动作退避基数（15/30/60/120/240…）
+    idleBackoffCapSeconds: 300     # 退避上限
+    idleBackoffStartCount: 2       # 第几次无动作起开始退避
+    bypassPendingCount: 6          # 待处理新消息达此数绕过退避
+    personaName: ""                # 机器人在群里的名字（留空=用 Bot.nickname）
+    botId: ""                      # 机器人自身 QQ（留空=自动探测 Bot.uin）
+    planner:
+      model: ""                    # Planner 模型 id（留空=utilityModel→主模型）
+      temperature: 0.2
+      maxTokens: 800
+      allowedReadTools: []         # Planner 可用的只读工具白名单；写/删/管理/终端/发送类一律拒绝
+    replyer:
+      model: ""                    # Replyer 模型 id（留空=主模型）
+      temperature: 0.7
+      maxTokens: 500
+      maxChars: 500                # 超长则低温重写
+    reply:
+      maxBubbles: 3                # 单次回复最多气泡数
+      typingSpeed: 1.0             # 输入延迟倍率（越大越快）
+      minDelayMs: 600
+      maxDelayMs: 3500
+      typos: false                 # 自动错字（第一版强制 false）
+      allowSticker: true           # 允许尾随表情包（复用 sticker cooldown/sendRate）
+      quoteTarget: auto            # auto=Planner 决定是否引用目标
+    behaviorPolicy:                # 「何时参与」（与「怎么说」的人设分离）
+      topics: []                   # 关注主题（命中 +10~25）
+      avoidTopics: []              # 回避主题
+      initiative: 0.35
+      humor: 0.4
+      answerUnknownQuestions: false
+      interruptHumanConversation: false
+      maxRepliesPer10Minutes: 4
+    learning:                      # Phase 4：仅 shadow 采集，不进 Prompt
+      style: shadow
+      jargon: shadow
+      behavior: false
+      minSamples: 20
+      requireReview: true
+    safety:
+      blockCommands: true
+      blockDestructiveTools: true
+      privateMemoryInGroup: false  # 隐私红线（强制 false，不可改）
+      maxConcurrentGroups: 1       # 同时 Planning 的群数上限
