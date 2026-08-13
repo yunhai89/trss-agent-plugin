@@ -37,13 +37,26 @@ export function segmentsToText(segments) {
   const parts = []
   for (const s of arr) {
     if (!s || typeof s !== 'object') continue
-    if (s.type === 'text') parts.push(s.text || '')
-    else if (s.type === 'at') parts.push(`@${s.qq}`)
-    else if (s.type === 'image') parts.push('[图片]')
-    else if (s.type === 'face' || s.type === 'bface' || s.type === 'mface') parts.push('[表情]')
-    else if (s.type === 'record') parts.push('[语音]')
-    else if (s.type === 'video') parts.push('[视频]')
-    else if (s.type === 'file') parts.push(`[文件:${s.name || ''}]`)
+    switch (s.type) {
+      case 'text': parts.push(s.text || ''); break
+      case 'at': parts.push(`@${s.qq}`); break
+      case 'image': parts.push('[图片]'); break
+      case 'face': case 'bface': case 'mface': parts.push('[表情]'); break
+      case 'record': parts.push('[语音]'); break
+      case 'video': parts.push('[视频]'); break
+      case 'file': parts.push(`[文件:${s.name || ''}]`); break
+      // 补全：合并转发 / JSON·XML 卡片 / 分享·音乐 / 戳一戳 / 位置 / 推荐名片
+      // 否则这些消息在上下文里 text 为空 → 显示 (无文本)，等于对 LLM 隐形
+      case 'forward': case 'node': parts.push('[合并转发]'); break
+      case 'json': parts.push(`[卡片${s.title ? ':' + s.title : ''}]`); break
+      case 'xml': parts.push('[卡片]'); break
+      case 'share': case 'music': parts.push(`[分享${s.title ? ':' + s.title : ''}]`); break
+      case 'poke': parts.push('[戳一戳]'); break
+      case 'location': parts.push('[位置]'); break
+      case 'contact': case 'recommend': parts.push('[推荐]'); break
+      case 'reply': break // 引用关系由 replyToId 表达，正文不重复占位
+      default: parts.push(`[${s.type || '未知'}]`); break // 兜底：未知类型也给占位，避免消息隐形
+    }
   }
   return parts.join('').trim()
 }

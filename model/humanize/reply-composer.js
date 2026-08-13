@@ -14,7 +14,9 @@
 
 import Log from '../../utils/Log.js'
 
-const URL_RE = /https?:\/\/[^\s<>""')]+/g
+// URL 边界：排除空白/尖括号/引号/括号 + 全部 CJK 标点 + 全角空格，
+// 否则 "看 https://x.com，超好笑" 会被贪婪匹配成 "https://x.com，超好笑"
+const URL_RE = /https?:\/\/[^\s<>"'），。！？；：、“”‘’（）【】《》〈〉「」『』…　]+/g
 const CODE_RE = /```[\s\S]*?```|`[^`\n]+`/g
 
 /** 保护 URL/代码 → 占位；返回 {masked, tokens}。 */

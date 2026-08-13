@@ -12,7 +12,7 @@
  */
 
 import { stringifyArgs } from '../agent/messages.js'
-import Log from '../../utils/Log.js'
+import Log, { ANSI } from '../../utils/Log.js'
 import { ACTION_TOOLS, pickSingleAction, TERMINAL_ACTIONS } from './action-tools.js'
 import { buildPlannerSystem, formatGroupContext, highlightTarget } from './prompts.js'
 
@@ -25,6 +25,18 @@ const LEAK_PATTERNS = [
 function looksLikeLeak(text) {
   const t = String(text || '')
   return LEAK_PATTERNS.some((re) => re.test(t))
+}
+
+/* 控制台彩色决策日志：按动作类型上色 + 带 reason。
+   ignore/reply 等都把理由/replyGuide 带出来，避免"只看到 human_ignore，不知道是主动沉默还是出错"。 */
+const DEC_COLOR = { human_reply: ANSI.g, human_react: ANSI.m, human_wait: ANSI.b, human_ignore: ANSI.y }
+function logDecision(runtime, action, violations = []) {
+  const col = DEC_COLOR[action.type] || ANSI.c
+  const tail = action.targetMessageId ? ' 目标#' + String(action.targetMessageId).slice(-6) : ''
+  const viol = violations.length ? ` ${ANSI.r}违规${violations.length}${ANSI.R}` : ''
+  const why = String(action.reason || action.replyGuide || action.intent || '').trim()
+  const whyStr = why ? ` ${ANSI.gry}· ${why.slice(0, 100)}${ANSI.R}` : ''
+  Log.mark('[humanize] 决策', `${col}群${runtime?.groupId} → ${action.type}${tail}${viol}${ANSI.R}${whyStr}`)
 }
 
 export class HumanizePlanner {
@@ -78,7 +90,10 @@ export class HumanizePlanner {
     const target = decision?.targetMessage || null
     let publicMemories = ''
     try {
-      if (this.getMemories && target) publicMemories = await this.getMemories(target.text || '', c.contextMessages ?? 30)
+      // 记忆检索门控：只对有实质文本的目标查（对齐 MaiBot——寒暄/短反应/纯媒体不查，免得注入无关记忆+白调一次）
+      const q = String(target?.text || '').trim()
+      const worthRecall = q.length >= 4 && !/^\[.+\]$/.test(q) && !/^(?:6|666|哈哈|好的?|嗯|哦|确实|赞成|支持)$/.test(q)
+      if (this.getMemories && target && worthRecall) publicMemories = await this.getMemories(q, c.contextMessages ?? 30)
     } catch { /* noop */ }
 
     const system = buildPlannerSystem({
@@ -116,7 +131,7 @@ export class HumanizePlanner {
         if (/abort/i.test(String(e?.message || e))) throw e
         // 非中断错误：记录并当作 ignore（不发送）
         runtime?.trace?.record('planner_call_error', { round, msg: String(e?.message || e) })
-        Log.mark('[humanize] 决策', `群${runtime?.groupId} → 沉默(规划失败: ${String(e?.message || e).slice(0, 60)})`)
+        Log.mark('[humanize] 决策', `${ANSI.r}群${runtime?.groupId} → 沉默(规划失败: ${String(e?.message || e).slice(0, 60)})${ANSI.R}`)
         return { type: 'human_ignore', reason: 'planner_call_failed', toolCallId: null }
       }
 
@@ -136,7 +151,7 @@ export class HumanizePlanner {
 
       if (!toolCalls.length) {
         // 无工具 = 本轮终结（沉默）—— MaiBot planner_no_tool_end，不重试
-        Log.mark('[humanize] 决策', `群${runtime?.groupId} → 沉默(无工具)`)
+        Log.mark('[humanize] 决策', `${ANSI.gry}群${runtime?.groupId} → 沉默(无工具)${ANSI.R}`)
         return { type: 'human_ignore', reason: 'no_tool', toolCallId: null }
       }
 
@@ -149,7 +164,7 @@ export class HumanizePlanner {
         const hasTarget = (id) => !!snapshot.find((m) => m.id === String(id))
         const { action, violations } = pickSingleAction(actionCalls, { hasTarget })
         if (violations.length) runtime?.trace?.record('planner_schema_violation', { round, violations })
-        Log.mark('[humanize] 决策', `群${runtime?.groupId} → ${action.type}${action.targetMessageId ? ' 目标#' + String(action.targetMessageId).slice(-6) : ''}${violations.length ? ' 违规' + violations.length : ''}`)
+        logDecision(runtime, action, violations)
         return action
       }
 
@@ -166,6 +181,7 @@ export class HumanizePlanner {
 
     // 轮数耗尽：默认沉默
     runtime?.trace?.record('planner_round_limit', { maxRounds })
+    Log.mark('[humanize] 决策', `${ANSI.y}群${runtime?.groupId} → 沉默(轮数耗尽 ${maxRounds})${ANSI.R}`)
     return { type: 'human_ignore', reason: 'round_limit', toolCallId: null }
   }
 

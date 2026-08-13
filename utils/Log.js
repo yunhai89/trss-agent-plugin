@@ -6,6 +6,11 @@
 
 const TAG = 'agents-plugin'
 
+/** ANSI 颜色（控制台彩色日志用；非终端或被 logger 转义时原样显示，无害） */
+export const ANSI = Object.freeze({
+  R: '\x1b[0m', r: '\x1b[31m', g: '\x1b[32m', y: '\x1b[33m', b: '\x1b[34m', m: '\x1b[35m', c: '\x1b[36m', gry: '\x1b[90m', B: '\x1b[1m',
+})
+
 function log(level, ...args) {
   try {
     if (typeof Bot !== 'undefined' && typeof Bot.makeLog === 'function') {

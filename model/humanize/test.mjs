@@ -6,7 +6,7 @@
  */
 import { memoryKv } from '../agent/store/kv.js'
 import {
-  normalizeYunzaiEvent, isSelfEvent, collectSelfIds, fingerprintId, textMentionsName,
+  normalizeYunzaiEvent, isSelfEvent, collectSelfIds, fingerprintId, textMentionsName, segmentsToText,
 } from './message-normalizer.js'
 import { MessageBuffer } from './message-buffer.js'
 import { HumanizeStore, newHolderId } from './store.js'
@@ -146,6 +146,27 @@ await test('scorer：followup_to_bot 需窗口含 self（修复死代码）+ pre
   ok(d3.components.pressure === pressureScore(8, pendingThreshold) && d3.bypassBackoff === true, 'pendingCount=8 → 压力升高 + 绕过退避')
 })
 
+await test('scorer：bot 焦点信号（近窗 @/引用/提及/自言 → ambient 也给 +30）', async () => {
+  // 近窗有人 @bot → ambient 后续消息拿到 focusBonus
+  const atMe = mkMsg('@bot 在吗', false, { atBot: true }, 'a1')
+  const amb = mkMsg('那具体咋弄', false, {}, 'a2')
+  const dFocus = evaluate({ messages: [atMe, amb], candidates: [amb], pendingCount: 1, presence: {}, cfg: { threshold: 80, talkValue: 0.35 } })
+  ok(dFocus.components.focusBonus === 30 && dFocus.positiveReasons.includes('bot_focus'), '近窗 @bot → ambient 目标得 bot_focus +30')
+  // bot 刚发过言（isSelf 在最近 3 条）→ 也算焦点
+  const self = mkMsg('我说了个梗', true, { seq: 1 }, 's1')
+  const amb2 = mkMsg('然后呢', false, {}, 'a3')
+  const dSelf = evaluate({ messages: [self, amb2], candidates: [amb2], pendingCount: 1, presence: {}, cfg: { threshold: 80, talkValue: 0.35 } })
+  ok(dSelf.components.focusBonus === 30, 'bot 最近发过言 → 也触发 bot_focus')
+  // 既无 @/引用/提及，bot 也没最近发言 → 不给 focus
+  const idle1 = mkMsg('今天天气不错', false, {}, 'i1'), idle2 = mkMsg('呵呵', false, {}, 'i2')
+  const dIdle = evaluate({ messages: [idle1, idle2], candidates: [idle2], pendingCount: 1, presence: {}, cfg: { threshold: 80, talkValue: 0.35 } })
+  ok(dIdle.components.focusBonus === 0 && !dIdle.positiveReasons.includes('bot_focus'), '无关闲聊 → 无 focus')
+  // 强信号目标(relevance>=55)不叠加 focus（避免重复）
+  const q = mkMsg('接得好', false, { quotesBot: true }, 'q1')
+  const dStrong = evaluate({ messages: [q], candidates: [q], pendingCount: 1, presence: {}, cfg: { threshold: 80, talkValue: 0.35 } })
+  ok(dStrong.components.focusBonus === 0, '强信号目标不再叠加 focusBonus')
+})
+
 // ───────── backoff ─────────
 await test('backoff：序列 0,15,30,60,120,240… + 绕过 + 清零', async () => {
   const b = new IdleBackoff({ baseSeconds: 15, capSeconds: 300, startCount: 2, bypassPendingCount: 6 })
@@ -160,6 +181,18 @@ await test('backoff：序列 0,15,30,60,120,240… + 绕过 + 清零', async () 
   ok(b.shouldDelay({ pendingCount: 1, forcedCandidate: true, isGroup: true }) === false, '强信号绕过并 reset')
   b.recordSuccess()
   ok(b.count === 0, '成功清零')
+})
+
+await test('backoff：ambient 必须用 falsy forcedCandidate（否则击穿退避）', async () => {
+  const b = new IdleBackoff({ baseSeconds: 15, capSeconds: 300, startCount: 2, bypassPendingCount: 6 })
+  const t = 1_000_000
+  b.recordNoAction(t); b.recordNoAction(t) // count=2，_until=t+15s，进入退避
+  // ambient 用 forcedCandidate:false → 受退避约束（被延迟）
+  ok(b.shouldDelay({ pendingCount: 1, forcedCandidate: false, isGroup: true, now: t + 1000 }) === true, 'ambient(false) 在退避期 → 延迟')
+  ok(b.count === 2, 'falsy forcedCandidate 不 reset 退避计数')
+  // 真值 forcedCandidate（旧 bug 用的 'ambient'）→ reset 并放行
+  ok(b.shouldDelay({ pendingCount: 1, forcedCandidate: 'ambient', isGroup: true, now: t + 2000 }) === false, '真值 forcedCandidate 仍放行')
+  ok(b.count === 0, '真值 forcedCandidate reset 计数 → 故 ambient 必须用 false')
 })
 
 // ───────── action-tools ─────────
@@ -230,6 +263,28 @@ await test('prompts：formatGroupContext 渲染对话关系（@我/引用我/回
   ok(ht.includes('@我') && ht.includes('m1'), 'highlightTarget 含关系 + id')
 })
 
+// ───────── batch2: normalizer / URL / avoidTopics ─────────
+await test('normalizer：segmentsToText 补全 forward/json/poke/location 等（不再隐形）', async () => {
+  ok(segmentsToText([{ type: 'forward' }, { type: 'text', text: '看' }, { type: 'json', title: '小程序' }, { type: 'poke' }, { type: 'location' }]) === '[合并转发]看[卡片:小程序][戳一戳][位置]', 'forward/json/poke/location 有占位')
+  ok(segmentsToText([{ type: 'reply', id: '1' }, { type: 'text', text: 'hi' }]) === 'hi', 'reply 不占位（由 replyToId 表达）')
+  ok(segmentsToText([{ type: 'xml' }, { type: 'mystery' }]) === '[卡片][mystery]', 'xml + 未知类型兜底占位')
+})
+
+await test('reply-composer：URL 不吞中文标点（，。！ 等）', async () => {
+  const { masked, tokens } = protect('看 https://x.com，超好笑')
+  ok(restore(masked, tokens) === '看 https://x.com，超好笑', 'URL+中文标点 完整还原')
+  const urls = [...tokens.values()]
+  ok(urls[0] === 'https://x.com', 'URL 在中文逗号前截断（不吃" ，超好笑"）')
+})
+
+await test('scorer：avoidTopics 命中给负分 + reason', async () => {
+  const msg = mkMsg('聊聊政治吧', false, {}, 'p1')
+  const base = evaluate({ messages: [msg], candidates: [msg], pendingCount: 1, presence: {}, cfg: { threshold: 80, talkValue: 0.35, avoidPenalty: 0 } })
+  const avd = evaluate({ messages: [msg], candidates: [msg], pendingCount: 1, presence: {}, cfg: { threshold: 80, talkValue: 0.35, avoidPenalty: 25 } })
+  ok(avd.rawScore === base.rawScore - 25, 'avoidPenalty -25 进 rawScore')
+  ok(avd.negativeReasons.includes('avoid_topic'), '记 avoid_topic 负向原因')
+})
+
 // ───────── persona block（MaiBot 式人设）─────────
 await test('persona：buildHumanizePersonaBlock + Planner 注入 + 空回落', async () => {
   ok(buildHumanizePersonaBlock({ prompt: '' }) === '', '空 prompt 返回空串（调用方回落旧来源）')
@@ -240,9 +295,9 @@ await test('persona：buildHumanizePersonaBlock + Planner 注入 + 空回落', a
   // Planner system 注入 personaBlock
   const sys = buildPlannerSystem({ personaName: '小汐', personaBlock: blk, groupContext: '甲: hi' })
   ok(sys.includes('角色人设') && sys.includes('轻松口语'), 'Planner system 含人设块')
-  // 未注入时不残留空行异常
+  // 未注入时不残留空行异常（"角色人设"字样会出现在原则里，但人设块标题不应出现）
   const sys2 = buildPlannerSystem({ personaName: '机器人', groupContext: '甲: hi' })
-  ok(sys2.includes('行为政策') && !sys2.includes('角色人设'), '无人设时 Planner 正常、不含人设块')
+  ok(sys2.includes('行为政策') && !sys2.includes('角色人设参考'), '无人设时 Planner 正常、不含人设块')
 })
 
 await test('persona：内置默认人设（去 AI 味、尊重看人、非空可渲染）', async () => {

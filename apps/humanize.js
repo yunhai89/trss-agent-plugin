@@ -102,8 +102,8 @@ async function buildHumanize() {
     },
     getBehaviorPolicyBlock: () => formatPolicyBlock(cfgFn().behaviorPolicy),
     getPersonaName: () => cfgFn().persona?.name || cfgFn().personaName || botNickname() || '机器人',
-    // 角色人设注入 Planner：决策时内化角色（会不会接、什么态度），MaiBot 式
-    getPersonaBlock: () => H.buildHumanizePersonaBlock(resolveHumanizePersona(cfgFn(), rt)),
+    // 角色人设注入 Planner：第三人称"参考"框定（决策器不是角色本人，只据此判断该不该接/态度）
+    getPersonaBlock: () => H.buildPlannerPersonaBlock(resolveHumanizePersona(cfgFn(), rt)),
   })
   const makeReplyer = (gid) => new H.HumanizeReplyer({
     provider: rt.provider, cfg: cfgFn,
@@ -174,7 +174,13 @@ function formatPolicyBlock(policy) {
   if (policy.topics?.length) lines.push(`- 关注主题：${policy.topics.join('、')}`)
   if (policy.avoidTopics?.length) lines.push(`- 回避主题：${policy.avoidTopics.join('、')}（命中时应沉默或谨慎）`)
   lines.push(`- 主动性：${policy.initiative}；幽默：${policy.humor}`)
-  if (policy.interruptHumanConversation === false) lines.push('- 不打断顺畅进行的人类对话')
+  if (policy.interruptHumanConversation === true) {
+    // 主动型群友：该插就插，但不硬插
+    lines.push('- 主动参与：你是普通群员，对感兴趣或有话可说的对话可以自然接话，不必等被 @ 或被点名')
+    lines.push('- 但不硬插：别人正在快速一来一回时别打断，挑自然停顿；没话说就沉默，不为说而说')
+  } else {
+    lines.push('- 不打断顺畅进行的人类对话；不回答明显发给别人的话')
+  }
   if (policy.answerUnknownQuestions === false) lines.push('- 事实不足时宁可不说，不编造')
   return lines.length ? '角色行为政策：\n' + lines.join('\n') : ''
 }

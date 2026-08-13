@@ -130,7 +130,8 @@
             <label class="f-label">标签(≤8,回车添加)</label>
             <div class="row g6 wrap">
               <span v-for="(t, i) in editor.form.tags" :key="t" class="pill p-pri">{{ t }}<v-icon name="x" style="cursor:pointer" @click="editor.form.tags.splice(i, 1)"/></span>
-              <input class="inp" style="width:130px;padding:5px 10px;font-size:12px" v-model="tagInput" @keydown.enter.prevent="addTag" placeholder="回车添加">
+              <input class="inp" style="width:110px;padding:5px 10px;font-size:12px" v-model="tagInput" enterkeyhint="enter" @keydown.enter.prevent="addTag" @keyup.enter.prevent="addTag" placeholder="回车添加">
+              <button type="button" class="btn b-soft b-sm" @click="addTag" title="添加"><v-icon name="plus"/></button>
             </div>
           </div>
           <div class="field" style="grid-column:1/-1"><label class="f-label">开场白</label><input class="inp" v-model="editor.form.greeting"></div>

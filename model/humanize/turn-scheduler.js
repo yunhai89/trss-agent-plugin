@@ -18,8 +18,8 @@
  */
 
 import { evaluate } from './necessity-scorer.js'
-import Log from '../../utils/Log.js'
-import { topicMatchScore } from './behavior-policy.js'
+import Log, { ANSI } from '../../utils/Log.js'
+import { topicMatchScore, hitsAvoidTopic } from './behavior-policy.js'
 
 export class TurnScheduler {
   /**
@@ -111,6 +111,9 @@ export class TurnScheduler {
     const policy = c.behaviorPolicy || {}
     const topicText = (external[external.length - 1] || {}).text || ''
     const topicBonus = topicMatchScore(topicText, policy.topics)
+    // avoidTopics 回避主题：命中则给负分（避免在不该参与的话题上插话）
+    const avoidHit = Array.isArray(policy.avoidTopics) && policy.avoidTopics.length > 0 && hitsAvoidTopic(topicText, policy.avoidTopics)
+    const avoidPenalty = avoidHit ? 25 : 0
 
     try {
       decision = evaluate({
@@ -124,10 +127,25 @@ export class TurnScheduler {
         cooldownUntil: rt.cooldownUntil,
         bypassPendingCount: c.bypassPendingCount ?? 6,
         topicBonus,
+        avoidPenalty,
         behaviorPolicy: policy,
       },
     })
     } catch (e) { Log.warn('[humanize] 评分异常', e?.message || e); rt.setPhase('idle'); return }
+    // 主动型群友（interruptHumanConversation=true）：环境对话（非 @/引用/提及/追问）未达阈值时，
+    // 按 initiative 概率给一次"插话机会"→ 强制进 Planner，由 LLM 判断该不该插（多数会沉默）。
+    // 成本/防刷复用现有冷却+频率上限+退避+presence；initiative 概率把 Planner 调用压到 ~initiative 比例。
+    if (!decision.shouldPlan
+        && policy.interruptHumanConversation === true
+        && (decision.components?.relevance ?? 0) < 55
+        && Math.random() < (Number(policy.initiative) || 0)) {
+      // forcedCandidate 必须 falsy：idle-backoff.shouldDelay 对真值 forcedCandidate 会 reset 退避并放行，
+      // 用 'ambient'（真值）会击穿退避 → 主动模式退避永不 escalate。这里 false 让 ambient 正常受退避约束。
+      decision = {
+        ...decision, shouldPlan: true, forcedCandidate: false, isAmbient: true,
+        positiveReasons: [...(decision.positiveReasons || []), 'ambient_chance'],
+      }
+    }
     const turnId = rt.trace?.newTurnId?.() || null
     rt.trace?.record('gate_decision', {
       turnId, batchSize: external.length, finalScore: decision.finalScore,
@@ -135,7 +153,7 @@ export class TurnScheduler {
       forcedCandidate: decision.forcedCandidate, reasons: { positive: decision.positiveReasons, negative: decision.negativeReasons },
       targetMessageId: decision.targetMessage?.id || null,
     })
-    Log.mark('[humanize] 门控', `群${rt.groupId} 批${external.length}条 分${decision.finalScore}/${decision.threshold}`, `+${(decision.positiveReasons || []).join('/') || '0'}`, `-${(decision.negativeReasons || []).join('/') || '0'}`, decision.shouldPlan ? '→ 进Planner' : '→ 跳过(沉默)')
+    Log.mark('[humanize] 门控', `群${rt.groupId} 批${external.length}条 分${decision.finalScore}/${decision.threshold}`, `+${(decision.positiveReasons || []).join('/') || '0'}`, `-${(decision.negativeReasons || []).join('/') || '0'}`, decision.shouldPlan ? `${ANSI.c}→ 进Planner${ANSI.R}` : `${ANSI.gry}→ 跳过(沉默)${ANSI.R}`)
 
     if (!decision.shouldPlan) {
       rt.markObserved(external) // 推进游标，避免重复评估
@@ -185,6 +203,29 @@ export class TurnScheduler {
     }
   }
 
+  /**
+   * 把 bot 自己刚发的回复主动入 buffer（isSelf:true）——解锁 presencePenalty / quotesBot /
+   * isFollowupToBot / getRecentBotText 四个信号，不再依赖平台 report-self-message 回抛。
+   * 用 sentId 作 id：report-self-message 开启时平台回抛同 id 会被 buffer 去重，不会重复。
+   */
+  _appendSelf(text, sentId) {
+    const rt = this.runtime
+    const c = this.cfg()
+    try {
+      rt.buffer.append({
+        id: String(sentId || `self_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`),
+        groupId: rt.groupId,
+        userId: c.botId || 'self',
+        displayName: c.personaName || '我',
+        text: String(text || ''),
+        timestamp: Date.now(),
+        segments: [], media: [],
+        isSelf: true, isCommand: false, handledByDirectAgent: false,
+        atBot: false, mentionsBotName: false, quotesBot: false, replyToId: null,
+      })
+    } catch { /* noop */ }
+  }
+
   async _applyAction(action, batch, decision, gen, turnId) {
     const rt = this.runtime
     if (!rt.isCurrent(gen)) return
@@ -228,11 +269,11 @@ export class TurnScheduler {
     // Replyer 生成可见文本（内部含输出校验/泄漏拦截）
     let text = ''
     try {
-      Log.info('[humanize] Replyer 开始生成回复', `群${rt.groupId}`)
+      Log.info('[humanize] Replyer 开始生成回复', `${ANSI.c}群${rt.groupId}${ANSI.R}`)
       const res = await this.replyer.generate({ action, batch, decision, target, runtime: rt, signal: rt.signal, cfg: c })
       if (!rt.isCurrent(gen)) { Log.info('[humanize] Replyer 完成但代已过期，取消'); return }
       text = (res?.text || '').trim()
-      Log.mark('[humanize] Replyer 完成', `len=${text.length}`, res?.cancelReason ? '取消:' + res.cancelReason : '"' + text.slice(0, 60) + '"')
+      Log.mark('[humanize] Replyer 完成', `${ANSI.g}len=${text.length}${ANSI.R}`, res?.cancelReason ? `${ANSI.y}取消:${res.cancelReason}${ANSI.R}` : `${ANSI.g}"${text.slice(0, 60)}"${ANSI.R}`)
     } catch (e) {
       Log.warn('[humanize] Replyer 失败', e?.message || e)
       rt.trace?.record('replyer_error', { turnId, msg: String(e?.message || e) })
@@ -258,11 +299,12 @@ export class TurnScheduler {
 
     // shadow 模式：只记录，不真实发送
     if (c.shadow !== false) {
-      Log.mark('[humanize] shadow 回复', `群${rt.groupId}`, '"' + text.slice(0, 80) + '"')
+      Log.mark('[humanize] shadow 回复', `${ANSI.m}群${rt.groupId}${ANSI.R}`, `${ANSI.m}"${text.slice(0, 80)}"${ANSI.R}`)
       rt.trace?.record('shadow_reply', { turnId, text: text.slice(0, 200), target: action.targetMessageId, quote: !!action.quote })
       try { await rt.store.markSent(rt.groupId, action.targetMessageId) } catch { /* noop */ }
       rt.enterCooldown(c.cooldownSeconds ?? 45)
       rt.recordReply(null)
+      this._appendSelf(text, null) // shadow 也计入自身在场（presence/上下文）
       rt.backoff.recordSuccess()
       rt.markObserved(batch)
       rt.setPhase('idle')
@@ -284,6 +326,7 @@ export class TurnScheduler {
     if (result?.sentIds?.length) {
       try { await rt.store.markSent(rt.groupId, action.targetMessageId) } catch { /* noop */ }
       rt.recordReply(result.sentIds[0])
+      this._appendSelf(text, result.sentIds[0]) // 自身发言入 buffer（解锁 presence/引用/追问信号）
       rt.enterCooldown(c.cooldownSeconds ?? 45)
       rt.backoff.recordSuccess()
       rt.trace?.record('delivery', { turnId, sent: true, count: result.sentIds.length, cancelled: !!result.cancelled })
@@ -310,6 +353,7 @@ export class TurnScheduler {
       const sentId = await this.composer.react({ action, target, runtime: rt, send: this.send, signal: rt.signal, cfg: c })
       if (rt.isCurrent(gen) && sentId) {
         rt.recordReply(sentId)
+        this._appendSelf(action.intent ? `[表情:${action.intent}]` : '[表情]', sentId)
         rt.enterCooldown((c.cooldownSeconds ?? 45) / 2) // react 冷却减半
         rt.backoff.recordSuccess()
         rt.trace?.record('delivery', { turnId, kind: 'react', sent: true })
@@ -323,6 +367,8 @@ export class TurnScheduler {
 
   /** wait 到期：重新评估（若有新消息则正常门控，否则轻量再判断）。 */
   async _onWaitDue(rt) {
+    // 若已在规划/发送，wait 的"稍后再看"已无意义，别踩 phase（防孤儿定时器用过期上下文发言）
+    if (rt.phase === 'planning' || rt.phase === 'sending') return
     rt.setPhase('idle')
     // 若有待处理新消息，重新 debounce 评估；否则保持沉默（纯时间流逝不强制唤醒）
     const pending = rt.buffer.snapshotAfter(rt.lastProcessedSeq).filter((m) => m && !m.isSelf && !m.handledByDirectAgent && !m.isCommand)

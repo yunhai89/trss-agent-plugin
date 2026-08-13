@@ -184,6 +184,17 @@ export function evaluate({ messages = [], candidates, pendingCount, presence = {
   const { target, relevance, reason } = pickTargetAndRelevance(pool, messages)
   if (relevance > 0) positive.push(reason)
 
+  // —— bot 焦点：近窗口有人 @/引用/提及 bot，或 bot 刚发过言 → 当前对话围绕 bot，
+  //     即使本条是 ambient（relevance<55）也给参与机会（对齐 MaiBot focus_active +40）。
+  //     解决"只判定和 bot 直接相关的才回"——bot 是话题焦点时 ambient 后续也能接。
+  let focusBonus = 0
+  if (relevance < 55 && Array.isArray(messages)) {
+    const win = messages.slice(-10)
+    const focused = win.some((m) => m && (m.atBot || m.quotesBot || m.mentionsBotName))
+      || messages.slice(-3).some((m) => m && m.isSelf)
+    if (focused) { focusBonus = 30; positive.push('bot_focus') }
+  }
+
   // —— content（按目标消息；强关联算直接上下文）——
   const isDirectContext = relevance >= 55
   const c = scoreContent(target?.text || '', { isDirectContext })
@@ -215,9 +226,12 @@ export function evaluate({ messages = [], candidates, pendingCount, presence = {
   if (cdPen > 0) negative.push('cooldown')
   const dirPen = directionPenaltyOf(target)
   if (dirPen > 0) negative.push('other_addressee')
+  // avoidTopics 回避主题惩罚（由 scheduler 据末条文本命中算出，避免在回避话题上参与）
+  const avoidPen = Math.max(0, Number(cfg.avoidPenalty) || 0)
+  if (avoidPen > 0) negative.push('avoid_topic')
 
   // —— 合成 ——
-  const rawScore = relevance + c.score + topicBonus + pressure + idleBonus - presencePen - cdPen - dirPen
+  const rawScore = relevance + c.score + topicBonus + focusBonus + pressure + idleBonus - presencePen - cdPen - dirPen - avoidPen
   const forcedCandidate = relevance >= 80 // 强信号不乘频率倍率
   const freqMul = 0.5 + 0.5 * talkValue
   const finalScore = Math.round(Math.max(0, Math.min(120, forcedCandidate ? rawScore : rawScore * freqMul)))
@@ -232,7 +246,7 @@ export function evaluate({ messages = [], candidates, pendingCount, presence = {
     forcedCandidate,
     positiveReasons: positive,
     negativeReasons: negative,
-    components: { relevance, content: c.score, topicBonus, pressure, idleBonus, presencePenalty: presencePen, cooldownPenalty: cdPen, directionPenalty: dirPen, freqMul },
+    components: { relevance, content: c.score, topicBonus, focusBonus, pressure, idleBonus, presencePenalty: presencePen, cooldownPenalty: cdPen, directionPenalty: dirPen, freqMul },
     targetMessage: target,
     // 辅助：是否应绕过 idle backoff
     bypassBackoff: forcedCandidate || pending >= (cfg.bypassPendingCount ?? 6),

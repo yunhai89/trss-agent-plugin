@@ -23,7 +23,7 @@ import {
   findByHash, addDiscoveredEntry, evictDiscoveredToCap,
 } from './index.js'
 import { parseMarkers, composeString, composeSegments } from './parser.js'
-import { hashImage, judgeAndTag, pickByEmotion as pickByEmotionFrom } from './discover.js'
+import { hashImage, judgeAndTag, pickByEmotion as pickByEmotionFrom, fuzzyFindByName } from './discover.js'
 
 const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }
 const IMG_EXT = new Set(Object.keys(MIME))
@@ -199,12 +199,26 @@ export class StickerManager {
     let count = 0
     for (const mk of parseMarkers(content)) {
       if (max > 0 && count >= max) break
-      const entry = stickers[mk.name]
+      let entry = stickers[mk.name]
+      let usedName = mk.name
+      if (!entry) {
+        // 精确名未中 → MaiBot 式模糊（Levenshtein，对 name+tags+desc）：容错拼写/简称/编的近似名
+        const fz = fuzzyFindByName(mk.name, Object.entries(stickers))
+        if (fz?.matched) {
+          entry = stickers[fz.name]
+          usedName = fz.name
+          this.logger('info', `[sticker] 模糊命中 "${mk.name}" → ${fz.name}（sim ${fz.score.toFixed(2)}）`)
+        } else if (fz) {
+          this.logger('info', `[sticker] 无匹配 "${mk.name}"（最近 ${fz.name} ${fz.score.toFixed(2)}）`)
+        } else {
+          this.logger('info', `[sticker] 无匹配 "${mk.name}"（库无候选）`)
+        }
+      }
       if (!entry || entry.nsfw) continue
       const abs = imageAbsOf(entry)
       if (!fs.existsSync(abs)) continue
-      if (acceptMap.has(mk.name)) continue
-      acceptMap.set(mk.name, abs)
+      if (acceptMap.has(usedName)) continue
+      acceptMap.set(usedName, abs)
       count++
     }
     return acceptMap

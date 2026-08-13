@@ -177,3 +177,40 @@ export function pickByEmotion(entries, emotion, { topK = 10, rand = Math.random 
   const pool = positive.length ? positive : scored.slice(0, Math.min(3, k))
   return pool[Math.floor(rand() * pool.length)]?.[0] || null
 }
+
+/**
+ * 按「名称」模糊匹配一张表情（对齐 MaiBot emoji_manager：Levenshtein 归一化相似度）。
+ * 用于 [sticker:名称] 标记在精确名未命中时的兜底——容错拼写错、简称、标签词、
+ * 以及 LLM 自行编的近似名（无语→无语猫 / 猫耳→猫耳女仆 / 666→666有桂）。
+ *
+ * 得分 = max( wordSim(q, name), max_{tag} wordSim(q, tag), desc 子串命中 0.6 )。
+ * top-K 内按阈值筛 → 随机一个（多样性，对齐 MaiBot top-N+random）；
+ * 都不达标返回 matched:false + 最近候选（供日志展示"差在哪"）。
+ * @param {Array<[name, entry]>} entries [[name, {tags, desc, ...}], ...]
+ * @param {string} query marker 名（或情绪词）
+ * @param {object} opts { topK?:number, threshold?:number, rand?:()=>number }
+ * @returns {{name:string, score:number, matched:boolean}|null}
+ */
+export function fuzzyFindByName(query, entries, { topK = 5, threshold = 0.3, rand = Math.random } = {}) {
+  const q = String(query || '').trim().toLowerCase()
+  if (!q || !entries || !entries.length) return null
+  const scored = entries.map(([name, e]) => {
+    const tags = Array.isArray(e.tags) ? e.tags : []
+    let best = wordSim(q, name)
+    for (const tag of tags) {
+      const s = wordSim(q, String(tag))
+      if (s > best) best = s
+    }
+    const desc = String(e.desc || '').toLowerCase()
+    if (desc.includes(q)) best = Math.max(best, 0.6)
+    return [name, best]
+  })
+  scored.sort((a, b) => b[1] - a[1])
+  const top = scored.slice(0, Math.min(topK, scored.length))
+  const positive = top.filter((x) => x[1] >= threshold)
+  if (positive.length) {
+    const pick = positive[Math.floor(rand() * positive.length)]
+    return { name: pick[0], score: pick[1], matched: true }
+  }
+  return { name: top[0]?.[0], score: top[0]?.[1] ?? 0, matched: false }
+}

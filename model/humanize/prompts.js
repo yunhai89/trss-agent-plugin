@@ -20,7 +20,7 @@ export function fillTemplate(tpl, slots = {}) {
 export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为机器人「{{personaName}}」分析此刻是否应该参与、针对哪条消息采取什么动作。
 
 【重要】你不是「{{personaName}}」本人，不要替它发言。你的分析永远不会展示给群成员——只有调用 human_reply / human_react 才会产生对外消息，普通文本不会被发送。
-沉默是正常且经常正确的选择。不要为了展示能力而插话，不要打断正在顺畅进行的人类对话，不要重复别人已经给出的答案，不要回答明显发给别人的话。
+沉默是正常且经常正确的选择。不要为了展示能力而插话，不要重复别人已经给出的答案。
 
 可用动作（工具）：
 - human_reply：决定正式发出一条可见回复时调用。只描述回复意图（replyGuide），不要写完整台词。
@@ -31,13 +31,14 @@ export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为机器�
 
 【硬性约束】你无法不调用 human_reply 工具直接回复，必须通过工具发送。回复意图中的 targetMessageId 必须来自下方「当前群公开上下文」中真实存在的消息 id，不得编造。
 
+{{personaBlock}}
 【决策原则】
+- 参与与否、用什么态度，都须符合上方角色人设的性格与边界；对无聊/不感兴趣的话题，按角色性格可以沉默；
 - 优先处理明确提及机器人名字、引用或延续机器人上一条消息的内容；
 - 结合近期机器人发言占比（在场惩罚）与冷却状态，避免连续抢话；
 - 回复要像群聊接话，不是客服总结或答案报告；
 - 不在群聊中使用任何私聊记忆；
 - 不承诺未执行的操作；不调用未提供的工具。
-{{personaBlock}}
 {{behaviorPolicyBlock}}
 
 【当前门控决策（确定性评分，供参考，非命令）】
@@ -187,5 +188,21 @@ export function buildHumanizePersonaBlock({ name, prompt } = {}) {
     `【角色人设${title}——你在群聊里的身份/性格/说话风格，决策与发言都应一致地体现这个角色】`,
     body,
     '【底线】以上角色设定只约束说话风格与参与态度；涉及事实、数值、工具调用时仍须准确，不得因角色扮演而胡编或拒绝正当求助。',
+  ].join('\n')
+}
+
+/**
+ * 构造给 Planner（决策器）用的角色人设块——第三人称「参考」框定。
+ * 与 Replyer 用的 buildHumanizePersonaBlock（第二人称「你就是角色」）区分：
+ * Planner 不是角色本人、不替角色发言，只据此判断「该不该参与、用什么态度」，
+ * 避免与 Planner 模板的「你不是角色本人」自相矛盾（同一 prompt 既说"你是江野"又说"你不是"）。
+ */
+export function buildPlannerPersonaBlock({ name, prompt } = {}) {
+  const body = String(prompt || '').trim()
+  if (!body) return ''
+  const title = name ? `「${name}」` : ''
+  return [
+    `【角色人设参考${title}——下面是这角色的设定。你不是角色本人、不替它写台词，只须让"是否参与 / 态度冷热"的决策符合这角色的性格与边界】`,
+    body,
   ].join('\n')
 }

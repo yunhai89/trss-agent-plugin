@@ -112,6 +112,7 @@ export class GroupRuntime {
    */
   scheduleDebounce(ms) {
     this.cancelDebounce()
+    this.cancelWait() // 新消息到达 → 取消悬空的 wait 定时器（否则它 later 会踩塌 planning 相位，用过期上下文发言）
     this.phase = this.phase === 'planning' ? this.phase : 'debouncing'
     const t = setTimeout(() => {
       this._debounceTimer = null

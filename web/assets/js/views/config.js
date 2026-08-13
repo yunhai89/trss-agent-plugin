@@ -36,7 +36,8 @@
       <span v-for="(t, i) in modelValue" :key="t" class="pill p-pri" :class="{mono: mono}" style="cursor:default">
         {{ t }}<v-icon name="x" style="cursor:pointer" @click="del(i)"/>
       </span>
-      <input v-model="input" class="inp" :class="{mono: mono}" style="width:120px;padding:5px 10px;font-size:12px" :placeholder="placeholder" @keydown.enter.prevent="add">
+      <input v-model="input" class="inp" :class="{mono: mono}" style="width:100px;padding:5px 10px;font-size:12px" :placeholder="placeholder" enterkeyhint="enter" @keydown.enter.prevent="add" @keyup.enter.prevent="add">
+      <button type="button" class="btn b-soft b-sm" @click="add" title="添加"><v-icon name="plus"/></button>
     </div>`,
   }
 
