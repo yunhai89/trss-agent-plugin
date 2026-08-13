@@ -16,7 +16,24 @@
     run_end: { name: 'Agent 结束', icon: 'check', color: 'var(--green)', bg: 'var(--green-bg)' },
     reply: { name: '回复投递', icon: 'send', color: 'var(--pri)', bg: 'var(--pri-soft)' },
     error: { name: '异常', icon: 'warn', color: 'var(--rose)', bg: 'var(--rose-bg)' },
+    // —— 技能匹配 + 伪人(Planner/humanize)事件，与后端 devLog/humanize trace 对齐 ——
+    skill: { name: '技能匹配', icon: 'skill', color: 'var(--mint)', bg: 'var(--mint-bg)' },
+    gate_decision: { name: '门控决策', icon: 'zap', color: 'var(--sky)', bg: 'var(--sky-bg)' },
+    planner_start: { name: 'Planner 启动', icon: 'bot', color: 'var(--pri)', bg: 'var(--pri-soft)' },
+    planner_round: { name: 'Planner 轮次', icon: 'cpu', color: 'var(--sky)', bg: 'var(--sky-bg)' },
+    planner_action: { name: 'Planner 动作', icon: 'play', color: 'var(--mint)', bg: 'var(--mint-bg)' },
+    planner_interrupted: { name: '规划中断', icon: 'warn', color: 'var(--rose)', bg: 'var(--rose-bg)' },
+    planner_stale: { name: '旧代丢弃', icon: 'warn', color: 'var(--honey)', bg: 'var(--honey-bg)' },
+    shadow_reply: { name: 'shadow 回复', icon: 'send', color: 'var(--honey)', bg: 'var(--honey-bg)' },
+    delivery: { name: '发送投递', icon: 'send', color: 'var(--green)', bg: 'var(--green-bg)' },
+    wait: { name: '等待', icon: 'clock', color: 'var(--sky)', bg: 'var(--sky-bg)' },
+    ignore: { name: '沉默', icon: 'info', color: 'var(--ink3)', bg: 'var(--honey-bg)' },
+    cooldown_block: { name: '冷却拦截', icon: 'clock', color: 'var(--rose)', bg: 'var(--rose-bg)' },
+    backoff_delay: { name: '退避延迟', icon: 'clock', color: 'var(--honey)', bg: 'var(--honey-bg)' },
   }
+  /* 未知 event 兜底：后端新增 event 类型时不再让 EV[e.event].color 崩掉整页 */
+  const EV_FALLBACK = { name: '其他', icon: 'info', color: 'var(--ink3)', bg: 'var(--honey-bg)' }
+  const evMeta = (ev) => EV[ev] || EV_FALLBACK
 
   window.VIEWS.logs = {
     name: 'LogsView',
@@ -108,6 +125,19 @@
           case 'run_end': return `${e.turns} 轮 · stop=${e.stopReason} · 总 ${e.usage.total} tok · ${fmt.dur(e.totalMs)}`
           case 'reply': return `${e.mode === 'image' ? '图片' : '文本'}模式 · ${e.delivered ? '已送达' : '未送达'} · ${e.replyLen || e.body?.length || 0}字`
           case 'error': return `${e.error}`
+          case 'skill': return `技能匹配 ${e.matched?.length || 0} 个 · 输入「${(e.input || '').slice(0, 20)}」`
+          case 'gate_decision': return `门控 分${e.finalScore ?? '?'}/${e.threshold ?? '?'} ${e.shouldPlan ? '→进 Planner' : '→沉默'} · 批 ${e.batchSize ?? '?'} 条`
+          case 'planner_start': return `Planner 启动 gen${e.gen ?? ''} · 批 ${e.batchSize ?? '?'} 条`
+          case 'planner_round': return `第 ${e.round ?? '?'} 轮 · ${e.contentLen ?? '?'} 字 · 工具[${(e.toolCalls || []).join(',')}]`
+          case 'planner_action': return `${e.action?.type || '?'}${e.action?.target ? ' 目标#' + String(e.action.target).slice(-6) : ''}${e.action?.reason ? ' · ' + e.action.reason : ''}`
+          case 'planner_interrupted': return '规划被新消息中断'
+          case 'planner_stale': return '旧代结果过期，丢弃'
+          case 'shadow_reply': return `shadow: ${(e.text || '').slice(0, 50)}`
+          case 'delivery': return `${e.sent ? '已发 ' + (e.count || 0) + ' 段' : '未发' + (e.cancelReason ? ' · ' + e.cancelReason : '')}`
+          case 'wait': return `等待 ${e.seconds ?? '?'} 秒${e.reason ? ' · ' + e.reason : ''}`
+          case 'ignore': return `沉默${e.reason ? ' · ' + e.reason : ''}`
+          case 'cooldown_block': return `冷却中${e.remaining != null ? '（剩 ' + Math.ceil(e.remaining) + 's）' : ''}`
+          case 'backoff_delay': return `退避延迟（剩 ${e.remaining ?? '?'}s · 第 ${e.count ?? '?'} 次）`
           default: return ''
         }
       }
@@ -126,7 +156,7 @@
         } catch { /* 忽略 */ }
       })
 
-      return { files, fileIdx, pickFile, traces, activeTrace, events, expanded, toggle, EV, summary, cachePct, fmt, filter, hitTotal, runFilter, resetFilter }
+      return { files, fileIdx, pickFile, traces, activeTrace, events, expanded, toggle, EV, evMeta, summary, cachePct, fmt, filter, hitTotal, runFilter, resetFilter }
     },
     template: `
     <div class="grid cols-300" style="align-items:start">
@@ -182,11 +212,11 @@
         <!-- 事件时间线 -->
         <div class="tl">
           <div v-for="(e, i) in events" :key="i" class="tl-i" :style="{'--i': i}">
-            <div class="tl-dot" :style="{background: EV[e.event].color}"><v-icon :name="EV[e.event].icon"/></div>
+            <div class="tl-dot" :style="{background: evMeta(e.event).color}"><v-icon :name="evMeta(e.event).icon"/></div>
             <div class="tl-c">
               <div class="tl-h" @click="toggle(i)">
-                <span class="pill" :style="{background: EV[e.event].bg, color: EV[e.event].color}">{{ e.event }}</span>
-                <b style="font-size:13px">{{ EV[e.event].name }}</b>
+                <span class="pill" :style="{background: evMeta(e.event).bg, color: evMeta(e.event).color}">{{ e.event }}</span>
+                <b style="font-size:13px">{{ evMeta(e.event).name }}</b>
                 <span class="mut mono tl-sum" style="font-size:11px">{{ summary(e) }}</span>
                 <span class="mut2 mono tl-time" style="margin-left:auto;font-size:11px;flex:0 0 auto">{{ fmt.time(e.time) }}</span>
                 <v-icon name="chevron" :style="{transform: expanded[i] ? 'rotate(180deg)' : '', transition: 'transform .25s', color: 'var(--ink3)', flex: '0 0 auto'}"/>

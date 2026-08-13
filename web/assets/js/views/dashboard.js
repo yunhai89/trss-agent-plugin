@@ -110,7 +110,7 @@
           <div class="row g10 wrap">
             <h2>agents-plugin <span class="grad-t">管理面板</span></h2>
             <span class="pill p-mint"><v-icon name="zap"/>运行中</span>
-            <span class="pill p-sky">v0.2.0</span>
+            <span class="pill p-sky">v0.3.0</span>
           </div>
           <p>多模型对话 · 工具调用 · 长期记忆 · 人设 · 多模态 · 深度研究 · MCP · 自进化。
             近 7 日累计消耗 <b class="num" style="color:var(--pri)">{{ fmt.num(totalTokens) }}</b> tokens。</p>
