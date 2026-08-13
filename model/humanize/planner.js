@@ -32,13 +32,14 @@ export class HumanizePlanner {
    * @param {object} opts { provider, cfg, readTools?:Array, getMemories?:(query)=>Promise<string>, getBehaviorPolicyBlock?:()=>string, getPersonaName?:()=>string }
    *   readTools: 已过滤的白名单只读工具，每项 {name, description, parameters, execute(args)=>Promise<string|object>}
    */
-  constructor({ provider, cfg, readTools = [], getMemories = null, getBehaviorPolicyBlock = null, getPersonaName = null } = {}) {
+  constructor({ provider, cfg, readTools = [], getMemories = null, getBehaviorPolicyBlock = null, getPersonaName = null, getPersonaBlock = null } = {}) {
     this.provider = provider
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.readTools = Array.isArray(readTools) ? readTools : []
     this.getMemories = getMemories
     this.getBehaviorPolicyBlock = getBehaviorPolicyBlock || (() => '')
     this.getPersonaName = getPersonaName || (() => '机器人')
+    this.getPersonaBlock = getPersonaBlock || (() => '')
   }
 
   /** 下发给模型的工具列表 = 4 动作 + 白名单只读。 */
@@ -82,6 +83,7 @@ export class HumanizePlanner {
 
     const system = buildPlannerSystem({
       personaName: this.getPersonaName(),
+      personaBlock: this.getPersonaBlock(),
       behaviorPolicyBlock: this.getBehaviorPolicyBlock(),
       necessityDecision: decision,
       groupContext: (target ? highlightTarget(target) + '\n\n' : '') + groupContext,

@@ -294,6 +294,18 @@ agent:
     bypassPendingCount: 6          # 待处理新消息达此数绕过退避
     personaName: ""                # 机器人在群里的名字（留空=用 Bot.nickname）
     botId: ""                      # 机器人自身 QQ（留空=自动探测 Bot.uin）
+    persona:                       # 群聊角色人设（MaiBot 式，与主 Agent 人设独立）
+      name: ""                     # 角色名（留空=用 personaName）
+      prompt: ""                   # 角色卡正文（自由多段，最高优先级）。示例见下方注释
+      fromPersonaId: ""            # prompt 为空时，按 id/名复用 PersonaStore 人设（如 raiden-ei）
+      # prompt 示例（MaiBot 式角色卡，取消注释按需改）：
+      # prompt: |
+      #   你是「小汐」，群里一个爱聊天的技术宅。性格随和有点皮，喜欢接梗。
+      #   【语气】轻松口语，偶尔用「哈」「确实」这类语气词，不端着。
+      #   【口癖】赞同别人时爱说「确实是」；遇到有意思的会回「有点东西」。
+      #   【距离感】对熟络的群友随意，对新人礼貌但不冷场。
+      #   【偏好】对 AI/编程/数码话题兴致高；八卦闲聊也会接，但不主动挑起。
+      #   【不做】不发长篇大论、不列要点清单、不每次都称呼对方。
     planner:
       model: ""                    # Planner 模型 id（留空=utilityModel→主模型）
       temperature: 0.2

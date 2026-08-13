@@ -105,24 +105,30 @@ function scoreContent(text, { isDirectContext }) {
  * 找批次的候选目标消息 + relevance（按最强信号）。
  * relevance（指南 §9.2）：quotesBot +90 / mentionsBotName +80 / 紧接机器人追问 +55 / else 0。
  * 注：@机器人(+100) 由 Direct Agent 接管，环境不从此触发，但保留 +100 分支以防 atBot 漏接管。
+ *
+ * @param candidates 候选目标池（通常是本批新消息；目标只从这里选——只回复刚到的新消息）
+ * @param lookback 完整序列（含机器人自身消息），用于 isFollowupToBot 回溯"上一条是不是 bot 说的"
  */
-function pickTargetAndRelevance(messages) {
+function pickTargetAndRelevance(candidates, lookback) {
   let best = null
   let bestScore = 0
   let bestReason = 'none'
-  for (const m of messages) {
+  for (const m of candidates) {
     let rel = 0
     let reason = 'none'
     if (m.atBot) { rel = 100; reason = 'at_bot' }
     else if (m.quotesBot) { rel = 90; reason = 'quotes_bot' }
     else if (m.mentionsBotName) { rel = 80; reason = 'mentions_bot_name' }
-    else if (isFollowupToBot(m, messages)) { rel = 55; reason = 'followup_to_bot' }
+    else if (isFollowupToBot(m, lookback)) { rel = 55; reason = 'followup_to_bot' }
     if (rel > bestScore || best == null) { bestScore = rel; best = m; bestReason = reason }
   }
-  return { target: best || (messages[messages.length - 1] || null), relevance: bestScore, reason: bestReason }
+  return { target: best || (candidates[candidates.length - 1] || null), relevance: bestScore, reason: bestReason }
 }
 
-/** 紧接机器人发言的明确追问：目标消息前一条是 isSelf，且当前是疑问/请求。 */
+/**
+ * 紧接机器人发言的明确追问：在完整序列里目标消息的上一条是 isSelf，且当前是疑问/请求。
+ * 必须传入含 isSelf 的完整序列（rolling window），否则 prev.isSelf 恒为 false（曾为死代码）。
+ */
 function isFollowupToBot(msg, messages) {
   const idx = messages.indexOf(msg)
   if (idx <= 0) return false
@@ -144,15 +150,25 @@ function directionPenaltyOf(msg) {
 
 /**
  * 评估一批待处理消息的回复必要性。
- * @param {object} input { messages: AmbientMessage[], presence, cfg, now? }
+ * @param {object} input { messages, candidates?, pendingCount?, presence, cfg, now? }
+ *   messages: 完整 rolling window（含 isSelf 机器人消息）——作为对话上下文 + followup 回溯
+ *   candidates: 本批新到、可作为回复目标的外部消息（不传则回退为 messages 中全部外部消息）
+ *   pendingCount: 本批新到外部消息条数，用于压力分/绕过退避（不传则回退 candidates 长度）
  *   presence = { bot, other, total }（来自 buffer.presenceStats(windowMs)）
  *   cfg = { threshold, talkValue, behaviorPolicy?, cooldownUntil?, bypassPendingCount? }
+ *   注：messages 必须含 isSelf，否则 isFollowupToBot(+55) 失效（曾是死代码）。
  * @returns {NecessityDecision}
  */
-export function evaluate({ messages = [], presence = {}, cfg = {}, now = Date.now() } = {}) {
+export function evaluate({ messages = [], candidates, pendingCount, presence = {}, cfg = {}, now = Date.now() } = {}) {
   const threshold = cfg.threshold ?? 80
   const talkValue = Math.min(1, Math.max(0, cfg.talkValue ?? 0.35))
   const external = messages.filter((m) => m && !m.isSelf && !m.handledByDirectAgent)
+  // 目标候选池：优先用调用方传入的"本批新消息"；否则回退到窗口内全部外部消息
+  const pool = (Array.isArray(candidates) && candidates.length
+    ? candidates.filter((m) => m && !m.isSelf && !m.handledByDirectAgent)
+    : external)
+  // 压力分/绕过用：本批新到条数（与窗口长度解耦，避免窗口恒满导致压力恒满）
+  const pending = Number.isFinite(pendingCount) ? pendingCount : pool.length
 
   const positive = []
   const negative = []
@@ -164,8 +180,8 @@ export function evaluate({ messages = [], presence = {}, cfg = {}, now = Date.no
       targetMessage: null }
   }
 
-  // —— relevance + 目标候选 ——
-  const { target, relevance, reason } = pickTargetAndRelevance(external)
+  // —— relevance + 目标候选（从本批 pool 选目标，用完整 messages 回溯 followup）——
+  const { target, relevance, reason } = pickTargetAndRelevance(pool, messages)
   if (relevance > 0) positive.push(reason)
 
   // —— content（按目标消息；强关联算直接上下文）——
@@ -180,8 +196,8 @@ export function evaluate({ messages = [], presence = {}, cfg = {}, now = Date.no
 
   // —— pressure（待处理条数 → pendingThreshold = ceil(1/talkValue²)）——
   const pendingThreshold = talkValue > 0 ? Math.max(1, Math.ceil(1 / (talkValue * talkValue))) : 1
-  const pressure = pressureScore(external.length, pendingThreshold)
-  if (pressure > 0) positive.push(`pressure(${external.length}/${pendingThreshold})`)
+  const pressure = pressureScore(pending, pendingThreshold)
+  if (pressure > 0) positive.push(`pressure(${pending}/${pendingThreshold})`)
 
   // —— idleBonus（空闲补偿：群变慢后适度提高参与机会）——
   // presence.recentExternalIntervals 平均间隔；idle 秒 = now - lastExternalAt
@@ -219,7 +235,7 @@ export function evaluate({ messages = [], presence = {}, cfg = {}, now = Date.no
     components: { relevance, content: c.score, topicBonus, pressure, idleBonus, presencePenalty: presencePen, cooldownPenalty: cdPen, directionPenalty: dirPen, freqMul },
     targetMessage: target,
     // 辅助：是否应绕过 idle backoff
-    bypassBackoff: forcedCandidate || external.length >= (cfg.bypassPendingCount ?? 6),
+    bypassBackoff: forcedCandidate || pending >= (cfg.bypassPendingCount ?? 6),
   }
 }
 

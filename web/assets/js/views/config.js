@@ -158,15 +158,14 @@
         Object.assign(form, snap)
         origSnapshot = JSON.parse(JSON.stringify(snap))
         mcpServersToUi()
-        // 兜底：确保 stagehand/terminal/sticker 子对象存在（防旧 config 无此字段时 v-model 报错）
+        // 兜底：确保各子对象存在（防旧 config 无此字段时 v-model 报错）
         if (!form.stagehand) form.stagehand = {}
         if (!form.terminal) form.terminal = {}
-        if (!form.sticker) form.sticker = {}
-        // sticker 数组字段兜底（TagEditor 要求 modelValue 为 Array）
-        const st = form.sticker
-        for (const k of ['githubProxies', 'excludeDirs', 'excludeKeywords', 'discoverGroups']) {
-          if (!Array.isArray(st[k])) st[k] = st[k] == null ? [] : [st[k]]
-        }
+        if (!form.download) form.download = {}
+        if (!form.multiagent) form.multiagent = {}
+        // multiagent.defaultTools 数组兜底（TagEditor 要求 modelValue 为 Array）
+        const ma = form.multiagent
+        if (ma && !Array.isArray(ma.defaultTools)) ma.defaultTools = ma.defaultTools == null ? [] : [ma.defaultTools]
         dirty.value = false
         nextTick(() => { dirtySuppressed = false })
       }
@@ -213,7 +212,6 @@
         { id: 'evolution', name: '自进化', icon: 'evolution', grad: 'var(--grad-rose)' },
         { id: 'security', name: '权限 / 安全 / 日志', icon: 'shield', grad: 'var(--grad-primary)' },
         { id: 'mcp', name: 'MCP 服务', icon: 'tool', grad: 'var(--grad-teal)' },
-        { id: 'sticker', name: '表情包', icon: 'smile', grad: 'var(--grad-amber)' },
         { id: 'ext', name: '多模态 / 工具 / 扩展', icon: 'tool', grad: 'var(--grad-sky)' },
       ]
       // 仅「基础/模型」默认展开，其余收起（配置多时便于查找）
@@ -731,85 +729,13 @@
           </div></div>
         </div>
 
-        <!-- ===== 表情包 ===== -->
-        <div :id="'cfg-sticker'" class="card cfg-section" :class="{open: open.sticker}">
-          <div class="cfg-section-head" @click="open.sticker = !open.sticker">
-            <span class="ico" style="background:var(--grad-amber)"><v-icon name="smile"/></span>
-            <div><div class="card-title" style="font-size:14px">表情包</div><div class="card-sub">LLM 自主附带表情包 · 官方仓库获取 + 频率管控 + 自动发现</div></div>
-            <v-icon class="arrow" name="chevron"/>
+        <!-- ===== 表情包（已独立成页） ===== -->
+        <div class="card" style="padding:12px 16px;margin-bottom:14px;border-left:4px solid var(--grad-amber)">
+          <div class="flex gap10" style="align-items:center">
+            <v-icon name="smile" style="font-size:18px;color:var(--brand,#6366f1)"/>
+            <div style="font-size:13px;flex:1"><b>表情包</b>配置已移至独立页：<b>系统 → 表情包</b>（含发送策略、自动发现、库概览/目录启停）。</div>
+            <button class="btn btn-ghost" @click="$root && (location.hash = '#/sticker')">前往表情包页 →</button>
           </div>
-          <div class="cfg-body" v-show="open.sticker"><div class="cfg-grid">
-            <cfg-row name="启用表情包" desc="总开关；未下载/未开则不注入清单、不解析（零影响）">
-              <v-switch v-model="form.sticker.enable"/>
-            </cfg-row>
-            <cfg-row name="官方仓库地址" desc="作者维护；留空=尚未接入（表情包安装会提示）">
-              <input class="input mono" style="width:260px" v-model="form.sticker.repo" placeholder="https://github.com/...stickers.git">
-            </cfg-row>
-            <cfg-row name="git http.proxy" desc="fetch 兜底代理（如 http://127.0.0.1:7890）">
-              <input class="input mono" style="width:220px" v-model="form.sticker.gitProxy" placeholder="留空=直连">
-            </cfg-row>
-            <cfg-row full name="克隆加速代理前缀" desc="追加在内置 ghfast.top/gh-proxy.com/ghproxy.net/gitclone.com 之上，安装时测速选最快">
-              <tag-editor v-model="form.sticker.githubProxies" placeholder="如 https://ghproxy.com/"/>
-            </cfg-row>
-            <cfg-row name="manifest 文件名" desc="留空=自动识别根目录第一个合规 .json（含 id/name/tags/docs）">
-              <input class="input" style="width:180px" v-model="form.sticker.manifest" placeholder="留空=自动">
-            </cfg-row>
-            <cfg-row full name="目录黑名单" desc="不复制进 images/ 的目录名">
-              <tag-editor v-model="form.sticker.excludeDirs" placeholder="回车添加目录名"/>
-            </cfg-row>
-            <cfg-row full name="文件名关键词黑名单" desc="追加在内置 nsfw/色情 等之上（正则，i 标志）">
-              <tag-editor v-model="form.sticker.excludeKeywords" placeholder="回车添加关键词"/>
-            </cfg-row>
-            <cfg-row name="prompt 清单条数上限" desc="listTopN；超出按高频+最近发现加权">
-              <input type="number" class="input" style="width:100px" min="5" max="200" v-model.number="form.sticker.listTopN">
-            </cfg-row>
-
-            <div class="full" style="margin-top:6px;padding-top:10px;border-top:1px dashed var(--border)">
-              <div class="muted" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="zap"/> 频率管控（防"每条都带 → 反而更 AI"）</div>
-              <div class="cfg-grid">
-                <cfg-row name="单条最多贴纸数" desc="maxPerReply">
-                  <input type="number" class="input" style="width:90px" min="1" max="5" v-model.number="form.sticker.maxPerReply">
-                </cfg-row>
-                <cfg-row name="同会话冷却(秒)" desc="两次带图回复最小间隔">
-                  <input type="number" class="input" style="width:100px" min="0" v-model.number="form.sticker.cooldown">
-                </cfg-row>
-                <cfg-row name="带图概率 sendRate" desc="门控通过后实际带图概率（0~1）">
-                  <div class="flex gap10" style="width:200px">
-                    <input type="range" class="slider" min="0" max="1" step="0.05" v-model.number="form.sticker.sendRate">
-                    <b class="num" style="width:34px;text-align:right">{{ Number(form.sticker.sendRate||0).toFixed(2) }}</b>
-                  </div>
-                </cfg-row>
-                <cfg-row name="防连发" desc="上一条带过则本条不带">
-                  <v-switch v-model="form.sticker.antiConsecutive"/>
-                </cfg-row>
-                <cfg-row name="仅群聊启用" desc="私聊不带表情包">
-                  <v-switch v-model="form.sticker.groupOnly"/>
-                </cfg-row>
-                <cfg-row name="send_sticker 工具" desc="注册按情绪跨全库选图工具（不受目录 top-N 限制）">
-                  <v-switch v-model="form.sticker.sendStickerTool"/>
-                </cfg-row>
-              </div>
-            </div>
-
-            <div class="full" style="margin-top:6px;padding-top:10px;border-top:1px dashed var(--border)">
-              <div class="muted" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="search"/> 自动发现（MaiBot 式：被动采集群内 image → 视觉判定+打标 → 入库）</div>
-              <div class="muted-3" style="font-size:11px;margin-bottom:8px">需 sticker.enable 开启 + agent.vision.model 已配。被动采集群内 image 段，视觉模型判定并打标后入库。</div>
-              <div class="cfg-grid">
-                <cfg-row name="自动发现总开关" desc="被动采集群内表情并入库">
-                  <v-switch v-model="form.sticker.autoDiscover"/>
-                </cfg-row>
-                <cfg-row full name="采集群白名单" desc="群号字符串；空数组=所有群都采集">
-                  <tag-editor v-model="form.sticker.discoverGroups" placeholder="输入群号回车"/>
-                </cfg-row>
-                <cfg-row name="自动发现条数上限" desc="超限按 usageCount 升序淘汰冷门">
-                  <input type="number" class="input" style="width:100px" min="10" v-model.number="form.sticker.maxDiscovered">
-                </cfg-row>
-                <cfg-row name="单张采集大小上限(MB)" desc="0=不限">
-                  <input type="number" class="input" style="width:100px" min="0" v-model.number="form.sticker.discoverMaxSizeMB">
-                </cfg-row>
-              </div>
-            </div>
-          </div></div>
         </div>
 
         <!-- ===== §1.7 多模态 / 工具 / 扩展 ===== -->
@@ -941,6 +867,54 @@
                 </cfg-row>
                 <cfg-row name="会话空闲超时(毫秒)">
                   <input type="number" class="input" style="width:130px" min="60000" step="60000" v-model.number="form.stagehand.idleTimeoutMs">
+                </cfg-row>
+              </div>
+            </div>
+
+            <div class="full" style="margin-top:6px;padding-top:10px;border-top:1px dashed var(--border)">
+              <div class="muted" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="file"/> 媒体下载（yt-dlp · 仅主人，受约束）</div>
+              <div class="cfg-grid">
+                <cfg-row name="启用媒体下载" desc="web_download 工具；依赖系统 yt-dlp + ffmpeg（合并格式）">
+                  <v-switch v-model="form.download.enable"/>
+                </cfg-row>
+                <cfg-row name="单文件大小上限(MB)" desc="yt-dlp --max-filesize，超限中止">
+                  <input type="number" class="input" style="width:100px" min="1" v-model.number="form.download.maxMB">
+                </cfg-row>
+                <cfg-row name="发送大小上限(MB)" desc="超过此大小不自动发 QQ（返回本地路径供 SFTP 取）">
+                  <input type="number" class="input" style="width:100px" min="1" v-model.number="form.download.sendLimitMB">
+                </cfg-row>
+                <cfg-row name="下载超时(秒)" desc="maxTimeoutSec">
+                  <input type="number" class="input" style="width:100px" min="10" v-model.number="form.download.maxTimeoutSec">
+                </cfg-row>
+                <cfg-row name="yt-dlp 路径" desc="空=PATH 中的 yt-dlp">
+                  <input class="input mono" style="width:180px" v-model="form.download.bin" placeholder="留空=自动">
+                </cfg-row>
+                <cfg-row name="输出目录" desc="空=插件 data/temp/downloads">
+                  <input class="input mono" style="width:180px" v-model="form.download.dir" placeholder="留空=默认">
+                </cfg-row>
+              </div>
+            </div>
+
+            <div class="full" style="margin-top:6px;padding-top:10px;border-top:1px dashed var(--border)">
+              <div class="muted" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="bot"/> 子代理编排（spawn_subagent · 主 Agent 自主委派子任务）</div>
+              <div class="cfg-grid">
+                <cfg-row name="启用子代理委派" desc="注册 spawn_subagent，主模型自行决定是否创建子代理">
+                  <v-switch v-model="form.multiagent.enable"/>
+                </cfg-row>
+                <cfg-row name="最大并发子代理" desc="同时运行子代理数上限（进程级 Semaphore）">
+                  <input type="number" class="input" style="width:90px" min="1" max="10" v-model.number="form.multiagent.maxConcurrent">
+                </cfg-row>
+                <cfg-row name="单次对话上限" desc="单次对话最多创建几个子代理（防失控）">
+                  <input type="number" class="input" style="width:90px" min="1" max="20" v-model.number="form.multiagent.maxSpawnsPerConversation">
+                </cfg-row>
+                <cfg-row name="子代理工具循环上限" desc="workerMaxTurns（防烧 token）">
+                  <input type="number" class="input" style="width:90px" min="1" max="50" v-model.number="form.multiagent.workerMaxTurns">
+                </cfg-row>
+                <cfg-row name="子代理模型" desc="空=复用主模型；填便宜模型可降本">
+                  <input class="input mono" style="width:200px" v-model="form.multiagent.workerModel" placeholder="留空=主模型">
+                </cfg-row>
+                <cfg-row full name="子代理默认工具" desc="模型未指定时的默认可用工具（仅 query 类安全）">
+                  <tag-editor v-model="form.multiagent.defaultTools" placeholder="如 web_search / memory_search" :mono="true"/>
                 </cfg-row>
               </div>
             </div>

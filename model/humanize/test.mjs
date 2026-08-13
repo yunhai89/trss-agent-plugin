@@ -15,7 +15,7 @@ import { IdleBackoff } from './idle-backoff.js'
 import { validateActionCall, pickSingleAction, ACTION_TOOLS } from './action-tools.js'
 import { resolveBehaviorPolicy, topicMatchScore, withinReplyRate } from './behavior-policy.js'
 import { MemoryAdapter } from './memory-adapter.js'
-import { fillTemplate, buildPlannerSystem, buildReplyerSystem, formatGroupContext } from './prompts.js'
+import { fillTemplate, buildPlannerSystem, buildReplyerSystem, formatGroupContext, highlightTarget, buildHumanizePersonaBlock } from './prompts.js'
 import { splitSegments, typingDelayMs, protect, restore } from './reply-composer.js'
 import { Trace, redactForLog } from './trace.js'
 import { validateHumanizeConfig, resolveHumanizeConfig, DEFAULT_HUMANIZE_CONFIG } from './default-config.js'
@@ -128,6 +128,23 @@ await test('scorer：quotesBot 强信号 + 空批次', async () => {
   ok(empty.finalScore === 0 && !empty.shouldPlan, '空批次不触发')
 })
 
+await test('scorer：followup_to_bot 需窗口含 self（修复死代码）+ pressure 走 pendingCount', async () => {
+  const bot = mkMsg('我说了个梗', true, { seq: 1 }, 'b1')
+  const q = mkMsg('那具体怎么操作？', false, { seq: 2 }, 'q1')
+  // 窗口含 bot 自己的话 → 能识别 q 是接着 bot 的追问（旧版传 external 切片→self 被滤→死代码）
+  const d1 = evaluate({ messages: [bot, q], candidates: [q], pendingCount: 1, presence: {}, cfg: { threshold: 80, talkValue: 0.35 } })
+  ok(d1.components.relevance === 55 && d1.positiveReasons.includes('followup_to_bot'), '窗口含 self → followup_to_bot(+55) 触发')
+  ok(d1.targetMessage?.id === 'q1', '目标选为追问消息')
+  // 窗口不含 self → followup_to_bot 不触发（回归保护）
+  const d2 = evaluate({ messages: [q], candidates: [q], pendingCount: 1, presence: {}, cfg: { threshold: 80, talkValue: 0.35 } })
+  ok(d2.components.relevance === 0 && !d2.positiveReasons.includes('followup_to_bot'), '窗口无 self → 不触发（保护回归）')
+  // pressure 用 pendingCount（本批条数），不被 rolling window 长度放大
+  const pendingThreshold = Math.ceil(1 / (0.35 * 0.35))
+  ok(d1.components.pressure === pressureScore(1, pendingThreshold), 'pressure 走 pendingCount=1，非窗口长度')
+  const d3 = evaluate({ messages: [bot, q], candidates: [q], pendingCount: 8, presence: {}, cfg: { threshold: 80, talkValue: 0.35 } })
+  ok(d3.components.pressure === pressureScore(8, pendingThreshold) && d3.bypassBackoff === true, 'pendingCount=8 → 压力升高 + 绕过退避')
+})
+
 // ───────── backoff ─────────
 await test('backoff：序列 0,15,30,60,120,240… + 绕过 + 清零', async () => {
   const b = new IdleBackoff({ baseSeconds: 15, capSeconds: 300, startCount: 2, bypassPendingCount: 6 })
@@ -196,6 +213,37 @@ await test('prompts：槽位替换 + Planner 含红线、无任务措辞', async
   ok(ctx.includes('甲') && ctx.includes('[m1]'), 'formatGroupContext 含 id')
 })
 
+await test('prompts：formatGroupContext 渲染对话关系（@我/引用我/回复某人/self/时间）', async () => {
+  const lines = formatGroupContext([
+    mkMsg('在吗', false, { atBot: true }, 'm1', '甲'),
+    mkMsg('接得好', false, { quotesBot: true }, 'm2', '乙'),
+    mkMsg('也说一句', false, { replyToId: 'm9' }, 'm3', '丙'),
+    mkMsg('我刚说的', true, {}, 'm4'),
+  ])
+  ok(lines.includes('@我'), '@bot 标注')
+  ok(lines.includes('引用我'), 'quotesBot 标注')
+  ok(lines.includes('↩[m9]'), 'replyToId 标注')
+  ok(lines.includes('（我）'), 'self 标注')
+  // highlightTarget 关系提示
+  const ht = highlightTarget(mkMsg('在吗', false, { atBot: true, id: 'm1' }, 'm1', '甲'))
+  ok(ht.includes('@我') && ht.includes('m1'), 'highlightTarget 含关系 + id')
+})
+
+// ───────── persona block（MaiBot 式人设）─────────
+await test('persona：buildHumanizePersonaBlock + Planner 注入 + 空回落', async () => {
+  ok(buildHumanizePersonaBlock({ prompt: '' }) === '', '空 prompt 返回空串（调用方回落旧来源）')
+  ok(buildHumanizePersonaBlock() === '', '无参返回空串')
+  const blk = buildHumanizePersonaBlock({ name: '小汐', prompt: '你是小汐，爱接梗。【语气】轻松口语。' })
+  ok(blk.includes('小汐') && blk.includes('角色人设'), '人设块含角色名 + 标题')
+  ok(blk.includes('底线'), '人设块含事实准确红线')
+  // Planner system 注入 personaBlock
+  const sys = buildPlannerSystem({ personaName: '小汐', personaBlock: blk, groupContext: '甲: hi' })
+  ok(sys.includes('角色人设') && sys.includes('轻松口语'), 'Planner system 含人设块')
+  // 未注入时不残留空行异常
+  const sys2 = buildPlannerSystem({ personaName: '机器人', groupContext: '甲: hi' })
+  ok(sys2.includes('行为政策') && !sys2.includes('角色人设'), '无人设时 Planner 正常、不含人设块')
+})
+
 // ───────── reply-composer ─────────
 await test('reply-composer：splitSegments 不拆 URL/代码 + 上限 + typingDelay', async () => {
   const segs = splitSegments('第一句。第二句见 https://example.com/a/b 吧。第三句。', { maxBubbles: 3 })
@@ -233,6 +281,18 @@ await test('config：enable&空群不开 + 危险工具剔除 + privateMemory �
   // resolve 合并
   const resolved = resolveHumanizeConfig(DEFAULT_HUMANIZE_CONFIG)
   ok(resolved.threshold === 80 && resolved.behaviorPolicy.initiative === 0.35, 'resolve 默认值')
+})
+
+await test('config：persona 块结构 + prompt 超长裁剪', async () => {
+  ok(DEFAULT_HUMANIZE_CONFIG.persona && DEFAULT_HUMANIZE_CONFIG.persona.prompt === '', '默认 persona 块存在且 prompt 空')
+  const r = validateHumanizeConfig({ persona: { name: '小汐', prompt: 'p'.repeat(5000), fromPersonaId: 'raiden-ei' } })
+  ok(r.config.persona.name === '小汐', 'persona.name 保留')
+  ok(r.config.persona.fromPersonaId === 'raiden-ei', 'persona.fromPersonaId 保留')
+  ok(r.config.persona.prompt.length === 4000, 'persona.prompt 裁剪到 4000')
+  ok(r.errors.some((e) => e.includes('裁剪')), '超长裁剪记 error')
+  // 缺 persona 字段时归一为对象（防 v-model/解析报错）
+  const r2 = validateHumanizeConfig({})
+  ok(r2.config.persona && typeof r2.config.persona === 'object', '无 persona 时归一为对象')
 })
 
 // ───────── helper ─────────

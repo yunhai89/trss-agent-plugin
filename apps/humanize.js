@@ -101,13 +101,21 @@ async function buildHumanize() {
       } catch { return '' }
     },
     getBehaviorPolicyBlock: () => formatPolicyBlock(cfgFn().behaviorPolicy),
-    getPersonaName: () => cfgFn().personaName || botNickname() || '机器人',
+    getPersonaName: () => cfgFn().persona?.name || cfgFn().personaName || botNickname() || '机器人',
+    // 角色人设注入 Planner：决策时内化角色（会不会接、什么态度），MaiBot 式
+    getPersonaBlock: () => {
+      const p = resolveHumanizePersona(cfgFn(), rt)
+      return p.prompt ? H.buildHumanizePersonaBlock(p) : ''
+    },
   })
   const makeReplyer = (gid) => new H.HumanizeReplyer({
     provider: rt.provider, cfg: cfgFn,
-    getPersonaVoice: async (gid) => {
+    // 优先伪人角色人设（config.persona.prompt / fromPersonaId）；为空才回落主 Agent 人设
+    getPersonaVoice: async (groupId) => {
+      const p = resolveHumanizePersona(cfgFn(), rt)
+      if (p.prompt) return H.buildHumanizePersonaBlock(p)
       try {
-        const { persona } = await rt.persona.resolve('g' + (gid || ''))
+        const { persona } = await rt.persona.resolve('g' + (groupId || ''))
         return persona?.systemPrompt || ''
       } catch { return '' }
     },
@@ -148,6 +156,23 @@ function makeSendFn(groupId) {
       return null
     }
   }
+}
+
+/**
+ * 解析伪人角色人设（同步）。优先级：persona.prompt > persona.fromPersonaId（复用 PersonaStore）> 空。
+ * @returns {{name:string, prompt:string}} prompt 为空表示未配置（调用方回落旧来源）
+ */
+function resolveHumanizePersona(cfg, rt) {
+  const persona = (cfg && cfg.persona) || {}
+  const name = String(persona.name || '').trim()
+  let prompt = String(persona.prompt || '').trim()
+  if (!prompt && persona.fromPersonaId) {
+    try {
+      const found = rt?.persona?.store?.get?.(persona.fromPersonaId)
+      if (found?.systemPrompt) prompt = String(found.systemPrompt).trim()
+    } catch { /* noop */ }
+  }
+  return { name, prompt }
 }
 
 function formatPolicyBlock(policy) {

@@ -13,7 +13,7 @@
  */
 
 import { redactSecrets } from '../agent/redact.js'
-import { buildReplyerSystem, formatGroupContext } from './prompts.js'
+import { buildReplyerSystem, formatGroupContext, highlightTarget } from './prompts.js'
 
 const REPLY_LEAK_PATTERNS = [
   /作为一个\s*(AI|人工智能|语言模型)/, /根据系统(指令|提示|设定)/, /我(?:将|会)(?:调用|使用)工具/,
@@ -53,7 +53,7 @@ export class HumanizeReplyer {
    * @param {object} ctx { action, batch, decision, target, runtime, signal, cfg }
    * @returns {Promise<{text:string, rewritten:boolean, cancelReason?:string}>}
    */
-  async generate({ action, batch, runtime, signal, cfg }) {
+  async generate({ action, batch, target, runtime, signal, cfg }) {
     const c = cfg || this._cfgFn()
     const rcfg = c.replyer || {}
     const model = rcfg.model || c.model || null
@@ -63,9 +63,11 @@ export class HumanizeReplyer {
     const contextMessages = c.contextMessages ?? 30
     const groupId = runtime?.groupId
 
+    // 近期群聊：含 id + 对话关系标注（@我/引用我/回复某人/时间），让 Replyer 知道在接谁的话。
+    // batch 现为 rolling ctxWindow（含 bot 自己的话），不再是无 self 的孤立批次。
     const recent = formatGroupContext(
       (Array.isArray(batch) ? batch : []).slice(-contextMessages),
-      { includeIds: false },
+      { includeIds: true },
     )
 
     const personaVoice = await this.getPersonaVoice(groupId)
@@ -73,6 +75,8 @@ export class HumanizeReplyer {
       personaName: c.personaName || '机器人',
       replyGuide: action.replyGuide || '',
       referenceInfo: action.referenceInfo || '',
+      toneHint: action.toneHint || '',
+      targetBlock: target ? highlightTarget(target) : '',
       personaVoice,
       approvedStyleExamples: this.getStyleExamples(groupId),
       recentMessages: recent,

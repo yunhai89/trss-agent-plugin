@@ -56,6 +56,8 @@
     contextMessages: 30, threshold: 80, cooldownSeconds: 45, presenceWindowSeconds: 300, maxRepliesPer10Minutes: 4,
     bufferCapacity: 150, bufferTtlHours: 2, idleBackoffBaseSeconds: 15, idleBackoffCapSeconds: 300,
     idleBackoffStartCount: 2, bypassPendingCount: 6, personaName: '', botId: '',
+    redactSecrets: true,
+    persona: { name: '', prompt: '', fromPersonaId: '' },
     planner: { model: '', temperature: 0.2, maxTokens: 800, allowedReadTools: [] },
     replyer: { model: '', temperature: 0.7, maxTokens: 500, maxChars: 500 },
     reply: { maxBubbles: 3, typingSpeed: 1.0, minDelayMs: 600, maxDelayMs: 3500, typos: false, allowSticker: true, quoteTarget: 'auto' },
@@ -140,10 +142,11 @@
       /* 分区折叠 */
       const sections = [
         { id: 'basic', name: '总开关 / 白名单', icon: 'group', grad: 'var(--grad-primary)' },
+        { id: 'persona', name: '角色人设', icon: 'persona', grad: 'var(--grad-violet)' },
         { id: 'gate', name: '门控 / 评分', icon: 'zap', grad: 'var(--grad-sky)' },
         { id: 'llm', name: 'Planner / Replyer', icon: 'cpu', grad: 'var(--grad-teal)' },
         { id: 'reply', name: '发送编排', icon: 'send', grad: 'var(--grad-amber)' },
-        { id: 'policy', name: '行为政策 / 学习', icon: 'persona', grad: 'var(--grad-rose)' },
+        { id: 'policy', name: '行为政策 / 学习', icon: 'bot', grad: 'var(--grad-rose)' },
         { id: 'safety', name: '安全 / 红线', icon: 'shield', grad: 'var(--grad-primary)' },
       ]
       const open = reactive(Object.fromEntries(sections.map((s) => [s.id, s.id === 'basic'])))
@@ -233,6 +236,26 @@
             </cfg-row>
             <cfg-row name="机器人自身 QQ" desc="self 判定/防环用；留空=自动探测 Bot.uin">
               <input class="input mono" style="width:170px" v-model="form.botId" placeholder="留空=自动">
+            </cfg-row>
+          </div></div>
+        </div>
+
+        <!-- ===== 角色人设 ===== -->
+        <div :id="'hz-persona'" class="card cfg-section" :class="{open: open.persona}">
+          <div class="cfg-section-head" @click="open.persona = !open.persona">
+            <span class="ico" style="background:var(--grad-rose)"><v-icon name="persona"/></span>
+            <div><div class="card-title" style="font-size:14px">角色人设</div><div class="card-sub">MaiBot 式角色卡——身份/性格/说话风格；注入 Planner 决策 + Replyer 发言（与主 Agent 人设独立）</div></div>
+            <v-icon class="arrow" name="chevron"/>
+          </div>
+          <div class="cfg-body" v-show="open.persona"><div class="cfg-grid">
+            <cfg-row name="角色名" desc="留空=用上方「机器人群内名字」">
+              <input class="input" style="width:170px" v-model="form.persona.name" placeholder="留空=自动">
+            </cfg-row>
+            <cfg-row name="复用人设 id" desc="角色卡为空时，按 id/名复用 PersonaStore 已建人设（如 raiden-ei）；留空=不复用">
+              <input class="input" style="width:170px" v-model="form.persona.fromPersonaId" placeholder="如 raiden-ei">
+            </cfg-row>
+            <cfg-row full name="角色卡（角色设定正文）" desc="自由多段，MaiBot 式：身份/性格/【语气】【口癖】【距离感】【偏好】等。为空且未复用 → 回落主 Agent 人设">
+              <textarea class="input mono" style="width:100%;min-height:180px;font-size:12px;line-height:1.6;resize:vertical" v-model="form.persona.prompt" placeholder="你是「小汐」，群里一个爱聊天的技术宅。性格随和有点皮，喜欢接梗。&#10;【语气】轻松口语，偶尔用「哈」「确实」，不端着。&#10;【口癖】赞同爱说「确实是」；遇到有意思的回「有点东西」。&#10;【偏好】对 AI/编程/数码话题兴致高；八卦闲聊也会接，但不主动挑起。&#10;【不做】不发长篇大论、不列要点清单。"></textarea>
             </cfg-row>
           </div></div>
         </div>
@@ -417,6 +440,9 @@
                 <cfg-row name="最小样本数" desc="达到才生成候选">
                   <input type="number" class="input" style="width:100px" min="5" v-model.number="form.learning.minSamples">
                 </cfg-row>
+                <cfg-row name="需人工审核" desc="开=候选须经主人审核才注入；关=自动注入（不建议）">
+                  <v-switch v-model="form.learning.requireReview"/>
+                </cfg-row>
               </div>
             </div>
           </div></div>
@@ -435,6 +461,9 @@
             </cfg-row>
             <cfg-row name="阻断破坏性工具" desc="写/删/管理/终端工具对 Planner 不可见">
               <v-switch v-model="form.safety.blockDestructiveTools"/>
+            </cfg-row>
+            <cfg-row name="发送前脱敏" desc="拦截回复中的秘钥/Token（redactSecrets）">
+              <v-switch v-model="form.redactSecrets"/>
             </cfg-row>
             <cfg-row name="私聊记忆注入群聊" desc="隐私红线：强制 false，不可开启（后端校验会强制改回）" danger>
               <v-switch v-model="form.safety.privateMemoryInGroup" :disabled="true"/>

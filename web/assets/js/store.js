@@ -14,6 +14,7 @@
     conversations: [], sessions: {}, logFiles: [], logFilesTotal: 0, schedules: [], confirms: [],
     suggestions: [], perceptions: [], tokenTrend: [], requestTrend: [], toolTop: [],
     totalRequests: 0, totalToolCalls: 0, totalTokens: 0,
+    stickerLib: null,
   })
 
   const TOKEN_KEY = 'agents_token'
@@ -60,6 +61,7 @@
   window.store = {
     MOCK,
     async loadConfig() { MOCK.config = await api.get('/config') },
+    async loadStickerLib() { MOCK.stickerLib = await api.get('/sticker') },
     async loadScopes() { MOCK.scopes = await api.get('/scopes') },
     async loadTools() { MOCK.tools = await api.get('/tools') },
     async loadKb() { MOCK.kb = await api.get('/kb') },

@@ -72,7 +72,7 @@ export class TurnScheduler {
     const c = this.cfg()
     if (!this._enabled()) {  rt.setPhase('idle'); return }
 
-    let snapshot, external, decision
+    let snapshot, external, ctxWindow, decision
     try {
       snapshot = rt.buffer.snapshotAfter(rt.lastProcessedSeq)
       // 防 cursor > buffer（重启后 buffer 清空但 cursor 从持久化恢复 → 所有消息被当"已处理"跳过）
@@ -81,6 +81,11 @@ export class TurnScheduler {
         snapshot = rt.buffer.snapshotAfter(0)
       }
       external = snapshot.filter((m) => m && !m.isSelf && !m.handledByDirectAgent && !m.isCommand)
+      // 对话上下文窗口：rolling 最近 N 条（**含 bot 自己的话**），仅去掉命令/已被直答接管的消息。
+      // 含 isSelf 是关键——让 Planner/Replyer/打分器都能看清"谁在回复谁、是否接着 bot 的话说"，
+      // 否则 LLM 只看到一批孤立新消息，分不清对话关系、上下文断裂（曾用 external 切片导致此问题）。
+      ctxWindow = rt.buffer.snapshot(c.contextMessages ?? 30)
+        .filter((m) => m && !m.isCommand && !m.handledByDirectAgent)
     } catch (e) { Log.warn('[humanize] snapshot 异常', e?.message || e); rt.setPhase('idle'); return }
     if (!external.length) {  return }
 
@@ -109,7 +114,10 @@ export class TurnScheduler {
 
     try {
       decision = evaluate({
-      messages: external, presence, now,
+      messages: ctxWindow,          // 完整 rolling window（含 self）→ isFollowupToBot(+55) 可触发
+      candidates: external,         // 目标只从本批新消息里选
+      pendingCount: external.length, // 压力分按本批条数，不按窗口长度（避免恒满）
+      presence, now,
       cfg: {
         threshold: c.threshold ?? 80,
         talkValue: c.talkValue ?? 0.35,
@@ -157,14 +165,16 @@ export class TurnScheduler {
     rt.trace?.record('planner_start', { turnId, gen, batchId, batchSize: external.length, targetMessageId: decision.targetMessage?.id || null })
     try {
       const action = await this.planner.decide({
-        snapshot: external, decision, signal: rt.signal, runtime: rt, cfg: c,
+        snapshot: ctxWindow, decision, signal: rt.signal, runtime: rt, cfg: c,
       })
       if (!rt.isCurrent(gen)) {
         rt.trace?.record('planner_stale', { gen, current: rt.plannerGeneration })
         return
       }
       rt.trace?.record('planner_action', { turnId, gen, action: { type: action.type, target: action.targetMessageId || null, reason: action.reason || '' } })
-      await this._applyAction(action, external, decision, gen, turnId)
+      // 把 ctxWindow（含 self + 近期上下文）作为 batch 透传给 Replyer；
+      // markObserved 取其末尾 seq 前移游标（命令类已在 onMessage 即时标记，无副作用）。
+      await this._applyAction(action, ctxWindow, decision, gen, turnId)
     } catch (e) {
       rt.trace?.record('planner_error', { turnId, gen, msg: String(e?.message || e) })
       rt.backoff.recordNoAction(now)

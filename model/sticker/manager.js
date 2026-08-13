@@ -527,6 +527,30 @@ export class StickerManager {
     const stats = await this.syncImages()
     return { ok: true, enable, dir, stats, msg: `${enable ? '启用' : '停用'} ${dir}，已重建清单（共 ${stats.total} 个）。` }
   }
+
+  /** 库概览（web 面板用，只读）：启用状态/总数/自动采集数/目录启停/仓库安装状态。 */
+  libStats() {
+    const stickers = (this.getIndex()?.stickers) || {}
+    const names = Object.keys(stickers)
+    let discovered = 0
+    for (const n of names) if (stickers[n]?.source === 'discovered') discovered++
+    const dirs = []
+    let repoInstalled = false
+    try {
+      repoInstalled = fs.existsSync(path.join(paths.REPO_DIR, '.git'))
+      if (fs.existsSync(paths.REPO_DIR)) {
+        const excl = new Set((this.cfg.excludeDirs || []).map((d) => String(d).replace(/\/$/, '')))
+        const entries = fs.readdirSync(paths.REPO_DIR, { withFileTypes: true })
+          .filter((d) => !d.name.startsWith('.') && d.name !== '_repo')
+        for (const d of entries.filter((x) => x.isDirectory()).map((x) => x.name).sort()) {
+          dirs.push({ name: d, enabled: !excl.has(d) })
+        }
+        const rootImgs = entries.filter((d) => d.isFile() && IMG_EXT.has(path.extname(d.name).toLowerCase())).length
+        if (rootImgs) dirs.push({ name: 'root', label: `root（散图 ${rootImgs}）`, enabled: !excl.has('root') })
+      }
+    } catch { /* noop */ }
+    return { enabled: this.enabled(), total: names.length, discovered, dirs, repoInstalled }
+  }
 }
 
 /** 进程级单例：buildRuntime 与 apps/sticker.js 共享，保证 usageCount/冷却状态全局一致 */

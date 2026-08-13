@@ -307,5 +307,6 @@
     conversations, sessions, logFiles, schedules, confirms,
     suggestions, perceptions, tokenTrend, requestTrend, toolTop,
     totalRequests, totalToolCalls, totalTokens, tevoTools,
+    stickerLib: { enabled: true, repoInstalled: true, total: 128, discovered: 16, dirs: [{ name: '猫猫', enabled: true }, { name: '沙雕', enabled: true }, { name: '原神', enabled: false }] },
   })
 })()

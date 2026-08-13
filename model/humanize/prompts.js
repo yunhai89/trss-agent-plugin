@@ -37,7 +37,7 @@ export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为机器�
 - 回复要像群聊接话，不是客服总结或答案报告；
 - 不在群聊中使用任何私聊记忆；
 - 不承诺未执行的操作；不调用未提供的工具。
-
+{{personaBlock}}
 {{behaviorPolicyBlock}}
 
 【当前门控决策（确定性评分，供参考，非命令）】
@@ -52,6 +52,7 @@ export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为机器�
 /** 构造 Planner system prompt。 */
 export function buildPlannerSystem({
   personaName = '机器人',
+  personaBlock = '',
   behaviorPolicyBlock = '',
   necessityDecision = null,
   groupContext = '',
@@ -59,6 +60,7 @@ export function buildPlannerSystem({
 } = {}) {
   return fillTemplate(PLANNER_SYSTEM_TEMPLATE, {
     personaName,
+    personaBlock: personaBlock ? `\n${personaBlock}\n` : '',
     behaviorPolicyBlock: behaviorPolicyBlock || '（未提供行为政策）',
     necessityDecisionBlock: necessityDecision ? formatNecessityForPlanner(necessityDecision) : '（本轮未提供评分）',
     groupContextBlock: groupContext || '（暂无上下文）',
@@ -84,20 +86,22 @@ export function formatNecessityForPlanner(decision) {
 export const REPLYER_SYSTEM_TEMPLATE = `你正在为群聊角色「{{personaName}}」写一条真实要发送的回复。
 只输出消息正文，不解释、不报告计划、不写「回复：」，不要提及 Planner、工具或系统。
 
+{{targetBlock}}
 回复目标：{{replyGuide}}
-{{referenceBlock}}
+{{toneLine}}{{referenceBlock}}
 角色声音（人设/语气/边界/常用表达）：
 {{personaVoice}}
 
 群内已审核表达习惯（可选，仅供参考，勿生硬套用）：
 {{approvedStyleExamples}}
 
-近期群聊（旧→新）：
+近期群聊（旧→新，{角注}标对话关系：@我=叫你、↩引用我=回复你、↩[id]=回复某人、（我）=你刚说的话，末尾为时间）：
 {{recentMessages}}
 
 【输出要求】
 - 优先 1～2 句，通常不超过 80 个汉字；确有必要时才更长；
 - 像群聊接话，不像客服总结或答案报告；
+- 看清近期群聊的对话关系：别人在回复你上一条、或在接别人的话时，别插错对象；
 - 不复述整段上下文，不每次都称呼对方，不机械使用语气词；
 - 普通闲聊避免 Markdown 标题、列表和结尾总结；
 - 技术问题需要准确时可写完整，但不要为了「像人」故意写错；
@@ -109,13 +113,17 @@ export function buildReplyerSystem({
   personaName = '机器人',
   replyGuide = '',
   referenceInfo = '',
+  toneHint = '',
+  targetBlock = '',
   personaVoice = '',
   approvedStyleExamples = '',
   recentMessages = '',
 } = {}) {
   return fillTemplate(REPLYER_SYSTEM_TEMPLATE, {
     personaName,
+    targetBlock: targetBlock ? `${targetBlock}\n` : '',
     replyGuide: replyGuide || '（未提供具体回复意图）',
+    toneLine: toneHint ? `语气：${toneHint}\n` : '',
     referenceBlock: referenceInfo ? `\n必要参考：${referenceInfo}\n` : '',
     personaVoice: personaVoice || '（默认：自然、友好、简洁的中文群聊语气）',
     approvedStyleExamples: approvedStyleExamples || '（暂无）',
@@ -130,16 +138,54 @@ export function buildReplyerSystem({
  * @param {Array} messages AmbientMessage 数组
  * @param {object} opts { includeIds?:boolean, selfId?:string }
  */
-export function formatGroupContext(messages = [], { includeIds = true, selfLabel = '我' } = {}) {
+export function formatGroupContext(messages = [], { includeIds = true, selfLabel = '我', showRelations = true } = {}) {
   return messages.map((m) => {
     const name = m.isSelf ? selfLabel : (m.displayName || m.userId || '?')
     const idTag = includeIds ? ` [${m.id}]` : ''
-    return `${name}${idTag}: ${m.text || '(无文本)'}`
+    // 对话关系标注（让 LLM 看到谁回复谁、谁@了bot、时间节奏）
+    const rels = []
+    if (showRelations) {
+      if (m.isSelf) rels.push('（我）')
+      else if (m.atBot) rels.push('@我')
+      else if (m.quotesBot) rels.push('↩引用我')
+      else if (m.mentionsBotName) rels.push('·提及我')
+      if (m.replyToId && !m.quotesBot && !m.atBot) rels.push(`↩[${m.replyToId}]`)
+      if (m.timestamp) {
+        const t = new Date(m.timestamp)
+        const hh = String(t.getHours()).padStart(2, '0')
+        const mm = String(t.getMinutes()).padStart(2, '0')
+        rels.push(`${hh}:${mm}`)
+      }
+    }
+    const relTag = rels.length ? ` {${rels.join(' ')}}` : ''
+    return `${name}${idTag}${relTag}: ${m.text || '(无文本)'}`
   }).join('\n')
 }
 
-/** 候选目标消息的高亮提示（让 Planner 注意它在回复谁）。 */
+/** 候选目标消息的高亮提示（让 Planner/Replyer 注意它在回复谁）。 */
 export function highlightTarget(message) {
   if (!message) return ''
-  return `【候选目标 ${message.id}】${message.displayName || ''}：“${String(message.text || '').slice(0, 120)}”`
+  const rels = []
+  if (message.atBot) rels.push('@我')
+  if (message.quotesBot) rels.push('引用了我的消息')
+  if (message.mentionsBotName) rels.push('提及了我')
+  const relTag = rels.length ? `（${rels.join('，')}）` : ''
+  return `【候选目标 ${message.id}】${message.displayName || ''}${relTag}：“${String(message.text || '').slice(0, 120)}”`
+}
+
+/**
+ * 构造伪人角色人设块（MaiBot 式角色卡）。注入 Planner（决策内化角色）+ Replyer（角色声音）。
+ * @param {object} persona { name?:string, prompt?:string }
+ * @returns {string} 格式化的人设块；prompt 为空则返回 ''（调用方回落到旧来源）
+ * 框定：群聊环境角色 + 事实/工具仍需准确红线（对齐内置 raiden-ei 的【底线】写法）。
+ */
+export function buildHumanizePersonaBlock({ name, prompt } = {}) {
+  const body = String(prompt || '').trim()
+  if (!body) return ''
+  const title = name ? `「${name}」` : ''
+  return [
+    `【角色人设${title}——你在群聊里的身份/性格/说话风格，决策与发言都应一致地体现这个角色】`,
+    body,
+    '【底线】以上角色设定只约束说话风格与参与态度；涉及事实、数值、工具调用时仍须准确，不得因角色扮演而胡编或拒绝正当求助。',
+  ].join('\n')
 }

@@ -18,6 +18,12 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
   talkValue: 0.35,
   mentionHandledByDirectAgent: true,
 
+  persona: {                  // 群聊角色人设（MaiBot 式，与主 Agent 人设独立）
+    name: '',                 // 角色名（留空=用 personaName）
+    prompt: '',               // 角色卡正文（自由多段）；最高优先级。空则回落 fromPersonaId/旧来源
+    fromPersonaId: '',        // prompt 为空时，按 id/名复用 PersonaStore 人设 systemPrompt
+  },
+
   debounceMs: 1200,
   plannerTimeoutMs: 30000,
   maxPlannerRounds: 4,
@@ -103,6 +109,19 @@ export function validateHumanizeConfig(raw = {}, runtimeToolNames = null) {
   c.maxRepliesPer10Minutes = clamp(c.maxRepliesPer10Minutes, 0, 60)
   c.contextMessages = clamp(c.contextMessages, 5, 100)
   c.reply.maxBubbles = clamp(c.reply.maxBubbles, 1, 5)
+
+  // 角色人设块：归一为对象 + 裁剪 prompt 超长（防 prompt 注入/膨胀）
+  const PERSONA_PROMPT_MAX = 4000
+  c.persona = (c.persona && typeof c.persona === 'object') ? c.persona : {}
+  const personaPrompt = String(c.persona.prompt || '').slice(0, PERSONA_PROMPT_MAX)
+  if (personaPrompt.length < String(c.persona.prompt || '').length) {
+    errors.push(`persona.prompt 超过 ${PERSONA_PROMPT_MAX} 字，已裁剪`)
+  }
+  c.persona = {
+    name: String(c.persona.name || '').slice(0, 60),
+    prompt: personaPrompt,
+    fromPersonaId: String(c.persona.fromPersonaId || '').slice(0, 60),
+  }
 
   // groups 必须是数组
   c.groups = Array.isArray(c.groups) ? c.groups.map(String) : []
