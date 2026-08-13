@@ -103,22 +103,12 @@ async function buildHumanize() {
     getBehaviorPolicyBlock: () => formatPolicyBlock(cfgFn().behaviorPolicy),
     getPersonaName: () => cfgFn().persona?.name || cfgFn().personaName || botNickname() || '机器人',
     // 角色人设注入 Planner：决策时内化角色（会不会接、什么态度），MaiBot 式
-    getPersonaBlock: () => {
-      const p = resolveHumanizePersona(cfgFn(), rt)
-      return p.prompt ? H.buildHumanizePersonaBlock(p) : ''
-    },
+    getPersonaBlock: () => H.buildHumanizePersonaBlock(resolveHumanizePersona(cfgFn(), rt)),
   })
   const makeReplyer = (gid) => new H.HumanizeReplyer({
     provider: rt.provider, cfg: cfgFn,
-    // 优先伪人角色人设（config.persona.prompt / fromPersonaId）；为空才回落主 Agent 人设
-    getPersonaVoice: async (groupId) => {
-      const p = resolveHumanizePersona(cfgFn(), rt)
-      if (p.prompt) return H.buildHumanizePersonaBlock(p)
-      try {
-        const { persona } = await rt.persona.resolve('g' + (groupId || ''))
-        return persona?.systemPrompt || ''
-      } catch { return '' }
-    },
+    // 角色人设（prompt / fromPersonaId / 内置默认）；恒有值，不再回落主任务 Agent systemPrompt（AI 味来源）
+    getPersonaVoice: () => H.buildHumanizePersonaBlock(resolveHumanizePersona(cfgFn(), rt)),
     getRecentBotText: () => {
       try {
         const ent = manager?.getOrCreate?.(gid)
@@ -159,8 +149,10 @@ function makeSendFn(groupId) {
 }
 
 /**
- * 解析伪人角色人设（同步）。优先级：persona.prompt > persona.fromPersonaId（复用 PersonaStore）> 空。
- * @returns {{name:string, prompt:string}} prompt 为空表示未配置（调用方回落旧来源）
+ * 解析伪人角色人设（同步）。优先级：persona.prompt > persona.fromPersonaId（复用 PersonaStore）
+ * > 内置默认人设（DEFAULT_HUMANIZE_PERSONA，刻意去 AI 味、尊重看人）。
+ * 即用户不配置时，也始终有一份「像真人」的人设兜底，绝不回落到主任务 Agent 的 systemPrompt（那是 AI 味来源）。
+ * @returns {{name:string, prompt:string}} prompt 恒非空
  */
 function resolveHumanizePersona(cfg, rt) {
   const persona = (cfg && cfg.persona) || {}
@@ -172,6 +164,7 @@ function resolveHumanizePersona(cfg, rt) {
       if (found?.systemPrompt) prompt = String(found.systemPrompt).trim()
     } catch { /* noop */ }
   }
+  if (!prompt) return { name, prompt: H.DEFAULT_HUMANIZE_PERSONA.prompt }
   return { name, prompt }
 }
 

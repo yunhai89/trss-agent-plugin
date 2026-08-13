@@ -252,7 +252,7 @@
             <cfg-row name="复用人设 id" desc="角色卡为空时，按 id/名复用 PersonaStore 已建人设（如 raiden-ei）；留空=不复用">
               <input class="inp" style="width:170px" v-model="form.persona.fromPersonaId" placeholder="如 raiden-ei">
             </cfg-row>
-            <cfg-row full name="角色卡（角色设定正文）" desc="自由多段，MaiBot 式：身份/性格/【语气】【口癖】【距离感】【偏好】等。为空且未复用 → 回落主 Agent 人设">
+            <cfg-row full name="角色卡（角色设定正文）" desc="自由多段，MaiBot 式：身份/性格/【语气】【口癖】【距离感】【偏好】等。留空且未复用 → 用内置默认人设（去 AI 味、尊重看人，开箱即用）">
               <textarea class="inp mono" style="width:100%;min-height:180px;font-size:12px;line-height:1.6;resize:vertical" v-model="form.persona.prompt" placeholder="你是「小汐」，群里一个爱聊天的技术宅。性格随和有点皮，喜欢接梗。&#10;【语气】轻松口语，偶尔用「哈」「确实」，不端着。&#10;【口癖】赞同爱说「确实是」；遇到有意思的回「有点东西」。&#10;【偏好】对 AI/编程/数码话题兴致高；八卦闲聊也会接，但不主动挑起。&#10;【不做】不发长篇大论、不列要点清单。"></textarea>
             </cfg-row>
           </div></div>

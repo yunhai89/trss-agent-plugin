@@ -28,3 +28,5 @@ export { HumanizeReplyComposer, splitSegments, typingDelayMs } from './reply-com
 export { DEFAULT_HUMANIZE_CONFIG } from './default-config.js'
 /** 配置校验（buildRuntime/应用启动时调用，硬约束）。 */
 export { validateHumanizeConfig, resolveHumanizeConfig } from './default-config.js'
+/** 内置默认伪人人设（persona 留空时启用，刻意去 AI 味、尊重看人）。 */
+export { DEFAULT_HUMANIZE_PERSONA } from './default-persona.js'

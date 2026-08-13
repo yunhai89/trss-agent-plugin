@@ -19,6 +19,7 @@ import { fillTemplate, buildPlannerSystem, buildReplyerSystem, formatGroupContex
 import { splitSegments, typingDelayMs, protect, restore } from './reply-composer.js'
 import { Trace, redactForLog } from './trace.js'
 import { validateHumanizeConfig, resolveHumanizeConfig, DEFAULT_HUMANIZE_CONFIG } from './default-config.js'
+import { DEFAULT_HUMANIZE_PERSONA } from './default-persona.js'
 
 let passed = 0, failed = 0
 function ok(c, m) { if (c) { passed++; console.log('  ✓', m) } else { failed++; console.error('  ✗ FAIL', m) } }
@@ -242,6 +243,18 @@ await test('persona：buildHumanizePersonaBlock + Planner 注入 + 空回落', a
   // 未注入时不残留空行异常
   const sys2 = buildPlannerSystem({ personaName: '机器人', groupContext: '甲: hi' })
   ok(sys2.includes('行为政策') && !sys2.includes('角色人设'), '无人设时 Planner 正常、不含人设块')
+})
+
+await test('persona：内置默认人设（去 AI 味、尊重看人、非空可渲染）', async () => {
+  ok(typeof DEFAULT_HUMANIZE_PERSONA.prompt === 'string' && DEFAULT_HUMANIZE_PERSONA.prompt.length > 200, '默认人设非空且有实质内容')
+  // 核心主张：尊重是看人的（不是“尊重每个用户”这类 AI 味措辞）
+  ok(/看人下菜|态度跟关系走|没有“尊重每个人”/.test(DEFAULT_HUMANIZE_PERSONA.prompt), '默认人设强调态度因人而异（非无差别尊重）')
+  ok(!/尊重每一位用户|尊重所有用户|礼貌对待每一个人/.test(DEFAULT_HUMANIZE_PERSONA.prompt), '不含“尊重每个用户”式 AI 味套话')
+  // 防 AI 味红线在
+  ok(DEFAULT_HUMANIZE_PERSONA.prompt.includes('很高兴帮你') || DEFAULT_HUMANIZE_PERSONA.prompt.includes('客服'), '默认人设含防 AI 味红线')
+  // 渲染成块可用
+  const blk = buildHumanizePersonaBlock({ name: DEFAULT_HUMANIZE_PERSONA.name, prompt: DEFAULT_HUMANIZE_PERSONA.prompt })
+  ok(blk.includes('角色人设') && blk.includes('看人下菜'), '默认人设可正确渲染为 Planner/Replyer 注入块')
 })
 
 // ───────── reply-composer ─────────
