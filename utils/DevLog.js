@@ -52,13 +52,14 @@ export function devLogFilename({ gid, uid, convId, createdAt } = {}) {
  * @param {object} data 任意结构数据（完整记录，不截断）
  * @param {string|null} traceId 本次 AI 调用的 traceId（串联整条链路）
  * @param {object|null} scope {gid,uid,convId,createdAt} —— 决定写哪个会话文件；缺则 dev-fallback.log
+ * @param {object} [opts] { dir?:string, filename?:string } —— 覆盖目录/文件名（如伪人日志写独立目录、按日文件）
  */
-export default async function devLog(event, data = {}, traceId = null, scope = null) {
+export default async function devLog(event, data = {}, traceId = null, scope = null, opts = {}) {
   if (_failed) return
   if (cfg().enable === false) return
   const c = cfg()
-  const dir = c.dir ? path.resolve(c.dir) : Config.path.logs
-  const filename = scope ? devLogFilename(scope) : 'dev-fallback.log'
+  const dir = opts.dir ? path.resolve(opts.dir) : (c.dir ? path.resolve(c.dir) : Config.path.logs)
+  const filename = opts.filename || (scope ? devLogFilename(scope) : 'dev-fallback.log')
   const filepath = path.join(dir, filename)
   const isError = data && (data.status === 'error' || data.error || data.resolveError || data.stopReason === 'blocked' || data.stopReason === 'max_turns')
   const obj = {

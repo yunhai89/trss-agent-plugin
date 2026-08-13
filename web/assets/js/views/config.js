@@ -162,6 +162,7 @@
         // 兜底：确保各子对象存在（防旧 config 无此字段时 v-model 报错）
         if (!form.stagehand) form.stagehand = {}
         if (!form.terminal) form.terminal = {}
+        if (form.terminal.skipConfirm == null) form.terminal.skipConfirm = false
         if (!form.download) form.download = {}
         if (!form.multiagent) form.multiagent = {}
         // multiagent.defaultTools 数组兜底（TagEditor 要求 modelValue 为 Array）
@@ -832,6 +833,9 @@
                 </cfg-row>
                 <cfg-row class="full" name="命令黑名单" desc="灾难命令正则（即使已确认也硬拦；空=用默认 rm -rf / mkfs / dd of=/dev 等）">
                   <tag-editor v-model="form.terminal.blocklist" placeholder="回车添加"/>
+                </cfg-row>
+                <cfg-row class="full" name="主人命令免 #确认" desc="⚠️ 开=terminal 主人命令免审批直跑（黑名单仍硬拦）。真机任意命令执行，高危，默认关" danger>
+                  <v-switch v-model="form.terminal.skipConfirm"/>
                 </cfg-row>
               </div>
             </div>

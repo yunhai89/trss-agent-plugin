@@ -83,7 +83,12 @@ async function buildHumanize() {
   const trace = new H.Trace({
     sink: (rec) => {
       Log.debug('[humanize]', rec.event, 'group=' + (rec.groupIdHash || '-'), 'turn=' + (rec.turnId || '-'))
-      devLog('humanize', rec, rec.turnId || null, null)
+      // 伪人全链路日志写独立目录（按日文件），与主 Agent 的 data/logs 隔离：
+      // 既不上 web 日志时间线（web 只读 data/logs），又按日便于定期压缩。
+      const d = new Date(rec.ts || Date.now())
+      const p = (n) => String(n).padStart(2, '0')
+      const day = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+      devLog('humanize', rec, rec.turnId || null, null, { dir: Config.path.humanizeLogs, filename: `humanize-${day}.log` })
     },
   })
   const memory = new H.MemoryAdapter({ recall: rt.recall, memory: rt.memory, kv: rt.kv })
@@ -222,8 +227,23 @@ export class Humanize extends plugin {
         { reg: '^[\\s\\S]+$', fnc: 'onAmbient', log: false }, // 旁听 catch-all（最后）
       ],
     })
+    // 每天 04:17 压缩归档过期的伪人全链路日志（>24h 未修改的 .log → .gz）
+    this.task = [{
+      name: '伪人日志压缩归档',
+      cron: '17 4 * * *',
+      fnc: this.compressHumanizeLogs.bind(this),
+    }]
     // 异步预热（不阻塞构造）
     getHumanize().catch(() => {})
+  }
+
+  /** 压缩归档伪人全链路日志（data/humanize-logs/ 下超过 24h 的 .log） */
+  async compressHumanizeLogs() {
+    try {
+      const { default: compressOldLogs } = await import('../utils/compressLogs.js')
+      const r = compressOldLogs(Config.path.humanizeLogs, { maxAgeMs: 24 * 3600 * 1000, logger: Log })
+      if (r.compressed) Log.mark('[humanize] 日志压缩', `归档 ${r.compressed} 个旧日志（跳过 ${r.skipped} 个太新${r.failed ? `，失败 ${r.failed}` : ''}）`)
+    } catch (e) { Log.warn('[humanize] 日志压缩失败', e?.message || e) }
   }
 
   /** 旁听入口：8 步过滤 + 归一化 + 路由。永远 return false（不阻断）。 */

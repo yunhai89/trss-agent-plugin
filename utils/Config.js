@@ -200,6 +200,7 @@ export default {
     data: path.join(PLUGIN_DIR, 'data'),
     temp: path.join(PLUGIN_DIR, 'data', 'temp'),
     logs: path.join(PLUGIN_DIR, 'data', 'logs'),
+    humanizeLogs: path.join(PLUGIN_DIR, 'data', 'humanize-logs'), // 伪人全链路日志（独立目录，不进 web 日志时间线，定期压缩）
     memories: path.join(PLUGIN_DIR, 'data', 'memories'),
     personas: path.join(PLUGIN_DIR, 'data', 'personas'),
     evolution: path.join(PLUGIN_DIR, 'data', 'evolution'),
