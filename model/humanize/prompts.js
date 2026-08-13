@@ -98,7 +98,7 @@ export const REPLYER_SYSTEM_TEMPLATE = `你正在为群聊角色「{{personaName
 
 近期群聊（旧→新，{角注}标对话关系：@我=叫你、↩引用我=回复你、↩[id]=回复某人、（我）=你刚说的话，末尾为时间）：
 {{recentMessages}}
-
+{{stickerCatalogBlock}}
 【输出要求】
 - 优先 1～2 句，通常不超过 80 个汉字；确有必要时才更长；
 - 像群聊接话，不像客服总结或答案报告；
@@ -119,6 +119,7 @@ export function buildReplyerSystem({
   personaVoice = '',
   approvedStyleExamples = '',
   recentMessages = '',
+  stickerCatalog = '',
 } = {}) {
   return fillTemplate(REPLYER_SYSTEM_TEMPLATE, {
     personaName,
@@ -129,6 +130,7 @@ export function buildReplyerSystem({
     personaVoice: personaVoice || '（默认：自然、友好、简洁的中文群聊语气）',
     approvedStyleExamples: approvedStyleExamples || '（暂无）',
     recentMessages: recentMessages || '（暂无）',
+    stickerCatalogBlock: stickerCatalog ? `\n${stickerCatalog}\n` : '',
   })
 }
 

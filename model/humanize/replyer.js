@@ -38,14 +38,15 @@ function similarity(a, b) {
 
 export class HumanizeReplyer {
   /**
-   * @param {object} opts { provider, cfg, getPersonaVoice?:(groupId)=>string, getRecentBotText?:(groupId)=>string, getStyleExamples?:(groupId)=>string }
+   * @param {object} opts { provider, cfg, getPersonaVoice?:(groupId)=>string, getRecentBotText?:(groupId)=>string, getStyleExamples?:(groupId)=>string, getStickerCatalog?:(groupId)=>string }
    */
-  constructor({ provider, cfg, getPersonaVoice = null, getRecentBotText = null, getStyleExamples = null } = {}) {
+  constructor({ provider, cfg, getPersonaVoice = null, getRecentBotText = null, getStyleExamples = null, getStickerCatalog = null } = {}) {
     this.provider = provider
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.getPersonaVoice = getPersonaVoice || (() => '')
     this.getRecentBotText = getRecentBotText || (() => '')
     this.getStyleExamples = getStyleExamples || (() => '')
+    this.getStickerCatalog = getStickerCatalog || (() => '')
   }
 
   /**
@@ -71,6 +72,12 @@ export class HumanizeReplyer {
     )
 
     const personaVoice = await this.getPersonaVoice(groupId)
+    // 表情包清单注入：仅在 reply.allowSticker !== false 且表情包启用时注入；否则空串零影响
+    let stickerCatalog = ''
+    const rc = c.reply || {}
+    if (rc.allowSticker !== false) {
+      try { stickerCatalog = String(this.getStickerCatalog(groupId) || '') } catch { /* noop */ }
+    }
     const system = buildReplyerSystem({
       personaName: c.personaName || '机器人',
       replyGuide: action.replyGuide || '',
@@ -80,6 +87,7 @@ export class HumanizeReplyer {
       personaVoice,
       approvedStyleExamples: this.getStyleExamples(groupId),
       recentMessages: recent,
+      stickerCatalog,
     })
 
     let text = await this._call(system, model, temperature, maxTokens, signal)

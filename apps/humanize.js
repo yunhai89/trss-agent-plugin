@@ -117,6 +117,8 @@ async function buildHumanize() {
       } catch { return '' }
     },
     getStyleExamples: () => '',
+    // 表情包清单注入：reply.allowSticker !== false 且表情包启用时给 Replyer 看 [sticker:名称] 与可用名表
+    getStickerCatalog: () => (cfgFn().reply?.allowSticker !== false && sticker?.enabled?.() ? (sticker.catalog?.() || '') : ''),
   })
   const makeComposer = () => new H.HumanizeReplyComposer({ cfg: cfgFn, stickerManager: sticker })
   const makeSend = (gid) => makeSendFn(gid)
