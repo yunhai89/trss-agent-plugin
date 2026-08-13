@@ -44,45 +44,48 @@
     },
     template: `
     <div>
-      <div class="card card-pad flex between wrap gap14" style="--i:0">
-        <div>
-          <div class="card-title"><v-icon name="confirm"/>待审批队列</div>
-          <div class="card-sub">纯内存,不持久化,重启清空 · 超时({{ TIMEOUT / 1000 }}s)自动拒绝 · 模拟环境不会真正执行</div>
+      <div class="card pad row-b wrap g14" style="--i:0">
+        <div class="ct">
+          <span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="confirm"/></span>
+          <div>
+            <div class="ct-t">待审批队列</div>
+            <div class="ct-s">纯内存不持久化 · 超时({{ TIMEOUT / 1000 }}s)自动拒绝 · 模拟环境不会真正执行</div>
+          </div>
         </div>
-        <span class="chip" :class="items.length ? 'chip-amber' : 'chip-green'" style="font-size:13px;padding:6px 14px">
+        <span class="pill" :class="items.length ? 'p-honey' : 'p-green'" style="font-size:13px;padding:7px 15px">
           {{ items.length ? items.length + ' 条待审批' : '队列已清空' }}
         </span>
       </div>
 
-      <TransitionGroup name="list" tag="div" class="grid grid-2 mt16" style="position:relative">
-        <div v-for="(c, i) in items" :key="c.id" class="card confirm-card hoverable" :style="{'--i': i}">
-          <div class="flex gap14" style="align-items:flex-start">
+      <TransitionGroup name="list" tag="div" class="grid g2 mt16" style="position:relative">
+        <div v-for="(c, i) in items" :key="c.id" class="card lift pad" :style="{'--i': i + 1}">
+          <div class="row g14" style="align-items:flex-start">
             <!-- 倒计时环 -->
-            <div class="countdown-ring">
+            <div class="cd-ring">
               <svg width="46" height="46">
-                <circle cx="23" cy="23" r="19" fill="none" stroke="var(--surface-3)" stroke-width="5"/>
+                <circle cx="23" cy="23" r="19" fill="none" stroke="rgba(104,116,186,.16)" stroke-width="5"/>
                 <circle cx="23" cy="23" r="19" fill="none" stroke-linecap="round" stroke-width="5"
-                  :stroke="remainPct(c) > 40 ? 'var(--teal)' : 'var(--rose)'"
+                  :stroke="remainPct(c) > 40 ? 'var(--mint)' : 'var(--rose)'"
                   :stroke-dasharray="2 * Math.PI * 19" :stroke-dashoffset="ringOffset(c)"
                   style="transition:stroke-dashoffset 1s linear, stroke .5s"/>
               </svg>
-              <div class="countdown-num num">{{ Math.ceil(remain(c) / 1000) }}</div>
+              <div class="cd-num num">{{ Math.ceil(remain(c) / 1000) }}</div>
             </div>
             <div style="flex:1;min-width:0">
-              <div class="flex gap6 wrap">
-                <span class="chip" :class="danger(c.tool) ? 'chip-rose' : 'chip-sky'"><v-icon :name="danger(c.tool) ? 'warn' : 'tool'"/>{{ c.tool }}</span>
-                <span class="chip chip-outline mono">#{{ c.id }}</span>
+              <div class="row g6 wrap">
+                <span class="pill" :class="danger(c.tool) ? 'p-rose' : 'p-sky'"><v-icon :name="danger(c.tool) ? 'warn' : 'tool'"/>{{ c.tool }}</span>
+                <span class="pill p-line mono">#{{ c.id }}</span>
               </div>
-              <div class="muted mt10" style="font-size:12px">
+              <div class="mut mt8" style="font-size:12px">
                 申请人 <b class="mono">{{ c.ctx.user }}</b> · {{ c.ctx.gid ? '群 ' + c.ctx.gid : '私聊' }} · {{ fmt.ago(c.createdAt) }}发起
               </div>
-              <div class="muted" style="font-size:12px;margin-top:2px">事由:{{ c.ctx.reason }}</div>
+              <div class="mut" style="font-size:12px;margin-top:2px">事由:{{ c.ctx.reason }}</div>
             </div>
           </div>
-          <div class="mt10"><json-block :data="c.args"/></div>
-          <div class="flex gap10 mt10" style="justify-content:flex-end">
-            <button class="btn btn-danger-soft" @click="decide(c, false)"><v-icon name="x"/>拒绝</button>
-            <button class="btn btn-success" @click="decide(c, true)"><v-icon name="check"/>批准执行</button>
+          <div class="mt12"><json-block :data="c.args"/></div>
+          <div class="row g10 mt12" style="justify-content:flex-end">
+            <button class="btn b-danger" @click="decide(c, false)"><v-icon name="x"/>拒绝</button>
+            <button class="btn b-ok" @click="decide(c, true)"><v-icon name="check"/>批准执行</button>
           </div>
         </div>
       </TransitionGroup>

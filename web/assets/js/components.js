@@ -1,6 +1,6 @@
 /**
  * 共享 UI 组件与工具函数(window.UI)
- * 所有组件注册到全局,模板字符串中直接使用。
+ * Aurora Glass 设计系统 · 全部组件注册到全局,模板字符串中直接使用。
  */
 (function () {
   const { defineComponent, h, ref, reactive } = Vue
@@ -83,11 +83,26 @@
     cpu: 'M9 9h6v6H9zM4 4h16v16H4zM9 1v3m6-3v3M9 20v3m6-3v3M1 9h3m-3 6h3m16-6h3m-3 6h3',
     file: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6ZM14 2v6h6',
     play: 'm5 3 14 9-14 9V3Z',
-    pause: 'M6 4h4v16H6zM14 4h4v16h-4z',
+    pause: 'M6 4h4v16H6zM14 4h4v16H4z',
     save: 'M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2ZM17 21v-8H7v8M7 3v5h8',
     undo: 'M3 7v6h6M3 13a9 9 0 1 0 3-7.7L3 7',
     menu: 'M3 6h18M3 12h18M3 18h18',
     smile: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Zm-3.5-7a4.5 4.5 0 0 0 7 0M9 10v.01M15 10v.01',
+    /* —— 新增 —— */
+    home: 'm3 10 9-7 9 7v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10Zm6 11v-8h6v8',
+    grid: 'M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z',
+    image: 'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm4 7a2 2 0 1 0 0-.01M21 15l-5-5L5 21',
+    globe: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20ZM2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z',
+    bell: 'M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9m-4.3 13a2 2 0 0 1-3.4 0',
+    logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m7 14 5-5-5-5m5 5H9',
+    sparkle: 'M12 3l1.9 5.8 5.8 1.9-5.8 1.9L12 18.4l-1.9-5.8-5.8-1.9 5.8-1.9L12 3Z',
+    link: 'M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7',
+    filter: 'M22 3H2l8 9.5V19l4 2v-8.5L22 3Z',
+    hash: 'M4 9h16M4 15h16M10 3 8 21M16 3l-2 18',
+    calendar: 'M8 2v4m8-4v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z',
+    arrowr: 'M5 12h14m-7-7 7 7-7 7',
+    layers: 'm12 2 10 5.5-10 5.5L2 7.5 12 2Zm-10 11 10 5.5 10-5.5M2 18l10 5.5 10-5.5',
+    book: 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15Z',
   }
 
   /* ---------------- <v-icon> ---------------- */
@@ -95,7 +110,6 @@
     name: 'VIcon',
     props: { name: { type: String, required: true }, fill: { type: Boolean, default: false } },
     setup(props) {
-      /* width/height 用表现层属性:默认 1em,CSS 类规则可覆盖 */
       return () => h('svg', {
         viewBox: '0 0 24 24', width: '1em', height: '1em',
         fill: props.fill ? 'currentColor' : 'none',
@@ -109,11 +123,11 @@
   /* ---------------- <v-switch> ---------------- */
   const VSwitch = defineComponent({
     name: 'VSwitch',
-    props: { modelValue: Boolean },
+    props: { modelValue: Boolean, disabled: { type: Boolean, default: false } },
     emits: ['update:modelValue'],
-    template: `<label class="switch">
-      <input type="checkbox" :checked="!!modelValue" @change="$emit('update:modelValue', $event.target.checked)">
-      <span class="slider"></span>
+    template: `<label class="sw" :class="{dis: disabled}">
+      <input type="checkbox" :checked="!!modelValue" :disabled="disabled" @change="$emit('update:modelValue', $event.target.checked)">
+      <span class="sw-k"></span>
     </label>`,
   })
 
@@ -126,21 +140,40 @@
     template: `
     <Teleport to="body">
       <Transition name="modal" appear>
-        <div class="overlay" @click.self="$emit('close')">
-          <div class="modal" :style="width ? {width} : {}">
-            <div class="modal-head">
-              <slot name="head"><span class="modal-title">{{ title }}</span></slot>
-              <button class="modal-x" @click="$emit('close')"><v-icon name="x"/></button>
+        <div class="ovl" @click.self="$emit('close')">
+          <div class="mdl" :style="width ? {width} : {}">
+            <div class="mdl-h">
+              <slot name="head">
+                <span v-if="icon" class="mdl-ico"><v-icon :name="icon"/></span>
+                <span class="mdl-t">{{ title }}</span>
+              </slot>
+              <button class="mdl-x" @click="$emit('close')"><v-icon name="x"/></button>
             </div>
-            <div class="modal-body"><slot/></div>
-            <div class="modal-foot" v-if="$slots.foot"><slot name="foot"/></div>
+            <div class="mdl-b"><slot/></div>
+            <div class="mdl-f" v-if="$slots.foot"><slot name="foot"/></div>
           </div>
         </div>
       </Transition>
     </Teleport>`,
   })
 
-  /* ---------------- <masked-value> 脱敏值(§5) ---------------- */
+  /* ---------------- <page-head> 页面标题区 ---------------- */
+  const PageHead = defineComponent({
+    name: 'PageHead',
+    components: { VIcon },
+    props: { title: String, desc: { type: String, default: '' }, icon: { type: String, default: '' } },
+    template: `
+    <div class="pagehead" style="--i:0">
+      <span v-if="icon" class="ph-ico"><v-icon :name="icon"/></span>
+      <div class="ph-main">
+        <div class="ph-t">{{ title }}</div>
+        <div class="ph-s" v-if="desc">{{ desc }}</div>
+      </div>
+      <div class="ph-acts"><slot/></div>
+    </div>`,
+  })
+
+  /* ---------------- <masked-value> 脱敏值 ---------------- */
   const MaskedValue = defineComponent({
     name: 'MaskedValue',
     components: { VIcon },
@@ -149,7 +182,7 @@
     <span class="masked" :title="value.configured ? '已脱敏:后端绝不返回明文' : '未配置'">
       <v-icon class="lock" name="lock"/>
       <span v-if="value.configured">{{ value.preview || '已配置' }}</span>
-      <span v-else class="muted-3">未配置</span>
+      <span v-else class="mut2">未配置</span>
     </span>`,
   })
 
@@ -168,18 +201,18 @@
       offset() { return this.c * (1 - Math.min(this.percent, 100) / 100) },
     },
     template: `
-    <div class="ring-wrap" :style="{width: size+'px', height: size+'px'}">
+    <div class="ring-w" :style="{width: size+'px', height: size+'px'}">
       <svg :width="size" :height="size">
         <defs>
           <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#2563eb"/>
+            <stop offset="0%" stop-color="#8b5cf6"/><stop offset="55%" stop-color="#6366f1"/><stop offset="100%" stop-color="#38bdf8"/>
           </linearGradient>
         </defs>
-        <circle class="ring-track" :cx="size/2" :cy="size/2" :r="r" :stroke-width="stroke"/>
-        <circle class="ring-val" :cx="size/2" :cy="size/2" :r="r" :stroke-width="stroke"
+        <circle class="ring-t" :cx="size/2" :cy="size/2" :r="r" :stroke-width="stroke"/>
+        <circle class="ring-v" :cx="size/2" :cy="size/2" :r="r" :stroke-width="stroke"
           :stroke="color" :stroke-dasharray="c" :stroke-dashoffset="offset"/>
       </svg>
-      <div class="ring-center"><slot :percent="percent"/></div>
+      <div class="ring-c"><slot :percent="percent"/></div>
     </div>`,
   })
 
@@ -206,7 +239,7 @@
     name: 'EmptyState',
     components: { VIcon },
     props: { icon: { type: String, default: 'db' }, text: { type: String, default: '暂无数据' }, sub: { type: String, default: '' } },
-    template: `<div class="empty"><v-icon :name="icon"/><div style="font-weight:700">{{ text }}</div><div v-if="sub" style="font-size:12px">{{ sub }}</div><slot/></div>`,
+    template: `<div class="empty"><span class="empty-ico"><v-icon :name="icon"/></span><div style="font-weight:700">{{ text }}</div><div v-if="sub" style="font-size:12px">{{ sub }}</div><slot/></div>`,
   })
 
   /* ---------------- Toast 服务 ---------------- */
@@ -228,10 +261,10 @@
     },
     template: `
     <Teleport to="body">
-      <div class="toast-wrap">
+      <div class="tst-w">
         <TransitionGroup name="toast">
-          <div v-for="t in toastState.list" :key="t.id" class="toast" :class="t.type">
-            <v-icon :name="icons[t.type] || 'info'"/><span>{{ t.msg }}</span>
+          <div v-for="t in toastState.list" :key="t.id" class="tst" :class="t.type">
+            <span class="tst-ico"><v-icon :name="icons[t.type] || 'info'"/></span><span>{{ t.msg }}</span>
           </div>
         </TransitionGroup>
       </div>
@@ -250,19 +283,22 @@
     template: `<pre class="code">{{ text }}</pre>`,
   })
 
-  /* ---------------- <scope-picker> scope 选择器(§6) ---------------- */
+  /* ---------------- <scope-picker> scope 选择器 ---------------- */
   const ScopePicker = defineComponent({
     name: 'ScopePicker',
     components: { VIcon },
     props: { modelValue: { type: String, required: true } },
     emits: ['update:modelValue'],
     setup(props, { emit }) {
-      return { scopes: window.MOCK.scopes, emit }
+      const { computed } = Vue
+      // 计算属性取值：store.loadScopes 会整体替换 MOCK.scopes，直接捕获旧数组会拿到空壳
+      const scopes = computed(() => window.MOCK.scopes || [])
+      return { scopes, emit }
     },
     template: `
-    <div class="scope-bar">
-      <span class="muted" style="font-size:12.5px;font-weight:700">数据隔离维度</span>
-      <div v-for="s in scopes" :key="s.scopeId" class="scope-pill" :class="{active: s.scopeId === modelValue}"
+    <div class="scp-bar">
+      <span class="scp-lab">数据隔离维度</span>
+      <div v-for="s in scopes" :key="s.scopeId" class="scp" :class="{on: s.scopeId === modelValue}"
         @click="emit('update:modelValue', s.scopeId)" :title="s.scopeId">
         <v-icon :name="s.type === 'private' ? 'user' : 'group'"/>
         <span>{{ s.label }}</span>
@@ -276,6 +312,7 @@
       app.component('VIcon', VIcon)
       app.component('VSwitch', VSwitch)
       app.component('VModal', VModal)
+      app.component('PageHead', PageHead)
       app.component('MaskedValue', MaskedValue)
       app.component('RingProgress', RingProgress)
       app.component('CountUp', CountUp)

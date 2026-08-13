@@ -4,18 +4,18 @@
 
   /* 12 种 event 的展示元数据 */
   const EV = {
-    trigger: { name: '收到消息', icon: 'send', color: 'var(--sky)', bg: 'var(--sky-soft)' },
-    media: { name: '媒体解析', icon: 'file', color: 'var(--violet)', bg: 'var(--violet-soft)' },
-    input: { name: '输入归一化', icon: 'edit', color: 'var(--teal)', bg: 'var(--teal-soft)' },
-    run_start: { name: 'Agent 启动', icon: 'play', color: 'var(--primary)', bg: 'var(--primary-soft)' },
-    turn: { name: 'LLM 往返', icon: 'cpu', color: 'var(--sky)', bg: 'var(--sky-soft)' },
-    tool: { name: '工具调用', icon: 'tool', color: 'var(--teal)', bg: 'var(--teal-soft)' },
-    tool_discovery: { name: '工具动态发现', icon: 'search', color: 'var(--violet)', bg: 'var(--violet-soft)' },
-    reflect: { name: '自检回环', icon: 'refresh', color: 'var(--amber)', bg: 'var(--amber-soft)' },
-    recall_extract: { name: '记忆抽取', icon: 'memory', color: 'var(--amber)', bg: 'var(--amber-soft)' },
-    run_end: { name: 'Agent 结束', icon: 'check', color: 'var(--green)', bg: 'var(--green-soft)' },
-    reply: { name: '回复投递', icon: 'send', color: 'var(--primary)', bg: 'var(--primary-soft)' },
-    error: { name: '异常', icon: 'warn', color: 'var(--rose)', bg: 'var(--rose-soft)' },
+    trigger: { name: '收到消息', icon: 'send', color: 'var(--sky)', bg: 'var(--sky-bg)' },
+    media: { name: '媒体解析', icon: 'file', color: 'var(--vio)', bg: 'var(--vio-bg)' },
+    input: { name: '输入归一化', icon: 'edit', color: 'var(--mint)', bg: 'var(--mint-bg)' },
+    run_start: { name: 'Agent 启动', icon: 'play', color: 'var(--pri)', bg: 'var(--pri-soft)' },
+    turn: { name: 'LLM 往返', icon: 'cpu', color: 'var(--sky)', bg: 'var(--sky-bg)' },
+    tool: { name: '工具调用', icon: 'tool', color: 'var(--mint)', bg: 'var(--mint-bg)' },
+    tool_discovery: { name: '工具动态发现', icon: 'search', color: 'var(--vio)', bg: 'var(--vio-bg)' },
+    reflect: { name: '自检回环', icon: 'refresh', color: 'var(--honey)', bg: 'var(--honey-bg)' },
+    recall_extract: { name: '记忆抽取', icon: 'memory', color: 'var(--honey)', bg: 'var(--honey-bg)' },
+    run_end: { name: 'Agent 结束', icon: 'check', color: 'var(--green)', bg: 'var(--green-bg)' },
+    reply: { name: '回复投递', icon: 'send', color: 'var(--pri)', bg: 'var(--pri-soft)' },
+    error: { name: '异常', icon: 'warn', color: 'var(--rose)', bg: 'var(--rose-bg)' },
   }
 
   window.VIEWS.logs = {
@@ -132,78 +132,78 @@
     <div class="grid cols-300" style="align-items:start">
       <!-- 会话文件 -->
       <div class="card" style="--i:0;overflow:hidden">
-        <div style="padding:15px 18px;border-bottom:1px solid var(--border)">
-          <div class="card-title"><v-icon name="log"/>会话日志文件</div>
-          <div class="card-sub">data/logs/ · 敏感度:高</div>
-          <!-- 筛选：默认最新10条；日期范围/事件类型/关键词任意组合 -->
-          <div class="flex gap6 wrap" style="margin-top:10px">
-            <input type="date" class="input" v-model="filter.from" style="width:auto"/>
-            <span class="muted-3">~</span>
-            <input type="date" class="input" v-model="filter.to" style="width:auto"/>
+        <div style="padding:16px 18px;border-bottom:1px solid var(--line)">
+          <div class="ct">
+            <span class="ct-ico" style="background:var(--grad)"><v-icon name="log"/></span>
+            <div><div class="ct-t">会话日志文件</div><div class="ct-s">data/logs/ · 敏感度:高</div></div>
           </div>
-          <div class="flex gap6 wrap" style="margin-top:6px">
-            <select class="select" v-model="filter.event" style="width:auto;min-width:108px">
+          <div class="row g6 wrap" style="margin-top:12px">
+            <input type="date" class="inp" v-model="filter.from" style="width:auto"/>
+            <span class="mut2">~</span>
+            <input type="date" class="inp" v-model="filter.to" style="width:auto"/>
+          </div>
+          <div class="row g6 wrap" style="margin-top:8px">
+            <select class="sel" v-model="filter.event" style="width:auto;min-width:108px">
               <option value="">全部事件</option>
               <option v-for="(meta, key) in EV" :key="key" :value="key">{{ meta.name }}</option>
             </select>
-            <input class="input" v-model="filter.q" placeholder="关键词(时间/报错/工具名)" style="flex:1;min-width:120px"/>
+            <input class="inp" v-model="filter.q" placeholder="关键词(时间/报错/工具名)" style="flex:1;min-width:120px"/>
           </div>
-          <div class="flex gap6" style="margin-top:6px">
-            <button class="btn btn-primary" @click="runFilter" style="flex:1">查询</button>
-            <button class="btn btn-ghost" @click="resetFilter" style="flex:1">重置</button>
+          <div class="row g6" style="margin-top:8px">
+            <button class="btn b-pri b-sm" @click="runFilter" style="flex:1"><v-icon name="search"/>查询</button>
+            <button class="btn b-line b-sm" @click="resetFilter" style="flex:1">重置</button>
           </div>
-          <div class="muted-3" style="margin-top:8px;font-size:11px">命中 {{ hitTotal }} 条 · 当前显示最新 {{ files.length }} 条</div>
+          <div class="mut2" style="margin-top:9px;font-size:11px">命中 {{ hitTotal }} 条 · 当前显示最新 {{ files.length }} 条</div>
         </div>
-        <div v-for="(f, i) in files" :key="f.file" class="trace-item" :class="{active: fileIdx === i}" @click="pickFile(i)">
+        <div v-for="(f, i) in files" :key="f.file" class="tf-item" :class="{on: fileIdx === i}" @click="pickFile(i)">
           <div style="font-weight:700;font-size:12.5px">{{ f.label }}</div>
-          <div class="muted-3 mono ellipsis" style="font-size:10.5px;margin-top:2px">{{ f.file }}</div>
+          <div class="mut2 mono ell" style="font-size:10.5px;margin-top:2px">{{ f.file }}</div>
         </div>
+        <empty-state v-if="!files.length" icon="log" text="暂无日志文件"/>
       </div>
 
-      <div style="display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;flex-direction:column;gap:16px;min-width:0">
         <!-- trace 选择 -->
-        <div class="card card-pad" style="--i:1">
-          <div class="card-title mb10"><v-icon name="zap"/>请求链路(traceId)</div>
-          <div class="flex gap10 wrap">
-            <div v-for="t in traces" :key="t.traceId" class="scope-pill" :class="{active: activeTrace === t.traceId}" @click="activeTrace = t.traceId">
+        <div class="card pad" style="--i:1">
+          <div class="ct mb12">
+            <span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="zap"/></span>
+            <div><div class="ct-t">请求链路(traceId)</div><div class="ct-s" v-if="activeTrace">traceId: <span class="mono">{{ activeTrace }}</span></div></div>
+          </div>
+          <div class="row g10 wrap">
+            <div v-for="t in traces" :key="t.traceId" class="scp" :class="{on: activeTrace === t.traceId}" @click="activeTrace = t.traceId">
               <v-icon :name="t.hasError ? 'warn' : 'check'"/>
               <span>{{ fmt.time(t.time).slice(0, 8) }}</span>
-              <span class="muted-3" style="font-weight:400">{{ t.turns }}轮 · {{ t.totalMs ? fmt.dur(t.totalMs) : '—' }}</span>
-              <span v-if="t.usage" class="chip chip-primary num" style="font-size:10px">{{ fmt.num(t.usage.total) }} tok</span>
+              <span class="mut2" style="font-weight:400">{{ t.turns }}轮 · {{ t.totalMs ? fmt.dur(t.totalMs) : '—' }}</span>
+              <span v-if="t.usage" class="pill num" :class="activeTrace === t.traceId ? '' : 'p-pri'" style="font-size:10px">{{ fmt.num(t.usage.total) }} tok</span>
             </div>
-          </div>
-          <div class="muted-3 mt10 ellipsis" style="font-size:11.5px" v-if="activeTrace">
-            traceId: <span class="mono">{{ activeTrace }}</span>
           </div>
         </div>
 
         <!-- 事件时间线 -->
-        <div class="timeline">
-          <div v-for="(e, i) in events" :key="i" class="tl-item" :style="{'--i': i}">
+        <div class="tl">
+          <div v-for="(e, i) in events" :key="i" class="tl-i" :style="{'--i': i}">
             <div class="tl-dot" :style="{background: EV[e.event].color}"><v-icon :name="EV[e.event].icon"/></div>
-            <div class="tl-card">
-              <div class="tl-head" @click="toggle(i)">
-                <span class="chip" :style="{background: EV[e.event].bg, color: EV[e.event].color}">{{ e.event }}</span>
+            <div class="tl-c">
+              <div class="tl-h" @click="toggle(i)">
+                <span class="pill" :style="{background: EV[e.event].bg, color: EV[e.event].color}">{{ e.event }}</span>
                 <b style="font-size:13px">{{ EV[e.event].name }}</b>
-                <span class="muted mono tl-summary" style="font-size:11px">{{ summary(e) }}</span>
-                <span class="muted-3 mono tl-time" style="margin-left:auto;font-size:11px;flex:0 0 auto">{{ fmt.time(e.time) }}</span>
-                <v-icon name="chevron" :style="{transform: expanded[i] ? 'rotate(180deg)' : '', transition: 'transform .25s', color: 'var(--text-3)', flex: '0 0 auto'}"/>
+                <span class="mut mono tl-sum" style="font-size:11px">{{ summary(e) }}</span>
+                <span class="mut2 mono tl-time" style="margin-left:auto;font-size:11px;flex:0 0 auto">{{ fmt.time(e.time) }}</span>
+                <v-icon name="chevron" :style="{transform: expanded[i] ? 'rotate(180deg)' : '', transition: 'transform .25s', color: 'var(--ink3)', flex: '0 0 auto'}"/>
               </div>
               <Transition name="expand">
-                <div v-if="expanded[i]" class="tl-body">
-                  <!-- turn:usage 可视化 -->
-                  <div v-if="e.event === 'turn'" class="mb10">
-                    <div class="flex between" style="font-size:11.5px;margin-bottom:4px">
-                      <span class="muted">prompt 缓存命中</span>
-                      <span class="num muted">{{ e.usage.prompt_cache_hit_tokens }}/{{ e.usage.prompt_tokens }} ({{ cachePct(e.usage) }}%)</span>
+                <div v-if="expanded[i]" class="tl-b">
+                  <div v-if="e.event === 'turn'" class="mb12">
+                    <div class="row-b" style="font-size:11.5px;margin-bottom:4px">
+                      <span class="mut">prompt 缓存命中</span>
+                      <span class="num mut">{{ e.usage.prompt_cache_hit_tokens }}/{{ e.usage.prompt_tokens }} ({{ cachePct(e.usage) }}%)</span>
                     </div>
-                    <div class="progress teal"><i :style="{width: cachePct(e.usage) + '%'}"></i></div>
+                    <div class="meter m-mint"><i :style="{width: cachePct(e.usage) + '%'}"></i></div>
                   </div>
-                  <!-- tool_discovery:命中可视化 -->
-                  <div v-if="e.event === 'tool_discovery'" class="mb10">
-                    <div class="tool-chip-flow">
-                      <span v-for="(h, j) in e.hits" :key="h.name" class="t-chip" :style="{'--i': j}">{{ h.name }} · {{ h.score }}</span>
-                      <span v-for="(a, j) in e.activated" :key="a" class="t-chip" :style="{'--i': j + 2, background: 'var(--teal-soft)', color: 'var(--teal)'}">+{{ a }}</span>
+                  <div v-if="e.event === 'tool_discovery'" class="mb12">
+                    <div class="tchip-f">
+                      <span v-for="(h, j) in e.hits" :key="h.name" class="tchip" :style="{'--i': j}">{{ h.name }} · {{ h.score }}</span>
+                      <span v-for="(a, j) in e.activated" :key="a" class="tchip" :style="{'--i': j + 2, background: 'var(--mint-bg)', color: 'var(--mint)', borderColor: 'rgba(11,163,148,.24)'}">+{{ a }}</span>
                     </div>
                   </div>
                   <json-block :data="e"/>

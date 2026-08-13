@@ -1,5 +1,5 @@
 /**
- * 应用外壳:hash 路由 + 侧边栏 + 顶栏 + 登录态
+ * 应用外壳:hash 路由 + PC 悬浮侧栏 / 移动端顶条 + 底部 Dock + 登录态
  */
 (function () {
   const { createApp, ref, computed, onMounted } = Vue
@@ -12,7 +12,7 @@
         { id: 'recall', name: '长期记忆', icon: 'recall' },
         { id: 'personas', name: '人设库', icon: 'persona' },
         { id: 'skills', name: '技能', icon: 'skill' },
-        { id: 'kb', name: '知识库', icon: 'skill' },
+        { id: 'kb', name: '知识库', icon: 'book' },
         { id: 'sessions', name: '会话回放', icon: 'session' },
         { id: 'logs', name: '日志时间线', icon: 'log' },
       ],
@@ -44,6 +44,13 @@
     humanize: ['伪人模式', '群聊环境参与者 · 旁听/门控/决策/发送'],
     sticker: ['表情包', '配置 + 库概览 · 发送策略 / 自动发现'],
   }
+  /* 移动端底部 Dock:四个常用 + 更多 */
+  const DOCK = [
+    { id: 'dashboard', name: '概览', icon: 'home' },
+    { id: 'memory', name: '记忆', icon: 'memory' },
+    { id: 'sessions', name: '会话', icon: 'session' },
+    { id: 'confirm', name: '审批', icon: 'confirm', badge: () => (window.MOCK?.confirms || []).length },
+  ]
 
   const App = {
     name: 'App',
@@ -51,15 +58,17 @@
       const route = ref((location.hash || '#/dashboard').slice(2))
       const valid = computed(() => !!window.VIEWS[route.value])
       if (!valid.value) route.value = 'dashboard'
-      const navOpen = ref(false) // 移动端抽屉
+      const menuOpen = ref(false) // 移动端全屏菜单
       window.addEventListener('hashchange', () => {
         const r = location.hash.slice(2)
         route.value = window.VIEWS[r] ? r : 'dashboard'
+        menuOpen.value = false
         window.scrollTo({ top: 0 })
       })
-      const go = (id) => { location.hash = '#/' + id; navOpen.value = false }
+      const go = (id) => { location.hash = '#/' + id; menuOpen.value = false }
       const view = computed(() => window.VIEWS[route.value])
       const title = computed(() => TITLES[route.value] || ['', ''])
+      const group = computed(() => (NAV.find((g) => g.items.some((it) => it.id === route.value)) || {}).group || '')
 
       // 登录态：URL ?token= 落地 → localStorage；无 token 显示登录框
       const loggedIn = ref(false)
@@ -76,67 +85,100 @@
         try { await window.store.loadScopes(); loggedIn.value = true }
         catch (e) { window.api.setToken(''); alert('登录失败：' + (e?.message || e)) }
       }
+      const logout = () => { loggedIn.value = false; window.api && window.api.setToken('') }
 
       onMounted(async () => {
         if (!loggedIn.value) return
         try { await window.store.loadScopes() } catch { /* 未登录或运行时未就绪，各页 load 时再处理 */ }
       })
 
-      return { route, go, view, title, NAV, navOpen, loggedIn, loginInput, doLogin }
+      return { route, go, view, title, group, NAV, DOCK, menuOpen, loggedIn, loginInput, doLogin, logout }
     },
     template: `
     <div v-if="!loggedIn" class="login-wrap">
       <div class="login-card">
-        <div class="brand-mark" style="width:48px;height:48px;font-size:26px"><v-icon name="bot"/></div>
-        <h2 style="margin:14px 0 4px">agents-plugin 管理面板</h2>
-        <p style="color:var(--muted,#888);font-size:13px;margin:0 0 16px">私聊 bot 发送 <b>#agents登录</b>，将返回的 token 粘贴到下方</p>
-        <input v-model="loginInput" placeholder="粘贴登录 token" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid var(--border,#ddd);border-radius:8px;font-size:14px;margin-bottom:12px" @keyup.enter="doLogin"/>
-        <button style="width:100%;padding:10px;background:var(--brand,#6366f1);color:#fff;border:0;border-radius:8px;font-size:14px;cursor:pointer" @click="doLogin">登录</button>
+        <div class="login-logo"><v-icon name="bot"/></div>
+        <h2 style="margin:16px 0 4px;font-size:20px">agents-plugin <span class="grad-t">管理面板</span></h2>
+        <p class="mut2" style="font-size:12.5px;margin:0 0 18px">私聊 bot 发送 <b>#agents登录</b>，将返回的 token 粘贴到下方</p>
+        <input class="inp" v-model="loginInput" placeholder="粘贴登录 token" style="margin-bottom:12px;text-align:left" @keyup.enter="doLogin"/>
+        <button class="btn b-pri" style="width:100%;padding:11px" @click="doLogin"><v-icon name="key"/>登 录</button>
       </div>
     </div>
-    <div v-else class="layout">
-      <!-- 侧边栏(移动端为抽屉) -->
-      <aside class="sidebar" :class="{open: navOpen}">
-        <div class="side-brand">
-          <div class="brand-mark"><v-icon name="bot"/></div>
+    <div v-else class="shell">
+      <!-- PC 悬浮侧栏 -->
+      <aside class="rail">
+        <div class="rail-head">
+          <div class="brand-badge"><v-icon name="bot"/></div>
           <div>
-            <div class="brand-name">agents-plugin</div>
-            <div class="brand-sub">AI Agents 管理面板</div>
+            <div class="brand-t grad-t">agents-plugin</div>
+            <div class="brand-s">AI Agents 管理面板</div>
           </div>
-          <button class="modal-x" style="margin-left:auto" @click="navOpen = false"><v-icon name="x"/></button>
         </div>
-        <nav class="side-nav">
+        <nav class="rail-nav">
           <template v-for="g in NAV" :key="g.group">
-            <div class="nav-group-label">{{ g.group }}</div>
-            <div v-for="it in g.items" :key="it.id" class="nav-item" :class="{active: route === it.id}" @click="go(it.id)">
+            <div class="nav-sec">{{ g.group }}</div>
+            <div v-for="it in g.items" :key="it.id" class="nav-link" :class="{on: route === it.id}" @click="go(it.id)">
               <v-icon :name="it.icon"/><span>{{ it.name }}</span>
               <span v-if="it.badge && it.badge()" class="nav-badge">{{ it.badge() }}</span>
             </div>
           </template>
         </nav>
-        <div class="side-foot"><span class="dot"></span>TRSS-Yunzai · 插件运行中</div>
+        <div class="rail-foot"><span class="st-dot"></span>TRSS-Yunzai · 插件运行中</div>
       </aside>
-      <Transition name="fade">
-        <div v-if="navOpen" class="side-backdrop" @click="navOpen = false"></div>
-      </Transition>
 
-      <!-- 主区 -->
-      <div class="main">
-        <header class="topbar">
-          <button class="nav-burger" @click="navOpen = true"><v-icon name="menu"/></button>
+      <div class="stage">
+        <!-- PC 胶囊顶栏 -->
+        <header class="bar">
           <div>
-            <div class="topbar-title">{{ title[0] }}</div>
-            <div class="topbar-sub">{{ title[1] }}</div>
+            <div class="bar-ts">{{ group }}</div>
+            <div class="bar-tt">{{ title[0] }}</div>
           </div>
-          <div class="topbar-right">
-            <button class="topbar-btn" @click="loggedIn = false; window.api && window.api.setToken('')" title="退出登录">退出</button>
+          <div class="bar-acts">
+            <span class="pill p-mint"><span class="st-dot"></span>运行中</span>
+            <button class="bar-btn" @click="logout" title="退出登录"><v-icon name="logout"/>退出</button>
           </div>
+        </header>
+        <!-- 移动端顶条 -->
+        <header class="m-top">
+          <div class="brand-badge"><v-icon name="bot"/></div>
+          <div>
+            <div class="mut2" style="font-size:10.5px;line-height:1.2">{{ group }}</div>
+            <div class="m-tt">{{ title[0] }}</div>
+          </div>
+          <button class="m-x" @click="logout" title="退出登录"><v-icon name="logout"/></button>
         </header>
         <main class="page">
           <Transition name="page" mode="out-in">
             <component :is="view" :key="route"/>
           </Transition>
         </main>
+      </div>
+
+      <!-- 移动端底部 Dock -->
+      <nav class="dock">
+        <div v-for="d in DOCK" :key="d.id" class="dock-i" :class="{on: route === d.id}" @click="go(d.id)">
+          <span v-if="d.badge && d.badge()" class="dock-badge">{{ d.badge() }}</span>
+          <v-icon :name="d.icon"/><span>{{ d.name }}</span>
+        </div>
+        <div class="dock-i" :class="{on: menuOpen}" @click="menuOpen = !menuOpen">
+          <v-icon name="grid"/><span>更多</span>
+        </div>
+      </nav>
+      <!-- 移动端全屏菜单 -->
+      <Transition name="fade">
+        <div v-if="menuOpen" class="sheet-back" @click="menuOpen = false"></div>
+      </Transition>
+      <div v-if="menuOpen" class="sheet">
+        <div class="sheet-grip"></div>
+        <template v-for="g in NAV" :key="g.group">
+          <div class="sheet-sec">{{ g.group }}</div>
+          <div class="sheet-grid">
+            <div v-for="it in g.items" :key="it.id" class="sheet-item" :class="{on: route === it.id}" @click="go(it.id)">
+              <span v-if="it.badge && it.badge()" class="nav-badge">{{ it.badge() }}</span>
+              <v-icon :name="it.icon"/><span>{{ it.name }}</span>
+            </div>
+          </div>
+        </template>
       </div>
       <toast-host/>
     </div>`,

@@ -1,7 +1,14 @@
 /** 视图:工具进化(Tool Evolution)· 候选版本/状态/审批/淘汰 */
 ;(function () {
   window.VIEWS = window.VIEWS || {}
-  const STATUS = { draft: '⚪ 草稿', verified: '🟡 待采纳', stable: '🟢 已上线', rejected: '⚫ 已拒绝', deprecated: '⚰ 已淘汰', quarantined: '🚫 隔离' }
+  const STATUS = {
+    draft: { name: '草稿', cls: 'p-line' },
+    verified: { name: '待采纳', cls: 'p-honey' },
+    stable: { name: '已上线', cls: 'p-green' },
+    rejected: { name: '已拒绝', cls: 'p-rose' },
+    deprecated: { name: '已淘汰', cls: 'p-line' },
+    quarantined: { name: '隔离', cls: 'p-rose' },
+  }
 
   window.VIEWS.evolution = {
     name: 'EvolutionView',
@@ -43,35 +50,36 @@
       return { list, loading, filter, filtered, stats, load, approve, decommission, rollback, STATUS }
     },
     template: `
-    <div class="card card-pad">
-      <div class="flex between mb16">
-        <div><div class="card-title"><v-icon name="tool"/> 工具进化</div><div class="card-sub">Tool Evolution · 候选生成(LLM+AST)→验证(沙箱)→审批→版本</div></div>
-        <button class="btn btn-ghost btn-sm" @click="load"><v-icon name="refresh"/>刷新</button>
-      </div>
+    <div>
+      <page-head title="工具进化" icon="tool" desc="Tool Evolution · 候选生成(LLM+AST) → 验证(沙箱) → 审批 → 版本。在 QQ 对 bot 发 #进化工具 <能力描述> 生成候选">
+        <button class="btn b-line" @click="load"><v-icon name="refresh"/>刷新</button>
+      </page-head>
 
-      <div class="flex gap6 wrap mb16">
-        <button class="chip" :class="{active: filter===''}" @click="filter=''">全部 {{list.length}}</button>
-        <button class="chip" :class="{active: filter==='verified'}" @click="filter='verified'">🟡待采纳 {{stats.verified||0}}</button>
-        <button class="chip" :class="{active: filter==='stable'}" @click="filter='stable'">🟢已上线 {{stats.stable||0}}</button>
-        <button class="chip" :class="{active: filter==='rejected'}" @click="filter='rejected'">⚫已拒绝 {{stats.rejected||0}}</button>
-      </div>
+      <div class="card pad" style="--i:1">
+        <div class="row g8 wrap mb16">
+          <button class="pill" :class="filter === '' ? 'p-pri' : ''" style="cursor:pointer" @click="filter=''">全部 {{ list.length }}</button>
+          <button class="pill" :class="filter === 'verified' ? 'p-honey' : ''" style="cursor:pointer" @click="filter='verified'">待采纳 {{ stats.verified || 0 }}</button>
+          <button class="pill" :class="filter === 'stable' ? 'p-green' : ''" style="cursor:pointer" @click="filter='stable'">已上线 {{ stats.stable || 0 }}</button>
+          <button class="pill" :class="filter === 'rejected' ? 'p-rose' : ''" style="cursor:pointer" @click="filter='rejected'">已拒绝 {{ stats.rejected || 0 }}</button>
+        </div>
 
-      <empty-state v-if="!filtered.length && !loading" icon="tool" text="暂无进化工具版本。在 QQ 对 bot 发 #进化工具 <能力描述> 生成候选"/>
+        <empty-state v-if="!filtered.length && !loading" icon="tool" text="暂无进化工具版本" sub="在 QQ 对 bot 发 #进化工具 <能力描述> 生成候选"/>
 
-      <div v-for="v in filtered" :key="v.id" class="cfg-item" style="margin-bottom:10px">
-        <div class="flex between wrap gap6">
-          <div style="min-width:0">
-            <b>{{ STATUS[v.status] || v.status }}</b>
-            <span class="mono muted" style="margin-left:8px">v{{ v.semver }}</span>
-            <span class="mono muted-3" style="font-size:10.5px;margin-left:8px">{{ v.id }}</span>
-          </div>
-          <div class="flex gap6">
-            <button v-if="v.status==='verified'" class="btn btn-primary btn-sm" @click="approve(v.id)"><v-icon name="check"/>采纳上线</button>
-            <button v-if="v.status==='stable'" class="btn btn-ghost btn-sm" @click="rollback(v.id)"><v-icon name="undo"/>设为当前</button>
-            <button v-if="v.status==='stable'" class="btn btn-ghost btn-sm" @click="decommission(v.id)">淘汰</button>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div v-for="v in filtered" :key="v.id" class="mem-row" style="align-items:center">
+            <span class="pill" :class="(STATUS[v.status] || STATUS.draft).cls">{{ (STATUS[v.status] || STATUS.draft).name }}</span>
+            <div style="flex:1;min-width:0">
+              <b style="font-size:13px" class="mono">{{ v.tool_id }}</b>
+              <span class="mono mut" style="margin-left:8px">v{{ v.semver }}</span>
+              <div class="mut2 mono ell" style="font-size:10.5px;margin-top:2px">id: {{ v.id }} · 生成模型: {{ v.generator_model || '—' }}</div>
+            </div>
+            <div class="row g6 wrap">
+              <button v-if="v.status==='verified'" class="btn b-pri b-sm" @click="approve(v.id)"><v-icon name="check"/>采纳上线</button>
+              <button v-if="v.status==='stable'" class="btn b-line b-sm" @click="rollback(v.id)"><v-icon name="undo"/>设为当前</button>
+              <button v-if="v.status==='stable'" class="btn b-danger b-sm" @click="decommission(v.id)">淘汰</button>
+            </div>
           </div>
         </div>
-        <div class="muted-3 mono ellipsis" style="font-size:10.5px;margin-top:4px">tool_id: {{ v.tool_id }} · 生成模型: {{ v.generator_model || '—' }}</div>
       </div>
     </div>`,
   }

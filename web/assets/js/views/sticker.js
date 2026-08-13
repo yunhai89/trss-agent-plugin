@@ -11,9 +11,9 @@
     name: 'CfgRow',
     props: { name: String, desc: { type: String, default: '' }, danger: Boolean, full: Boolean },
     template: `
-    <div class="cfg-item" :class="{full: full}" :style="danger ? {borderColor:'#f3c8d1', background:'linear-gradient(180deg,#fff,#fff8f9)'} : {}">
+    <div class="cf-item" :class="{full: full, dg: danger}">
       <div class="info">
-        <div class="name">{{ name }}<span v-if="danger" class="chip chip-rose" style="margin-left:7px;font-size:10px;padding:2px 7px">高危</span></div>
+        <div class="name">{{ name }}<span v-if="danger" class="pill p-rose" style="margin-left:7px;font-size:10px;padding:3px 8px">高危</span></div>
         <div class="desc" v-if="desc">{{ desc }}</div>
       </div>
       <div class="ctl"><slot/></div>
@@ -36,11 +36,11 @@
       return { input, add, del }
     },
     template: `
-    <div class="flex gap6 wrap" :style="'justify-content:flex-end' + (mono ? ';font-family:var(--mono,monospace)' : '')">
-      <span v-for="(t, i) in modelValue" :key="t + i" class="chip chip-primary" style="cursor:default" :class="{mono: mono}">
+    <div class="row g6 wrap" :style="'justify-content:flex-end' + (mono ? ';font-family:var(--mono,monospace)' : '')">
+      <span v-for="(t, i) in modelValue" :key="t + i" class="pill p-pri" style="cursor:default" :class="{mono: mono}">
         {{ t }}<v-icon name="x" style="cursor:pointer" @click="del(i)"/>
       </span>
-      <input v-model="input" class="input" :class="{mono: mono}" style="width:140px;padding:4px 9px;font-size:12px" :placeholder="placeholder" @keydown.enter.prevent="add">
+      <input v-model="input" class="inp" :class="{mono: mono}" style="width:140px;padding:5px 10px;font-size:12px" :placeholder="placeholder" @keydown.enter.prevent="add">
     </div>`,
   }
 
@@ -142,11 +142,11 @@
       }
 
       const sections = [
-        { id: 'basic', name: '基础 / 总开关', icon: 'smile', grad: 'var(--grad-amber)' },
+        { id: 'basic', name: '基础 / 总开关', icon: 'smile', grad: 'var(--grad-honey)' },
         { id: 'send', name: '发送策略', icon: 'send', grad: 'var(--grad-sky)' },
-        { id: 'repo', name: '仓库 / 同步', icon: 'refresh', grad: 'var(--grad-teal)' },
+        { id: 'repo', name: '仓库 / 同步', icon: 'refresh', grad: 'var(--grad-mint)' },
         { id: 'discover', name: '自动发现', icon: 'bot', grad: 'var(--grad-rose)' },
-        { id: 'lib', name: '表情包库', icon: 'image', grad: 'var(--grad-primary)' },
+        { id: 'lib', name: '表情包库', icon: 'image', grad: 'var(--grad)' },
       ]
       const open = reactive(Object.fromEntries(sections.map((s) => [s.id, s.id === 'basic'])))
       const activeSec = ref('basic')
@@ -180,42 +180,40 @@
       }
     },
     template: `
-    <div class="cfg-layout">
-      <div class="cfg-anchor">
-        <a v-for="s in sections" :key="s.id" :class="{active: activeSec === s.id}" @click="jump(s.id)">{{ s.name }}</a>
+    <div class="cf-wrap">
+      <div class="cf-nav">
+        <a v-for="s in sections" :key="s.id" :class="{on: activeSec === s.id}" @click="jump(s.id)">{{ s.name }}</a>
       </div>
 
       <div>
         <!-- 说明条 -->
-        <div class="card" style="padding:14px 16px;margin-bottom:14px;border-left:4px solid var(--brand,#6366f1)">
-          <div class="flex gap10" style="align-items:flex-start">
-            <v-icon name="smile" style="font-size:18px;color:var(--brand,#6366f1);margin-top:2px"/>
-            <div style="font-size:13px;line-height:1.7">
+        <div class="note">
+            <v-icon name="smile" />
+            <div>
               <b>表情包</b>：reply 时按情绪/语境贴图，自动发现（MaiBot 式）被动采集群内图片 → 视觉判定+打标 → 入库。
-              <span class="muted-3">未启用时零影响（不注入清单、不解析）。命令：<code>#表情包安装</code> / <code>#表情包目录</code>。</span>
+              <span class="mut2">未启用时零影响（不注入清单、不解析）。命令：<code>#表情包安装</code> / <code>#表情包目录</code>。</span>
             </div>
-          </div>
         </div>
 
         <!-- ===== 基础 / 总开关 ===== -->
-        <div :id="'sk-basic'" class="card cfg-section" :class="{open: open.basic}">
-          <div class="cfg-section-head" @click="open.basic = !open.basic">
-            <span class="ico" style="background:var(--grad-amber)"><v-icon name="smile"/></span>
-            <div><div class="card-title" style="font-size:14px">基础 / 总开关</div><div class="card-sub">总开关、仓库地址、清单注入</div></div>
-            <v-icon class="arrow" name="chevron"/>
+        <div :id="'sk-basic'" class="card cf-sec" :class="{open: open.basic}">
+          <div class="cf-sh" @click="open.basic = !open.basic">
+            <span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="smile"/></span>
+            <div><div class="ct-t">基础 / 总开关</div><div class="ct-s">总开关、仓库地址、清单注入</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
           </div>
-          <div class="cfg-body" v-show="open.basic"><div class="cfg-grid">
+          <div class="cf-body" v-show="open.basic"><div class="cf-grid">
             <cfg-row name="启用表情包" desc="未启用 → 不注入清单、不解析贴图标记（零影响）">
               <v-switch v-model="form.enable"/>
             </cfg-row>
             <cfg-row full name="官方仓库地址" desc="作者维护的表情包仓库；留空=尚未接入（可手动 git clone 到 _repo）">
-              <input class="input mono" style="width:100%" v-model="form.repo" placeholder="https://github.com/xxx/stickers">
+              <input class="inp mono" style="width:100%" v-model="form.repo" placeholder="https://github.com/xxx/stickers">
             </cfg-row>
             <cfg-row name="manifest 文件名" desc="留空=自动识别根目录第一个合规 .json（含 id/name/tags/docs）">
-              <input class="input" style="width:170px" v-model="form.manifest" placeholder="留空=自动">
+              <input class="inp" style="width:170px" v-model="form.manifest" placeholder="留空=自动">
             </cfg-row>
             <cfg-row name="清单注入上限" desc="prompt 注入的清单条数上限（listTopN）">
-              <input type="number" class="input" style="width:110px" min="5" max="200" v-model.number="form.listTopN">
+              <input type="number" class="inp" style="width:110px" min="5" max="200" v-model.number="form.listTopN">
             </cfg-row>
             <cfg-row name="仅群聊启用" desc="开=私聊不贴图">
               <v-switch v-model="form.groupOnly"/>
@@ -224,22 +222,22 @@
         </div>
 
         <!-- ===== 发送策略 ===== -->
-        <div :id="'sk-send'" class="card cfg-section" :class="{open: open.send}">
-          <div class="cfg-section-head" @click="open.send = !open.send">
-            <span class="ico" style="background:var(--grad-sky)"><v-icon name="send"/></span>
-            <div><div class="card-title" style="font-size:14px">发送策略</div><div class="card-sub">频率/概率闸门，避免每条都带图</div></div>
-            <v-icon class="arrow" name="chevron"/>
+        <div :id="'sk-send'" class="card cf-sec" :class="{open: open.send}">
+          <div class="cf-sh" @click="open.send = !open.send">
+            <span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="send"/></span>
+            <div><div class="ct-t">发送策略</div><div class="ct-s">频率/概率闸门，避免每条都带图</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
           </div>
-          <div class="cfg-body" v-show="open.send"><div class="cfg-grid">
+          <div class="cf-body" v-show="open.send"><div class="cf-grid">
             <cfg-row name="单条最多贴图数" desc="单条回复最多贴的贴纸数（maxPerReply）">
-              <input type="number" class="input" style="width:90px" min="0" max="5" v-model.number="form.maxPerReply">
+              <input type="number" class="inp" style="width:90px" min="0" max="5" v-model.number="form.maxPerReply">
             </cfg-row>
             <cfg-row name="带图冷却(秒)" desc="同会话两次带图回复最小间隔（cooldown）">
-              <input type="number" class="input" style="width:110px" min="0" max="3600" v-model.number="form.cooldown">
+              <input type="number" class="inp" style="width:110px" min="0" max="3600" v-model.number="form.cooldown">
             </cfg-row>
             <cfg-row name="带图概率 sendRate" desc="门控通过后实际带图概率（防每条都带 → 更像人）">
-              <div class="flex gap10" style="width:200px">
-                <input type="range" class="slider" min="0" max="1" step="0.05" v-model.number="form.sendRate" :style="{'--fill': sendRatePct}">
+              <div class="row g10" style="width:200px">
+                <input type="range" class="rng" min="0" max="1" step="0.05" v-model.number="form.sendRate" :style="{'--fill': sendRatePct}">
                 <b class="num" style="width:34px;text-align:right">{{ Number(form.sendRate||0).toFixed(2) }}</b>
               </div>
             </cfg-row>
@@ -253,15 +251,15 @@
         </div>
 
         <!-- ===== 仓库 / 同步 ===== -->
-        <div :id="'sk-repo'" class="card cfg-section" :class="{open: open.repo}">
-          <div class="cfg-section-head" @click="open.repo = !open.repo">
-            <span class="ico" style="background:var(--grad-teal)"><v-icon name="refresh"/></span>
-            <div><div class="card-title" style="font-size:14px">仓库 / 同步</div><div class="card-sub">git 代理加速、目录/关键词黑名单</div></div>
-            <v-icon class="arrow" name="chevron"/>
+        <div :id="'sk-repo'" class="card cf-sec" :class="{open: open.repo}">
+          <div class="cf-sh" @click="open.repo = !open.repo">
+            <span class="ct-ico" style="background:var(--grad-mint)"><v-icon name="refresh"/></span>
+            <div><div class="ct-t">仓库 / 同步</div><div class="ct-s">git 代理加速、目录/关键词黑名单</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
           </div>
-          <div class="cfg-body" v-show="open.repo"><div class="cfg-grid">
+          <div class="cf-body" v-show="open.repo"><div class="cf-grid">
             <cfg-row name="git http.proxy" desc="fetch 兜底代理（如 http://127.0.0.1:7890）">
-              <input class="input mono" style="width:200px" v-model="form.gitProxy" placeholder="留空=不走代理">
+              <input class="inp mono" style="width:200px" v-model="form.gitProxy" placeholder="留空=不走代理">
             </cfg-row>
             <cfg-row full name="克隆加速代理" desc="追加在内置 ghfast.top/gh-proxy.com 等之上，安装时测速选最快">
               <tag-editor v-model="form.githubProxies" placeholder="https://ghproxy.net/" :mono="true"/>
@@ -276,13 +274,13 @@
         </div>
 
         <!-- ===== 自动发现 ===== -->
-        <div :id="'sk-discover'" class="card cfg-section" :class="{open: open.discover}">
-          <div class="cfg-section-head" @click="open.discover = !open.discover">
-            <span class="ico" style="background:var(--grad-rose)"><v-icon name="bot"/></span>
-            <div><div class="card-title" style="font-size:14px">自动发现（MaiBot 式）</div><div class="card-sub">被动采集群内 image 段 → 视觉判定+打标 → 入库</div></div>
-            <v-icon class="arrow" name="chevron"/>
+        <div :id="'sk-discover'" class="card cf-sec" :class="{open: open.discover}">
+          <div class="cf-sh" @click="open.discover = !open.discover">
+            <span class="ct-ico" style="background:var(--grad-rose)"><v-icon name="bot"/></span>
+            <div><div class="ct-t">自动发现（MaiBot 式）</div><div class="ct-s">被动采集群内 image 段 → 视觉判定+打标 → 入库</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
           </div>
-          <div class="cfg-body" v-show="open.discover"><div class="cfg-grid">
+          <div class="cf-body" v-show="open.discover"><div class="cf-grid">
             <cfg-row name="自动发现" desc="需 sticker.enable + 视觉模型（agent.vision）。开=采集群内 image 段">
               <v-switch v-model="form.autoDiscover"/>
             </cfg-row>
@@ -290,56 +288,63 @@
               <tag-editor v-model="form.discoverGroups" placeholder="群号回车" :mono="true"/>
             </cfg-row>
             <cfg-row name="采集上限" desc="自动发现条目上限（maxDiscovered）；超限按 usageCount 升序淘汰冷门">
-              <input type="number" class="input" style="width:110px" min="10" max="2000" v-model.number="form.maxDiscovered">
+              <input type="number" class="inp" style="width:110px" min="10" max="2000" v-model.number="form.maxDiscovered">
             </cfg-row>
             <cfg-row name="单张大小上限(MB)" desc="0=不限（discoverMaxSizeMB）">
-              <input type="number" class="input" style="width:110px" min="0" max="50" v-model.number="form.discoverMaxSizeMB">
+              <input type="number" class="inp" style="width:110px" min="0" max="50" v-model.number="form.discoverMaxSizeMB">
             </cfg-row>
           </div></div>
         </div>
 
         <!-- ===== 表情包库（概览，只读 + 目录启停） ===== -->
-        <div :id="'sk-lib'" class="card cfg-section" :class="{open: open.lib}">
-          <div class="cfg-section-head" @click="open.lib = !open.lib">
-            <span class="ico" style="background:var(--grad-primary)"><v-icon name="info"/></span>
-            <div><div class="card-title" style="font-size:14px">表情包库</div><div class="card-sub">已入库统计 + 目录启停（只读概览）</div></div>
-            <v-icon class="arrow" name="chevron"/>
+        <div :id="'sk-lib'" class="card cf-sec" :class="{open: open.lib}">
+          <div class="cf-sh" @click="open.lib = !open.lib">
+            <span class="ct-ico" style="background:var(--grad)"><v-icon name="info"/></span>
+            <div><div class="ct-t">表情包库</div><div class="ct-s">已入库统计 + 目录启停（只读概览）</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
           </div>
-          <div class="cfg-body" v-show="open.lib">
-            <div class="flex gap10" style="align-items:center;margin-bottom:12px">
-              <button class="btn btn-ghost" @click="refreshLib" :disabled="lib.loading"><v-icon name="refresh"/> 刷新</button>
-              <span v-if="lib.loading" class="muted">加载中…</span>
-              <span v-if="lib.error" style="color:var(--rose,#e11d48);font-size:12px"><v-icon name="warn"/> {{ lib.error }}</span>
+          <div class="cf-body" v-show="open.lib">
+            <div class="row g10" style="align-items:center;margin-bottom:12px">
+              <button class="btn b-line" @click="refreshLib" :disabled="lib.loading"><v-icon name="refresh"/> 刷新</button>
+              <span v-if="lib.loading" class="mut">加载中…</span>
+              <span v-if="lib.error" style="color:var(--rose);font-size:12px"><v-icon name="warn"/> {{ lib.error }}</span>
             </div>
-            <div v-if="lib.data" class="cfg-grid">
+            <div v-if="lib.data" class="cf-grid">
               <cfg-row name="总开关状态" desc="当前 sticker.enable">
-                <span class="chip" :class="lib.data.enabled ? 'chip-green' : 'chip-rose'">{{ lib.data.enabled ? '已启用' : '未启用' }}</span>
+                <span class="pill" :class="lib.data.enabled ? 'chip-green' : 'chip-rose'">{{ lib.data.enabled ? '已启用' : '未启用' }}</span>
               </cfg-row>
               <cfg-row name="仓库安装状态" desc="_repo 是否已克隆">
-                <span class="chip" :class="lib.data.repoInstalled ? 'chip-green' : 'chip-rose'">{{ lib.data.repoInstalled ? '已安装' : '未安装（#表情包安装）' }}</span>
+                <span class="pill" :class="lib.data.repoInstalled ? 'chip-green' : 'chip-rose'">{{ lib.data.repoInstalled ? '已安装' : '未安装（#表情包安装）' }}</span>
               </cfg-row>
               <cfg-row name="入库总数 / 自动采集" desc="index 内 sticker 总数；其中 source=discovered 计数">
-                <b class="num">{{ lib.data.total }}</b><span class="muted" style="margin:0 8px">/</span><b class="num">{{ lib.data.discovered }}</b>
+                <b class="num">{{ lib.data.total }}</b><span class="mut" style="margin:0 8px">/</span><b class="num">{{ lib.data.discovered }}</b>
               </cfg-row>
               <div class="full" style="margin-top:6px">
-                <div class="muted" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="info"/> 目录启停（✅启用 / ⏸️停用；停用即加入 excludeDirs 并重建清单）</div>
-                <div v-if="(lib.data.dirs || []).length" class="flex gap6 wrap">
-                  <span v-for="d in lib.data.dirs" :key="d.name" class="chip" :class="d.enabled ? 'chip-green' : 'chip-rose'" style="cursor:pointer;padding:5px 10px" @click="toggleDir(d)">
+                <div class="mut" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="info"/> 目录启停（✅启用 / ⏸️停用；停用即加入 excludeDirs 并重建清单）</div>
+                <div v-if="(lib.data.dirs || []).length" class="row g6 wrap">
+                  <span v-for="d in lib.data.dirs" :key="d.name" class="pill" :class="d.enabled ? 'p-green' : 'p-rose'" style="cursor:pointer;padding:5px 10px" @click="toggleDir(d)">
                     {{ d.enabled ? '✅' : '⏸️' }} {{ d.label || d.name }}
                   </span>
                 </div>
-                <div v-else class="muted-3" style="font-size:12px">暂无目录（未安装仓库，或仓库为空）。</div>
+                <div v-else class="mut2" style="font-size:12px">暂无目录（未安装仓库，或仓库为空）。</div>
               </div>
             </div>
-            <div v-else-if="!lib.loading && !lib.error" class="muted-3" style="font-size:12px">点「刷新」加载库数据。</div>
+            <div v-else-if="!lib.loading && !lib.error" class="mut2" style="font-size:12px">点「刷新」加载库数据。</div>
           </div>
         </div>
 
         <!-- 保存条 -->
-        <div style="position:sticky;bottom:0;margin-top:14px;padding:12px 16px;background:var(--surface,#fff);border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:10px;z-index:5">
-          <button class="btn btn-ghost" @click="reset" :disabled="!dirty"><v-icon name="undo"/> 还原</button>
-          <button class="btn btn-primary" @click="save" :disabled="!dirty"><v-icon name="save"/> 保存（热加载）</button>
-        </div>
+        <!-- 保存栏 -->
+        <Transition name="fade">
+          <div v-if="dirty" class="savebar">
+            <span class="dirty-dot"></span>
+            <span style="font-weight:700;font-size:13px">有未保存的修改</span>
+            <div class="row g10" style="margin-left:auto">
+              <button class="btn b-line" @click="reset"><v-icon name="undo"/>还原</button>
+              <button class="btn b-pri" @click="save"><v-icon name="save"/>保存（热加载）</button>
+            </div>
+          </div>
+        </Transition>
       </div>
     </div>`,
   }

@@ -68,33 +68,29 @@
     },
     template: `
     <div>
-      <div class="sec-head" style="--i:0">
-        <div>
-          <h3>人设库</h3>
-          <div class="desc">data/personas/&lt;id&gt;.json · 内置为代码常量(builtin 只读),自定义可编辑</div>
-        </div>
-        <button class="btn btn-primary" @click="openCreate"><v-icon name="plus"/>新建人设</button>
-      </div>
+      <page-head title="人设库" icon="persona" desc="data/personas/&lt;id&gt;.json · 内置为代码常量(只读)，自定义可编辑">
+        <button class="btn b-pri" @click="openCreate"><v-icon name="plus"/>新建人设</button>
+      </page-head>
 
-      <div class="grid grid-3 stagger">
-        <div v-for="(p, i) in personas" :key="p.id" class="card hoverable persona-card" :style="{'--i': i + 1}" @click="detail = p">
-          <div class="flex between">
-            <div class="persona-ava" :style="{background: AVA_BG[i % AVA_BG.length]}">{{ p.avatar }}</div>
-            <span v-if="p.builtin" class="chip chip-outline"><v-icon name="lock"/>内置</span>
-            <span v-else class="chip chip-violet">自定义</span>
+      <div class="grid g3 stagger">
+        <div v-for="(p, i) in personas" :key="p.id" class="card lift ps-card" :style="{'--i': i + 1}" @click="detail = p">
+          <div class="row-b">
+            <div class="ps-ava" :style="{background: AVA_BG[i % AVA_BG.length]}">{{ p.avatar }}</div>
+            <span v-if="p.builtin" class="pill p-line"><v-icon name="lock"/>内置</span>
+            <span v-else class="pill p-vio">自定义</span>
           </div>
           <div>
             <div style="font-weight:800;font-size:15px">{{ p.name }}</div>
-            <div class="muted" style="font-size:12px;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">{{ p.description }}</div>
+            <div class="mut" style="font-size:12px;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">{{ p.description }}</div>
           </div>
-          <div class="flex gap6 wrap">
-            <span v-for="t in p.tags" :key="t" class="chip chip-primary" style="font-size:10.5px">{{ t }}</span>
+          <div class="row g6 wrap">
+            <span v-for="t in p.tags" :key="t" class="pill p-pri" style="font-size:10.5px">{{ t }}</span>
           </div>
-          <div class="flex between" style="margin-top:auto">
-            <span class="muted-3" style="font-size:11px">{{ fmt.ago(p.createdAt) }}创建</span>
-            <div class="flex gap6" @click.stop>
-              <button class="icon-btn" @click="openEdit(p, i)" :title="p.builtin ? '内置只读' : '编辑'"><v-icon name="edit"/></button>
-              <button class="icon-btn danger" @click="del(p, i)"><v-icon name="trash"/></button>
+          <div class="row-b" style="margin-top:auto">
+            <span class="mut2" style="font-size:11px">{{ fmt.ago(p.createdAt) }}创建</span>
+            <div class="row g6" @click.stop>
+              <button class="bic" @click="openEdit(p, i)" :title="p.builtin ? '内置只读' : '编辑'"><v-icon name="edit"/></button>
+              <button class="bic dg" @click="del(p, i)"><v-icon name="trash"/></button>
             </div>
           </div>
         </div>
@@ -102,50 +98,50 @@
 
       <!-- 详情 -->
       <v-modal v-if="detail" :title="detail.name" icon="persona" width="720px" @close="detail = null">
-        <div class="flex gap14" style="align-items:flex-start">
-          <div class="persona-ava" style="width:64px;height:64px;font-size:32px;flex:0 0 64px" :style="{background: AVA_BG[0]}">{{ detail.avatar }}</div>
-          <div style="flex:1">
-            <div class="flex gap6 wrap">
-              <span class="chip" :class="detail.builtin ? 'chip-outline' : 'chip-violet'">{{ detail.builtin ? '内置(代码常量)' : '自定义 .json' }}</span>
-              <span v-for="t in detail.tags" :key="t" class="chip chip-primary">{{ t }}</span>
+        <div class="row g14" style="align-items:flex-start">
+          <div class="ps-ava" style="width:64px;height:64px;font-size:32px;flex:0 0 64px" :style="{background: AVA_BG[0]}">{{ detail.avatar }}</div>
+          <div style="flex:1;min-width:0">
+            <div class="row g6 wrap">
+              <span class="pill" :class="detail.builtin ? 'p-line' : 'p-vio'">{{ detail.builtin ? '内置(代码常量)' : '自定义 .json' }}</span>
+              <span v-for="t in detail.tags" :key="t" class="pill p-pri">{{ t }}</span>
             </div>
-            <p class="muted mt10" style="font-size:13px">{{ detail.description }}</p>
+            <p class="mut mt8" style="font-size:13px">{{ detail.description }}</p>
           </div>
         </div>
-        <div class="divider"></div>
+        <div class="hr"></div>
         <div class="field">
-          <label class="field-label">开场白 greeting</label>
-          <div class="bubble assistant" style="max-width:100%">{{ detail.greeting }}</div>
+          <label class="f-label">开场白 greeting</label>
+          <div class="m-b a" style="max-width:100%">{{ detail.greeting }}</div>
         </div>
         <div class="field mt16">
-          <label class="field-label">systemPrompt</label>
+          <label class="f-label">systemPrompt</label>
           <pre class="code" style="white-space:pre-wrap">{{ detail.systemPrompt }}</pre>
         </div>
-        <div class="muted-3 mt16" style="font-size:11.5px">id: <span class="mono">{{ detail.id }}</span> · creator: {{ detail.creator || '—' }} · {{ new Date(detail.createdAt).toLocaleString('zh-CN') }}</div>
+        <div class="mut2 mt16" style="font-size:11.5px">id: <span class="mono">{{ detail.id }}</span> · creator: {{ detail.creator || '—' }} · {{ new Date(detail.createdAt).toLocaleString('zh-CN') }}</div>
       </v-modal>
 
       <!-- 编辑/新建 -->
       <v-modal v-if="editor.show" :title="editor.idx === -1 ? '新建人设' : '编辑人设 · ' + editor.form.name" icon="edit" width="720px" @close="editor.show = false">
-        <div class="grid grid-2" style="gap:14px">
-          <div class="field"><label class="field-label">名称</label><input class="input" v-model="editor.form.name"></div>
-          <div class="field"><label class="field-label">头像 emoji</label><input class="input" v-model="editor.form.avatar" maxlength="4"></div>
-          <div class="field" style="grid-column:1/-1"><label class="field-label">一句话描述</label><input class="input" v-model="editor.form.description"></div>
+        <div class="grid g2" style="gap:14px">
+          <div class="field"><label class="f-label">名称</label><input class="inp" v-model="editor.form.name"></div>
+          <div class="field"><label class="f-label">头像 emoji</label><input class="inp" v-model="editor.form.avatar" maxlength="4"></div>
+          <div class="field" style="grid-column:1/-1"><label class="f-label">一句话描述</label><input class="inp" v-model="editor.form.description"></div>
           <div class="field" style="grid-column:1/-1">
-            <label class="field-label">标签(≤8,回车添加)</label>
-            <div class="flex gap6 wrap">
-              <span v-for="(t, i) in editor.form.tags" :key="t" class="chip chip-primary">{{ t }}<v-icon name="x" style="cursor:pointer" @click="editor.form.tags.splice(i, 1)"/></span>
-              <input class="input" style="width:130px;padding:4px 9px;font-size:12px" v-model="tagInput" @keydown.enter.prevent="addTag" placeholder="回车添加">
+            <label class="f-label">标签(≤8,回车添加)</label>
+            <div class="row g6 wrap">
+              <span v-for="(t, i) in editor.form.tags" :key="t" class="pill p-pri">{{ t }}<v-icon name="x" style="cursor:pointer" @click="editor.form.tags.splice(i, 1)"/></span>
+              <input class="inp" style="width:130px;padding:5px 10px;font-size:12px" v-model="tagInput" @keydown.enter.prevent="addTag" placeholder="回车添加">
             </div>
           </div>
-          <div class="field" style="grid-column:1/-1"><label class="field-label">开场白</label><input class="input" v-model="editor.form.greeting"></div>
+          <div class="field" style="grid-column:1/-1"><label class="f-label">开场白</label><input class="inp" v-model="editor.form.greeting"></div>
           <div class="field" style="grid-column:1/-1">
-            <label class="field-label">systemPrompt</label>
-            <textarea class="textarea" style="min-height:130px" v-model="editor.form.systemPrompt"></textarea>
+            <label class="f-label">systemPrompt</label>
+            <textarea class="txa" style="min-height:130px" v-model="editor.form.systemPrompt"></textarea>
           </div>
         </div>
         <template #foot>
-          <button class="btn btn-ghost" @click="editor.show = false">取消</button>
-          <button class="btn btn-primary" @click="applyEdit"><v-icon name="check"/>保存(模拟)</button>
+          <button class="btn b-line" @click="editor.show = false">取消</button>
+          <button class="btn b-pri" @click="applyEdit"><v-icon name="check"/>保存</button>
         </template>
       </v-modal>
     </div>`,

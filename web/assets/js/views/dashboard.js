@@ -13,11 +13,11 @@
         const cfg = M.config || {}
         return [
           {
-            icon: 'cpu', grad: 'var(--grad-primary)', label: '主模型', value: cfg.model || '—',
+            icon: 'cpu', grad: 'var(--grad)', label: '主模型', value: cfg.model || '—',
             sub: `${cfg.preset || '—'} · ${cfg.protocol || '—'}`,
           },
           {
-            icon: 'recall', grad: 'var(--grad-teal)', label: '长期记忆条目', value: Object.values(M.recall || {}).flat().length,
+            icon: 'recall', grad: 'var(--grad-mint)', label: '长期记忆条目', value: Object.values(M.recall || {}).flat().length,
             sub: `上限 ${cfg.recall?.cap || '—'} 条/用户 · 抽取每 ${cfg.recall?.extractEvery || '—'} 轮`, count: true,
           },
           {
@@ -25,7 +25,7 @@
             sub: '群聊/私聊会话总数', count: true,
           },
           {
-            icon: 'confirm', grad: 'var(--grad-amber)', label: '待审批 / 待审建议', value: (M.confirms || []).length + (M.suggestions || []).filter((s) => s.status === 'pending').length,
+            icon: 'confirm', grad: 'var(--grad-honey)', label: '待审批 / 待审建议', value: (M.confirms || []).length + (M.suggestions || []).filter((s) => s.status === 'pending').length,
             sub: '审批为纯内存,重启清空', count: true,
           },
           {
@@ -33,7 +33,7 @@
             sub: '对话轮次 (run_end 聚合)', count: true,
           },
           {
-            icon: 'tool', grad: 'var(--grad-sky)', label: '工具调用次数', value: M.totalToolCalls || 0,
+            icon: 'tool', grad: 'var(--grad-vio)', label: '工具调用次数', value: M.totalToolCalls || 0,
             sub: '近 7 日累计', count: true,
           },
         ]
@@ -58,7 +58,7 @@
         return { W, H: Hgt, lineIn: line('input'), lineOut: line('output'), areaIn: area('input'), areaOut: area('output'), days: trend.map((d) => d.day), dots, single: trend.length === 1 }
       })
 
-      /* 请求趋势柱状图（每日对话轮次 = run_end 计数）—— MinBot 风格简洁柱图 */
+      /* 请求趋势柱状图（每日对话轮次 = run_end 计数） */
       const reqChart = computed(() => {
         const W = 560, Hgt = 180, PAD = 8
         const trend = M.requestTrend || []
@@ -99,158 +99,171 @@
         try { await window.store.loadConfig() } catch { /* 忽略 */ }
       })
 
-      return { stats, chart, reqChart, toolTop, toolMax, switches, perceptions, totalTokens, fmt }
+      return { stats, chart, reqChart, toolTop, toolMax, switches, perceptions, totalTokens, fmt, M }
     },
     template: `
     <div>
       <!-- Hero -->
       <div class="hero" style="--i:0">
-        <div class="hero-blob b1"></div><div class="hero-blob b2"></div><div class="hero-blob b3"></div>
+        <div class="h-blob b1"></div><div class="h-blob b2"></div><div class="h-blob b3"></div>
         <div style="position:relative">
-          <div class="flex gap10 wrap">
-            <h2>agents-plugin 管理面板</h2>
-            <span class="chip chip-primary"><v-icon name="zap"/>运行中</span>
-            <span class="chip chip-sky">v0.2.0</span>
+          <div class="row g10 wrap">
+            <h2>agents-plugin <span class="grad-t">管理面板</span></h2>
+            <span class="pill p-mint"><v-icon name="zap"/>运行中</span>
+            <span class="pill p-sky">v0.2.0</span>
           </div>
           <p>多模型对话 · 工具调用 · 长期记忆 · 人设 · 多模态 · 深度研究 · MCP · 自进化。
-            近 7 日累计消耗 <b class="num" style="color:var(--primary)">{{ fmt.num(totalTokens) }}</b> tokens。</p>
+            近 7 日累计消耗 <b class="num" style="color:var(--pri)">{{ fmt.num(totalTokens) }}</b> tokens。</p>
+          <div class="hero-qs">
+            <span class="qs"><v-icon name="zap"/>请求 <b class="num">{{ fmt.num(M.totalRequests || 0) }}</b></span>
+            <span class="qs"><v-icon name="tool"/>工具调用 <b class="num">{{ fmt.num(M.totalToolCalls || 0) }}</b></span>
+            <span class="qs"><v-icon name="session"/>活跃对话 <b class="num">{{ fmt.num(M.counts?.conversations ?? 0) }}</b></span>
+            <span class="qs"><v-icon name="recall"/>长期记忆 <b class="num">{{ fmt.num(Object.values(M.recall || {}).flat().length) }}</b></span>
+          </div>
         </div>
       </div>
 
       <!-- 统计卡片 -->
-      <div class="grid grid-4 mt16 stagger">
-        <div v-for="(s, i) in stats" :key="s.label" class="card hoverable stat-card" :style="{'--i': i+1}">
-          <div class="stat-icon" :style="{background: s.grad}"><v-icon :name="s.icon"/></div>
-          <div class="stat-value">
+      <div class="grid g3 mt16 stagger">
+        <div v-for="(s, i) in stats" :key="s.label" class="card lift stat" :style="{'--i': i+1}">
+          <div class="st-ico" :style="{background: s.grad}"><v-icon :name="s.icon"/></div>
+          <div class="st-v">
             <count-up v-if="s.count" :to="s.value"/>
             <span v-else class="mono" style="font-size:19px">{{ s.value }}</span>
           </div>
-          <div class="stat-label">{{ s.label }}</div>
-          <div class="stat-trend muted-3">{{ s.sub }}</div>
+          <div class="st-l">{{ s.label }}</div>
+          <div class="st-s">{{ s.sub }}</div>
         </div>
       </div>
 
       <!-- 图表区 -->
-      <div class="grid mt16 cols-wide">
-        <div class="card card-pad hoverable" style="--i:5">
-          <div class="flex between">
-            <div>
-              <div class="card-title"><v-icon name="zap"/>Token 消耗趋势</div>
-              <div class="card-sub">按 devLog run_end.usage 聚合 · 近 7 日</div>
+      <div class="grid mt16 cols-w">
+        <div class="card pad lift" style="--i:7">
+          <div class="row-b wrap g10">
+            <div class="ct">
+              <span class="ct-ico" style="background:var(--grad)"><v-icon name="zap"/></span>
+              <div><div class="ct-t">Token 消耗趋势</div><div class="ct-s">按 devLog run_end.usage 聚合 · 近 7 日</div></div>
             </div>
-            <div class="flex gap14" style="font-size:12px">
-              <span class="flex gap6"><i style="width:10px;height:10px;border-radius:3px;background:var(--primary)"></i>输入</span>
-              <span class="flex gap6"><i style="width:10px;height:10px;border-radius:3px;background:var(--teal)"></i>输出</span>
+            <div class="row g14" style="font-size:12px">
+              <span class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:#6366f1"></i>输入</span>
+              <span class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:#2dd4bf"></i>输出</span>
             </div>
           </div>
           <svg v-if="chart.lineIn" :viewBox="'0 0 ' + chart.W + ' ' + chart.H" style="width:100%;margin-top:14px;display:block">
             <defs>
               <linearGradient id="agIn" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="#3b82f6" stop-opacity=".28"/><stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
+                <stop offset="0%" stop-color="#6366f1" stop-opacity=".28"/><stop offset="100%" stop-color="#6366f1" stop-opacity="0"/>
               </linearGradient>
               <linearGradient id="agOut" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="#14b8a6" stop-opacity=".25"/><stop offset="100%" stop-color="#14b8a6" stop-opacity="0"/>
+                <stop offset="0%" stop-color="#2dd4bf" stop-opacity=".25"/><stop offset="100%" stop-color="#2dd4bf" stop-opacity="0"/>
               </linearGradient>
             </defs>
             <path :d="chart.areaIn" fill="url(#agIn)"/>
             <path :d="chart.areaOut" fill="url(#agOut)"/>
-            <polyline :points="chart.lineIn" fill="none" stroke="#3b82f6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
-              pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:1;animation:dashIn 1.4s .2s var(--ease-out) forwards"/>
-            <polyline :points="chart.lineOut" fill="none" stroke="#14b8a6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
-              pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:1;animation:dashIn 1.4s .5s var(--ease-out) forwards"/>
+            <polyline :points="chart.lineIn" fill="none" stroke="#6366f1" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
+              pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:1;animation:dashIn 1.4s .2s var(--eo) forwards"/>
+            <polyline :points="chart.lineOut" fill="none" stroke="#2dd4bf" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
+              pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:1;animation:dashIn 1.4s .5s var(--eo) forwards"/>
             <template v-if="chart.single && chart.dots.length">
-              <circle :cx="chart.dots[0].x" :cy="chart.dots[0].yIn" r="3.5" fill="#3b82f6"/>
-              <circle :cx="chart.dots[0].x" :cy="chart.dots[0].yOut" r="3.5" fill="#14b8a6"/>
+              <circle :cx="chart.dots[0].x" :cy="chart.dots[0].yIn" r="3.5" fill="#6366f1"/>
+              <circle :cx="chart.dots[0].x" :cy="chart.dots[0].yOut" r="3.5" fill="#2dd4bf"/>
             </template>
           </svg>
-          <div v-if="chart.lineIn" class="flex between" style="padding:0 8px;font-size:11px;color:var(--text-3)">
+          <div v-if="chart.lineIn" class="row-b" style="padding:0 8px;font-size:11px;color:var(--ink3)">
             <span v-for="d in chart.days" :key="d">{{ d }}</span>
           </div>
-          <div v-else style="padding:34px 16px;text-align:center;color:var(--text-3)">
-            <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:var(--text-2)">暂无数据</div>
+          <div v-else style="padding:34px 16px;text-align:center;color:var(--ink3)">
+            <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:var(--ink2)">暂无数据</div>
             <div style="font-size:11.5px">产生对话（@机器人 / #ai）后自动统计</div>
           </div>
         </div>
 
-        <div class="card card-pad hoverable" style="--i:6">
-          <div class="card-title"><v-icon name="tool"/>工具调用 Top5</div>
-          <div class="card-sub">按 tool 事件计数 · 近 7 日</div>
+        <div class="card pad lift" style="--i:8">
+          <div class="ct">
+            <span class="ct-ico" style="background:var(--grad-vio)"><v-icon name="tool"/></span>
+            <div><div class="ct-t">工具调用 Top5</div><div class="ct-s">按 tool 事件计数 · 近 7 日</div></div>
+          </div>
           <div v-if="toolTop.length" class="mt16" style="display:flex;flex-direction:column;gap:13px">
-            <div v-for="(t, i) in toolTop" :key="t.name" :style="{'--i': i}" class="stagger" style="animation:fadeUp .5s var(--ease-out) backwards">
-              <div class="flex between" style="font-size:12.5px;margin-bottom:5px">
+            <div v-for="(t, i) in toolTop" :key="t.name" :style="{'--i': i, animation: 'fadeUp .5s var(--eo) backwards', animationDelay: (i * 60) + 'ms'}">
+              <div class="row-b" style="font-size:12.5px;margin-bottom:5px">
                 <span class="mono" style="font-weight:700">{{ t.name }}</span>
-                <span class="muted num">{{ t.count }} 次</span>
+                <span class="mut num">{{ t.count }} 次</span>
               </div>
-              <div class="progress" :class="['', 'teal', 'amber', 'rose', ''][i]">
+              <div class="meter" :class="['', 'm-mint', 'm-honey', 'm-rose', ''][i]">
                 <i :style="{width: (t.count / toolMax * 100) + '%', transitionDelay: (i * 90 + 200) + 'ms'}"></i>
               </div>
             </div>
           </div>
-          <div v-else style="padding:34px 16px;text-align:center;color:var(--text-3)">
-            <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:var(--text-2)">暂无数据</div>
+          <div v-else style="padding:34px 16px;text-align:center;color:var(--ink3)">
+            <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:var(--ink2)">暂无数据</div>
             <div style="font-size:11.5px">产生对话后自动统计</div>
           </div>
         </div>
       </div>
 
       <!-- 请求趋势柱状图（近 7 日对话轮次） -->
-      <div class="card card-pad hoverable mt16" style="--i:9">
-        <div class="flex between">
-          <div>
-            <div class="card-title"><v-icon name="zap"/>请求趋势（每日对话轮次）</div>
-            <div class="card-sub">按 devLog run_end 计数 · 近 7 日 · 共 {{ fmt.num(totalRequests || 0) }} 次</div>
+      <div class="card pad lift mt16" style="--i:9">
+        <div class="row-b wrap g10">
+          <div class="ct">
+            <span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="zap"/></span>
+            <div><div class="ct-t">请求趋势（每日对话轮次）</div><div class="ct-s">按 devLog run_end 计数 · 近 7 日 · 共 {{ fmt.num(M.totalRequests || 0) }} 次</div></div>
           </div>
-          <span class="chip chip-primary" style="font-size:11px">峰值 {{ reqChart.max }} / 日</span>
+          <span class="pill p-pri" style="font-size:11px">峰值 {{ reqChart.max }} / 日</span>
         </div>
         <svg v-if="reqChart.bars.length" :viewBox="'0 0 ' + reqChart.W + ' ' + reqChart.H" style="width:100%;margin-top:14px;display:block">
           <defs>
             <linearGradient id="agReq" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#6366f1" stop-opacity=".9"/><stop offset="100%" stop-color="#6366f1" stop-opacity=".45"/>
+              <stop offset="0%" stop-color="#8b5cf6" stop-opacity=".9"/><stop offset="100%" stop-color="#6366f1" stop-opacity=".45"/>
             </linearGradient>
           </defs>
-          <rect v-for="(b, i) in reqChart.bars" :key="i" :x="b.x" :y="b.y" :width="b.w" :height="b.h" rx="3"
-            fill="url(#agReq)" :style="{ animation: 'fadeUp .5s var(--ease-out) backwards', animationDelay: (i * 70 + 120) + 'ms' }">
+          <rect v-for="(b, i) in reqChart.bars" :key="i" :x="b.x" :y="b.y" :width="b.w" :height="b.h" rx="4"
+            fill="url(#agReq)" :style="{ animation: 'fadeUp .5s var(--eo) backwards', animationDelay: (i * 70 + 120) + 'ms' }">
             <title>{{ b.count }} 次</title>
           </rect>
         </svg>
-        <div v-if="reqChart.bars.length" class="flex between" style="padding:0 8px;font-size:11px;color:var(--text-3)">
+        <div v-if="reqChart.bars.length" class="row-b" style="padding:0 8px;font-size:11px;color:var(--ink3)">
           <span v-for="d in reqChart.days" :key="d">{{ d }}</span>
         </div>
-        <div v-else style="padding:34px 16px;text-align:center;color:var(--text-3)">
-          <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:var(--text-2)">暂无数据</div>
+        <div v-else style="padding:34px 16px;text-align:center;color:var(--ink3)">
+          <div style="font-weight:700;font-size:13px;margin-bottom:4px;color:var(--ink2)">暂无数据</div>
           <div style="font-size:11.5px">产生对话（@机器人 / #ai）后自动统计</div>
         </div>
       </div>
 
       <!-- 状态行 -->
-      <div class="grid mt16 cols-wide">
-        <div class="card card-pad hoverable" style="--i:7">
-          <div class="card-title"><v-icon name="config"/>功能开关速览</div>
-          <div class="card-sub">当前生效配置一览(只读,修改请前往配置中心)</div>
-          <div class="grid grid-4 mt16" style="gap:12px">
-            <div v-for="s in switches" :key="s.name" class="flex between"
-              style="padding:9px 13px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);font-size:12.5px;font-weight:700">
+      <div class="grid mt16 cols-w">
+        <div class="card pad lift" style="--i:10">
+          <div class="ct">
+            <span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="config"/></span>
+            <div><div class="ct-t">功能开关速览</div><div class="ct-s">当前生效配置一览(只读,修改请前往配置中心)</div></div>
+          </div>
+          <div class="grid g4 mt16" style="gap:12px">
+            <div v-for="s in switches" :key="s.name" class="row-b"
+              style="padding:9px 13px;border-radius:12px;background:rgba(255,255,255,.5);border:1px solid var(--line);font-size:12.5px;font-weight:700">
               <span>{{ s.name }}</span>
-              <span class="chip" :class="s.on ? (s.danger ? 'chip-rose' : 'chip-green') : ''" style="font-size:10.5px;padding:2px 8px">
+              <span class="pill" :class="s.on ? (s.danger ? 'p-rose' : 'p-green') : ''" style="font-size:10.5px;padding:3px 9px">
                 {{ s.on ? 'ON' : 'OFF' }}
               </span>
             </div>
           </div>
         </div>
-        <div class="card card-pad hoverable" style="--i:8">
-          <div class="card-title"><v-icon name="group"/>群情境感知</div>
-          <div class="card-sub">perception:met / last_active</div>
+        <div class="card pad lift" style="--i:11">
+          <div class="ct">
+            <span class="ct-ico" style="background:var(--grad-mint)"><v-icon name="group"/></span>
+            <div><div class="ct-t">群情境感知</div><div class="ct-s">perception:met / last_active</div></div>
+          </div>
           <div class="mt16" style="display:flex;flex-direction:column;gap:10px">
-            <div v-for="p in perceptions" :key="p.groupId" class="flex between"
-              style="padding:10px 14px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border)">
+            <div v-for="p in perceptions" :key="p.groupId" class="row-b"
+              style="padding:10px 14px;border-radius:12px;background:rgba(255,255,255,.5);border:1px solid var(--line)">
               <div>
                 <div class="mono" style="font-weight:800;font-size:13px">群 {{ p.groupId }}</div>
-                <div class="muted-3" style="font-size:11px">入群 {{ fmt.ago(p.met.at) }}</div>
+                <div class="mut2" style="font-size:11px">入群 {{ fmt.ago(p.met.at) }}</div>
               </div>
-              <span class="chip" :class="(Date.now() - p.lastActive.at) > 6*3600e3 ? 'chip-amber' : 'chip-green'">
+              <span class="pill" :class="(Date.now() - p.lastActive.at) > 6*3600e3 ? 'p-honey' : 'p-green'">
                 {{ (Date.now() - p.lastActive.at) > 6*3600e3 ? '久离 ' : '活跃 ' }}{{ fmt.ago(p.lastActive.at) }}
               </span>
             </div>
+            <empty-state v-if="!perceptions.length" icon="group" text="暂无群感知数据"/>
           </div>
         </div>
       </div>

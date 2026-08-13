@@ -4,7 +4,7 @@
   window.VIEWS.kb = {
     name: 'KbView',
     setup() {
-      const { ref, onMounted } = Vue
+      const { ref, computed, onMounted } = Vue
       const M = window.MOCK
       const title = ref('')
       const text = ref('')
@@ -54,66 +54,78 @@
         finally { busy.value = false; await reload() }
       }
       const dateStr = (t) => t ? new Date(t).toLocaleString('zh-CN') : ''
-      return { docs: M.kb, title, text, url, urlTitle, busy, msg, add, addUrl, refreshDoc, remove, rebuild, dateStr }
+      // docs 用计算属性：loadKb 会整体替换 MOCK.kb 数组，直接捕获会拿到空壳
+      return { docs: computed(() => M.kb || []), title, text, url, urlTitle, busy, msg, add, addUrl, refreshDoc, remove, rebuild, dateStr }
     },
     template: `
     <div>
-      <div class="sec-head" style="--i:0">
-        <div>
-          <h3>知识库</h3>
-          <div class="desc">全局共享文档库 · chunk + embedding 向量化 · 对话时 Agent 调 kb_search 检索（RAG）。支持网页 URL 入库 + 定时拉取最新。embedding 复用 recall.embedProvider。</div>
+      <page-head title="知识库" icon="book" desc="全局共享文档库 · chunk + embedding 向量化 · 对话时 Agent 调 kb_search 检索（RAG）；支持网页 URL 入库 + 定时拉取最新">
+        <button class="btn b-line" @click="rebuild" :disabled="busy"><v-icon name="refresh"/>重建索引</button>
+      </page-head>
+
+      <div class="grid g2">
+        <div class="card pad lift" style="--i:1">
+          <div class="ct mb12">
+            <span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="globe"/></span>
+            <div><div class="ct-t">添加网页 URL</div><div class="ct-s">自动抓取正文 → 分块入库</div></div>
+          </div>
+          <div class="col" style="gap:8px">
+            <input class="inp" v-model="url" placeholder="https://example.com/article">
+            <input class="inp" v-model="urlTitle" placeholder="标题（可选，留空用页面标题）">
+            <div class="row-b wrap g8">
+              <span class="mut2" style="font-size:11.5px">可用 #知识库定时 &lt;id&gt; 每天8点 设定时刷新</span>
+              <button class="btn b-pri b-sm" @click="addUrl" :disabled="busy"><v-icon name="globe"/>抓取入库</button>
+            </div>
+          </div>
         </div>
-        <button class="btn" @click="rebuild" :disabled="busy">🔄 重建索引</button>
+
+        <div class="card pad lift" style="--i:2">
+          <div class="ct mb12">
+            <span class="ct-ico" style="background:var(--grad-mint)"><v-icon name="file"/></span>
+            <div><div class="ct-t">添加文档</div><div class="ct-s">粘贴文本 · 长文自动分块向量化</div></div>
+          </div>
+          <div class="col" style="gap:8px">
+            <input class="inp" v-model="title" placeholder="标题（可选，留空自动命名）">
+            <textarea class="txa mono" style="height:88px" v-model="text" placeholder="粘贴文档全文（FAQ / 资料 / 设定等）"></textarea>
+            <div class="row-b wrap g8">
+              <span class="mut2" style="font-size:11.5px">{{ msg }}</span>
+              <button class="btn b-pri b-sm" @click="add" :disabled="busy"><v-icon name="plus"/>入库</button>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <div class="card card-pad" style="--i:1">
-        <div class="card-title mb10">添加网页 URL（自动抓取正文入库）</div>
-        <input class="input" style="width:100%;margin-bottom:8px" v-model="url" placeholder="https://example.com/article（自动抓取正文 → 分块入库）">
-        <input class="input" style="width:100%;margin-bottom:8px" v-model="urlTitle" placeholder="标题（可选，留空用页面标题）">
-        <div class="flex between">
-          <span class="muted-3" style="font-size:12px">入库后可用 #知识库定时 &lt;id&gt; 每天8点 设定时刷新最新内容</span>
-          <button class="btn btn-primary" @click="addUrl" :disabled="busy">🌐 抓取入库</button>
+      <div class="card mt16" style="--i:3;overflow:hidden">
+        <div class="ct" style="padding:16px 20px">
+          <span class="ct-ico" style="background:var(--grad)"><v-icon name="db"/></span>
+          <div><div class="ct-t">已入库文档</div><div class="ct-s">{{ docs.length }} 篇 · 🌐 网页 / 📄 文本</div></div>
         </div>
-      </div>
-
-      <div class="card card-pad" style="--i:2">
-        <div class="card-title mb10">添加文档（粘贴文本）</div>
-        <input class="input" style="width:100%;margin-bottom:8px" v-model="title" placeholder="标题（可选，留空自动命名）">
-        <textarea class="input mono" style="width:100%;height:140px;margin-bottom:8px;resize:vertical" v-model="text" placeholder="粘贴文档全文（FAQ / 资料 / 设定等）。长文会自动分块向量化。"></textarea>
-        <div class="flex between">
-          <span class="muted-3" style="font-size:12px">{{ msg }}</span>
-          <button class="btn btn-primary" @click="add" :disabled="busy">入库</button>
-        </div>
-      </div>
-
-      <div class="card" style="--i:3;overflow:hidden">
-        <div class="card-title" style="padding:15px 20px">已入库文档（{{ docs.length }} · 🌐网页 / 📄文本）</div>
-        <div class="tbl-wrap">
+        <div class="tbl-w">
         <table class="tbl">
-          <thead><tr><th>标题</th><th style="width:120px">ID</th><th style="width:60px">分块</th><th style="width:150px">定时 / 刷新</th><th style="width:120px">操作</th></tr></thead>
+          <thead><tr><th>标题</th><th style="width:120px">ID</th><th style="width:60px">分块</th><th style="width:150px">定时 / 刷新</th><th style="width:110px">操作</th></tr></thead>
           <tbody>
             <tr v-for="d in docs" :key="d.id">
               <td>
-                <span :class="d.url ? '' : ''">{{ d.url ? '🌐' : '📄' }}</span> {{ d.title }}
-                <div v-if="d.url" class="muted-3" style="font-size:11px;word-break:break-all">{{ d.url }}</div>
+                <span>{{ d.url ? '🌐' : '📄' }}</span> {{ d.title }}
+                <div v-if="d.url" class="mut2" style="font-size:11px;word-break:break-all">{{ d.url }}</div>
               </td>
-              <td class="mono muted" style="font-size:11px">{{ d.id }}</td>
-              <td><span class="chip">{{ d.chunkCount }}</span></td>
-              <td class="muted" style="font-size:11px">
+              <td class="mono mut" style="font-size:11px">{{ d.id }}</td>
+              <td><span class="pill">{{ d.chunkCount }}</span></td>
+              <td class="mut" style="font-size:11px">
                 <span v-if="d.refreshCron">⏰ {{ d.refreshCron }}</span>
-                <span v-else class="muted-3">—</span>
-                <div v-if="d.lastCrawled" class="muted-3">刷新 {{ dateStr(d.lastCrawled) }}</div>
-                <div class="muted-3">入库 {{ dateStr(d.createdAt) }}</div>
+                <span v-else class="mut2">—</span>
+                <div v-if="d.lastCrawled" class="mut2">刷新 {{ dateStr(d.lastCrawled) }}</div>
+                <div class="mut2">入库 {{ dateStr(d.createdAt) }}</div>
               </td>
               <td>
-                <button v-if="d.url" class="btn btn-sm" @click="refreshDoc(d.id)" :disabled="busy" title="刷新最新内容">🔄</button>
-                <button class="btn btn-sm" @click="remove(d.id)" title="删除">🗑</button>
+                <button v-if="d.url" class="bic" @click="refreshDoc(d.id)" :disabled="busy" title="刷新最新内容"><v-icon name="refresh"/></button>
+                <button class="bic dg" @click="remove(d.id)" title="删除"><v-icon name="trash"/></button>
               </td>
             </tr>
-            <tr v-if="!docs.length"><td colspan="5" class="muted-3" style="text-align:center;padding:24px">暂无文档（上方粘贴文本或添加 URL，或 #知识库添加 命令）</td></tr>
           </tbody>
         </table>
         </div>
+        <empty-state v-if="!docs.length" icon="book" text="暂无文档" sub="上方粘贴文本或添加 URL，或 #知识库添加 命令"/>
       </div>
     </div>`,
   }
