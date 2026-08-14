@@ -32,7 +32,7 @@ agent:
     maxSameAction: 2          # 同工具+相同参数连续允许次数（超出 → duplicate_action 终止，防 ping 死循环）
     maxConsecutiveFailures: 3 # 连续工具失败次数上限（超出 → consecutive_failures 终止）
     noProgressWindow: 4       # 连续 N 步无新事实 → no_progress 终止
-    timeBudgetMs: 90000       # 单次对话时间预算（毫秒，超出终止）
+    timeBudgetMs: 300000       # 单次对话时间预算（毫秒，超出终止）
     tokenBudget: 80000        # 单次对话 token 预算（超出终止）
   temperature: 0.2  # 工具调用稳定性（建议 0.1~0.3；勿设 0 避免复读式回复）
   thinking:
@@ -135,6 +135,9 @@ agent:
       - web_search
       - skill
       - get_chat_history
+      - spawn_subagent
+      - check_subagent
+      - extend_subagent
     topK: 8                   # tool_search 默认返回数
     minScore: 0.3             # 最低相似度（query 覆盖率/cosine；0.3=至少 30% 命中，平衡召回与精度）
   miyoushe:

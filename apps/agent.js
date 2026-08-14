@@ -59,7 +59,7 @@ import { buildSituationalContext } from '../model/perception.js'
 import { makeTerminalTool, DEFAULT_BLOCKLIST, requestClaim, claim, getMaster as getTerminalMaster, isMaster as isTerminalMaster, resolveApproval as resolveTerminalApproval, listApprovals as listTerminalApprovals } from '../model/terminal/index.js'
 import { makeStagehand } from '../model/stagehand/index.js'
 import { makeDownloadTool } from '../model/download/index.js'
-import { makeSpawnSubagentTool, Semaphore } from '../model/multiagent/index.js'
+import { makeSpawnSubagentTools, Semaphore } from '../model/multiagent/index.js'
 import { calcTool } from '../model/calc/index.js'
 import { sendFileTool } from '../model/document/sendfile.js'
 import { readPdfTool } from '../model/document/pdf.js'
@@ -719,19 +719,20 @@ async function buildRuntime() {
     }
   }
 
-  // 子代理编排：主 Agent 可自主创建子代理委派任务（复用 multiagent 基础设施）
+  // 子代理编排：主 Agent 可自主创建子代理委派任务（异步三件套：spawn + check + extend）
   if (cfg.multiagent?.enable !== false) {
     try {
-      tools.register(makeSpawnSubagentTool({
+      const subagentTools = makeSpawnSubagentTools({
         provider, model: cfg.multiagent?.workerModel || null,
         sourceRegistry: tools,
         semaphore: new Semaphore(cfg.multiagent?.maxConcurrent ?? 3),
         maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
         defaultTools: cfg.multiagent?.defaultTools || ['web_search', 'memory_search'],
         maxSpawns: cfg.multiagent?.maxSpawnsPerConversation ?? 5,
-      }))
-      Log.info('[multiagent] spawn_subagent 工具已注册（主 Agent 可自主委派子任务）')
-    } catch (e) { Log.warn('[multiagent] spawn_subagent 注册失败', e?.message || e) }
+      })
+      for (const t of subagentTools) tools.register(t)
+      Log.info('[multiagent] spawn_subagent + check_subagent + extend_subagent 已注册（异步委派 + 预算控制）')
+    } catch (e) { Log.warn('[multiagent] 子代理工具注册失败', e?.message || e) }
   }
 
   return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand }
