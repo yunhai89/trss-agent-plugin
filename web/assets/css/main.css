@@ -751,6 +751,16 @@ code { font-family: var(--mono); font-size: .92em; background: var(--pri-softer)
 .cf-item .ctl { flex: 0 0 auto; display: flex; justify-content: flex-end; }
 .cf-item .ctl .inp, .cf-item .ctl .sel, .cf-item .ctl .txa { width: auto; }
 .cf-item.dg { background: linear-gradient(120deg, var(--rose-bg), transparent 70%); box-shadow: inset 3px 0 0 var(--rose); }
+/* 分区内的子组标题（占满整行，上方虚线分隔） */
+.cf-sub {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 6px; padding: 12px 6px 2px;
+  border-top: 1px dashed var(--line2);
+  font-size: 12px; font-weight: 700; color: var(--ink2);
+}
+.cf-sub svg { width: 14px; height: 14px; color: var(--pri); }
+.cf-sub:first-child { margin-top: 0; padding-top: 2px; border-top: none; }
 .savebar {
   position: sticky; bottom: 16px; z-index: 25;
   display: flex; align-items: center; gap: 12px;

@@ -324,8 +324,8 @@
             <cfg-row name="Planner 超时(ms)" desc="超时默认沉默">
               <input type="number" class="inp" style="width:130px" min="5000" max="120000" step="1000" v-model.number="form.plannerTimeoutMs">
             </cfg-row>
-            <cfg-row name="Planner 模型" desc="留空=utilityModel→主模型">
-              <input class="inp mono" style="width:200px" v-model="form.planner.model" placeholder="留空=主模型">
+            <cfg-row name="Planner 模型" desc="已集中到 配置中心 → 模型配置（功能分配）（留空=utilityModel→主模型）">
+              <span class="mut2 mono" style="font-size:12px">{{ form.planner.model || '(留空=主模型)' }}</span>
             </cfg-row>
             <cfg-row name="Planner 温度" desc="低温求稳定（默认 0.2）">
               <div class="row g10" style="width:200px">
@@ -339,8 +339,8 @@
             <cfg-row full name="Planner 白名单只读工具" desc="仅查询类；写/删/管理/终端/发送工具一律被拒（双保险）">
               <tag-editor v-model="form.planner.allowedReadTools" placeholder="如 memory_search / web_search" :mono="true"/>
             </cfg-row>
-            <cfg-row name="Replyer 模型" desc="留空=主模型">
-              <input class="inp mono" style="width:200px" v-model="form.replyer.model" placeholder="留空=主模型">
+            <cfg-row name="Replyer 模型" desc="已集中到 配置中心 → 模型配置（功能分配）（留空=主模型）">
+              <span class="mut2 mono" style="font-size:12px">{{ form.replyer.model || '(留空=主模型)' }}</span>
             </cfg-row>
             <cfg-row name="Replyer 温度" desc="文风多样性（默认 0.7）">
               <div class="row g10" style="width:200px">

@@ -18,6 +18,7 @@ import Config from '../utils/Config.js'
 import Log from '../utils/Log.js'
 import devLog from '../utils/DevLog.js'
 import { getRuntime } from './agent.js'
+import { getGroupWorld } from './groupworld.js'
 import * as H from '../model/humanize/index.js'
 
 let _humanize = null
@@ -97,6 +98,13 @@ async function buildHumanize() {
 
   let manager // 先声明，工厂闭包内引用（getOrCreate 时已赋值）
 
+  // GroupWorld 局部社会现场（仅 online 时注入；GW 未就绪/失败 → 空现场，零影响）。复用 apps/groupworld 单例。
+  const EMPTY_SCENE = { empty: true, text: '' }
+  const gwLazy = getGroupWorld().catch(() => null)
+  const gwPlannerCtx = async (ctx) => { try { const gw = await gwLazy; return gw ? await gw.buildPlannerContext(ctx) : EMPTY_SCENE } catch { return EMPTY_SCENE } }
+  const gwReplyerCtx = async (ctx) => { try { const gw = await gwLazy; return gw ? await gw.buildReplyerContext(ctx) : EMPTY_SCENE } catch { return EMPTY_SCENE } }
+  const gwOnDelivered = async (info) => { try { const gw = await gwLazy; if (gw) await gw.recordInteraction(info) } catch { /* noop */ } }
+
   const makePlanner = (gid) => new H.HumanizePlanner({
     provider: rt.provider, cfg: cfgFn, readTools,
     getMemories: async (q) => {
@@ -109,6 +117,7 @@ async function buildHumanize() {
     getPersonaName: () => cfgFn().persona?.name || cfgFn().personaName || botNickname() || '机器人',
     // 角色人设注入 Planner：第三人称"参考"框定（决策器不是角色本人，只据此判断该不该接/态度）
     getPersonaBlock: () => H.buildPlannerPersonaBlock(resolveHumanizePersona(cfgFn(), rt)),
+    getWorldContext: gwPlannerCtx,
   })
   const makeReplyer = (gid) => new H.HumanizeReplyer({
     provider: rt.provider, cfg: cfgFn,
@@ -124,11 +133,12 @@ async function buildHumanize() {
     getStyleExamples: () => '',
     // 表情包清单注入：reply.allowSticker !== false 且表情包启用时给 Replyer 看 [sticker:名称] 与可用名表
     getStickerCatalog: () => (cfgFn().reply?.allowSticker !== false && sticker?.enabled?.() ? (sticker.catalog?.() || '') : ''),
+    getWorldContext: gwReplyerCtx,
   })
   const makeComposer = () => new H.HumanizeReplyComposer({ cfg: cfgFn, stickerManager: sticker })
   const makeSend = (gid) => makeSendFn(gid)
 
-  manager = new H.RuntimeManager({ store, trace, cfg: cfgFn, makePlanner, makeReplyer, makeComposer, makeSend })
+  manager = new H.RuntimeManager({ store, trace, cfg: cfgFn, makePlanner, makeReplyer, makeComposer, makeSend, onDelivered: gwOnDelivered })
 
   // 配置热重载：取消所有进行中规划/未发送分段 + 重建信号量上限
   Config.onChange(() => {

@@ -13,6 +13,7 @@ import { setPath } from '../../utils/path.js'
 import { presets as openaiPresets } from '../openai/presets.js'
 import { presets as anthropicPresets } from '../anthropic/presets.js'
 import { getRuntime, fireReminder, makeFireDispatch } from '../../apps/agent.js'
+import { getGroupWorld } from '../../apps/groupworld.js'
 import { parseCron } from '../agent/schedule.js'
 import { redactConfig } from './redact.js'
 import { listLogFiles, readLogFile, aggregateStats, queryLogFiles } from './logs.js'
@@ -27,6 +28,15 @@ async function getRt(res) {
   try { return await getRuntime() }
   catch (e) {
     fail(res, CODE.INTERNAL, `运行时未就绪：${e?.message || '可能 apiKey 未配'}`)
+    return null
+  }
+}
+
+/** 取 GroupWorld 服务；失败则响应 5000 并返回 null。 */
+async function getGw(res) {
+  try { return await getGroupWorld() }
+  catch (e) {
+    fail(res, CODE.INTERNAL, `GroupWorld 未就绪：${e?.message || e}`)
     return null
   }
 }
@@ -308,6 +318,53 @@ router.get('/overview', asyncHandler(async (req, res) => {
   const data = { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, perceptions, counts }
   _overviewCache = { at: Date.now(), data }
   return ok(res, data)
+}))
+
+// ── 群聊小世界 GroupWorld 数据浏览（主人面板；§12.3 web 仅限主人，群内仅自查）──
+// GET /api/groupworld/stats?groupId= —— 数据规模 + 任务状态 + 今日调用
+router.get('/groupworld/stats', asyncHandler(async (req, res) => {
+  const gw = await getGw(res); if (!gw) return
+  const groupId = String(req.query.groupId || '')
+  if (!groupId) return fail(res, CODE.BAD, '缺少 groupId')
+  if (!gw.isReady()) return ok(res, { ready: false })
+  return ok(res, await gw.getStats(groupId))
+}))
+
+// GET /api/groupworld/members?groupId=&tier=&limit=&offset= —— 成员列表
+router.get('/groupworld/members', asyncHandler(async (req, res) => {
+  const gw = await getGw(res); if (!gw) return
+  const groupId = String(req.query.groupId || '')
+  if (!groupId) return fail(res, CODE.BAD, '缺少 groupId')
+  if (!gw.isReady()) return ok(res, [])
+  return ok(res, await gw.listMembers(groupId, { tier: req.query.tier || null, limit: req.query.limit, offset: req.query.offset }))
+}))
+
+// GET /api/groupworld/profile?groupId=&userId= —— 单成员画像详情（特征+证据+主观关系+一跳边）
+router.get('/groupworld/profile', asyncHandler(async (req, res) => {
+  const gw = await getGw(res); if (!gw) return
+  const groupId = String(req.query.groupId || '')
+  const userId = String(req.query.userId || '')
+  if (!groupId || !userId) return fail(res, CODE.BAD, '缺少 groupId 或 userId')
+  if (!gw.isReady()) return ok(res, null)
+  return ok(res, await gw.getProfileDetail(groupId, userId))
+}))
+
+// GET /api/groupworld/episodes?groupId= —— 群事件/群梗
+router.get('/groupworld/episodes', asyncHandler(async (req, res) => {
+  const gw = await getGw(res); if (!gw) return
+  const groupId = String(req.query.groupId || '')
+  if (!groupId) return fail(res, CODE.BAD, '缺少 groupId')
+  if (!gw.isReady()) return ok(res, [])
+  return ok(res, await gw.listEpisodes(groupId, { limit: req.query.limit }))
+}))
+
+// GET /api/groupworld/communities?groupId= —— 小圈子
+router.get('/groupworld/communities', asyncHandler(async (req, res) => {
+  const gw = await getGw(res); if (!gw) return
+  const groupId = String(req.query.groupId || '')
+  if (!groupId) return fail(res, CODE.BAD, '缺少 groupId')
+  if (!gw.isReady()) return ok(res, [])
+  return ok(res, await gw.listCommunities(groupId, { limit: req.query.limit }))
 }))
 
 // ── OpenRouter（模型目录 + key 余额；config.agent.apiKey 作 Bearer）──

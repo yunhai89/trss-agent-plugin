@@ -48,7 +48,8 @@ export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为机器�
 {{groupContextBlock}}
 
 【可用群公开记忆】
-{{publicMemoriesBlock}}`
+{{publicMemoriesBlock}}
+{{socialSceneBlock}}`
 
 /** 构造 Planner system prompt。 */
 export function buildPlannerSystem({
@@ -58,6 +59,7 @@ export function buildPlannerSystem({
   necessityDecision = null,
   groupContext = '',
   publicMemories = '',
+  socialScene = '',
 } = {}) {
   return fillTemplate(PLANNER_SYSTEM_TEMPLATE, {
     personaName,
@@ -66,6 +68,7 @@ export function buildPlannerSystem({
     necessityDecisionBlock: necessityDecision ? formatNecessityForPlanner(necessityDecision) : '（本轮未提供评分）',
     groupContextBlock: groupContext || '（暂无上下文）',
     publicMemoriesBlock: publicMemories || '（无可用群公开记忆）',
+    socialSceneBlock: socialScene ? `\n${socialScene}` : '',
   })
 }
 
@@ -98,6 +101,7 @@ export const REPLYER_SYSTEM_TEMPLATE = `你正在为群聊角色「{{personaName
 
 近期群聊（旧→新，{角注}标对话关系：@我=叫你、↩引用我=回复你、↩[id]=回复某人、（我）=你刚说的话，末尾为时间）：
 {{recentMessages}}
+{{socialSceneBlock}}
 {{stickerCatalogBlock}}
 【输出要求】
 - 优先 1～2 句，通常不超过 80 个汉字；确有必要时才更长；
@@ -119,6 +123,7 @@ export function buildReplyerSystem({
   personaVoice = '',
   approvedStyleExamples = '',
   recentMessages = '',
+  socialScene = '',
   stickerCatalog = '',
 } = {}) {
   return fillTemplate(REPLYER_SYSTEM_TEMPLATE, {
@@ -130,6 +135,7 @@ export function buildReplyerSystem({
     personaVoice: personaVoice || '（默认：自然、友好、简洁的中文群聊语气）',
     approvedStyleExamples: approvedStyleExamples || '（暂无）',
     recentMessages: recentMessages || '（暂无）',
+    socialSceneBlock: socialScene ? `\n${socialScene}\n` : '',
     stickerCatalogBlock: stickerCatalog ? `\n${stickerCatalog}\n` : '',
   })
 }

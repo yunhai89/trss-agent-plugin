@@ -165,6 +165,21 @@
         if (form.terminal.skipConfirm == null) form.terminal.skipConfirm = false
         if (!form.download) form.download = {}
         if (!form.multiagent) form.multiagent = {}
+        // 统一模型配置块兜底（recall/selfReview/vision 原有；humanize/groupWorld 为新纳入字段）
+        if (!form.recall) form.recall = {}
+        if (!form.selfReview) form.selfReview = {}
+        if (!form.vision) form.vision = {}
+        if (!form.humanize) form.humanize = {}
+        if (!form.humanize.planner) form.humanize.planner = {}
+        if (form.humanize.planner.model == null) form.humanize.planner.model = ''
+        if (!form.humanize.replyer) form.humanize.replyer = {}
+        if (form.humanize.replyer.model == null) form.humanize.replyer.model = ''
+        if (!form.groupWorld) form.groupWorld = {}
+        if (!form.groupWorld.analysis) form.groupWorld.analysis = {}
+        if (form.groupWorld.analysis.modelProfile == null) form.groupWorld.analysis.modelProfile = ''
+        // 厂商/模型注册表（数组整体提交）
+        if (!Array.isArray(form.llmProviders)) form.llmProviders = []
+        if (!Array.isArray(form.llmModels)) form.llmModels = []
         // multiagent.defaultTools 数组兜底（TagEditor 要求 modelValue 为 Array）
         const ma = form.multiagent
         if (ma && !Array.isArray(ma.defaultTools)) ma.defaultTools = ma.defaultTools == null ? [] : [ma.defaultTools]
@@ -206,8 +221,75 @@
       }
 
       /* 分区折叠 */
+      /* —— 厂商/模型注册表：厂商=端点(protocol/preset/baseURL/apiKey)，模型=绑厂商的条目；功能槽位引用模型 —— */
+      const genId = (p) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+      const provById = (id) => id === 'main'
+        ? { id: 'main', name: '主厂商', protocol: form.protocol, preset: form.preset, baseURL: form.baseURL, apiKey: form.apiKey }
+        : form.llmProviders.find((p) => p.id === id)
+      const provName = (id) => id === 'main' ? '主厂商' : (form.llmProviders.find((p) => p.id === id)?.name || id || '?')
+      const addProvider = () => form.llmProviders.push({ id: genId('p'), name: '', protocol: form.protocol || 'openai', preset: '', baseURL: '', apiKey: '' })
+      const delProvider = (i) => form.llmProviders.splice(i, 1)
+      const testing = reactive({})
+      const testProvider = async (p) => {
+        testing[p.id] = true
+        try {
+          const list = await window.api.get('/models', { protocol: p.protocol, baseURL: p.baseURL, apiKey: p.apiKey, preset: p.preset })
+          toast(`「${p.name || p.baseURL || '未命名'}」连接成功，可用模型 ${list.length} 个`, 'success')
+        } catch (e) { toast(`「${p.name || p.baseURL || '未命名'}」连接失败：${e.message}`, 'error') }
+        finally { testing[p.id] = false }
+      }
+      const addModel = () => form.llmModels.push({ id: genId('m'), name: '', providerId: 'main', model: '', temperature: null, maxTokens: null, note: '' })
+      const delModel = (i) => form.llmModels.splice(i, 1)
+
+      /* 功能分配：槽位 ← 注册表模型。writePath 主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）
+         与主 provider 同端点，只能选主厂商模型；视觉/Embedding/主模型选其它厂商时自动同步其端点。 */
+      const FEATURES = [
+        { key: 'main', label: '主模型', mainOnly: false, get: () => form.model, set: (v) => { form.model = v } },
+        { key: 'utility', label: '旁路小模型', mainOnly: true, get: () => form.utilityModel, set: (v) => { form.utilityModel = v } },
+        { key: 'vision', label: '视觉模型', mainOnly: false, get: () => form.vision?.model || '', set: (v) => { if (!form.vision) form.vision = {}; form.vision.model = v } },
+        { key: 'recall', label: '记忆抽取模型', mainOnly: true, get: () => form.recall?.model || '', set: (v) => { if (!form.recall) form.recall = {}; form.recall.model = v } },
+        { key: 'embed', label: 'Embedding 模型', mainOnly: false, get: () => form.recall?.embedProvider || '', set: (v) => { if (!form.recall) form.recall = {}; form.recall.embedProvider = v } },
+        { key: 'review', label: '自进化评审模型', mainOnly: true, get: () => form.selfReview?.model || '', set: (v) => { if (!form.selfReview) form.selfReview = {}; form.selfReview.model = v } },
+        { key: 'worker', label: '子代理模型', mainOnly: true, get: () => form.multiagent?.workerModel || '', set: (v) => { if (!form.multiagent) form.multiagent = {}; form.multiagent.workerModel = v } },
+        { key: 'hzp', label: '伪人 Planner 模型', mainOnly: true, get: () => form.humanize?.planner?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.planner) form.humanize.planner = {}; form.humanize.planner.model = v } },
+        { key: 'hzr', label: '伪人 Replyer 模型', mainOnly: true, get: () => form.humanize?.replyer?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.replyer) form.humanize.replyer = {}; form.humanize.replyer.model = v } },
+        { key: 'gw', label: '群世界分析模型', mainOnly: true, get: () => form.groupWorld?.analysis?.modelProfile || '', set: (v) => { if (!form.groupWorld) form.groupWorld = {}; if (!form.groupWorld.analysis) form.groupWorld.analysis = {}; form.groupWorld.analysis.modelProfile = v } },
+      ]
+      const featureVal = (f) => f.get() || ''
+      const featureSel = (f) => {
+        const v = featureVal(f)
+        if (!v) return ''
+        const hit = form.llmModels.find((m) => m.model === v && (!f.mainOnly || m.providerId === 'main'))
+        return hit ? hit.id : '__custom'
+      }
+      const onFeatureSel = (f, entryId) => {
+        if (entryId === '__custom') return // 手动模式：保留当前值，走旁边的输入框
+        if (entryId === '') { f.set(''); return }
+        const m = form.llmModels.find((x) => x.id === entryId)
+        if (!m) return
+        f.set(m.model)
+        const prov = provById(m.providerId)
+        const isMain = m.providerId === 'main'
+        if (f.key === 'main' && !isMain && prov?.baseURL) {
+          form.protocol = prov.protocol || form.protocol; form.preset = prov.preset || ''; form.baseURL = prov.baseURL; form.apiKey = prov.apiKey
+          toast('已将该厂商接入信息同步为主厂商（基础 / 模型）', 'info')
+        }
+        if (f.key === 'vision') {
+          if (!form.vision) form.vision = {}
+          if (!isMain && prov?.baseURL) { form.vision.protocol = prov.protocol || ''; form.vision.preset = prov.preset || ''; form.vision.baseURL = prov.baseURL; form.vision.apiKey = prov.apiKey }
+          else { form.vision.protocol = ''; form.vision.preset = ''; form.vision.baseURL = ''; form.vision.apiKey = '' }
+        }
+        if (f.key === 'embed') {
+          if (!form.recall) form.recall = {}
+          if (!isMain && prov?.baseURL) { form.recall.embedBaseURL = prov.baseURL; form.recall.embedApiKey = prov.apiKey }
+          else { form.recall.embedBaseURL = ''; form.recall.embedApiKey = '' }
+        }
+      }
+
       const sections = [
         { id: 'basic', name: '基础 / 模型', icon: 'cpu', grad: 'var(--grad)' },
+        { id: 'providers', name: '厂商配置', icon: 'tool', grad: 'var(--grad-vio)' },
+        { id: 'models', name: '模型配置', icon: 'bot', grad: 'var(--grad-mint)' },
         { id: 'reason', name: '推理参数', icon: 'zap', grad: 'var(--grad-sky)' },
         { id: 'reply', name: '进度 / 回复渲染', icon: 'send', grad: 'var(--grad-mint)' },
         { id: 'memory', name: '记忆系统', icon: 'memory', grad: 'var(--grad-honey)' },
@@ -405,6 +487,9 @@
         thinkingOn, tempPct,
         orModels, orSearch, orLoading, loadOrModels, orFiltered, pickOrModel, orKey, loadOrKey,
         allTools, toolCats, toolsByCat, toggleAlwaysOn,
+        // 厂商/模型注册表 + 功能分配
+        addProvider, delProvider, testProvider, testing, provById, provName,
+        addModel, delModel, FEATURES, featureVal, featureSel, onFeatureSel,
       }
     },
     template: `
@@ -419,16 +504,22 @@
         <div :id="'cfg-basic'" class="card cf-sec" :class="{open: open.basic}">
           <div class="cf-sh" @click="open.basic = !open.basic">
             <span class="ct-ico" style="background:var(--grad)"><v-icon name="cpu"/></span>
-            <div><div class="ct-t">基础 / 模型</div><div class="ct-s">触发方式、协议预设、主模型与回退</div></div>
+            <div><div class="ct-t">基础 / 模型</div><div class="ct-s">触发方式、协议预设、主模型与回退 · 全部模型统一在此配置</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.basic"><div class="cf-grid">
+            <div class="cf-sub"><v-icon name="send"/>触发 / 会话</div>
             <cfg-row name="触发模式" desc="at=被@ / command=触发词 / both 两者">
               <select class="sel" style="width:150px" v-model="form.trigger"><option v-for="o in OPT.trigger" :value="o[0]">{{ o[1] }}</option></select>
             </cfg-row>
             <cfg-row name="触发词" desc="command/both 时生效">
               <input class="inp" style="width:150px" v-model="form.triggerCommand" placeholder="#ai">
             </cfg-row>
+            <cfg-row name="多用户数据隔离" desc="开启后按 (群,用户) 隔离记忆与会话">
+              <v-switch v-model="form.isolation.enable"/>
+            </cfg-row>
+
+            <div class="cf-sub"><v-icon name="link"/>主接入（对话主模型）</div>
             <cfg-row name="协议" desc="API 兼容协议">
               <select class="sel" style="width:170px" v-model="form.protocol"><option v-for="o in OPT.protocol" :value="o[0]">{{ o[1] }}</option></select>
             </cfg-row>
@@ -468,9 +559,8 @@
             <cfg-row name="旁路小模型" desc="进度播报等旁路任务;留空=主模型">
               <input class="inp" style="width:180px" v-model="form.utilityModel" placeholder="留空=主模型">
             </cfg-row>
-            <cfg-row name="多用户数据隔离" desc="开启后按 (群,用户) 隔离记忆与会话">
-              <v-switch v-model="form.isolation.enable"/>
-            </cfg-row>
+
+            <div class="cf-sub"><v-icon name="shield"/>网络 / 容错</div>
             <cfg-row name="代理" desc="http 代理(留空=直连)">
               <input class="inp mono" style="width:240px" v-model="form.proxy" placeholder="http://127.0.0.1:7890">
             </cfg-row>
@@ -492,6 +582,115 @@
                   <button class="bic dg" @click="delFallback(i)"><v-icon name="trash"/></button>
                 </div>
               </TransitionGroup>
+            </div>
+
+            <!-- 各功能模型选择已拆分至 厂商配置 / 模型配置 两个分区 -->
+            <div class="full" style="margin-top:6px;padding:10px 14px;border:1px dashed var(--line);border-radius:10px">
+              <div class="mut2" style="font-size:12px"><v-icon name="info"/> 多服务商与各功能模型选择已拆分至下方 <b>厂商配置</b>（配服务商地址/Key）与 <b>模型配置</b>（建模型 + 功能分配）两个分区。</div>
+            </div>
+          </div></div>
+        </div>
+
+        <!-- ===== 厂商配置 ===== -->
+        <div :id="'cfg-providers'" class="card cf-sec" :class="{open: open.providers}">
+          <div class="cf-sh" @click="open.providers = !open.providers">
+            <span class="ct-ico" style="background:var(--grad-vio)"><v-icon name="tool"/></span>
+            <div><div class="ct-t">厂商配置（LLM 服务商）</div><div class="ct-s">主厂商在「基础 / 模型」编辑；此处维护附加服务商，模型在「模型配置」中绑定厂商</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
+          </div>
+          <div class="cf-body" v-show="open.providers"><div class="cf-grid">
+            <div class="full" style="padding:11px 14px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.42)">
+              <div class="row g10 wrap" style="align-items:center">
+                <span class="pill p-pri">主厂商</span>
+                <span class="mut mono" style="font-size:12px">{{ form.protocol }}{{ form.preset ? ' · ' + form.preset : '' }}</span>
+                <span class="mut2 mono ell" style="font-size:12px;flex:1;min-width:180px">{{ form.baseURL || '(未填接口地址)' }}</span>
+                <span class="pill" :class="form.apiKey ? 'p-mint' : 'p-line'" style="font-size:11px">{{ form.apiKey ? 'Key 已填' : 'Key 未填' }}</span>
+                <button type="button" class="btn b-line b-sm" @click="jump('basic')"><v-icon name="edit"/>前往「基础 / 模型」编辑</button>
+              </div>
+            </div>
+            <div class="full">
+              <div class="row-b mb12">
+                <div style="font-weight:800;font-size:13px">附加厂商（{{ form.llmProviders.length }}）</div>
+                <button class="btn b-soft b-sm" @click="addProvider"><v-icon name="plus"/>添加厂商</button>
+              </div>
+              <TransitionGroup name="list" tag="div" style="display:flex;flex-direction:column;gap:10px;position:relative">
+                <div v-for="(p, i) in form.llmProviders" :key="p.id" class="mem-row" style="flex-direction:column;align-items:stretch;gap:8px">
+                  <div class="row g10 wrap" style="align-items:center">
+                    <input class="inp" style="width:150px" v-model="p.name" placeholder="厂商名称（如 硅基）">
+                    <select class="sel" style="width:140px" v-model="p.protocol"><option v-for="o in OPT.protocol" :value="o[0]">{{ o[1] }}</option></select>
+                    <select class="sel" style="width:150px" v-model="p.preset"><option value="">预设(无)</option><option v-for="o in OPT.preset" :value="o[0]">{{ o[1] }}</option></select>
+                    <span style="flex:1"></span>
+                    <button class="btn b-line b-sm" @click="testProvider(p)" :disabled="testing[p.id]">{{ testing[p.id] ? '测试中…' : '测试连接' }}</button>
+                    <button class="bic dg" @click="delProvider(i)"><v-icon name="trash"/></button>
+                  </div>
+                  <div class="row g10 wrap">
+                    <input class="inp mono" style="flex:2;min-width:220px" v-model="p.baseURL" placeholder="接口地址 baseURL">
+                    <input class="inp mono" style="flex:1;min-width:160px" v-model="p.apiKey" placeholder="API Key">
+                  </div>
+                </div>
+              </TransitionGroup>
+              <div v-if="!form.llmProviders.length" class="mut2" style="font-size:12px;padding:6px 2px">暂无附加厂商——只用主厂商可不添加；需要跨厂商模型（如视觉/Embedding 用别家）时在此添加。</div>
+            </div>
+          </div></div>
+        </div>
+
+        <!-- ===== 模型配置 ===== -->
+        <div :id="'cfg-models'" class="card cf-sec" :class="{open: open.models}">
+          <div class="cf-sh" @click="open.models = !open.models">
+            <span class="ct-ico" style="background:var(--grad-mint)"><v-icon name="bot"/></span>
+            <div><div class="ct-t">模型配置</div><div class="ct-s">在已建厂商下创建模型（可拉取列表）并为各功能分配</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
+          </div>
+          <div class="cf-body" v-show="open.models"><div class="cf-grid">
+            <div class="full">
+              <div class="row-b mb12">
+                <div style="font-weight:800;font-size:13px">模型列表（{{ form.llmModels.length }}）</div>
+                <button class="btn b-soft b-sm" @click="addModel"><v-icon name="plus"/>添加模型</button>
+              </div>
+              <TransitionGroup name="list" tag="div" style="display:flex;flex-direction:column;gap:10px;position:relative">
+                <div v-for="(m, i) in form.llmModels" :key="m.id" class="mem-row" style="flex-direction:column;align-items:stretch;gap:8px">
+                  <div class="row g10 wrap">
+                    <input class="inp" style="width:140px" v-model="m.name" placeholder="别名（如 便宜小模型）">
+                    <select class="sel" style="width:170px" v-model="m.providerId">
+                      <option value="main">主厂商</option>
+                      <option v-for="p in form.llmProviders" :key="p.id" :value="p.id">{{ p.name || p.id }}</option>
+                    </select>
+                    <input type="number" class="inp" style="width:80px" min="0" max="2" step="0.1" v-model.number="m.temperature" placeholder="温度" title="默认温度（可空=用各功能默认）">
+                    <input type="number" class="inp" style="width:90px" min="0" step="256" v-model.number="m.maxTokens" placeholder="maxTokens" title="默认 maxTokens（可空）">
+                    <button class="bic dg" @click="delModel(i)"><v-icon name="trash"/></button>
+                  </div>
+                  <div class="row g10 wrap">
+                    <model-picker v-model="m.model" :protocol="(provById(m.providerId) || {}).protocol || form.protocol" :base-url="(provById(m.providerId) || {}).baseURL || form.baseURL" :api-key="(provById(m.providerId) || {}).apiKey || form.apiKey" :preset="(provById(m.providerId) || {}).preset || form.preset" placeholder="模型 ID（选择厂商后可拉取列表）"/>
+                    <input class="inp" style="flex:1;min-width:160px" v-model="m.note" placeholder="备注 / 用途（可空）">
+                  </div>
+                </div>
+              </TransitionGroup>
+              <div v-if="!form.llmModels.length" class="mut2" style="font-size:12px;padding:6px 2px">暂无模型——添加后可在下方「功能分配」一键选用；也可在功能行选手动输入。</div>
+            </div>
+
+            <div class="full" style="margin-top:6px;padding:12px 14px;border:1px dashed var(--line);border-radius:10px">
+              <div style="font-weight:800;font-size:13px;margin-bottom:4px">功能分配</div>
+              <div class="mut2" style="font-size:11px;margin-bottom:10px">从上方模型列表选择；留空=该功能默认回落（主模型/旁路小模型）。主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）只能用<b>主厂商</b>的模型；视觉 / Embedding / 主模型选其它厂商时会自动同步其接入信息。</div>
+              <div class="cf-grid">
+                <cfg-row v-for="f in FEATURES" :key="f.key" :name="f.label" :desc="f.mainOnly ? '主厂商模型（与主接入同端点）' : '可选任意厂商（自动同步端点）'">
+                  <div class="row g6">
+                    <select class="sel" style="width:250px" :value="featureSel(f)" @change="onFeatureSel(f, $event.target.value)">
+                      <option value="">（留空 = 默认回落）</option>
+                      <option v-for="m in form.llmModels" :key="m.id" :value="m.id" :disabled="f.mainOnly && m.providerId !== 'main'">
+                        {{ (m.name || m.model) + ' · ' + m.model }}{{ m.providerId === 'main' ? '' : '（' + provName(m.providerId) + '）' }}
+                      </option>
+                      <option v-if="featureVal(f) && featureSel(f) === '__custom'" value="__custom">手动：{{ featureVal(f) }}</option>
+                    </select>
+                    <input v-if="featureSel(f) === '__custom'" class="inp mono" style="width:170px" :value="featureVal(f)" @input="f.set($event.target.value)" placeholder="手动填模型 ID">
+                  </div>
+                </cfg-row>
+                <cfg-row name="Stagehand 原生模型" desc="浏览器自动化原生 SDK（独立体系，不走注册表）">
+                  <div class="row g6">
+                    <input class="inp mono" style="width:190px" v-model="form.stagehand.modelName" placeholder="留空=复用 provider">
+                    <input class="inp mono" style="width:130px" v-model="form.stagehand.modelApiKey" placeholder="apiKey 可空">
+                  </div>
+                </cfg-row>
+              </div>
             </div>
           </div></div>
         </div>
@@ -618,18 +817,9 @@
             <cfg-row name="LLM 抽取间隔(轮)" desc="每 N 轮触发一次抽取">
               <input type="number" class="inp" style="width:120px" min="1" v-model.number="form.recall.extractEvery">
             </cfg-row>
-            <cfg-row name="抽取用模型" desc="留空=utilityModel→主模型">
-              <input class="inp" style="width:170px" v-model="form.recall.model" placeholder="留空=主模型">
-            </cfg-row>
-            <cfg-row name="embedding 模型" desc="留空=关键词 jaccard 召回；填模型 id 走语义召回">
-              <input class="inp mono" style="width:200px" v-model="form.recall.embedProvider" placeholder="如 text-embedding-3-small / embedding-3">
-            </cfg-row>
-            <cfg-row name="embedding 接口 / Key" desc="留空=复用主 baseURL/apiKey；用专门 embedding 服务时填">
-              <div class="row g6">
-                <input class="inp mono" style="width:200px" v-model="form.recall.embedBaseURL" placeholder="baseURL 留空=复用主">
-                <input class="inp mono" style="width:140px" v-model="form.recall.embedApiKey" placeholder="Key 留空=复用主">
-              </div>
-            </cfg-row>
+            <div class="full" style="padding:8px 12px;border:1px dashed var(--line);border-radius:10px">
+              <div class="mut2" style="font-size:12px"><v-icon name="info"/> 抽取 / Embedding 模型已移至 <b>模型配置（功能分配）</b></div>
+            </div>
           </div></div>
         </div>
 
@@ -647,9 +837,10 @@
             <cfg-row name="评审间隔(轮)" desc="每 N 轮触发一次">
               <input type="number" class="inp" style="width:120px" min="5" v-model.number="form.selfReview.every">
             </cfg-row>
-            <cfg-row name="评审用模型" desc="建议廉价小模型降本">
-              <input class="inp" style="width:170px" v-model="form.selfReview.model" placeholder="留空=主模型">
+            <cfg-row name="评审用模型" desc="已移至 模型配置（功能分配）">
+              <span class="mut2 mono" style="font-size:12px">{{ form.selfReview?.model || '(留空=主模型)' }}</span>
             </cfg-row>
+            <!-- 模型输入已集中到 基础/模型；上面仅显示当前生效值 -->
             <cfg-row name="日 token 预算" desc="耗尽则只采迹不评审">
               <input type="number" class="inp" style="width:150px" min="0" step="10000" v-model.number="form.selfReview.dailyBudgetTokens">
             </cfg-row>
@@ -755,14 +946,8 @@
             <cfg-row name="视觉子模型" desc="主模型无视觉时图转文；各字段留空=复用主配置">
               <v-switch v-model="form.vision.enable"/>
             </cfg-row>
-            <cfg-row full name="视觉模型 ID" desc="视觉模型名；留空=复用主模型。可手输或点「拉取列表」（按视觉接口或主接口拉取）">
-              <model-picker v-model="form.vision.model" :protocol="form.vision.protocol || form.protocol" :base-url="form.vision.baseURL || form.baseURL" :api-key="form.vision.apiKey || form.apiKey" :preset="form.vision.preset || form.preset" placeholder="留空=复用主模型"/>
-            </cfg-row>
-            <cfg-row name="视觉接口地址" desc="baseURL；留空=复用主(跨厂商时填，如 https://dashscope.aliyuncs.com/compatible-mode/v1)">
-              <input class="inp mono" style="width:240px" v-model="form.vision.baseURL" placeholder="留空=复用主 baseURL">
-            </cfg-row>
-            <cfg-row name="视觉模型 Key" desc="apiKey；空则复用主 Key">
-              <input class="inp mono" style="width:240px" v-model="form.vision.apiKey" placeholder="留空=复用主 Key">
+            <cfg-row full name="视觉模型" desc="已移至 模型配置（功能分配）（模型 ID / 接口 / Key）">
+              <span class="mut2 mono" style="font-size:12px">{{ form.vision?.model || '(留空=复用主模型)' }}{{ form.vision?.baseURL ? ' @ ' + form.vision.baseURL : '' }}</span>
             </cfg-row>
             <cfg-row name="工具按需发现" desc="常驻少数工具,其余 tool_search 动态注入">
               <v-switch v-model="form.toolDiscovery.enable"/>
@@ -862,11 +1047,8 @@
                 <cfg-row name="云区域(可选)">
                   <select class="sel" style="width:190px" v-model="form.stagehand.region"><option v-for="o in OPT.shRegion" :value="o[0]">{{ o[1] }}</option></select>
                 </cfg-row>
-                <cfg-row name="Stagehand 原生模型(可选)" desc="如 google/gemini-2.5-flash；空=复用插件 provider(仅 OpenAI 兼容)；云模式空=自动选">
-                  <input class="inp mono" style="width:200px" v-model="form.stagehand.modelName" placeholder="留空=复用插件 provider">
-                </cfg-row>
-                <cfg-row name="原生模型 apiKey(可选)">
-                  <input class="inp mono" style="width:200px" v-model="form.stagehand.modelApiKey">
+                <cfg-row name="Stagehand 原生模型(可选)" desc="已移至 模型配置（功能分配）">
+                  <span class="mut2 mono" style="font-size:12px">{{ form.stagehand?.modelName || '(留空=复用 provider)' }}</span>
                 </cfg-row>
                 <cfg-row name="会话空闲超时(毫秒)">
                   <input type="number" class="inp" style="width:130px" min="60000" step="60000" v-model.number="form.stagehand.idleTimeoutMs">
@@ -913,8 +1095,8 @@
                 <cfg-row name="子代理工具循环上限" desc="workerMaxTurns（防烧 token）">
                   <input type="number" class="inp" style="width:90px" min="1" max="50" v-model.number="form.multiagent.workerMaxTurns">
                 </cfg-row>
-                <cfg-row name="子代理模型" desc="空=复用主模型；填便宜模型可降本">
-                  <input class="inp mono" style="width:200px" v-model="form.multiagent.workerModel" placeholder="留空=主模型">
+                <cfg-row name="子代理模型" desc="已移至 模型配置（功能分配）">
+                  <span class="mut2 mono" style="font-size:12px">{{ form.multiagent?.workerModel || '(留空=主模型)' }}</span>
                 </cfg-row>
                 <cfg-row full name="子代理默认工具" desc="模型未指定时的默认可用工具（仅 query 类安全）">
                   <tag-editor v-model="form.multiagent.defaultTools" placeholder="如 web_search / memory_search" :mono="true"/>

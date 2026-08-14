@@ -40,13 +40,14 @@ export class HumanizeReplyer {
   /**
    * @param {object} opts { provider, cfg, getPersonaVoice?:(groupId)=>string, getRecentBotText?:(groupId)=>string, getStyleExamples?:(groupId)=>string, getStickerCatalog?:(groupId)=>string }
    */
-  constructor({ provider, cfg, getPersonaVoice = null, getRecentBotText = null, getStyleExamples = null, getStickerCatalog = null } = {}) {
+  constructor({ provider, cfg, getPersonaVoice = null, getRecentBotText = null, getStyleExamples = null, getStickerCatalog = null, getWorldContext = null } = {}) {
     this.provider = provider
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.getPersonaVoice = getPersonaVoice || (() => '')
     this.getRecentBotText = getRecentBotText || (() => '')
     this.getStyleExamples = getStyleExamples || (() => '')
     this.getStickerCatalog = getStickerCatalog || (() => '')
+    this.getWorldContext = getWorldContext // GroupWorld 局部社会现场（online 时；失败/空 → 零影响）
   }
 
   /**
@@ -78,6 +79,19 @@ export class HumanizeReplyer {
     if (rc.allowSticker !== false) {
       try { stickerCatalog = String(this.getStickerCatalog(groupId) || '') } catch { /* noop */ }
     }
+    // GroupWorld 局部社会现场（online 时；失败/空 → 零影响，不阻断生成）
+    let socialScene = ''
+    try {
+      if (this.getWorldContext && target && groupId) {
+        const scene = await this.getWorldContext({
+          groupId,
+          focusUserId: target.userId,
+          relatedUserIds: (target.segments || []).filter((s) => s?.type === 'at' && s.qq != null && String(s.qq) !== 'all').map((s) => String(s.qq)),
+          topicText: String(target.text || '').slice(0, 200),
+        })
+        socialScene = scene?.text || ''
+      }
+    } catch { /* noop */ }
     const system = buildReplyerSystem({
       personaName: c.personaName || '机器人',
       replyGuide: action.replyGuide || '',
@@ -87,6 +101,7 @@ export class HumanizeReplyer {
       personaVoice,
       approvedStyleExamples: this.getStyleExamples(groupId),
       recentMessages: recent,
+      socialScene,
       stickerCatalog,
     })
 

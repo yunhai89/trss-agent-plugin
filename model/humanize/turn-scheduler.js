@@ -28,17 +28,31 @@ export class TurnScheduler {
    *         presenceWindowSeconds/bypassPendingCount/contextMessages/behaviorPolicy）
    *   send: async (text:string, opts:{quoteTargetId?:string}) => sentMessageId|null
    */
-  constructor({ runtime, cfg, planner, replyer, composer, send }) {
+  constructor({ runtime, cfg, planner, replyer, composer, send, onDelivered = null }) {
     this.runtime = runtime
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.planner = planner
     this.replyer = replyer
     this.composer = composer
     this.send = send
+    // 可选：成功发送后回调（apps 注入 → GroupWorld.recordInteraction 写回主观关系；失败不影响发送）
+    this.onDelivered = onDelivered
     runtime.bindDriver({
       onDebounced: (rt) => this._onDebounced(rt),
       onWaitDue: (rt) => this._onWaitDue(rt),
     })
+  }
+
+  /** 触发 onDelivered 回调（写回 GroupWorld 主观关系；任何异常吞掉）。 */
+  async _notifyDelivered(target) {
+    if (!this.onDelivered || !target) return
+    try {
+      await this.onDelivered({
+        groupId: this.runtime.groupId,
+        targetUserId: target.userId,
+        kind: (target.quotesBot || target.atBot) ? 'reply_to_bot' : 'neutral',
+      })
+    } catch { /* noop */ }
   }
 
   cfg() { return this._cfgFn() || {} }
@@ -305,6 +319,7 @@ export class TurnScheduler {
       rt.enterCooldown(c.cooldownSeconds ?? 45)
       rt.recordReply(null)
       this._appendSelf(text, null) // shadow 也计入自身在场（presence/上下文）
+      this._notifyDelivered(target) // 写回 GroupWorld 主观关系（online 时；失败忽略）
       rt.backoff.recordSuccess()
       rt.markObserved(batch)
       rt.setPhase('idle')
@@ -327,6 +342,7 @@ export class TurnScheduler {
       try { await rt.store.markSent(rt.groupId, action.targetMessageId) } catch { /* noop */ }
       rt.recordReply(result.sentIds[0])
       this._appendSelf(text, result.sentIds[0]) // 自身发言入 buffer（解锁 presence/引用/追问信号）
+      this._notifyDelivered(target) // 写回 GroupWorld 主观关系（online 时；失败忽略）
       rt.enterCooldown(c.cooldownSeconds ?? 45)
       rt.backoff.recordSuccess()
       rt.trace?.record('delivery', { turnId, sent: true, count: result.sentIds.length, cancelled: !!result.cancelled })

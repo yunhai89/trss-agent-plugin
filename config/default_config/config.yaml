@@ -12,6 +12,10 @@ agent:
   apiKey: ""               # ★必填：API Key（OpenAI/Anthropic 兼容或 Gemini 原生均填此）；留空则插件不初始化
   model: "deepseek-chat"
   utilityModel: ""  # 进度播报等旁路任务用的小模型 id（留空=沿用主模型；填主 provider 支持的小模型 id 可降本）
+
+  # ── 厂商/模型注册表（web 配置中心 → 厂商配置 / 模型配置 维护；为 UI 选择层，运行时仍读上方主接入与各功能字段）──
+  llmProviders: []  # [{ id, name, protocol, preset, baseURL, apiKey }] 附加 LLM 服务商（主厂商=上方 protocol/baseURL/apiKey）
+  llmModels: []     # [{ id, name, providerId('main'=主厂商), model, temperature, maxTokens, note }] 模型条目（web 功能分配下拉数据源）
   # 回退模型：主模型失败时依次尝试。每条独立 baseURL/apiKey/protocol（可跨厂商）。
   # 多回退用数组（在此 yaml 配）：例：主 DeepSeek，回退 GPT
   #   fallbackModels:
@@ -346,3 +350,61 @@ agent:
       blockDestructiveTools: true
       privateMemoryInGroup: false  # 隐私红线（强制 false，不可改）
       maxConcurrentGroups: 1       # 同时 Planning 的群数上限
+
+  # ───────────────── 群聊小世界 GroupWorld（社会记忆层） ─────────────────
+  # 按群隔离、持续更新、带证据/会遗忘/可局部检索的稀疏社会关系网络。设计文档：trss-agent-plugin-groupworld-design-v1.0.md
+  # 数据落 sqlite（data/groupworld/gw.db）。online 默认 false：先观察画像质量，翻 true 才注入 Planner/Replyer。
+  # 语义层（embedding 检索相似度/近义合并/事件语义去重）复用 recall 的 embedding 配置
+  # （agent.recall.embedProvider / embedBaseURL / embedApiKey）；未配置则全部走词面相似度，功能不受阻。
+  groupWorld:
+    enabled: false                 # 总开关（即便 true，groups 为空也不开启）
+    groups: []                     # 显式白名单群号；空数组=不开启
+    online: false                  # 在线影响 Planner/Replyer（默认关：先观察再上线）
+
+    ingestion:
+      rawMessageRetentionDays: 30  # 原始消息保留天数（超过由每日维护清理）
+      segmentIdleSeconds: 300      # 会话切片静默阈值（文档 3~8min，默认 5min）
+      segmentMaxMessages: 100      # 单片段最大消息数（文档 60~120）
+      ignoreCommandMessages: true  # #指令消息不摄入
+      ignoreSystemNotices: true    # 系统通知不摄入
+      topicShiftEnabled: true      # 主题漂移切分（TextTiling 式；换话题无静默间隙也提前分割）
+      topicShiftWindow: 6          # 参与漂移比较的近窗有效消息数
+      topicShiftSimThreshold: 0.06 # 新消息与近窗相似度低于此值 → 分割（保守防碎片化）
+
+    analysis:
+      schedule: "7 * * * *"        # 小时增量分析 cron（每小时 :07）
+      minSegmentMessages: 4        # 有效信息量低于此值的片段跳过分析
+      maxSegmentsPerRun: 50        # 每轮最多分析片段数
+      modelProfile: ""             # 分析模型 id（留空=主模型/utilityModel）
+      maxDailyCallsPerGroup: 100   # 每群每日 LLM 调用预算（熔断）
+      retryCount: 1                # 模型非法 JSON 重试次数（仍失败→dead_letter）
+      maxTokens: 1200
+      episodeMergeSim: 0.85        # 事件语义去重阈值（embedding 余弦；需配 recall.embedProvider）
+
+    profiles:
+      hotActiveDays30d: 10         # 近30天活跃天数≥此值=hot（维护完整画像）
+      warmMessageCount30d: 5       # 近30天发言数≥此值=warm
+      minOnlineConfidence: 0.55    # 在线上下文最低置信（不可低于0.55；低置信推断不进回复）
+      maxTraitsPerUser: 5          # 每成员在线返回画像上限
+      temporaryTraitTtlDays: 14    # 临时状态过期天数
+      traitMergeSimThreshold: 0.82 # 近义特征聚类合并阈值（每日维护；embedding 余弦）
+
+    graph:
+      activeEdgeDays: 90           # 关系边活跃窗口
+      maxNeighborsPerUser: 40      # 每成员活跃一跳关系上限
+      maxOnlineHops: 1             # 在线检索跳数（默认一跳）
+      weeklyCommunityDetection: true  # 每周小圈子识别
+      minCommunitySize: 3          # 最小圈子人数
+
+    retrieval:
+      plannerTokenBudget: 800      # Planner 社会现场 token 预算
+      replyerTokenBudget: 500      # Replyer 社会现场 token 预算
+      maxEpisodes: 3               # 在线返回共同经历上限
+      maxRelationships: 5          # 在线返回关系上限
+      cacheTtlSeconds: 60          # 社会现场短 TTL 缓存
+
+    privacy:
+      allowUserOptOut: true        # 允许 #关闭我的群聊建模
+      allowUserInspect: true       # 允许 #查看我的群聊画像
+      allowUserCorrect: true       # 允许 #纠正我的群聊画像
+      blockSensitiveInference: true  # 拦截敏感推断（健康/政治/性取向/证件等）

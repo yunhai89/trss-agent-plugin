@@ -44,7 +44,7 @@ export class HumanizePlanner {
    * @param {object} opts { provider, cfg, readTools?:Array, getMemories?:(query)=>Promise<string>, getBehaviorPolicyBlock?:()=>string, getPersonaName?:()=>string }
    *   readTools: 已过滤的白名单只读工具，每项 {name, description, parameters, execute(args)=>Promise<string|object>}
    */
-  constructor({ provider, cfg, readTools = [], getMemories = null, getBehaviorPolicyBlock = null, getPersonaName = null, getPersonaBlock = null } = {}) {
+  constructor({ provider, cfg, readTools = [], getMemories = null, getBehaviorPolicyBlock = null, getPersonaName = null, getPersonaBlock = null, getWorldContext = null } = {}) {
     this.provider = provider
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.readTools = Array.isArray(readTools) ? readTools : []
@@ -52,6 +52,16 @@ export class HumanizePlanner {
     this.getBehaviorPolicyBlock = getBehaviorPolicyBlock || (() => '')
     this.getPersonaName = getPersonaName || (() => '机器人')
     this.getPersonaBlock = getPersonaBlock || (() => '')
+    this.getWorldContext = getWorldContext // GroupWorld 局部社会现场（online 时由 apps 注入；失败/空 → 零影响）
+  }
+
+  /** 从目标消息段提取 @ 的用户 id（供 GroupWorld 检索相关人）。 */
+  _relatedIds(target) {
+    const out = []
+    for (const s of (target?.segments || [])) {
+      if (s?.type === 'at' && s.qq != null && String(s.qq) !== 'all') out.push(String(s.qq))
+    }
+    return out
   }
 
   /** 下发给模型的工具列表 = 4 动作 + 白名单只读。 */
@@ -96,6 +106,20 @@ export class HumanizePlanner {
       if (this.getMemories && target && worthRecall) publicMemories = await this.getMemories(q, c.contextMessages ?? 30)
     } catch { /* noop */ }
 
+    // GroupWorld 局部社会现场（online 时；失败/空 → 零影响，不阻断决策）
+    let socialScene = ''
+    try {
+      if (this.getWorldContext && target && runtime?.groupId) {
+        const scene = await this.getWorldContext({
+          groupId: runtime.groupId,
+          focusUserId: target.userId,
+          relatedUserIds: this._relatedIds(target),
+          topicText: String(target.text || '').slice(0, 200),
+        })
+        socialScene = scene?.text || ''
+      }
+    } catch { /* noop */ }
+
     const system = buildPlannerSystem({
       personaName: this.getPersonaName(),
       personaBlock: this.getPersonaBlock(),
@@ -103,6 +127,7 @@ export class HumanizePlanner {
       necessityDecision: decision,
       groupContext: (target ? highlightTarget(target) + '\n\n' : '') + groupContext,
       publicMemories,
+      socialScene,
     })
 
     // 内部消息（永不对外发送）

@@ -30,6 +30,15 @@
     ignore: { name: '沉默', icon: 'info', color: 'var(--ink3)', bg: 'var(--honey-bg)' },
     cooldown_block: { name: '冷却拦截', icon: 'clock', color: 'var(--rose)', bg: 'var(--rose-bg)' },
     backoff_delay: { name: '退避延迟', icon: 'clock', color: 'var(--honey)', bg: 'var(--honey-bg)' },
+    // —— 群聊小世界 GroupWorld 事件 ——
+    gw_ingest: { name: 'GW 摄入', icon: 'edit', color: 'var(--sky)', bg: 'var(--sky-bg)' },
+    gw_segment: { name: 'GW 分段', icon: 'file', color: 'var(--vio)', bg: 'var(--vio-bg)' },
+    gw_analyze: { name: 'GW 分析', icon: 'cpu', color: 'var(--mint)', bg: 'var(--mint-bg)' },
+    gw_trait: { name: 'GW 特征', icon: 'memory', color: 'var(--honey)', bg: 'var(--honey-bg)' },
+    gw_retrieve: { name: 'GW 检索', icon: 'search', color: 'var(--pri)', bg: 'var(--pri-soft)' },
+    gw_maint: { name: 'GW 维护', icon: 'refresh', color: 'var(--mint)', bg: 'var(--mint-bg)' },
+    gw_community: { name: 'GW 圈子', icon: 'group', color: 'var(--honey)', bg: 'var(--honey-bg)' },
+    gw_privacy: { name: 'GW 隐私', icon: 'shield', color: 'var(--rose)', bg: 'var(--rose-bg)' },
   }
   /* 未知 event 兜底：后端新增 event 类型时不再让 EV[e.event].color 崩掉整页 */
   const EV_FALLBACK = { name: '其他', icon: 'info', color: 'var(--ink3)', bg: 'var(--honey-bg)' }
@@ -138,6 +147,14 @@
           case 'ignore': return `沉默${e.reason ? ' · ' + e.reason : ''}`
           case 'cooldown_block': return `冷却中${e.remaining != null ? '（剩 ' + Math.ceil(e.remaining) + 's）' : ''}`
           case 'backoff_delay': return `退避延迟（剩 ${e.remaining ?? '?'}s · 第 ${e.count ?? '?'} 次）`
+          case 'gw_ingest': return `摄入${e.isNew ? '新' : '重复'} · ${e.msgType || '?'}${e.reply ? ' · 回复' : ''}${e.mentions ? ' · @' + e.mentions : ''} · ${e.ms ?? '?'}ms`
+          case 'gw_segment': return e.segId != null ? `闭合片段#${e.segId} · ${e.msgCount ?? '?'} 条` : `处理 ${e.processed ?? '?'} 条 · 闭合 ${e.closed ?? '?'}`
+          case 'gw_analyze': return e.skipped ? `跳过(${e.skipped} · ${e.used ?? '?'}/${e.max ?? '?'})` : `分析 ${e.analyzed ?? '?'}/${e.pending ?? '?'}${e.failed ? ' · 失败 ' + e.failed : ''}`
+          case 'gw_trait': return `片段#${e.segId ?? '?'} → 特征${e.traits ?? '?'} 关系${e.relations ?? '?'} 事件${e.episodes ?? '?'}${e.sensitive ? ' · 敏感拦截' + e.sensitive : ''}`
+          case 'gw_retrieve': return `${e.role || '?'} · ${e.tokens ?? '?'}tok · 特征${e.traits ?? 0} 旧事${e.episodes ?? 0} 关系${e.rels ?? 0}`
+          case 'gw_maint': return e.kind === 'weekly' ? `每周聚类 → ${e.communities ?? '?'} 圈子` : `每日维护 · 成员${e.members ?? '?'}`
+          case 'gw_community': return `节点${e.nodes ?? '?'} → 圈子${e.communities ?? '?'}`
+          case 'gw_privacy': return `${e.action || ''}${e.groupIdHash ? ' · ' + e.groupIdHash : ''}`
           default: return ''
         }
       }
