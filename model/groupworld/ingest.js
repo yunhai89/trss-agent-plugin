@@ -92,14 +92,18 @@ export class GroupWorldIngester {
     }
 
     if (isNew) {
-      await this._upsertProfile(groupId, userId, norm, msgType, now)
-      // 有向边：回复
-      if (replyToUserId && replyToUserId !== userId) {
-        await this._bumpEdge(groupId, userId, replyToUserId, 'reply', now)
-      }
-      // 有向边：@
-      for (const muid of mentions) {
-        if (muid && muid !== userId) await this._bumpEdge(groupId, userId, muid, 'mention', now)
+      // bot 自身发言：消息照常入库（群友"回复 bot"的 reply 链解析靠查 gw_messages，不能排除），
+      // 但不建成员档案、不算社交边、不进活跃统计——bot 的关系走独立的 gw_bot_rel 主观关系表
+      if (!norm.isSelf) {
+        await this._upsertProfile(groupId, userId, norm, msgType, now)
+        // 有向边：回复
+        if (replyToUserId && replyToUserId !== userId) {
+          await this._bumpEdge(groupId, userId, replyToUserId, 'reply', now)
+        }
+        // 有向边：@
+        for (const muid of mentions) {
+          if (muid && muid !== userId) await this._bumpEdge(groupId, userId, muid, 'mention', now)
+        }
       }
       // 游标占位
       try { await this.dao.run('INSERT OR IGNORE INTO gw_cursor(group_id) VALUES (?)', [groupId]) } catch { /* noop */ }

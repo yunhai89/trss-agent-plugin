@@ -183,7 +183,7 @@ export class EvidenceResolver {
   /** 写一批证据行。 */
   async _writeEvidence(groupId, targetType, targetId, evidenceMsgs, now, fallbackText = '') {
     if (!Array.isArray(evidenceMsgs) || !evidenceMsgs.length) {
-      if (fallbackText) await this.dao.run('INSERT INTO gw_evidence(group_id,target_type,target_id,evidence_kind,evidence_text,weight,observed_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)', [groupId, targetType, targetId || null, 'inferred', String(fallbackText).slice(0, 1000), 1, now, now])
+      if (fallbackText) await this.dao.run('INSERT INTO gw_evidence(group_id,target_type,target_id,evidence_kind,evidence_text,weight,observed_at,created_at) VALUES (?,?,?,?,?,?,?,?)', [groupId, targetType, targetId || null, 'inferred', String(fallbackText).slice(0, 1000), 1, now, now])
       return
     }
     for (const m of evidenceMsgs.slice(0, 12)) {

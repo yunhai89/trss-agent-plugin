@@ -644,6 +644,13 @@ async function buildRuntime() {
     } catch (e) { Log.warn('[toolEvo] 初始化失败（sqlite3 未装？）', e?.message || e) }
   }
 
+  // 模型注册表参数覆盖：当前主模型在 agent.llmModels 有登记且显式指定 thinking/温度/maxTokens 时覆盖全局
+  // （web「模型列表 → 编辑」弹窗设置的参数在此生效；仅对主对话链路，各旁路功能仍用自己的配置）
+  const regEntry = (cfg.llmModels || []).find((m) => m && String(m.model) === String(cfg.model))
+  const regThinking = regEntry?.thinking === 'on' ? { type: 'enabled' } : regEntry?.thinking === 'off' ? { type: 'disabled' } : null
+  const regTemperature = Number.isFinite(Number(regEntry?.temperature)) ? Number(regEntry.temperature) : null
+  const regMaxTokens = Number.isFinite(Number(regEntry?.maxTokens)) && Number(regEntry.maxTokens) > 0 ? Number(regEntry.maxTokens) : null
+
   const agentConfig = {
     provider,
     model: cfg.model,
@@ -665,9 +672,9 @@ async function buildRuntime() {
     systemPrompt: cfg.systemPrompt || undefined,
     maxTurns: cfg.maxTurns ?? 50,
     loop: cfg.loop || undefined, // LoopGovernor 循环智能终止（审计 §2.1）；cfg.loop 假值则 Agent 不启用 governor
-    temperature: cfg.temperature,
-    maxTokens: cfg.maxTokens || null, // 控制输出长度（消除 Anthropic 硬编码 4096 / OpenAI 不发）
-    thinking: cfg.thinking || null,
+    temperature: regTemperature != null ? regTemperature : cfg.temperature,
+    maxTokens: regMaxTokens != null ? regMaxTokens : (cfg.maxTokens || null), // 控制输出长度（消除 Anthropic 硬编码 4096 / OpenAI 不发）
+    thinking: regThinking || cfg.thinking || null,
     // 上下文管理：token 压力阈值（从 contextWindow 派生）、工具结果上限、是否回灌 reasoning
     contextPressureThreshold: cfg.contextPressureThreshold ?? (cfg.contextWindow ? Math.floor(cfg.contextWindow * 0.8) : null),
     maxToolResultChars: cfg.maxToolResultChars ?? 4000,
@@ -1286,7 +1293,9 @@ export class Chat extends plugin {
           if (acceptMap && acceptMap.size) {
             try {
               cleanBody = rt.sticker.applyImage(body, new Map()).replace(/[\s\n]+$/, '')
-              stickerImgs = [...acceptMap.values()].map((e) => rt.sticker._imgDataUri(e.abs || e.path)).filter(Boolean)
+              // 修复：acceptMap 的 value 是图片绝对路径字符串（此前误当对象取 .abs/.path → undefined
+              // → _imgDataUri 读文件失败被吞 → stickerImgs 恒空，图片回复从未渲染出表情包）
+              stickerImgs = [...acceptMap.values()].map((abs) => rt.sticker._imgDataUri(abs)).filter(Boolean)
             } catch { cleanBody = body }
           }
           const img = await renderReplyImage(cleanBody, {

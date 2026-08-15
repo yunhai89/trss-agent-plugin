@@ -19,7 +19,7 @@ export class WorldAnalyzer {
   /**
    * @param {object} opts { provider, dao, segmenter, resolver, cfg:()=>object, trace? }
    */
-  constructor({ provider, dao, segmenter, resolver, cfg, trace = null }) {
+  constructor({ provider, dao, segmenter, resolver, cfg, trace = null, botId = null }) {
     if (!provider || !dao || !segmenter || !resolver) throw new Error('WorldAnalyzer 缺参数')
     this.provider = provider
     this.dao = dao
@@ -27,6 +27,7 @@ export class WorldAnalyzer {
     this.resolver = resolver
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.trace = trace
+    this.botId = botId != null ? String(botId) : null
   }
 
   /** 一轮小时分析。返回统计。 */
@@ -93,6 +94,8 @@ export class WorldAnalyzer {
       await this.dao.txn(async () => {
         for (const t of validated.trait_candidates) {
           const userId = revMap[t.user_id]; if (!userId) continue
+          // 不给 bot 自己提画像（bot 消息留在片段里供对话上下文，但"关于我自己的特征"无意义且占据画像预算）
+          if (this.botId && String(userId) === String(this.botId)) continue
           await this.resolver.mergeTraitCandidate({ groupId, userId, candidate: t, evidenceMsgs: evOf(t.evidence_message_ids), sourceType: 'inferred', now })
         }
         for (const r of validated.relation_candidates) {

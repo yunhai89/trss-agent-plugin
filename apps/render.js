@@ -71,7 +71,9 @@ export const renderReplyImage = async (content, { scale = 3, footer, extraCss, c
       const messages = [
         { role: 'user', text: chat.userText, avatar: userAvatar },
         { role: 'ai', html: bodyHtml, avatar: aiAvatar, name: chat.aiName },
-        ...((chat.stickerImgs || []).map((u) => ({ role: 'ai', html: `<img style="max-height:140px;display:block" src="${u}">`, avatar: aiAvatar, name: chat.aiName }))),
+        // 修复：stickerImgs 的元素已是完整 <img class="sticker" src="data:..."> 标签（manager._imgDataUri 产物，
+        // .sticker 样式在 theme.js）——此前误当 URL 再包一层 src="${u}" → 嵌套 HTML 解析崩 → 卡片里只剩空气泡
+        ...((chat.stickerImgs || []).map((tag) => ({ role: 'ai', html: String(tag), avatar: aiAvatar, name: chat.aiName }))),
       ]
       chatResolved = { messages, head: chat.groupName ? `${chat.groupName}（${chat.groupId}）` : '私聊', tokens: chat.tokens, reasoningTokens: chat.reasoningTokens, model: chat.model, inputTokens: chat.inputTokens, outputTokens: chat.outputTokens }
     }

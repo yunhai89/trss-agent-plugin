@@ -63,6 +63,13 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
     quoteTarget: 'auto',
   },
   behaviorPolicy: { ...DEFAULT_BEHAVIOR_POLICY },
+  memory: {                   // 伪人独立记忆库（MaiBot 式睡眠整合；独立 sqlite，与主 Agent 记忆隔离）
+    enabled: true,
+    maxPerQuery: 5,           // Planner 单次注入记忆条数上限
+    maxPerGroup: 300,         // 单群记忆容量（超量按价值淘汰）
+    minConsolidateMessages: 6, // 整合所需最少消息数
+    forgetDays: 30,           // 超龄硬遗忘（天）
+  },
   learning: {                 // Phase 4：仅 shadow 采集，不进 Prompt
     style: 'shadow',
     jargon: 'shadow',
@@ -103,6 +110,11 @@ export function validateHumanizeConfig(raw = {}, runtimeToolNames = null) {
   c.talkValue = clamp(c.talkValue, 0.05, 1)
   c.threshold = clamp(c.threshold, 1, 120)
   c.maxPlannerRounds = clamp(c.maxPlannerRounds, 1, 6)
+  c.memory = c.memory && typeof c.memory === 'object' ? c.memory : {}
+  c.memory.maxPerQuery = clamp(c.memory.maxPerQuery, 1, 12)
+  c.memory.maxPerGroup = clamp(c.memory.maxPerGroup, 50, 2000)
+  c.memory.minConsolidateMessages = clamp(c.memory.minConsolidateMessages, 4, 50)
+  c.memory.forgetDays = clamp(c.memory.forgetDays, 7, 180)
   c.plannerTimeoutMs = clamp(c.plannerTimeoutMs, 5000, 120000)
   c.debounceMs = clamp(c.debounceMs, 200, 10000)
   c.cooldownSeconds = clamp(c.cooldownSeconds, 0, 600)

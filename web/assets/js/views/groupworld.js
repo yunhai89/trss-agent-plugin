@@ -118,6 +118,9 @@
       const enableWarn = computed(() => form.enabled === true && !(form.groups || []).length)
       const onlineWarn = computed(() => form.online === true && form.enabled !== true)
 
+      // 配置分区默认全部收起（点标题展开/收起）
+      const cfgOpen = reactive({ main: false, ingest: false, analysis: false, graph: false, privacy: false })
+
       // ── 标签 + 数据浏览 ──
       const tab = ref('config')
       const dataGid = ref('')
@@ -163,7 +166,7 @@
       })
 
       return {
-        form, dirty, save, reset, enableWarn, onlineWarn,
+        form, dirty, save, reset, enableWarn, onlineWarn, cfgOpen,
         tab, sub, switchTab, dataGid, dataGroups, stats, members, episodes, communities, detail, loading,
         loadData, openProfile, tierName, srcName, epName, pct, shortId, parseArr,
         sections: [], // 占位（配置页锚点导航已内联）
@@ -191,16 +194,16 @@
         <div v-if="enableWarn" class="note n-rose"><v-icon name="warn"/><div>总开关已开，但白名单为空 —— 不会在任何群生效。</div></div>
         <div v-if="onlineWarn" class="note n-rose"><v-icon name="warn"/><div>online=开 但总开关未开 —— 在线注入不会生效。</div></div>
 
-        <div class="card cf-sec open"><div class="cf-sh"><span class="ct-ico" style="background:var(--grad)"><v-icon name="group"/></span><div><div class="ct-t">总开关 / 白名单</div><div class="ct-s">先加白名单群跑观测，核对画像质量后再开在线注入</div></div></div>
-          <div class="cf-body"><div class="cf-grid">
+        <div class="card cf-sec" :class="{open: cfgOpen.main}"><div class="cf-sh" @click="cfgOpen.main = !cfgOpen.main"><span class="ct-ico" style="background:var(--grad)"><v-icon name="group"/></span><div><div class="ct-t">总开关 / 白名单</div><div class="ct-s">先加白名单群跑观测，核对画像质量后再开在线注入</div></div></div>
+          <div class="cf-body" v-show="cfgOpen.main"><div class="cf-grid">
             <cfg-row name="启用 GroupWorld"><v-switch v-model="form.enabled"/></cfg-row>
             <cfg-row name="在线注入 Planner/Replyer" desc="默认关：开=注入伪人决策与回复；关=仅观测" danger><v-switch v-model="form.online"/></cfg-row>
             <cfg-row full name="白名单群"><tag-editor v-model="form.groups" placeholder="输入群号回车" :mono="true"/></cfg-row>
           </div></div>
         </div>
 
-        <div class="card cf-sec open"><div class="cf-sh"><span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="filter"/></span><div><div class="ct-t">摄入 / 会话切片</div><div class="ct-s">原始消息落库、静默切片与主题漂移切分</div></div></div>
-          <div class="cf-body"><div class="cf-grid">
+        <div class="card cf-sec" :class="{open: cfgOpen.ingest}"><div class="cf-sh" @click="cfgOpen.ingest = !cfgOpen.ingest"><span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="filter"/></span><div><div class="ct-t">摄入 / 会话切片</div><div class="ct-s">原始消息落库、静默切片与主题漂移切分</div></div></div>
+          <div class="cf-body" v-show="cfgOpen.ingest"><div class="cf-grid">
             <cfg-row name="原始消息保留(天)"><input type="number" class="inp" style="width:110px" min="1" max="365" v-model.number="form.ingestion.rawMessageRetentionDays"></cfg-row>
             <cfg-row name="切片静默阈值(秒)"><input type="number" class="inp" style="width:120px" min="60" max="1800" v-model.number="form.ingestion.segmentIdleSeconds"></cfg-row>
             <cfg-row name="单片段最大消息数"><input type="number" class="inp" style="width:110px" min="20" max="200" v-model.number="form.ingestion.segmentMaxMessages"></cfg-row>
@@ -212,8 +215,8 @@
           </div></div>
         </div>
 
-        <div class="card cf-sec open"><div class="cf-sh"><span class="ct-ico" style="background:var(--grad-mint)"><v-icon name="cpu"/></span><div><div class="ct-t">分析 / 预算</div><div class="ct-s">小时增量分析的调度、模型与调用预算</div></div></div>
-          <div class="cf-body"><div class="cf-grid">
+        <div class="card cf-sec" :class="{open: cfgOpen.analysis}"><div class="cf-sh" @click="cfgOpen.analysis = !cfgOpen.analysis"><span class="ct-ico" style="background:var(--grad-mint)"><v-icon name="cpu"/></span><div><div class="ct-t">分析 / 预算</div><div class="ct-s">小时增量分析的调度、模型与调用预算</div></div></div>
+          <div class="cf-body" v-show="cfgOpen.analysis"><div class="cf-grid">
             <cfg-row name="分析 cron"><input class="inp mono" style="width:170px" v-model="form.analysis.schedule" placeholder="7 * * * *"></cfg-row>
             <cfg-row name="片段最小有效消息数"><input type="number" class="inp" style="width:110px" min="1" max="50" v-model.number="form.analysis.minSegmentMessages"></cfg-row>
             <cfg-row name="每轮最多片段数"><input type="number" class="inp" style="width:110px" min="1" max="500" v-model.number="form.analysis.maxSegmentsPerRun"></cfg-row>
@@ -225,8 +228,8 @@
           </div></div>
         </div>
 
-        <div class="card cf-sec open"><div class="cf-sh"><span class="ct-ico" style="background:var(--grad-vio)"><v-icon name="memory"/></span><div><div class="ct-t">画像 / 关系图</div><div class="ct-s">成员分层、画像特征上限与关系边维护</div></div></div>
-          <div class="cf-body"><div class="cf-grid">
+        <div class="card cf-sec" :class="{open: cfgOpen.graph}"><div class="cf-sh" @click="cfgOpen.graph = !cfgOpen.graph"><span class="ct-ico" style="background:var(--grad-vio)"><v-icon name="memory"/></span><div><div class="ct-t">画像 / 关系图</div><div class="ct-s">成员分层、画像特征上限与关系边维护</div></div></div>
+          <div class="cf-body" v-show="cfgOpen.graph"><div class="cf-grid">
             <cfg-row name="hot 活跃天数(30d)"><input type="number" class="inp" style="width:100px" min="1" max="30" v-model.number="form.profiles.hotActiveDays30d"></cfg-row>
             <cfg-row name="warm 发言数(30d)"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.profiles.warmMessageCount30d"></cfg-row>
             <cfg-row name="在线最低置信度" desc="后端强制 ≥0.55" danger><input type="number" class="inp" style="width:100px" min="0.55" max="0.99" step="0.01" v-model.number="form.profiles.minOnlineConfidence"></cfg-row>
@@ -238,8 +241,8 @@
           </div></div>
         </div>
 
-        <div class="card cf-sec open"><div class="cf-sh"><span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="shield"/></span><div><div class="ct-t">在线检索 / 隐私</div><div class="ct-s">注入伪人的检索预算与群友自查/退出权利</div></div></div>
-          <div class="cf-body"><div class="cf-grid">
+        <div class="card cf-sec" :class="{open: cfgOpen.privacy}"><div class="cf-sh" @click="cfgOpen.privacy = !cfgOpen.privacy"><span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="shield"/></span><div><div class="ct-t">在线检索 / 隐私</div><div class="ct-s">注入伪人的检索预算与群友自查/退出权利</div></div></div>
+          <div class="cf-body" v-show="cfgOpen.privacy"><div class="cf-grid">
             <cfg-row name="Planner token 预算" desc="注入 Planner 的社会现场摘要上限"><input type="number" class="inp" style="width:110px" min="100" v-model.number="form.retrieval.plannerTokenBudget"></cfg-row>
             <cfg-row name="Replyer token 预算" desc="注入 Replyer 的社会现场摘要上限"><input type="number" class="inp" style="width:110px" min="100" v-model.number="form.retrieval.replyerTokenBudget"></cfg-row>
             <cfg-row name="在线返回旧事上限" desc="单次注入最多携带几条事件/群梗"><input type="number" class="inp" style="width:90px" min="0" v-model.number="form.retrieval.maxEpisodes"></cfg-row>

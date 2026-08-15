@@ -40,7 +40,7 @@ export class HumanizeReplyer {
   /**
    * @param {object} opts { provider, cfg, getPersonaVoice?:(groupId)=>string, getRecentBotText?:(groupId)=>string, getStyleExamples?:(groupId)=>string, getStickerCatalog?:(groupId)=>string }
    */
-  constructor({ provider, cfg, getPersonaVoice = null, getRecentBotText = null, getStyleExamples = null, getStickerCatalog = null, getWorldContext = null } = {}) {
+  constructor({ provider, cfg, getPersonaVoice = null, getRecentBotText = null, getStyleExamples = null, getStickerCatalog = null, getWorldContext = null, getSelfCapsule = null, getMemoryBlock = null, enrichMedia = null } = {}) {
     this.provider = provider
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.getPersonaVoice = getPersonaVoice || (() => '')
@@ -48,6 +48,9 @@ export class HumanizeReplyer {
     this.getStyleExamples = getStyleExamples || (() => '')
     this.getStickerCatalog = getStickerCatalog || (() => '')
     this.getWorldContext = getWorldContext // GroupWorld 局部社会现场（online 时；失败/空 → 零影响）
+    this.getSelfCapsule = getSelfCapsule // SelfState 表达胶囊（enabled+非 shadow 时；失败/中性 → 零影响）
+    this.getMemoryBlock = getMemoryBlock // 伪人独立记忆（对当前发言对象的印象等；失败/空 → 零影响）
+    this.enrichMedia = enrichMedia // 视觉图描述（配了视觉模型时 '[图片]'→'[图:描述]'；未配/失败 → 原样）
   }
 
   /**
@@ -67,10 +70,12 @@ export class HumanizeReplyer {
 
     // 近期群聊：含 id + 对话关系标注（@我/引用我/回复某人/时间），让 Replyer 知道在接谁的话。
     // batch 现为 rolling ctxWindow（含 bot 自己的话），不再是无 self 的孤立批次。
-    const recent = formatGroupContext(
-      (Array.isArray(batch) ? batch : []).slice(-contextMessages),
-      { includeIds: true },
-    )
+    // 视觉：配了视觉模型时把窗口内近期图片注成一句话描述（'[图片]'→'[图:描述]'）
+    let ctxMessages = Array.isArray(batch) ? batch.slice(-contextMessages) : []
+    try {
+      if (this.enrichMedia && ctxMessages.length) ctxMessages = await this.enrichMedia(ctxMessages, { targetId: target?.id }) || ctxMessages
+    } catch { /* 保持原样 */ }
+    const recent = formatGroupContext(ctxMessages, { includeIds: true })
 
     const personaVoice = await this.getPersonaVoice(groupId)
     // 表情包清单注入：仅在 reply.allowSticker !== false 且表情包启用时注入；否则空串零影响
@@ -92,6 +97,21 @@ export class HumanizeReplyer {
         socialScene = scene?.text || ''
       }
     } catch { /* noop */ }
+    // SelfState 表达胶囊（enabled+非 shadow 时注入；失败/中性 → 零影响）
+    let selfCapsule = ''
+    try {
+      if (this.getSelfCapsule && target && groupId) {
+        const cap = await this.getSelfCapsule({ groupId, targetUserId: target.userId, plannerIntent: action.intent || 'normal_reply' })
+        selfCapsule = cap?.text || ''
+      }
+    } catch { /* noop */ }
+    // 伪人独立记忆（对当前发言对象的印象/群梗；失败/空 → 零影响）
+    let memoryBlock = ''
+    try {
+      if (this.getMemoryBlock && target && groupId) {
+        memoryBlock = await this.getMemoryBlock({ groupId, targetUserId: target.userId, queryText: String(target.text || '').slice(0, 200) }) || ''
+      }
+    } catch { /* noop */ }
     const system = buildReplyerSystem({
       personaName: c.personaName || '机器人',
       replyGuide: action.replyGuide || '',
@@ -102,6 +122,8 @@ export class HumanizeReplyer {
       approvedStyleExamples: this.getStyleExamples(groupId),
       recentMessages: recent,
       socialScene,
+      selfCapsule,
+      memoryBlock,
       stickerCatalog,
     })
 

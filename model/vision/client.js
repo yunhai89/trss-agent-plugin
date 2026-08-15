@@ -116,7 +116,13 @@ export class VisionService {
         stream: false,
       })
     } catch (e) {
-      this.logger('warn', `[vision] analyze 失败 ${name || ''}：${e?.message || e}`)
+      const msg = String(e?.message || e)
+      // 常见配置错：视觉模型本身或代理通道不支持 image_url 块（模型可能是多模态的，但中转通道没透传）——给人话提示
+      if (/image_url|multimodal|not.*support.*image|image.*input/i.test(msg)) {
+        this.logger('warn', `[vision] analyze 失败 ${name || ''}：当前通道/模型拒收图片输入。两种可能：① 模型本身是文本模型；② 模型是多模态但代理通道（如 OpenCode Zen/Go）未透传 image_url——换通道直连或换该通道已验证支持图片的模型（本通道实测 mimo-v2.5 可用）`)
+      } else {
+        this.logger('warn', `[vision] analyze 失败 ${name || ''}：${msg}`)
+      }
       return ''
     }
     return (res?.content || '').trim()

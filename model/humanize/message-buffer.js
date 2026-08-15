@@ -52,6 +52,28 @@ export class MessageBuffer {
     return item.seq
   }
 
+  /**
+   * 恢复预置消息（重启后从持久化回填缓冲；修复重启丢全部上下文）。
+   * 只收 id/seq 合法且未超 TTL 的条目（旧序→新序），按容量截断；恢复后 _seq 取最大值，
+   * 新消息 seq 继续递增，与持久化的游标（lastProcessedSeq）保持同一序号空间。
+   */
+  adopt(items) {
+    if (!Array.isArray(items) || !items.length) return 0
+    const now = Date.now()
+    const valid = items
+      .filter((m) => m && m.id && Number.isFinite(m.seq) && Number(m.timestamp) > now - this.ttlMs)
+      .sort((a, b) => a.seq - b.seq)
+      .slice(-this.capacity)
+    this._items = []
+    this._ids = new Set()
+    for (const m of valid) {
+      this._items.push({ ...m })
+      this._ids.add(String(m.id))
+    }
+    this._seq = valid.length ? valid[valid.length - 1].seq : 0
+    return valid.length
+  }
+
   /** 标记某条消息为机器人自身发言（presence 统计用）。 */
   markSelf(messageId) {
     const it = this._items.find((m) => m.id === messageId)

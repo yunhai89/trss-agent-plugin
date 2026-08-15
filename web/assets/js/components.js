@@ -135,12 +135,12 @@
   const VModal = defineComponent({
     name: 'VModal',
     components: { VIcon },
-    props: { title: String, width: { type: String, default: '' }, icon: { type: String, default: '' } },
+    props: { title: String, width: { type: String, default: '' }, icon: { type: String, default: '' }, center: { type: Boolean, default: false } },
     emits: ['close'],
     template: `
     <Teleport to="body">
       <Transition name="modal" appear>
-        <div class="ovl" @click.self="$emit('close')">
+        <div class="ovl" :class="{ center }" @click.self="$emit('close')">
           <div class="mdl" :style="width ? {width} : {}">
             <div class="mdl-h">
               <slot name="head">

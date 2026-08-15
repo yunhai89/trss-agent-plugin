@@ -14,7 +14,7 @@
  */
 import { createHash } from 'node:crypto'
 import Log from '../../utils/Log.js'
-import { textSim } from './embedding.js'
+import { textSim, cosine } from './embedding.js'
 
 // 低价值消息判定（纯表情/极短反应/系统/命令）。不计入有效信息量，但仍占位时间线。
 const SHORT_REACTIONS = new Set(['', '哈', '哈哈', '哈哈哈', '草', '笑死', '好', '嗯', '啊', '哦', '6', '666', '？', '?', '对', '是的', '牛', '卧槽', 'nb', 'NB', '收到', 'ok', 'OK'])
@@ -39,12 +39,16 @@ function segIdemKey(groupId, startMsgId) {
 
 export class ConversationSegmenter {
   /**
-   * @param {object} opts { dao, trace? }
+   * @param {object} opts { dao, trace?, embedder? }
+   *   embedder（可选）：话题漂移复核用——词面 textSim 判"该切"时用 embedding 余弦复核，
+   *   同话题换措辞（textSim 假切）不切，防碎片化。未配 → 纯词面（零影响）。
    */
-  constructor({ dao, trace = null } = {}) {
+  constructor({ dao, trace = null, embedder = null } = {}) {
     if (!dao) throw new Error('ConversationSegmenter 需要 dao')
     this.dao = dao
     this.trace = trace
+    this.embedder = embedder
+    this._winEmbCache = new Map() // segmentId → 近窗向量（片段存活期内复用）
   }
 
   /**
@@ -82,11 +86,17 @@ export class ConversationSegmenter {
       // 需新开片段：无 open / 静默超阈值 / 当前片段已满
       let needNew = !open || gap >= idleMs || open.msgCount >= maxMsg
       // 主题漂移：片段已具最小规模 + 新消息是有效长文本 + 不属于片段内引用链 + 与近窗词面相似度跌破阈值
+      // （embedding 可用时复核：词面判"该切"但语义余弦仍高 = 同话题换措辞 → 不切，防碎片化）
       if (!needNew && shiftOn && open && open.msgCount >= minSplit
           && !isLowValue(m) && [...String(m.plain_text || '')].length >= 6
           && !(m.reply_to_msg_id && open.msgIds?.has(String(m.reply_to_msg_id)))) {
-        const sim = textSim((open.recentTexts || []).slice(-winSize).join(' '), String(m.plain_text || ''))
-        if (sim < shiftThr) { needNew = true; topicSplits++ }
+        const winText = (open.recentTexts || []).slice(-winSize).join(' ')
+        const sim = textSim(winText, String(m.plain_text || ''))
+        if (sim < shiftThr) {
+          let stillSameTopic = false
+          if (this.embedder) stillSameTopic = await this._sameTopicByEmbed(open, winText, String(m.plain_text || ''))
+          if (!stillSameTopic) { needNew = true; topicSplits++ }
+        }
       }
       if (needNew) {
         if (open && open.id) { await this._close(open, now, open.msgCount >= maxMsg ? 'full' : (gap >= idleMs ? 'idle' : 'topic_shift')); closed++ }
@@ -100,6 +110,28 @@ export class ConversationSegmenter {
     closed += await this._closeIdleOpen(groupId, idleMs, now)
     this.trace?.record?.('gw_segment', { groupId, processed: msgs.length, closed, topicSplits })
     return { processed: msgs.length, closed, topicSplits }
+  }
+
+  /** embedding 复核：新消息与片段近窗是否仍同话题（余弦 ≥0.55 视为同话题）。
+   *  近窗向量按 segmentId 缓存（片段存活期内不重算）；任一向量缺失 → false（回落词面判定）。 */
+  async _sameTopicByEmbed(open, winText, msgText) {
+    try {
+      if (!open?.id) return false
+      if (!this._winEmbCache.has(open.id)) {
+        const v = await this.embedder.embed(winText)
+        if (!v) { this._winEmbCache.set(open.id, null); return false }
+        this._winEmbCache.set(open.id, v)
+        if (this._winEmbCache.size > 50) { // 简单容量控制：超 50 清一轮（旧片段已闭合）
+          for (const k of this._winEmbCache.keys()) { if (k !== open.id) this._winEmbCache.delete(k) }
+        }
+      }
+      const winEmb = this._winEmbCache.get(open.id)
+      if (!winEmb) return false
+      const msgEmb = await this.embedder.embed(msgText)
+      if (!msgEmb) return false
+      const c = cosine(winEmb, msgEmb)
+      return c != null && c >= 0.55
+    } catch { return false }
   }
 
   /** 取当前 open 片段（含内存追踪的 lastSentAt/msgCount/recentTexts/msgIds，漂移检测用）。 */

@@ -19,6 +19,7 @@ import Log, { ANSI } from '../utils/Log.js'
 import devLog from '../utils/DevLog.js'
 import { getRuntime } from './agent.js'
 import { embed } from '../model/llm/embed.js'
+import { buildEmbed } from '../model/llm/embed-wiring.js'
 import { normalizeYunzaiEvent, collectSelfIds } from '../model/humanize/message-normalizer.js'
 import { GroupWorldService } from '../model/groupworld/index.js'
 
@@ -64,17 +65,6 @@ export async function getGroupWorld() {
     return svc
   })().catch((e) => { _gwFailed = e; Log.warn('[groupworld] 装配失败（agent 未初始化？），旁听暂停', e?.message || e); throw e }).finally(() => { _gwPromise = null })
   return _gwPromise
-}
-
-/** 语义层 embedFn：复用 recall 的 embedding 配置（agent.recall.embedProvider 等；未配 → null 词面兜底）。
- *  注：与 provider 同为装配期决定——改 embedding 配置需重启进程生效。 */
-function buildEmbed(rt) {
-  const rcfg = Config.get().agent?.recall || {}
-  if (!rcfg.embedProvider) return { embedFn: null, embedModel: null }
-  const client = (rcfg.embedBaseURL || rcfg.embedApiKey)
-    ? { baseURL: rcfg.embedBaseURL || rt.provider?.client?.baseURL, apiKey: rcfg.embedApiKey || rt.provider?.client?.apiKey }
-    : rt.provider
-  return { embedModel: rcfg.embedProvider, embedFn: (text) => embed(text, { client, model: rcfg.embedProvider }) }
 }
 
 /** 极简 trace：groupId 哈希后写默认 data/logs（web 可见）。 */
@@ -138,7 +128,7 @@ export class GroupWorld extends plugin {
     const e = this.e
     if (!e.isGroup) return false
     const c = cfgNow()
-    if (c.enable !== true || !Array.isArray(c.groups) || !c.groups.map(String).includes(String(e.group_id))) return false
+    if (c.enabled !== true || !Array.isArray(c.groups) || !c.groups.map(String).includes(String(e.group_id))) return false
 
     let gw
     try { gw = await getGroupWorld() } catch { return false }
@@ -161,7 +151,7 @@ export class GroupWorld extends plugin {
 
   async hourlyTask() {
     const c = cfgNow()
-    if (c.enable !== true) return
+    if (c.enabled !== true) return
     let gw; try { gw = await getGroupWorld() } catch { return }
     for (const gid of (c.groups || []).map(String)) {
       try { await gw.runHourlyAnalysis(gid) } catch (e) { Log.warn('[groupworld] 小时分析失败', gid, e?.message || e) }
@@ -170,7 +160,7 @@ export class GroupWorld extends plugin {
 
   async dailyTask() {
     const c = cfgNow()
-    if (c.enable !== true) return
+    if (c.enabled !== true) return
     let gw; try { gw = await getGroupWorld() } catch { return }
     for (const gid of (c.groups || []).map(String)) {
       try { await gw.runDailyMaintenance(gid) } catch (e) { Log.warn('[groupworld] 每日维护失败', gid, e?.message || e) }
@@ -179,7 +169,7 @@ export class GroupWorld extends plugin {
 
   async weeklyTask() {
     const c = cfgNow()
-    if (c.enable !== true || c.graph?.weeklyCommunityDetection === false) return
+    if (c.enabled !== true || c.graph?.weeklyCommunityDetection === false) return
     let gw; try { gw = await getGroupWorld() } catch { return }
     for (const gid of (c.groups || []).map(String)) {
       try { await gw.runWeeklyCommunity(gid) } catch (e) { Log.warn('[groupworld] 每周聚类失败', gid, e?.message || e) }
@@ -258,7 +248,7 @@ export class GroupWorld extends plugin {
     const c = cfgNow()
     const gid = e.msg.match(/\d+/)?.[0] || (c.groups[0] ? String(c.groups[0]) : null)
     const lines = [
-      `群聊小世界：${c.enable ? '✅已开启' : '❌未开启'}（online=${c.online === true}）`,
+      `群聊小世界：${c.enabled ? '✅已开启' : '❌未开启'}（online=${c.online === true}）`,
       `白名单群：${(c.groups || []).join('、') || '(空)'}`,
     ]
     if (gid) {

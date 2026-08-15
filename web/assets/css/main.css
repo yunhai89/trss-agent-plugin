@@ -1101,3 +1101,11 @@ pre.code {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
   body::after, .h-blob, .brand-badge, .login-logo, .meter > i::after { animation: none !important; }
 }
+
+/* 居中弹窗（v-modal center 属性）：覆盖移动端"底部弹出层"行为——始终垂直居中，避免长表单弹窗掉到屏幕下沿 */
+.ovl.center { padding: 18px; place-items: center !important; }
+.ovl.center .mdl {
+  width: min(640px, calc(100vw - 32px)) !important; max-width: calc(100vw - 32px);
+  max-height: 86vh; max-height: calc(100dvh - 36px);
+  border-radius: var(--r4) !important; border-bottom: 1px solid var(--rim) !important;
+}

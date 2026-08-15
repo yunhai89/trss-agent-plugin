@@ -181,19 +181,33 @@ export class GroupRuntime {
     this.phase = 'idle'
   }
 
-  /** 持久化轻状态（重启后恢复游标/冷却；不恢复进行中的 Planner）。 */
+  /** 持久化轻状态 + 消息缓冲尾部（重启后恢复游标/冷却/近期上下文；不恢复进行中的 Planner）。 */
   async persist() {
     try {
+      // 缓冲尾部：近期消息（含 bot 自身发言）随状态一起存——重启后 Planner/Replyer 不至于面对空上下文。
+      // 条数取 bufferCapacity 与 100 的较大值，且天然受 TTL 约束（adopt/append 时淘汰过期）。
+      const tail = this.buffer?.snapshot(Math.max(this.buffer?.capacity || 0, 100), { includeSelf: true }) || []
       await this.store?.setState?.(this.groupId, {
         lastProcessedSeq: this.lastProcessedSeq,
         cooldownUntil: this.cooldownUntil,
         backoff: this.backoff?.snapshot?.(),
+        bufferTail: tail.map(({ seq, id, groupId, userId, displayName, timestamp, text, segments, replyToId, atBot, mentionsBotName, quotesBot, isCommand, isSelf, handledByDirectAgent, media }) => ({ seq, id, groupId, userId, displayName, timestamp, text, segments, replyToId, atBot, mentionsBotName, quotesBot, isCommand, isSelf, handledByDirectAgent, media })),
         phase: 'idle', // 重启后一律从 idle 开始（不恢复 planning）
       })
     } catch { /* noop */ }
   }
 
-  /** 从持久化恢复轻状态。 */
+  /** 去抖持久化（消息路由路径高频调用，2.5s 尾沿合并写盘）。 */
+  schedulePersist() {
+    if (this._persistTimer) return
+    this._persistTimer = setTimeout(() => {
+      this._persistTimer = null
+      this.persist().catch(() => {})
+    }, 2500)
+    if (this._persistTimer.unref) this._persistTimer.unref()
+  }
+
+  /** 从持久化恢复轻状态 + 近期消息缓冲。 */
   async restore() {
     try {
       const s = await this.store?.getState?.(this.groupId)
@@ -201,6 +215,14 @@ export class GroupRuntime {
         if (Number.isFinite(s.lastProcessedSeq)) this.lastProcessedSeq = s.lastProcessedSeq
         if (Number.isFinite(s.cooldownUntil)) this.cooldownUntil = s.cooldownUntil
         this.backoff?.restore?.(s.backoff)
+        // 恢复消息尾部（TTL 外的会被 adopt 过滤；游标若仍超出缓冲则归零，防"全跳过"——坑#4 同型防线）
+        if (Array.isArray(s.bufferTail) && s.bufferTail.length) {
+          const n = this.buffer?.adopt(s.bufferTail) || 0
+          if (Number.isFinite(this.lastProcessedSeq) && this.lastProcessedSeq > (this.buffer?.lastSeq || 0)) {
+            this.lastProcessedSeq = 0
+          }
+          if (n) this.trace?.record?.('buffer_restore', { groupId: this.groupId, restored: n })
+        }
       }
     } catch { /* noop */ }
   }

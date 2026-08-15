@@ -152,13 +152,21 @@ export class HumanizeReplyComposer {
       try {
         const acceptMap = this.stickerManager.decide(text, { isGroup: true, groupId: runtime.groupId })
         const sn = acceptMap ? [...acceptMap.keys()] : []
-        Log.mark('[humanize] 表情包', `群${runtime.groupId} ${sn.length ? '附加 ' + sn.join(',') : '未附加（门控未过/无匹配）'}`)
+        // 日志分级（修复误导：此前"回复本来就没带标记"也打成"未附加（门控未过/无匹配）"，看起来像想发发不出）
+        if (sn.length) Log.mark('[humanize] 表情包', `群${runtime.groupId} 附加 ${sn.join(',')}`)
+        else if (/\[sticker:/i.test(text)) Log.warn('[humanize] 表情包', `群${runtime.groupId} 未附加：Replyer 带了标记但门控未过/无匹配（${text.match(/\[sticker:[^\]]*\]/gi)?.join(' ')}）`)
+        // 取证（入全链路日志）：Replyer 原始标记 vs 实际命中——出现"虚构名→模糊兜底到语义不符的图"时可直接定位
+        if (/\[sticker:/i.test(text)) runtime.trace?.record('sticker', { markers: (text.match(/\[sticker:[^\]]*\]/gi) || []).join(' '), attached: sn.join(','), sentCount: sentIds.length })
+        // 无标记 → 模型本轮不想用表情包，不打日志（之前每条回复刷一行造成误读）
         if (acceptMap && acceptMap.size) {
-          // 取一个 sticker 作为独立气泡（文本模式 applyText 返回 segment 数组）
-          const seg = this.stickerManager.applyText('', acceptMap)
-          if (Array.isArray(seg)) {
+          // 取一个 sticker 作为独立气泡。修复：applyText 是按"文本中的标记位置"插图片段的，
+          // 空文本没有标记 → 返回 []（此前 sendMsg([]) 发出空气泡：适配器返回 id 但群里无内容，
+          // "附加 X"日志刷了但表情从来没真正发出去过）。用首个命中名构造单标记文本产出真图片段。
+          const firstName = [...acceptMap.keys()][0]
+          const seg = this.stickerManager.applyText(`[sticker:${firstName}]`, acceptMap)
+          if (Array.isArray(seg) && seg.length) {
             try {
-              const sid = await send(seg, { quoteTargetId: null })
+              const sid = await send(seg[0], { quoteTargetId: null })
               if (sid) sentIds.push(sid)
             } catch (e) { Log.warn('[humanize] 表情包发送失败', e?.message || e) }
           }

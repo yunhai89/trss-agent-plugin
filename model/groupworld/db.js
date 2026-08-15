@@ -199,6 +199,141 @@ const SCHEMA = {
     key TEXT PRIMARY KEY,
     value TEXT
   )`,
+  // ══════════ SelfState 自我认知与情绪（设计文档 v1.1 §6；sqlite 适配 ms/REAL/TEXT-JSON）══════════
+  // §6.1 稳定自我核心（SelfCoreCompiler 编译产物，persona_version 缓存）
+  ss_self_core: `CREATE TABLE IF NOT EXISTS ss_self_core (
+    bot_id TEXT PRIMARY KEY,
+    persona_version TEXT NOT NULL,
+    identity_summary TEXT NOT NULL,
+    values_json TEXT NOT NULL,
+    boundaries_json TEXT NOT NULL,
+    sensitivities_json TEXT NOT NULL,
+    coping_style_json TEXT NOT NULL,
+    emotional_baseline_json TEXT NOT NULL,
+    temperament_json TEXT NOT NULL,
+    compiled_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`,
+  // §6.2 群级自我状态（CoreAffect；state_version 乐观锁 §21.4）
+  ss_group_state: `CREATE TABLE IF NOT EXISTS ss_group_state (
+    bot_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    valence REAL NOT NULL DEFAULT 0,
+    arousal REAL NOT NULL DEFAULT 0.2,
+    energy REAL NOT NULL DEFAULT 0.7,
+    social_security REAL NOT NULL DEFAULT 0.6,
+    agency REAL NOT NULL DEFAULT 0.6,
+    belonging_satisfaction REAL NOT NULL DEFAULT 0.6,
+    respect_satisfaction REAL NOT NULL DEFAULT 0.6,
+    attention_satisfaction REAL NOT NULL DEFAULT 0.5,
+    expression_frozen INTEGER NOT NULL DEFAULT 0,
+    last_transition_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    state_version INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (bot_id, group_id)
+  )`,
+  // §6.3 情绪实例（懒衰减锚点 last_evaluated_at；cause 关联 ss_events）
+  ss_emotions: `CREATE TABLE IF NOT EXISTS ss_emotions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    emotion_type TEXT NOT NULL,
+    intensity REAL NOT NULL,
+    target_user_id TEXT,
+    cause_event_id INTEGER NOT NULL,
+    started_at INTEGER NOT NULL,
+    half_life_seconds INTEGER NOT NULL,
+    last_evaluated_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`,
+  // §6.4 自我事件（连接 GW 与 SS 的桥梁；17 种 event_type）
+  ss_events: `CREATE TABLE IF NOT EXISTS ss_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    actor_user_id TEXT,
+    target_user_id TEXT,
+    source_message_ids TEXT NOT NULL,
+    group_episode_id INTEGER,
+    appraisal_json TEXT NOT NULL,
+    emotion_impulse_json TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    significance REAL NOT NULL,
+    occurred_at INTEGER NOT NULL,
+    processed_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at INTEGER NOT NULL
+  )`,
+  // §6.5 回应期待（七态生命周期 §16.3）
+  ss_expectations: `CREATE TABLE IF NOT EXISTS ss_expectations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    source_message_id TEXT NOT NULL,
+    target_user_id TEXT,
+    expectation_type TEXT NOT NULL,
+    expectation_strength REAL NOT NULL,
+    group_activity_at_send REAL,
+    normal_response_ms INTEGER,
+    not_before_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    fulfilled_by_message_id TEXT,
+    outcome TEXT,
+    outcome_confidence REAL,
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending'
+  )`,
+  // §6.7 未解决心事
+  ss_concerns: `CREATE TABLE IF NOT EXISTS ss_concerns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    concern_type TEXT NOT NULL,
+    target_user_id TEXT,
+    source_event_ids TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    intensity REAL NOT NULL,
+    priority REAL NOT NULL,
+    desired_resolution TEXT,
+    expires_at INTEGER,
+    resolved_at INTEGER,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`,
+  // §13.3 反思叙事（主观总结，不入群公共事实）
+  ss_reflections: `CREATE TABLE IF NOT EXISTS ss_reflections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    target_user_id TEXT,
+    confidence REAL NOT NULL,
+    source_event_ids TEXT NOT NULL,
+    recommended_concern TEXT,
+    expires_at INTEGER,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at INTEGER NOT NULL
+  )`,
+  // §6.8 状态迁移审计（before/delta/after，一切变化可追溯）
+  ss_transitions: `CREATE TABLE IF NOT EXISTS ss_transitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    source_event_id INTEGER,
+    before_state_json TEXT NOT NULL,
+    delta_json TEXT NOT NULL,
+    after_state_json TEXT NOT NULL,
+    transition_reason TEXT NOT NULL,
+    engine_version TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  )`,
 }
 
 /** 索引（与建表分离，便于统一加）。 */
@@ -215,6 +350,13 @@ const INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_episodes_group ON gw_episodes(group_id, status)',
   'CREATE INDEX IF NOT EXISTS idx_communities_group ON gw_communities(group_id)',
   'CREATE INDEX IF NOT EXISTS idx_bot_rel ON gw_bot_rel(group_id, user_id)',
+  // SelfState
+  'CREATE INDEX IF NOT EXISTS idx_ss_emotions_group ON ss_emotions(bot_id, group_id, status)',
+  'CREATE INDEX IF NOT EXISTS idx_ss_events_group ON ss_events(bot_id, group_id, occurred_at)',
+  'CREATE INDEX IF NOT EXISTS idx_ss_events_actor ON ss_events(group_id, actor_user_id, event_type)',
+  'CREATE INDEX IF NOT EXISTS idx_ss_expectations_pending ON ss_expectations(bot_id, group_id, status)',
+  'CREATE INDEX IF NOT EXISTS idx_ss_concerns_group ON ss_concerns(bot_id, group_id, status)',
+  'CREATE INDEX IF NOT EXISTS idx_ss_transitions_group ON ss_transitions(bot_id, group_id, created_at)',
 ]
 
 /* —— Promise 封装（sqlite3 回调风格 → async）—— */
@@ -252,6 +394,14 @@ export function getDb({ dir } = {}) {
 const COLUMN_MIGRATIONS = [
   ['gw_traits', 'embedding', 'ALTER TABLE gw_traits ADD COLUMN embedding BLOB'],
   ['gw_episodes', 'embedding', 'ALTER TABLE gw_episodes ADD COLUMN embedding BLOB'],
+  // SelfState §6.6：gw_bot_rel 关系情感扩展列（关系性情绪衰减慢于即时情绪，由 maintenance 处理）
+  ['gw_bot_rel', 'gratitude', 'ALTER TABLE gw_bot_rel ADD COLUMN gratitude REAL NOT NULL DEFAULT 0'],
+  ['gw_bot_rel', 'hurt', 'ALTER TABLE gw_bot_rel ADD COLUMN hurt REAL NOT NULL DEFAULT 0'],
+  ['gw_bot_rel', 'resentment', 'ALTER TABLE gw_bot_rel ADD COLUMN resentment REAL NOT NULL DEFAULT 0'],
+  ['gw_bot_rel', 'disappointment', 'ALTER TABLE gw_bot_rel ADD COLUMN disappointment REAL NOT NULL DEFAULT 0'],
+  ['gw_bot_rel', 'guardedness', 'ALTER TABLE gw_bot_rel ADD COLUMN guardedness REAL NOT NULL DEFAULT 0'],
+  ['gw_bot_rel', 'unresolved_event_count', 'ALTER TABLE gw_bot_rel ADD COLUMN unresolved_event_count INTEGER NOT NULL DEFAULT 0'],
+  ['gw_bot_rel', 'last_affective_event_at', 'ALTER TABLE gw_bot_rel ADD COLUMN last_affective_event_at INTEGER'],
 ]
 
 /** 初始化：建全部表 + 索引 + 迁移 + PRAGMA（WAL 并发读、外键约束）。幂等。 */
@@ -268,7 +418,9 @@ export async function initDb({ dir }) {
   for (const [table, col, ddl] of COLUMN_MIGRATIONS) {
     try {
       const cols = await allP(db, `PRAGMA table_info(${table})`)
-      if (cols.length && !cols.some((c) => c.name === col)) await runP(db, ddl)
+      if (cols.length && !cols.some((c) => c.name === col)) {
+        try { await runP(db, ddl) } catch (e2) { if (!/duplicate column/i.test(String(e2?.message || e2))) throw e2 }
+      }
     } catch (e) { Log.warn(`[groupworld] 列迁移失败 ${table}.${col}:`, e?.message || e) }
   }
   return db

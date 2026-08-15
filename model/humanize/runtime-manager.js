@@ -113,8 +113,11 @@ export class RuntimeManager {
   /** 路由一条消息到对应群的 scheduler。 */
   async route(groupId, msg) {
     if (!groupId) return false
-    const { scheduler } = this.getOrCreate(String(groupId))
-    return scheduler.onMessage(msg)
+    const entry = this.getOrCreate(String(groupId))
+    const r = await entry.scheduler.onMessage(msg)
+    // 消息已入缓冲 → 去抖持久化缓冲尾部（重启后可恢复上下文）
+    entry.runtime.schedulePersist()
+    return r
   }
 
   /** 取消某群所有进行中操作（失锁/配置变更）。 */

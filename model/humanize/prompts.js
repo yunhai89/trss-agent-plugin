@@ -49,7 +49,8 @@ export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为机器�
 
 【可用群公开记忆】
 {{publicMemoriesBlock}}
-{{socialSceneBlock}}`
+{{socialSceneBlock}}
+{{selfStateBlock}}`
 
 /** 构造 Planner system prompt。 */
 export function buildPlannerSystem({
@@ -60,6 +61,7 @@ export function buildPlannerSystem({
   groupContext = '',
   publicMemories = '',
   socialScene = '',
+  selfState = '',
 } = {}) {
   return fillTemplate(PLANNER_SYSTEM_TEMPLATE, {
     personaName,
@@ -69,6 +71,7 @@ export function buildPlannerSystem({
     groupContextBlock: groupContext || '（暂无上下文）',
     publicMemoriesBlock: publicMemories || '（无可用群公开记忆）',
     socialSceneBlock: socialScene ? `\n${socialScene}` : '',
+    selfStateBlock: selfState ? `\n${selfState}` : '',
   })
 }
 
@@ -102,6 +105,8 @@ export const REPLYER_SYSTEM_TEMPLATE = `你正在为群聊角色「{{personaName
 近期群聊（旧→新，{角注}标对话关系：@我=叫你、↩引用我=回复你、↩[id]=回复某人、（我）=你刚说的话，末尾为时间）：
 {{recentMessages}}
 {{socialSceneBlock}}
+{{memoryBlock}}
+{{selfCapsuleBlock}}
 {{stickerCatalogBlock}}
 【输出要求】
 - 优先 1～2 句，通常不超过 80 个汉字；确有必要时才更长；
@@ -124,6 +129,8 @@ export function buildReplyerSystem({
   approvedStyleExamples = '',
   recentMessages = '',
   socialScene = '',
+  memoryBlock = '',
+  selfCapsule = '',
   stickerCatalog = '',
 } = {}) {
   return fillTemplate(REPLYER_SYSTEM_TEMPLATE, {
@@ -136,6 +143,8 @@ export function buildReplyerSystem({
     approvedStyleExamples: approvedStyleExamples || '（暂无）',
     recentMessages: recentMessages || '（暂无）',
     socialSceneBlock: socialScene ? `\n${socialScene}\n` : '',
+    memoryBlock: memoryBlock ? `\n${memoryBlock}\n` : '',
+    selfCapsuleBlock: selfCapsule ? `\n${selfCapsule}\n` : '',
     stickerCatalogBlock: stickerCatalog ? `\n${stickerCatalog}\n` : '',
   })
 }
@@ -205,12 +214,47 @@ export function buildHumanizePersonaBlock({ name, prompt } = {}) {
  * Planner 不是角色本人、不替角色发言，只据此判断「该不该参与、用什么态度」，
  * 避免与 Planner 模板的「你不是角色本人」自相矛盾（同一 prompt 既说"你是江野"又说"你不是"）。
  */
-export function buildPlannerPersonaBlock({ name, prompt } = {}) {
-  const body = String(prompt || '').trim()
+export function buildPlannerPersonaBlock({ name, prompt } = {}) {  const body = String(prompt || '').trim()
   if (!body) return ''
   const title = name ? `「${name}」` : ''
   return [
     `【角色人设参考${title}——下面是这角色的设定。你不是角色本人、不替它写台词，只须让"是否参与 / 态度冷热"的决策符合这角色的性格与边界】`,
     body,
   ].join('\n')
+}
+
+// ─────────────── 伪人独立记忆库（MaiBot 式睡眠整合） ───────────────
+
+/** 记忆整合 system：把近期群聊（含 bot 自身发言）以角色第一人称视角压缩成长时记忆。 */
+export const MEMORY_CONSOLIDATE_SYSTEM = `你是角色记忆整合器。给你一段近期群聊记录（含"我"自己的发言），请以这个角色的第一人称视角，把它值得长期记住的内容压缩成记忆条目。
+
+只输出纯 JSON（无 markdown、无解释）：
+{
+  "memories": [
+    {
+      "kind": "impression | event | jargon | style",
+      "about_user": "成员id（群级记忆留 null）",
+      "content": "第一人称记忆，≤80字（如：林墨老爱拿我玩梗，但没恶意，我们算损友）",
+      "keywords": ["关键词", "最多8个"],
+      "importance": 0.0~1.0
+    }
+  ]
+}
+
+kind 含义：impression=对某成员的印象/关系变化；event=群里发生的事（谁做了什么）；jargon=群梗/黑话/称呼（如"咕嘎"是什么意思）；style=我的表达方式被大家如何回应（哪种语气受欢迎/被嫌弃）。
+
+规则：
+- 只记群聊公开可见内容；不记任何隐私、敏感、健康、政治推断；
+- content 用"我"的视角，写事实与感受，不写分析报告腔；
+- 宁缺毋滥：日常寒暄、无信息量的水聊不要生成记忆；
+- importance 参考：群梗/重要关系 0.6~0.9，普通事件 0.4~0.6，零碎印象 0.2~0.4。`
+
+/** 构造整合 user 消息（近期对话 → 行文本；bot 自身标"我"）。 */
+export function buildConsolidatePrompt(messages = []) {
+  const lines = (Array.isArray(messages) ? messages : []).slice(-100).map((m) => {
+    const who = m.isSelf ? '我' : `${m.displayName || m.userId}(${m.userId})`
+    const t = new Date(Number(m.timestamp) || Date.now()).toISOString().slice(5, 16).replace('T', ' ')
+    return `[${t}] ${who}: ${String(m.text || '').slice(0, 120)}`
+  })
+  return `近期群聊记录：\n${lines.join('\n')}\n\n请输出 JSON 记忆条目。`
 }

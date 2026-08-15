@@ -43,14 +43,18 @@ export class TurnScheduler {
     })
   }
 
-  /** 触发 onDelivered 回调（写回 GroupWorld 主观关系；任何异常吞掉）。 */
-  async _notifyDelivered(target) {
+  /** 触发 onDelivered 回调（写回 GroupWorld 主观关系 + SelfState 出站期待登记；任何异常吞掉）。 */
+  async _notifyDelivered(target, ctx = {}) {
     if (!this.onDelivered || !target) return
     try {
       await this.onDelivered({
         groupId: this.runtime.groupId,
         targetUserId: target.userId,
         kind: (target.quotesBot || target.atBot) ? 'reply_to_bot' : 'neutral',
+        // SelfState §16.1：仅真实发送才登记期待（文本/guide 供期待强度规则判定）
+        sentText: ctx.sentText || '',
+        replyGuide: ctx.replyGuide || '',
+        sourceMessageId: ctx.sourceMessageId || null,
       })
     } catch { /* noop */ }
   }
@@ -342,7 +346,7 @@ export class TurnScheduler {
       try { await rt.store.markSent(rt.groupId, action.targetMessageId) } catch { /* noop */ }
       rt.recordReply(result.sentIds[0])
       this._appendSelf(text, result.sentIds[0]) // 自身发言入 buffer（解锁 presence/引用/追问信号）
-      this._notifyDelivered(target) // 写回 GroupWorld 主观关系（online 时；失败忽略）
+      this._notifyDelivered(target, { sentText: text, replyGuide: action.replyGuide || '', sourceMessageId: result.sentIds[0] }) // GW 主观关系 + SS 出站期待
       rt.enterCooldown(c.cooldownSeconds ?? 45)
       rt.backoff.recordSuccess()
       rt.trace?.record('delivery', { turnId, sent: true, count: result.sentIds.length, cancelled: !!result.cancelled })

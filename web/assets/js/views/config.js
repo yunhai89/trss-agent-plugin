@@ -102,7 +102,7 @@
   const OPT = {
     trigger: [['at', '@机器人触发'], ['command', '触发词触发'], ['both', '两者皆可']],
     protocol: [['openai', 'OpenAI 兼容'], ['anthropic', 'Anthropic 兼容'], ['gemini', 'Gemini 原生(官方SDK)']],
-    preset: [['deepseek', 'DeepSeek'], ['openai', 'OpenAI'], ['gemini', 'Gemini'], ['dashscope', '通义(DashScope)'], ['zhipu', '智谱'], ['moonshot', 'Kimi(Moonshot)'], ['mimo', '小米(MiMo)'], ['minimax', 'MiniMax(M3)'], ['anthropic', 'Anthropic'], ['openrouter', 'OpenRouter(聚合)'], ['opencode', 'OpenCode Zen'], ['opencode-go', 'OpenCode Go(订阅)']],
+    preset: [['deepseek', 'DeepSeek'], ['openai', 'OpenAI'], ['gemini', 'Gemini'], ['dashscope', '通义(DashScope)'], ['zhipu', '智谱'], ['moonshot', 'Kimi(Moonshot)'], ['mimo', '小米(MiMo)'], ['minimax', 'MiniMax(M3)'], ['doubao', '豆包(火山方舟)'], ['anthropic', 'Anthropic'], ['openrouter', 'OpenRouter(聚合)'], ['opencode', 'OpenCode Zen'], ['opencode-go', 'OpenCode Go(订阅)']],
     permission: [['master', '仅主人'], ['admin', '管理员'], ['owner', '群主'], ['all', '所有人']],
     guardAction: [['block', '拦截(block)'], ['flag', '隔离标注(flag)'], ['sanitize', '脱敏(sanitize)']],
     guardSensitivity: [['low', '低 (0.95)'], ['medium', '中 (0.7)'], ['high', '高 (0.5)']],
@@ -139,6 +139,9 @@
         mimo: 'https://api.xiaomimimo.com/v1',
         // MiniMax 双协议：openai 走 /v1（chat/completions）；anthropic 走 /anthropic（client 自动拼 /v1/messages，不能带 /v1）
         minimax: { openai: 'https://api.minimaxi.com/v1', anthropic: 'https://api.minimaxi.com/anthropic' },
+        // 豆包（火山方舟 Ark）：完全 OpenAI 兼容（chat /chat/completions + embedding /embeddings 同根）；
+        // model 填推理接入点 ID（ep-xxx）或模型 ID；embedding 模型（doubao-embedding）走同一 baseURL
+        doubao: 'https://ark.cn-beijing.volces.com/api/v3',
         anthropic: 'https://api.anthropic.com',
         openrouter: 'https://openrouter.ai/api/v1',
         // OpenCode 两套端点：openai 走 /chat/completions（baseURL 带 /v1）；anthropic 走 /messages（client 自动拼 /v1，baseURL 不能带）
@@ -177,6 +180,24 @@
         if (!form.groupWorld) form.groupWorld = {}
         if (!form.groupWorld.analysis) form.groupWorld.analysis = {}
         if (form.groupWorld.analysis.modelProfile == null) form.groupWorld.analysis.modelProfile = ''
+        // selfState 兜底
+        if (!form.selfState) form.selfState = {}
+        if (form.selfState.enabled == null) form.selfState.enabled = false
+        if (form.selfState.shadowMode == null) form.selfState.shadowMode = true
+        if (!form.selfState.emotion) form.selfState.emotion = {}
+        if (form.selfState.emotion.maxNormalImpulse == null) form.selfState.emotion.maxNormalImpulse = 0.2
+        if (form.selfState.emotion.maxHighSalienceImpulse == null) form.selfState.emotion.maxHighSalienceImpulse = 0.35
+        if (form.selfState.emotion.moodEmaAlpha == null) form.selfState.emotion.moodEmaAlpha = 0.3
+        if (form.selfState.emotion.moodResetHours == null) form.selfState.emotion.moodResetHours = 6
+        if (!form.selfState.eventDetection) form.selfState.eventDetection = {}
+        if (form.selfState.eventDetection.semantic == null) form.selfState.eventDetection.semantic = true
+        if (!form.selfState.resentment) form.selfState.resentment = {}
+        if (form.selfState.resentment.maxSingleEventDelta == null) form.selfState.resentment.maxSingleEventDelta = 0.05
+        if (!form.selfState.expectations) form.selfState.expectations = {}
+        if (form.selfState.expectations.minimumWindowSeconds == null) form.selfState.expectations.minimumWindowSeconds = 90
+        if (form.selfState.expectations.minIgnoredConfidence == null) form.selfState.expectations.minIgnoredConfidence = 0.65
+        if (!form.selfState.stability) form.selfState.stability = {}
+        if (form.selfState.stability.maxNegativeMoodHours == null) form.selfState.stability.maxNegativeMoodHours = 24
         // 厂商/模型注册表（数组整体提交）
         if (!Array.isArray(form.llmProviders)) form.llmProviders = []
         if (!Array.isArray(form.llmModels)) form.llmModels = []
@@ -227,8 +248,26 @@
         ? { id: 'main', name: '主厂商', protocol: form.protocol, preset: form.preset, baseURL: form.baseURL, apiKey: form.apiKey }
         : form.llmProviders.find((p) => p.id === id)
       const provName = (id) => id === 'main' ? '主厂商' : (form.llmProviders.find((p) => p.id === id)?.name || id || '?')
-      const addProvider = () => form.llmProviders.push({ id: genId('p'), name: '', protocol: form.protocol || 'openai', preset: '', baseURL: '', apiKey: '' })
+      // 附加厂商：列表 + 查看/编辑弹窗（与模型列表同交互）；选预设/切协议自动填 baseURL
+      const provModal = reactive({ show: false, mode: 'view', index: -1, draft: {} })
+      const openProvView = (i) => { provModal.show = true; provModal.mode = 'view'; provModal.index = i; provModal.draft = JSON.parse(JSON.stringify(form.llmProviders[i] || {})) }
+      const openProvEdit = (i) => {
+        provModal.show = true; provModal.mode = 'edit'
+        if (i === -1) { provModal.index = -1; provModal.draft = { id: genId('p'), name: '', protocol: form.protocol || 'openai', preset: '', baseURL: '', apiKey: '' } }
+        else { provModal.index = i; provModal.draft = JSON.parse(JSON.stringify(form.llmProviders[i] || {})) }
+      }
+      const saveProv = () => {
+        const d = provModal.draft
+        if (!String(d.baseURL || '').trim()) { toast('接口地址 baseURL 不能为空', 'warn'); return }
+        if (provModal.index === -1) form.llmProviders.push(JSON.parse(JSON.stringify(d)))
+        else form.llmProviders.splice(provModal.index, 1, JSON.parse(JSON.stringify(d)))
+        provModal.show = false
+      }
       const delProvider = (i) => form.llmProviders.splice(i, 1)
+      const onProvPreset = (p) => {
+        const u = PRESET_URLS[p.preset]
+        if (u) p.baseURL = typeof u === 'string' ? u : (u[p.protocol] || u.openai)
+      }
       const testing = reactive({})
       const testProvider = async (p) => {
         testing[p.id] = true
@@ -238,34 +277,74 @@
         } catch (e) { toast(`「${p.name || p.baseURL || '未命名'}」连接失败：${e.message}`, 'error') }
         finally { testing[p.id] = false }
       }
-      const addModel = () => form.llmModels.push({ id: genId('m'), name: '', providerId: 'main', model: '', temperature: null, maxTokens: null, note: '' })
+      // 模型注册表：列表 + 查看/编辑弹窗（编辑可改思考开关等参数；查看只读）
+      const modelModal = reactive({ show: false, mode: 'view', index: -1, draft: {} })
+      const THK_ZH = { inherit: '继承全局', on: '开启思考', off: '关闭思考' }
+      const openModelView = (i) => { modelModal.show = true; modelModal.mode = 'view'; modelModal.index = i; modelModal.draft = JSON.parse(JSON.stringify(form.llmModels[i] || {})) }
+      const openModelEdit = (i) => {
+        modelModal.show = true; modelModal.mode = 'edit'
+        if (i === -1) { modelModal.index = -1; modelModal.draft = { id: genId('m'), name: '', providerId: 'main', model: '', temperature: null, maxTokens: null, thinking: 'inherit', note: '' } }
+        else { modelModal.index = i; modelModal.draft = JSON.parse(JSON.stringify(form.llmModels[i] || {})) }
+        if (!modelModal.draft.thinking) modelModal.draft.thinking = 'inherit'
+      }
+      const saveModel = () => {
+        const d = modelModal.draft
+        if (!String(d.model || '').trim()) { toast('模型 ID 不能为空', 'warn'); return }
+        if (modelModal.index === -1) form.llmModels.push(JSON.parse(JSON.stringify(d)))
+        else form.llmModels.splice(modelModal.index, 1, JSON.parse(JSON.stringify(d)))
+        modelModal.show = false
+      }
       const delModel = (i) => form.llmModels.splice(i, 1)
 
       /* 功能分配：槽位 ← 注册表模型。writePath 主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）
          与主 provider 同端点，只能选主厂商模型；视觉/Embedding/主模型选其它厂商时自动同步其端点。 */
       const FEATURES = [
-        { key: 'main', label: '主模型', mainOnly: false, get: () => form.model, set: (v) => { form.model = v } },
-        { key: 'utility', label: '旁路小模型', mainOnly: true, get: () => form.utilityModel, set: (v) => { form.utilityModel = v } },
-        { key: 'vision', label: '视觉模型', mainOnly: false, get: () => form.vision?.model || '', set: (v) => { if (!form.vision) form.vision = {}; form.vision.model = v } },
-        { key: 'recall', label: '记忆抽取模型', mainOnly: true, get: () => form.recall?.model || '', set: (v) => { if (!form.recall) form.recall = {}; form.recall.model = v } },
-        { key: 'embed', label: 'Embedding 模型', mainOnly: false, get: () => form.recall?.embedProvider || '', set: (v) => { if (!form.recall) form.recall = {}; form.recall.embedProvider = v } },
-        { key: 'review', label: '自进化评审模型', mainOnly: true, get: () => form.selfReview?.model || '', set: (v) => { if (!form.selfReview) form.selfReview = {}; form.selfReview.model = v } },
-        { key: 'worker', label: '子代理模型', mainOnly: true, get: () => form.multiagent?.workerModel || '', set: (v) => { if (!form.multiagent) form.multiagent = {}; form.multiagent.workerModel = v } },
-        { key: 'hzp', label: '伪人 Planner 模型', mainOnly: true, get: () => form.humanize?.planner?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.planner) form.humanize.planner = {}; form.humanize.planner.model = v } },
-        { key: 'hzr', label: '伪人 Replyer 模型', mainOnly: true, get: () => form.humanize?.replyer?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.replyer) form.humanize.replyer = {}; form.humanize.replyer.model = v } },
-        { key: 'gw', label: '群世界分析模型', mainOnly: true, get: () => form.groupWorld?.analysis?.modelProfile || '', set: (v) => { if (!form.groupWorld) form.groupWorld = {}; if (!form.groupWorld.analysis) form.groupWorld.analysis = {}; form.groupWorld.analysis.modelProfile = v } },
+        { key: 'main', label: '主模型', mainOnly: false, hint: '对话主力：推理/工具调用/复杂任务，建议用强模型', get: () => form.model, set: (v) => { form.model = v } },
+        { key: 'utility', label: '旁路小模型', mainOnly: true, hint: '高频小任务（意图识别/摘要），推荐便宜快速的小模型', get: () => form.utilityModel, set: (v) => { form.utilityModel = v } },
+        { key: 'vision', label: '视觉模型', mainOnly: false, hint: '看图/多模态理解，必须选支持图片输入的模型', get: () => form.vision?.model || '', set: (v) => { if (!form.vision) form.vision = {}; form.vision.model = v } },
+        { key: 'recall', label: '记忆抽取模型', mainOnly: true, hint: '短文本结构化抽取，小模型即可，量大省钱', get: () => form.recall?.model || '', set: (v) => { if (!form.recall) form.recall = {}; form.recall.model = v } },
+        { key: 'embed', label: 'Embedding 模型', mainOnly: false, hint: '语义检索/近邻检测用，需厂商有 /embeddings 端点（DeepSeek 无，留空则全部回落词面匹配）', get: () => form.recall?.embedProvider || '', set: (v) => { if (!form.recall) form.recall = {}; form.recall.embedProvider = v } },
+        { key: 'review', label: '自进化评审模型', mainOnly: true, hint: '代码/方案评审，输出结构化结论，中等模型够用', get: () => form.selfReview?.model || '', set: (v) => { if (!form.selfReview) form.selfReview = {}; form.selfReview.model = v } },
+        { key: 'worker', label: '子代理模型', mainOnly: true, hint: '并行子任务执行，性价比优先（可多实例并发）', get: () => form.multiagent?.workerModel || '', set: (v) => { if (!form.multiagent) form.multiagent = {}; form.multiagent.workerModel = v } },
+        { key: 'hzp', label: '伪人 Planner 模型', mainOnly: true, hint: '群聊参与决策（该不该接话），高频调用，小-中模型重速度', get: () => form.humanize?.planner?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.planner) form.humanize.planner = {}; form.humanize.planner.model = v } },
+        { key: 'hzr', label: '伪人 Replyer 模型', mainOnly: true, hint: '写群聊台词要像真人，语感重要，建议与主模型同档', get: () => form.humanize?.replyer?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.replyer) form.humanize.replyer = {}; form.humanize.replyer.model = v } },
+        { key: 'gw', label: '群世界分析模型', mainOnly: true, hint: '批量 JSON 抽取（画像/事件），小模型即可，注意每日预算', get: () => form.groupWorld?.analysis?.modelProfile || '', set: (v) => { if (!form.groupWorld) form.groupWorld = {}; if (!form.groupWorld.analysis) form.groupWorld.analysis = {}; form.groupWorld.analysis.modelProfile = v } },
       ]
       const featureVal = (f) => f.get() || ''
+      // 下拉候选 = 模型列表注册表 ∪ 配置中已在用的模型（各功能当前值 + 回退链）——已配置未入册的也能直接选
+      const knownModels = computed(() => {
+        // 注册表别名索引：raw 条目（当前配置在用/回退链）有同 id 注册条目时也带别名显示
+        const aliasOf = new Map()
+        for (const m of form.llmModels || []) if (m && m.model && !aliasOf.has(m.model)) aliasOf.set(m.model, m.name || '')
+        const seen = new Map()
+        for (const m of form.llmModels || []) {
+          if (!m || !m.model) continue
+          const k = m.model + '|' + (m.name || '') // 同 id 不同别名各自保留
+          if (!seen.has(k)) seen.set(k, { model: m.model, label: (m.name ? m.name + ' · ' : '') + m.model, fromRegistry: true, id: m.id, main: m.providerId === 'main', provName: m.providerId === 'main' ? '' : provName(m.providerId) })
+        }
+        for (const f of FEATURES) {
+          const v = featureVal(f)
+          if (!v || aliasOf.has(v)) continue // 已有注册条目（带别名）就不重复列
+          if (![...seen.values()].some((x) => x.model === v)) seen.set(v + '|__raw', { model: v, label: (aliasOf.get(v) ? aliasOf.get(v) + ' · ' : '') + v + '（当前配置在用）', fromRegistry: false, main: true, provName: '' })
+        }
+        for (const fb of form.fallbackModels || []) {
+          if (!fb?.model || aliasOf.has(fb.model)) continue
+          if (![...seen.values()].some((x) => x.model === fb.model)) seen.set(fb.model + '|__fb', { model: fb.model, label: (aliasOf.get(fb.model) ? aliasOf.get(fb.model) + ' · ' : '') + fb.model + '（回退链）', fromRegistry: false, main: true, provName: '' })
+        }
+        return [...seen.values()]
+      })
       const featureSel = (f) => {
         const v = featureVal(f)
         if (!v) return ''
         const hit = form.llmModels.find((m) => m.model === v && (!f.mainOnly || m.providerId === 'main'))
-        return hit ? hit.id : '__custom'
+        if (hit) return hit.id
+        return knownModels.value.some((m) => m.model === v) ? 'raw:' + v : '__custom'
       }
-      const onFeatureSel = (f, entryId) => {
-        if (entryId === '__custom') return // 手动模式：保留当前值，走旁边的输入框
-        if (entryId === '') { f.set(''); return }
-        const m = form.llmModels.find((x) => x.id === entryId)
+      const onFeatureSel = (f, val) => {
+        if (val === '__custom') return // 手动模式：保留当前值，走旁边的输入框
+        if (val === '') { f.set(''); return }
+        if (val.startsWith('raw:')) { f.set(val.slice(4)); return } // 已配置未入册的模型：直接写值
+        const m = form.llmModels.find((x) => x.id === val)
         if (!m) return
         f.set(m.model)
         const prov = provById(m.providerId)
@@ -289,7 +368,9 @@
       const sections = [
         { id: 'basic', name: '基础 / 模型', icon: 'cpu', grad: 'var(--grad)' },
         { id: 'providers', name: '厂商配置', icon: 'tool', grad: 'var(--grad-vio)' },
-        { id: 'models', name: '模型配置', icon: 'bot', grad: 'var(--grad-mint)' },
+        { id: 'models', name: '模型列表', icon: 'bot', grad: 'var(--grad-mint)' },
+        { id: 'features', name: '功能分配', icon: 'zap', grad: 'var(--grad-honey)' },
+        { id: 'selfstate', name: '自我状态', icon: 'bot', grad: 'var(--grad-rose)' },
         { id: 'reason', name: '推理参数', icon: 'zap', grad: 'var(--grad-sky)' },
         { id: 'reply', name: '进度 / 回复渲染', icon: 'send', grad: 'var(--grad-mint)' },
         { id: 'memory', name: '记忆系统', icon: 'memory', grad: 'var(--grad-honey)' },
@@ -488,8 +569,9 @@
         orModels, orSearch, orLoading, loadOrModels, orFiltered, pickOrModel, orKey, loadOrKey,
         allTools, toolCats, toolsByCat, toggleAlwaysOn,
         // 厂商/模型注册表 + 功能分配
-        addProvider, delProvider, testProvider, testing, provById, provName,
-        addModel, delModel, FEATURES, featureVal, featureSel, onFeatureSel,
+        delProvider, testProvider, testing, provById, provName, provModal, openProvView, openProvEdit, saveProv,
+        delModel, modelModal, openModelView, openModelEdit, saveModel, THK_ZH, knownModels, onProvPreset,
+        FEATURES, featureVal, featureSel, onFeatureSel,
       }
     },
     template: `
@@ -586,7 +668,7 @@
 
             <!-- 各功能模型选择已拆分至 厂商配置 / 模型配置 两个分区 -->
             <div class="full" style="margin-top:6px;padding:10px 14px;border:1px dashed var(--line);border-radius:10px">
-              <div class="mut2" style="font-size:12px"><v-icon name="info"/> 多服务商与各功能模型选择已拆分至下方 <b>厂商配置</b>（配服务商地址/Key）与 <b>模型配置</b>（建模型 + 功能分配）两个分区。</div>
+              <div class="mut2" style="font-size:12px"><v-icon name="info"/> 多服务商与各功能模型选择已拆分至 <b>厂商配置</b>（服务商地址/Key）、<b>模型列表</b>（添加/管理模型）与 <b>功能分配</b>（各功能用哪个模型）三个分区。</div>
             </div>
           </div></div>
         </div>
@@ -611,24 +693,26 @@
             <div class="full">
               <div class="row-b mb12">
                 <div style="font-weight:800;font-size:13px">附加厂商（{{ form.llmProviders.length }}）</div>
-                <button class="btn b-soft b-sm" @click="addProvider"><v-icon name="plus"/>添加厂商</button>
+                <button class="btn b-soft b-sm" @click="openProvEdit(-1)"><v-icon name="plus"/>添加厂商</button>
               </div>
-              <TransitionGroup name="list" tag="div" style="display:flex;flex-direction:column;gap:10px;position:relative">
-                <div v-for="(p, i) in form.llmProviders" :key="p.id" class="mem-row" style="flex-direction:column;align-items:stretch;gap:8px">
-                  <div class="row g10 wrap" style="align-items:center">
-                    <input class="inp" style="width:150px" v-model="p.name" placeholder="厂商名称（如 硅基）">
-                    <select class="sel" style="width:140px" v-model="p.protocol"><option v-for="o in OPT.protocol" :value="o[0]">{{ o[1] }}</option></select>
-                    <select class="sel" style="width:150px" v-model="p.preset"><option value="">预设(无)</option><option v-for="o in OPT.preset" :value="o[0]">{{ o[1] }}</option></select>
-                    <span style="flex:1"></span>
-                    <button class="btn b-line b-sm" @click="testProvider(p)" :disabled="testing[p.id]">{{ testing[p.id] ? '测试中…' : '测试连接' }}</button>
-                    <button class="bic dg" @click="delProvider(i)"><v-icon name="trash"/></button>
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <div v-for="(p, i) in form.llmProviders" :key="p.id" class="card" style="padding:10px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                  <div style="flex:1;min-width:220px">
+                    <div class="row g6" style="align-items:center">
+                      <b style="font-size:13px">{{ p.name || '（未命名）' }}</b>
+                      <span class="pill p-line" style="font-size:10px">{{ (OPT.protocol.find((o) => o[0] === p.protocol) || ['', p.protocol])[1] }}</span>
+                      <span v-if="p.preset" class="pill p-honey" style="font-size:10px">{{ (OPT.preset.find((o) => o[0] === p.preset) || ['', p.preset])[1] }}</span>
+                    </div>
+                    <div class="mono mut" style="font-size:12px;margin-top:2px">{{ p.baseURL || '(未填接口地址)' }}</div>
                   </div>
-                  <div class="row g10 wrap">
-                    <input class="inp mono" style="flex:2;min-width:220px" v-model="p.baseURL" placeholder="接口地址 baseURL">
-                    <input class="inp mono" style="flex:1;min-width:160px" v-model="p.apiKey" placeholder="API Key">
+                  <div class="row g6">
+                    <button class="btn b-line b-sm" @click="testProvider(p)" :disabled="testing[p.id]">{{ testing[p.id] ? '测试中…' : '测试' }}</button>
+                    <button class="btn b-line b-sm" @click="openProvView(i)"><v-icon name="search"/>查看</button>
+                    <button class="btn b-soft b-sm" @click="openProvEdit(i)"><v-icon name="edit"/>编辑</button>
+                    <button class="btn b-line b-sm" style="color:var(--rose,#e5484d)" @click="delProvider(i)"><v-icon name="trash"/>删除</button>
                   </div>
                 </div>
-              </TransitionGroup>
+              </div>
               <div v-if="!form.llmProviders.length" class="mut2" style="font-size:12px;padding:6px 2px">暂无附加厂商——只用主厂商可不添加；需要跨厂商模型（如视觉/Embedding 用别家）时在此添加。</div>
             </div>
           </div></div>
@@ -638,59 +722,95 @@
         <div :id="'cfg-models'" class="card cf-sec" :class="{open: open.models}">
           <div class="cf-sh" @click="open.models = !open.models">
             <span class="ct-ico" style="background:var(--grad-mint)"><v-icon name="bot"/></span>
-            <div><div class="ct-t">模型配置</div><div class="ct-s">在已建厂商下创建模型（可拉取列表）并为各功能分配</div></div>
+            <div><div class="ct-t">模型列表</div><div class="ct-s">在已建厂商下创建/管理模型（可拉取列表）；各功能用哪个模型 → 「功能分配」分区</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.models"><div class="cf-grid">
             <div class="full">
               <div class="row-b mb12">
                 <div style="font-weight:800;font-size:13px">模型列表（{{ form.llmModels.length }}）</div>
-                <button class="btn b-soft b-sm" @click="addModel"><v-icon name="plus"/>添加模型</button>
+                <button class="btn b-soft b-sm" @click="openModelEdit(-1)"><v-icon name="plus"/>添加模型</button>
               </div>
-              <TransitionGroup name="list" tag="div" style="display:flex;flex-direction:column;gap:10px;position:relative">
-                <div v-for="(m, i) in form.llmModels" :key="m.id" class="mem-row" style="flex-direction:column;align-items:stretch;gap:8px">
-                  <div class="row g10 wrap">
-                    <input class="inp" style="width:140px" v-model="m.name" placeholder="别名（如 便宜小模型）">
-                    <select class="sel" style="width:170px" v-model="m.providerId">
-                      <option value="main">主厂商</option>
-                      <option v-for="p in form.llmProviders" :key="p.id" :value="p.id">{{ p.name || p.id }}</option>
-                    </select>
-                    <input type="number" class="inp" style="width:80px" min="0" max="2" step="0.1" v-model.number="m.temperature" placeholder="温度" title="默认温度（可空=用各功能默认）">
-                    <input type="number" class="inp" style="width:90px" min="0" step="256" v-model.number="m.maxTokens" placeholder="maxTokens" title="默认 maxTokens（可空）">
-                    <button class="bic dg" @click="delModel(i)"><v-icon name="trash"/></button>
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <div v-for="(m, i) in form.llmModels" :key="m.id" class="card" style="padding:10px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                  <div style="flex:1;min-width:220px">
+                    <div class="row g6" style="align-items:center">
+                      <b style="font-size:13px">{{ m.name || '（未命名）' }}</b>
+                      <span class="pill p-line" style="font-size:10px">{{ m.providerId === 'main' ? '主厂商' : provName(m.providerId) }}</span>
+                      <span v-if="m.thinking === 'on'" class="pill p-honey" style="font-size:10px">思考</span>
+                      <span v-else-if="m.thinking === 'off'" class="pill p-rose" style="font-size:10px">禁思考</span>
+                    </div>
+                    <div class="mono mut" style="font-size:12px;margin-top:2px">{{ m.model || '(未填模型 ID)' }}</div>
+                    <div class="mut2" style="font-size:11px;margin-top:2px" v-if="m.note || m.temperature != null || m.maxTokens != null">{{ [m.note, m.temperature != null ? '温度 ' + m.temperature : '', m.maxTokens != null ? 'maxTokens ' + m.maxTokens : ''].filter(Boolean).join(' · ') }}</div>
                   </div>
-                  <div class="row g10 wrap">
-                    <model-picker v-model="m.model" :protocol="(provById(m.providerId) || {}).protocol || form.protocol" :base-url="(provById(m.providerId) || {}).baseURL || form.baseURL" :api-key="(provById(m.providerId) || {}).apiKey || form.apiKey" :preset="(provById(m.providerId) || {}).preset || form.preset" placeholder="模型 ID（选择厂商后可拉取列表）"/>
-                    <input class="inp" style="flex:1;min-width:160px" v-model="m.note" placeholder="备注 / 用途（可空）">
+                  <div class="row g6">
+                    <button class="btn b-line b-sm" @click="openModelView(i)"><v-icon name="search"/>查看</button>
+                    <button class="btn b-soft b-sm" @click="openModelEdit(i)"><v-icon name="edit"/>编辑</button>
+                    <button class="btn b-line b-sm" style="color:var(--rose,#e5484d)" @click="delModel(i)"><v-icon name="trash"/>删除</button>
                   </div>
                 </div>
-              </TransitionGroup>
-              <div v-if="!form.llmModels.length" class="mut2" style="font-size:12px;padding:6px 2px">暂无模型——添加后可在下方「功能分配」一键选用；也可在功能行选手动输入。</div>
-            </div>
-
-            <div class="full" style="margin-top:6px;padding:12px 14px;border:1px dashed var(--line);border-radius:10px">
-              <div style="font-weight:800;font-size:13px;margin-bottom:4px">功能分配</div>
-              <div class="mut2" style="font-size:11px;margin-bottom:10px">从上方模型列表选择；留空=该功能默认回落（主模型/旁路小模型）。主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）只能用<b>主厂商</b>的模型；视觉 / Embedding / 主模型选其它厂商时会自动同步其接入信息。</div>
-              <div class="cf-grid">
-                <cfg-row v-for="f in FEATURES" :key="f.key" :name="f.label" :desc="f.mainOnly ? '主厂商模型（与主接入同端点）' : '可选任意厂商（自动同步端点）'">
-                  <div class="row g6">
-                    <select class="sel" style="width:250px" :value="featureSel(f)" @change="onFeatureSel(f, $event.target.value)">
-                      <option value="">（留空 = 默认回落）</option>
-                      <option v-for="m in form.llmModels" :key="m.id" :value="m.id" :disabled="f.mainOnly && m.providerId !== 'main'">
-                        {{ (m.name || m.model) + ' · ' + m.model }}{{ m.providerId === 'main' ? '' : '（' + provName(m.providerId) + '）' }}
-                      </option>
-                      <option v-if="featureVal(f) && featureSel(f) === '__custom'" value="__custom">手动：{{ featureVal(f) }}</option>
-                    </select>
-                    <input v-if="featureSel(f) === '__custom'" class="inp mono" style="width:170px" :value="featureVal(f)" @input="f.set($event.target.value)" placeholder="手动填模型 ID">
-                  </div>
-                </cfg-row>
-                <cfg-row name="Stagehand 原生模型" desc="浏览器自动化原生 SDK（独立体系，不走注册表）">
-                  <div class="row g6">
-                    <input class="inp mono" style="width:190px" v-model="form.stagehand.modelName" placeholder="留空=复用 provider">
-                    <input class="inp mono" style="width:130px" v-model="form.stagehand.modelApiKey" placeholder="apiKey 可空">
-                  </div>
-                </cfg-row>
               </div>
+              <div v-if="!form.llmModels.length" class="mut2" style="font-size:12px;padding:6px 2px">暂无模型——添加后可在「功能分配」分区一键选用。</div>
+            </div>
+          </div></div>
+        </div>
+
+        <!-- ===== 功能分配 ===== -->
+        <div :id="'cfg-features'" class="card cf-sec" :class="{open: open.features}">
+          <div class="cf-sh" @click="open.features = !open.features">
+            <span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="zap"/></span>
+            <div><div class="ct-t">功能分配</div><div class="ct-s">各功能（旁路/记忆/评审/子代理/伪人/群世界/视觉/Embedding）用哪个模型</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
+          </div>
+          <div class="cf-body" v-show="open.features"><div class="cf-grid">
+            <div class="full" style="padding:10px 12px;border:1px dashed var(--line);border-radius:10px;margin-bottom:4px">
+              <div class="mut2" style="font-size:12px">从「模型列表」分区选择；留空=该功能默认回落（主模型/旁路小模型）。主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）只能用<b>主厂商</b>的模型；视觉 / Embedding / 主模型选其它厂商时会自动同步其接入信息。</div>
+            </div>
+            <cfg-row v-for="f in FEATURES" :key="f.key" :name="f.label" :desc="(f.hint ? f.hint + '；' : '') + (f.mainOnly ? '仅主厂商（与主接入同端点）' : '可选任意厂商（自动同步端点）')">
+              <div class="row g6">
+                <select class="sel" style="width:250px" :value="featureSel(f)" @change="onFeatureSel(f, $event.target.value)">
+                  <option value="">（留空 = 默认回落）</option>
+                  <option v-for="m in knownModels" :key="(m.fromRegistry ? m.id : 'raw:' + m.model)" :value="(m.fromRegistry ? m.id : 'raw:' + m.model)" :disabled="f.mainOnly && m.fromRegistry && !m.main">
+                    {{ m.label }}{{ m.provName ? '（' + m.provName + '）' : '' }}
+                  </option>
+                  <option v-if="featureVal(f) && featureSel(f) === '__custom'" value="__custom">手动：{{ featureVal(f) }}</option>
+                </select>
+                <input v-if="featureSel(f) === '__custom'" class="inp mono" style="width:170px" :value="featureVal(f)" @input="f.set($event.target.value)" placeholder="手动填模型 ID">
+              </div>
+            </cfg-row>
+            <cfg-row name="Stagehand 原生模型" desc="浏览器自动化原生 SDK（独立体系，不走注册表）">
+              <div class="row g6">
+                <input class="inp mono" style="width:190px" v-model="form.stagehand.modelName" placeholder="留空=复用 provider">
+                <input class="inp mono" style="width:130px" v-model="form.stagehand.modelApiKey" placeholder="apiKey 可空">
+              </div>
+            </cfg-row>
+          </div></div>
+        </div>
+
+        <!-- ===== 自我状态 SelfState ===== -->
+        <div :id="'cfg-selfstate'" class="card cf-sec" :class="{open: open.selfstate}">
+          <div class="cf-sh" @click="open.selfstate = !open.selfstate">
+            <span class="ct-ico" style="background:var(--grad-rose)"><v-icon name="bot"/></span>
+            <div><div class="ct-t">自我状态 SelfState</div><div class="ct-s">自我认知与情绪（GroupWorld 配套层）；默认 shadow 计算，观察后放量</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
+          </div>
+          <div class="cf-body" v-show="open.selfstate"><div class="cf-grid">
+            <div class="full" style="padding:10px 12px;border:1px dashed var(--line);border-radius:10px;margin-bottom:4px">
+              <div class="mut2" style="font-size:12px"><v-icon name="info"/> 红线：情绪只是偏置，不影响功能/权限/工具结果；不外显数值；跨群隔离；禁卖惨。详细参数（期待窗口/反思/retention）见 config.yaml agent.selfState。</div>
+            </div>
+            <cfg-row name="启用 SelfState" desc="总开关；挂在伪人链路（需伪人白名单群）。关=整层 no-op"><v-switch v-model="form.selfState.enabled"/></cfg-row>
+            <cfg-row name="Shadow Mode" desc="计算/入库/审计但不影响发言；观察期保持开，核对质量后再关" danger><v-switch v-model="form.selfState.shadowMode"/></cfg-row>
+            <cfg-row name="普通事件脉冲上限" desc="单次事件最大情绪变化"><input type="number" class="inp" style="width:100px" min="0.05" max="0.5" step="0.01" v-model.number="form.selfState.emotion.maxNormalImpulse"></cfg-row>
+            <cfg-row name="高显著脉冲上限" desc="高置信公开重复攻击上限"><input type="number" class="inp" style="width:100px" min="0.1" max="0.5" step="0.01" v-model.number="form.selfState.emotion.maxHighSalienceImpulse"></cfg-row>
+            <cfg-row name="心境惯性系数" desc="EMA α：0=心境冻结，1=无惯性直跟随情绪（0.3≈被骂后低落持续一晚）"><input type="number" class="inp" style="width:100px" min="0.05" max="1" step="0.05" v-model.number="form.selfState.emotion.moodEmaAlpha"></cfg-row>
+            <cfg-row name="心境回基线时长(时)" desc="超过该时长无状态迁移 → 心境自动回基线（睡一觉恢复）"><input type="number" class="inp" style="width:100px" min="1" max="48" v-model.number="form.selfState.emotion.moodResetHours"></cfg-row>
+            <cfg-row name="语义近邻检测" desc="embedding 语义分类层（需「长期记忆→embedding 模型」已配；未配自动回落关键词）"><v-switch v-model="form.selfState.eventDetection.semantic"/></cfg-row>
+            <cfg-row name="单次怨气增量上限" desc="记仇的单次上限"><input type="number" class="inp" style="width:100px" min="0.01" max="0.2" step="0.01" v-model.number="form.selfState.resentment.maxSingleEventDelta"></cfg-row>
+            <cfg-row name="期待等待窗下限(秒)" desc="动态窗口 = max(群节奏, 目标响应, 此值)"><input type="number" class="inp" style="width:100px" min="30" max="1800" v-model.number="form.selfState.expectations.minimumWindowSeconds"></cfg-row>
+            <cfg-row name="冷落判定置信门槛" desc="ignore_score 达此值才算高置信被冷落（防误判）"><input type="number" class="inp" style="width:100px" min="0.6" max="0.95" step="0.05" v-model.number="form.selfState.expectations.minIgnoredConfidence"></cfg-row>
+            <cfg-row name="负心境恢复上限(小时)" desc="负状态超时强制进入恢复流程"><input type="number" class="inp" style="width:100px" min="1" max="48" v-model.number="form.selfState.stability.maxNegativeMoodHours"></cfg-row>
+            <div class="full" style="padding:8px 12px;border:1px dashed var(--line);border-radius:10px">
+              <div class="mut2" style="font-size:12px">实时状态/情绪/期待/心事/关系情感 → 侧栏「自我状态」页。</div>
             </div>
           </div></div>
         </div>
@@ -1167,6 +1287,62 @@
             <button class="btn b-line" @click="mcpModal.show = false">取消</button>
             <button class="btn b-pri" @click="confirmNewMcp"><v-icon name="check"/>添加</button>
           </template>
+        </v-modal>
+
+        <!-- 模型详情弹窗：查看（只读）/ 编辑（含思考开关等参数） -->
+        <v-modal v-if="modelModal.show" :title="(modelModal.mode === 'view' ? '查看模型' : (modelModal.index === -1 ? '添加模型' : '编辑模型'))" :icon="modelModal.mode === 'view' ? 'search' : 'edit'" center @close="modelModal.show = false">
+          <div class="row g6 wrap" style="align-items:center;margin-bottom:10px">
+            <input class="inp" style="width:150px;font-weight:700" v-model="modelModal.draft.name" placeholder="别名（如 便宜小模型）" :disabled="modelModal.mode === 'view'">
+            <select class="sel" style="width:170px" v-model="modelModal.draft.providerId" :disabled="modelModal.mode === 'view'">
+              <option value="main">主厂商</option>
+              <option v-for="p in form.llmProviders" :key="p.id" :value="p.id">{{ p.name || p.id }}</option>
+            </select>
+          </div>
+          <div style="margin-bottom:10px">
+            <model-picker v-if="modelModal.mode === 'edit'" v-model="modelModal.draft.model" :protocol="(provById(modelModal.draft.providerId) || {}).protocol || form.protocol" :base-url="(provById(modelModal.draft.providerId) || {}).baseURL || form.baseURL" :api-key="(provById(modelModal.draft.providerId) || {}).apiKey || form.apiKey" :preset="(provById(modelModal.draft.providerId) || {}).preset || form.preset" placeholder="模型 ID（选择厂商后可拉取列表）"/>
+            <div v-else class="inp mono" style="width:100%;box-sizing:border-box">{{ modelModal.draft.model || '(未填)' }}</div>
+          </div>
+          <div class="row g6 wrap" style="margin-bottom:10px">
+            <label class="row g6" style="font-size:12px">
+              <span class="mut2">温度</span>
+              <input type="number" class="inp" style="width:80px" min="0" max="2" step="0.1" v-model.number="modelModal.draft.temperature" placeholder="（空=功能默认）" :disabled="modelModal.mode === 'view'">
+            </label>
+            <label class="row g6" style="font-size:12px">
+              <span class="mut2">maxTokens</span>
+              <input type="number" class="inp" style="width:90px" min="0" step="256" v-model.number="modelModal.draft.maxTokens" placeholder="（空=厂商默认）" :disabled="modelModal.mode === 'view'">
+            </label>
+            <label class="row g6" style="font-size:12px">
+              <span class="mut2">思考</span>
+              <select class="sel" style="width:120px" v-model="modelModal.draft.thinking" :disabled="modelModal.mode === 'view'">
+                <option value="inherit">继承全局</option>
+                <option value="on">开启思考</option>
+                <option value="off">关闭思考</option>
+              </select>
+            </label>
+          </div>
+          <input class="inp" style="width:100%;margin-bottom:10px;box-sizing:border-box" v-model="modelModal.draft.note" placeholder="备注 / 用途（可空）" :disabled="modelModal.mode === 'view'">
+          <div class="mut2" style="font-size:11px;margin-bottom:10px">思考/温度/maxTokens 在该模型被主对话链路使用时生效（覆盖全局 agent.thinking 等）。</div>
+          <div class="row g10" style="justify-content:flex-end">
+            <button class="btn b-line b-sm" @click="modelModal.show = false">{{ modelModal.mode === 'view' ? '关闭' : '取消' }}</button>
+            <button v-if="modelModal.mode === 'edit'" class="btn b-pri b-sm" @click="saveModel"><v-icon name="save"/>保存</button>
+          </div>
+        </v-modal>
+
+        <!-- 厂商详情弹窗：查看（只读）/ 编辑（选预设自动填地址） -->
+        <v-modal v-if="provModal.show" :title="(provModal.mode === 'view' ? '查看厂商' : (provModal.index === -1 ? '添加厂商' : '编辑厂商'))" :icon="provModal.mode === 'view' ? 'search' : 'edit'" center @close="provModal.show = false">
+          <div class="row g6 wrap" style="align-items:center;margin-bottom:10px">
+            <input class="inp" style="width:150px;font-weight:700" v-model="provModal.draft.name" placeholder="厂商名称（如 豆包）" :disabled="provModal.mode === 'view'">
+            <select class="sel" style="width:140px" v-model="provModal.draft.protocol" :disabled="provModal.mode === 'view'" @change="onProvPreset(provModal.draft)"><option v-for="o in OPT.protocol" :value="o[0]">{{ o[1] }}</option></select>
+            <select class="sel" style="width:160px" v-model="provModal.draft.preset" :disabled="provModal.mode === 'view'" @change="onProvPreset(provModal.draft)"><option value="">预设(无)</option><option v-for="o in OPT.preset" :value="o[0]">{{ o[1] }}</option></select>
+          </div>
+          <input class="inp mono" style="width:100%;margin-bottom:10px;box-sizing:border-box" v-model="provModal.draft.baseURL" placeholder="接口地址 baseURL（选预设自动填充）" :disabled="provModal.mode === 'view'">
+          <input class="inp mono" style="width:100%;margin-bottom:10px;box-sizing:border-box" v-model="provModal.draft.apiKey" placeholder="API Key" :disabled="provModal.mode === 'view'">
+          <div class="mut2" style="font-size:11px;margin-bottom:10px">选预设厂商会自动填 baseURL；协议/预设变化也会重填（MiniMax/OpenCode 等双协议地址不同）。模型在「模型列表」分区绑定厂商。</div>
+          <div class="row g10" style="justify-content:flex-end">
+            <button class="btn b-line b-sm" @click="provModal.show = false">{{ provModal.mode === 'view' ? '关闭' : '取消' }}</button>
+            <button v-if="provModal.mode === 'edit'" class="btn b-soft b-sm" @click="testProvider(provModal.draft)" :disabled="testing[provModal.draft.id]">{{ testing[provModal.draft.id] ? '测试中…' : '测试连接' }}</button>
+            <button v-if="provModal.mode === 'edit'" class="btn b-pri b-sm" @click="saveProv"><v-icon name="save"/>保存</button>
+          </div>
         </v-modal>
 
         <!-- 保存栏 -->

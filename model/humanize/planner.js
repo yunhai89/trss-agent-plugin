@@ -44,7 +44,7 @@ export class HumanizePlanner {
    * @param {object} opts { provider, cfg, readTools?:Array, getMemories?:(query)=>Promise<string>, getBehaviorPolicyBlock?:()=>string, getPersonaName?:()=>string }
    *   readTools: 已过滤的白名单只读工具，每项 {name, description, parameters, execute(args)=>Promise<string|object>}
    */
-  constructor({ provider, cfg, readTools = [], getMemories = null, getBehaviorPolicyBlock = null, getPersonaName = null, getPersonaBlock = null, getWorldContext = null } = {}) {
+  constructor({ provider, cfg, readTools = [], getMemories = null, getBehaviorPolicyBlock = null, getPersonaName = null, getPersonaBlock = null, getWorldContext = null, getSelfProjection = null, enrichMedia = null } = {}) {
     this.provider = provider
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.readTools = Array.isArray(readTools) ? readTools : []
@@ -53,6 +53,8 @@ export class HumanizePlanner {
     this.getPersonaName = getPersonaName || (() => '机器人')
     this.getPersonaBlock = getPersonaBlock || (() => '')
     this.getWorldContext = getWorldContext // GroupWorld 局部社会现场（online 时由 apps 注入；失败/空 → 零影响）
+    this.getSelfProjection = getSelfProjection // SelfState 状态投影（enabled+非shadow 时；失败/中性 → 零影响）
+    this.enrichMedia = enrichMedia // 视觉图描述（配了视觉模型时 '[图片]'→'[图:描述]'；未配/失败 → 原样）
   }
 
   /** 从目标消息段提取 @ 的用户 id（供 GroupWorld 检索相关人）。 */
@@ -95,8 +97,12 @@ export class HumanizePlanner {
     const temperature = pcfg.temperature ?? 0.2
     const maxTokens = pcfg.maxTokens ?? 800
 
-    // 系统 Prompt
-    const groupContext = formatGroupContext(snapshot, { includeIds: true })
+    // 系统 Prompt（视觉：配了视觉模型时把窗口内近期图片注成一句话描述）
+    let ctxMessages = snapshot
+    try {
+      if (this.enrichMedia && Array.isArray(snapshot)) ctxMessages = await this.enrichMedia(snapshot, { targetId: decision?.targetMessage?.id }) || snapshot
+    } catch { ctxMessages = snapshot }
+    const groupContext = formatGroupContext(ctxMessages, { includeIds: true })
     const target = decision?.targetMessage || null
     let publicMemories = ''
     try {
@@ -120,6 +126,15 @@ export class HumanizePlanner {
       }
     } catch { /* noop */ }
 
+    // SelfState 状态投影（enabled+非 shadow 时注入；失败/中性 → 零影响）
+    let selfState = ''
+    try {
+      if (this.getSelfProjection && runtime?.groupId) {
+        const p = await this.getSelfProjection({ groupId: runtime.groupId, targetUserId: target?.userId })
+        selfState = p?.text || ''
+      }
+    } catch { /* noop */ }
+
     const system = buildPlannerSystem({
       personaName: this.getPersonaName(),
       personaBlock: this.getPersonaBlock(),
@@ -128,6 +143,7 @@ export class HumanizePlanner {
       groupContext: (target ? highlightTarget(target) + '\n\n' : '') + groupContext,
       publicMemories,
       socialScene,
+      selfState,
     })
 
     // 内部消息（永不对外发送）

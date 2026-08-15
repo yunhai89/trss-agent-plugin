@@ -59,6 +59,17 @@ export function makeEmbedder({ embedFn, model = 'default' } = {}) {
         return Float32Array.from(v)
       } catch { return null }
     },
+    /** 批量嵌入（并发钳 8；任一失败该条为 null，调用方自滤）。 */
+    async embedBatch(texts) {
+      const list = (Array.isArray(texts) ? texts : []).map((t) => String(t || '').trim()).filter(Boolean)
+      const out = new Array(list.length).fill(null)
+      for (let i = 0; i < list.length; i += 8) {
+        const chunk = list.slice(i, i + 8)
+        const res = await Promise.all(chunk.map((t) => this.embed(t).catch(() => null)))
+        for (let j = 0; j < chunk.length; j++) out[i + j] = res[j]
+      }
+      return out
+    },
   }
 }
 

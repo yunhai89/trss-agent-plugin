@@ -295,6 +295,11 @@ agent:
     maxRepliesPer10Minutes: 4      # 10 分钟内最大回复数（频率硬上限）
     bufferCapacity: 150            # 单群消息缓冲条数
     bufferTtlHours: 2              # 缓冲 TTL（小时）
+    memory:                        # 伪人独立记忆库（独立 sqlite：data/humanize/memory.db；与主 Agent 记忆完全隔离）
+      enabled: true                # 每日 04:47 睡眠整合近期对话→长时记忆；Planner/Replyer 按相关性检索注入
+      maxPerQuery: 5               # Planner 单次注入条数
+      maxPerGroup: 300             # 单群容量（超量按重要性×使用率淘汰）
+      forgetDays: 30               # 超龄硬遗忘（天）
     idleBackoffBaseSeconds: 15     # 连续无动作退避基数（15/30/60/120/240…）
     idleBackoffCapSeconds: 300     # 退避上限
     idleBackoffStartCount: 2       # 第几次无动作起开始退避
@@ -408,3 +413,81 @@ agent:
       allowUserInspect: true       # 允许 #查看我的群聊画像
       allowUserCorrect: true       # 允许 #纠正我的群聊画像
       blockSensitiveInference: true  # 拦截敏感推断（健康/政治/性取向/证件等）
+
+  # ───────────────── SelfState 自我认知与情绪（GroupWorld 配套层，Phase 0-4） ─────────────────
+  # 设计文档：trss-agent-plugin-groupworld-selfstate-design-v1.1.md
+  # 红线：情绪只是偏置（不覆盖权限/安全/功能指令/工具结果）；不外显数值；跨群隔离；
+  #      禁卖惨/跨用户扩散/功能报复；负状态超时恢复。数据与 GroupWorld 同库（data/groupworld/gw.db，ss_ 前缀表）。
+  selfState:
+    enabled: false              # 总开关（关=整层 no-op）
+    shadowMode: true            # 计算入库但不影响发言（观察期）；false 才注入 Planner/Replyer
+    expressionFrozen: false     # 冻结情绪外显（继续影子计算）
+
+    scope:
+      isolateByGroup: true      # 群级隔离（唯一模式）
+      crossGroupMoodCarry: 0
+
+    eventDetection:
+      directReply: true
+      directMention: true
+      nicknameReference: true
+      expectationTracking: true
+      semantic: true                     # 语义近邻检测层（需 agent.recall.embedProvider 配 embedding 模型；未配自动回落关键词）
+      ambiguousIntentModelProfile: ""   # 歧义评价模型（留空=主模型）
+      minEventConfidence: 0.55
+
+    emotion:
+      maxNormalImpulse: 0.20        # 普通事件单次脉冲上限
+      maxHighSalienceImpulse: 0.35  # 高置信公开重复攻击上限
+      minVisibleIntensity: 0.18     # 低于此强度不进投影
+      maxActiveEmotions: 8
+      enableMixedEmotions: true     # 允许多情绪并存（不压成单标签）
+      lazyDecay: true               # 懒衰减（读时算，无定时扫描）
+      moodEmaAlpha: 0.3             # 心境 EMA 惯性系数（0=冻结 1=无惯性；被骂后低落持续而非半小时反弹）
+      moodResetHours: 6             # 超时无迁移自动回基线（睡一觉恢复）
+
+    resentment:
+      enabled: true
+      minCreateConfidence: 0.72
+      minRepeatedEvents: 2          # 记仇需重复证据
+      maxSingleEventDelta: 0.05     # 单次怨气增量上限
+      halfLifeDays: 7
+
+    expectations:
+      enabled: true
+      minimumWindowSeconds: 90      # 动态等待窗下限
+      maximumWindowSeconds: 3600
+      minIgnoredConfidence: 0.65    # ignore_score 达此值才算高置信冷落
+      requireTargetActivityEvidence: true
+      firstIgnoreCanBeExpressed: false  # 首次被忽略不表达（防卖惨）
+
+    reflection:
+      enabled: true
+      schedule: "37 4 * * *"
+      minSignificantEvents: 3
+      maxReflectionsPerDay: 10
+      defaultTtlDays: 7
+
+    planner:
+      includeStateProjection: true
+      maxStateTokens: 220
+      emotionIsBiasOnly: true       # 强制 true（红线）
+
+    replyer:
+      includeExpressionCapsule: true
+      exposeNumericState: false     # 强制 false（红线：不外显数值）
+      allowNaturalEmotionDisclosure: true
+
+    stability:
+      commandsIgnoreEmotion: true
+      toolsIgnoreEmotion: true
+      noCrossUserSpillover: true    # 强制 true（红线）
+      preventEmotionalBlackmail: true  # 强制 true（红线）
+      preventSelfHarmNarratives: true  # 强制 true（红线）
+      maxNegativeMoodHours: 24      # 负心境超时 → 恢复流程
+
+    retention:
+      transitionLogDays: 14
+      resolvedEmotionDays: 7
+      resolvedExpectationDays: 7
+

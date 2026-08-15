@@ -40,6 +40,17 @@ export const presets = {
     reasoningFields: ['reasoning_content'],
   },
 
+  /** 豆包 / 火山方舟 Ark（完全 OpenAI 兼容：chat=POST /chat/completions，embedding=POST /embeddings，同一 baseURL）。
+   *  官方兼容文档：https://www.volcengine.com/docs/82379/1330626
+   *  model 填推理接入点 ID（ep-2024…）或模型 ID（doubao-seed-1-6 等）；
+   *  embedding 走同一端点（doubao-embedding 系列）——本插件 agent.recall.embedProvider 直接填模型/接入点即可。
+   *  深度思考模型返回 reasoning_content。 */
+  doubao: {
+    name: 'doubao',
+    baseURL: 'https://ark.cn-beijing.volces.com/api/v3',
+    reasoningFields: ['reasoning_content'],
+  },
+
   zhipu: {
     name: 'zhipu',
     baseURL: 'https://open.bigmodel.cn/api/paas/v4',

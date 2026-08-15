@@ -19,6 +19,9 @@ import Log from '../utils/Log.js'
 import devLog from '../utils/DevLog.js'
 import { getRuntime } from './agent.js'
 import { getGroupWorld } from './groupworld.js'
+import { SelfStateService } from '../model/selfstate/index.js'
+import { buildEmbed } from '../model/llm/embed-wiring.js'
+import { makeEmbedder } from '../model/groupworld/embedding.js'
 import * as H from '../model/humanize/index.js'
 
 let _humanize = null
@@ -41,6 +44,17 @@ function botSelfIds(e) {
 function botNickname() {
   try { if (typeof Bot !== 'undefined' && Bot) return Bot.nickname || Bot.name || '' } catch { /* noop */ }
   return ''
+}
+
+/** SelfState 定时任务用：bot 自身 QQ。 */
+function botNicknameSelfId() {
+  try {
+    if (typeof Bot !== 'undefined' && Bot) {
+      if (Bot.uin) return String(Bot.uin)
+      if (Bot.uins?.[0]) return String(Bot.uins[0])
+    }
+  } catch { /* noop */ }
+  return Config.get().agent?.humanize?.botId || 'bot'
 }
 
 function extractMsgId(res) {
@@ -93,6 +107,17 @@ async function buildHumanize() {
     },
   })
   const memory = new H.MemoryAdapter({ recall: rt.recall, memory: rt.memory, kv: rt.kv })
+  // 伪人独立记忆库（MaiBot 式睡眠整合；独立 sqlite，与主 Agent 的 recall/KV 完全隔离）
+  // embedder：配置 agent.recall.embedProvider 后记忆检索走语义余弦（同义换说可召回），未配回落词面
+  const { embedFn: memEmbedFn, embedModel: memEmbedModel } = buildEmbed(rt)
+  const hmem = new H.HumanizeMemoryStore({
+    dataDir: Config.path.data + '/humanize',
+    provider: rt.provider,
+    cfg: cfgFn,
+    embedder: memEmbedFn ? makeEmbedder({ embedFn: memEmbedFn, model: memEmbedModel }) : null,
+    trace: { record: (event, data = {}) => { try { trace.record(event, data) } catch { /* noop */ } } },
+  })
+  hmem.init().catch(() => {})
   const readTools = buildReadTools(rt, cfgFn())
   const sticker = rt.sticker
 
@@ -103,14 +128,67 @@ async function buildHumanize() {
   const gwLazy = getGroupWorld().catch(() => null)
   const gwPlannerCtx = async (ctx) => { try { const gw = await gwLazy; return gw ? await gw.buildPlannerContext(ctx) : EMPTY_SCENE } catch { return EMPTY_SCENE } }
   const gwReplyerCtx = async (ctx) => { try { const gw = await gwLazy; return gw ? await gw.buildReplyerContext(ctx) : EMPTY_SCENE } catch { return EMPTY_SCENE } }
-  const gwOnDelivered = async (info) => { try { const gw = await gwLazy; if (gw) await gw.recordInteraction(info) } catch { /* noop */ } }
+  // SelfState（自我认知与情绪）：惰性单例，enabled=false 时 service.init 返 false 全链路 no-op。
+  const NEUTRAL = { neutral: true, text: '' }
+  const ssLazy = (() => {
+    try {
+      // 语义检测层 embedder：与 GroupWorld 共用 agent.recall.embedProvider 配置（未配 → 词面/规则兜底）
+      const { embedFn, embedModel } = buildEmbed(rt)
+      const svc = new SelfStateService({
+        provider: rt.provider,
+        cfg: () => Config.get().agent?.selfState || {},
+        botId: botSelfIdsAll(rt)[0] || 'bot',
+        botNames: [cfgFn().personaName, botNickname()].filter(Boolean),
+        trace: { record: (event, data = {}) => { try { devLog(event, data, null, 'selfstate').catch(() => {}) } catch { /* noop */ } } },
+        dataDir: Config.path.data + '/groupworld',
+        embedFn, embedModel,
+      })
+      return svc.init().then(() => svc).catch(() => null)
+    } catch { return Promise.resolve(null) }
+  })()
+  const ssPlannerProj = async (ctx) => { try { const ss = await ssLazy; return ss ? await ss.buildPlannerProjection(ctx) : NEUTRAL } catch { return NEUTRAL } }
+  const ssReplyerCap = async (ctx) => { try { const ss = await ssLazy; return ss ? await ss.buildReplyerCapsule(ctx) : NEUTRAL } catch { return NEUTRAL } }
+  const ssOnDelivered = async (info) => {
+    try {
+      const ss = await ssLazy
+      if (ss && info?.sentText) await ss.registerOutgoingExpectation({ groupId: info.groupId, sourceMessageId: info.sourceMessageId, targetUserId: info.targetUserId, sentText: info.sentText, replyGuide: info.replyGuide })
+    } catch { /* noop */ }
+  }
+  const gwOnDelivered = async (info) => {
+    try {
+      const gw = await gwLazy
+      if (gw) await gw.recordInteraction(info)
+    } catch { /* noop */ }
+    await ssOnDelivered(info)
+  }
+  /** 取 bot 自身 id 集合（runtime 期）。 */
+  function botSelfIdsAll(rt) {
+    const ids = []
+    try {
+      if (typeof Bot !== 'undefined' && Bot) {
+        if (Bot.uin) ids.push(String(Bot.uin))
+        if (Bot.uins) for (const u of Bot.uins) ids.push(String(u))
+      }
+    } catch { /* noop */ }
+    if (rt?.botId) ids.push(String(rt.botId))
+    return ids
+  }
+
+  // 伪人看图：配置了视觉模型（agent.vision.enable + model → rt.vision）时，把上下文里的图片注成一句话描述
+  const mediaDesc = new H.MediaDescriber({
+    vision: rt.vision || null,
+    trace: { record: (event, data = {}) => { try { trace.record(event, data) } catch { /* noop */ } } },
+  })
+  if (mediaDesc.available) Log.info('[humanize] 视觉已接入：伪人可看见群友图片（每轮最多 3 张新描述，按图缓存）')
+  const enrichMedia = mediaDesc.available ? (msgs, o) => mediaDesc.annotate(msgs, o) : null
 
   const makePlanner = (gid) => new H.HumanizePlanner({
     provider: rt.provider, cfg: cfgFn, readTools,
+    // 独立记忆库检索（替换原 rt.recall 适配——伪人记忆与主 Agent 记忆彻底分离）
     getMemories: async (q) => {
       try {
-        const ms = await memory.retrieveGroupPublic(gid, q, 5)
-        return H.formatPublicMemories(ms)
+        if (cfgFn().memory?.enabled === false) return ''
+        return await hmem.recallText({ groupId: gid, query: String(q || '').slice(0, 200), topK: cfgFn().memory?.maxPerQuery ?? 5 })
       } catch { return '' }
     },
     getBehaviorPolicyBlock: () => formatPolicyBlock(cfgFn().behaviorPolicy),
@@ -118,6 +196,8 @@ async function buildHumanize() {
     // 角色人设注入 Planner：第三人称"参考"框定（决策器不是角色本人，只据此判断该不该接/态度）
     getPersonaBlock: () => H.buildPlannerPersonaBlock(resolveHumanizePersona(cfgFn(), rt)),
     getWorldContext: gwPlannerCtx,
+    getSelfProjection: ssPlannerProj,
+    enrichMedia,
   })
   const makeReplyer = (gid) => new H.HumanizeReplyer({
     provider: rt.provider, cfg: cfgFn,
@@ -134,6 +214,15 @@ async function buildHumanize() {
     // 表情包清单注入：reply.allowSticker !== false 且表情包启用时给 Replyer 看 [sticker:名称] 与可用名表
     getStickerCatalog: () => (cfgFn().reply?.allowSticker !== false && sticker?.enabled?.() ? (sticker.catalog?.() || '') : ''),
     getWorldContext: gwReplyerCtx,
+    getSelfCapsule: ssReplyerCap,
+    enrichMedia,
+    // 伪人独立记忆：对当前发言对象的印象 + 相关群梗（Replyer 用；失败/空零影响；热读配置）
+    getMemoryBlock: async ({ groupId, targetUserId, queryText }) => {
+      try {
+        if (cfgFn().memory?.enabled === false) return ''
+        return await hmem.recallText({ groupId, userId: targetUserId, query: queryText, topK: 3, kinds: ['impression', 'jargon'] })
+      } catch { return '' }
+    },
   })
   const makeComposer = () => new H.HumanizeReplyComposer({ cfg: cfgFn, stickerManager: sticker })
   const makeSend = (gid) => makeSendFn(gid)
@@ -145,7 +234,23 @@ async function buildHumanize() {
     try { manager.reload(); manager.cancelAll(); Log.info('[humanize] 配置热加载，已取消所有进行中规划') } catch (e) { Log.warn('[humanize] 热加载失败', e?.message || e) }
   })
 
-  return { manager, store, trace, memory, cfgFn }
+  // getPersona：把 rt 闭包在内，供 onAmbient 的 SelfState 感知解析人设（onAmbient 作用域无 rt）
+  const getPersona = () => resolveHumanizePersona(cfgFn(), rt)
+  return { manager, store, trace, memory, cfgFn, ssLazy, getPersona, hmem }
+}
+
+/** 取伪人装配体（manager/hmem/trace 等；web 与测试用）。 */
+export async function getHumanize() {
+  if (_humanize) return _humanize
+  if (_humanizeFailed) throw _humanizeFailed
+  _humanize = await buildHumanize()
+  return _humanize
+}
+
+/** 取 SelfStateService（web API 用；未装配/enabled=false → null）。 */
+export async function getSelfState() {
+  const h = await getHumanize()
+  return (await h.ssLazy) || null
 }
 
 function makeSendFn(groupId) {
@@ -202,19 +307,7 @@ function formatPolicyBlock(policy) {
   return lines.length ? '角色行为政策：\n' + lines.join('\n') : ''
 }
 
-async function getHumanize() {
-  if (_humanize) return _humanize
-  if (_humanizeFailed) throw _humanizeFailed
-  try {
-    _humanize = await buildHumanize()
-    _humanizeFailed = null
-    return _humanize
-  } catch (e) {
-    _humanizeFailed = e
-    Log.warn('[humanize] 装配失败（agent 未初始化？），旁听暂停', e?.message || e)
-    throw e
-  }
-}
+// （getHumanize 已上移导出——web/测试需要 hmem 等装配体）
 
 // 触发命令检测：所有 # 前缀视为命令（绝不触发环境回复）
 function isCommandText(text) {
@@ -234,6 +327,7 @@ export class Humanize extends plugin {
         { reg: '^#伪人状态$', fnc: 'humanizeStatus', permission: 'master' },
         { reg: '^#伪人决策(?:\\s+(\\d+))?$', fnc: 'humanizeTrace', permission: 'master' },
         { reg: '^#伪人开关\\s+(on|off|开|关)$', fnc: 'humanizeToggle', permission: 'master' },
+        { reg: '^#伪人记忆(?:\\s+(\\d+))?$', fnc: 'humanizeMemory', permission: 'master' },
         { reg: '^[\\s\\S]+$', fnc: 'onAmbient', log: false }, // 旁听 catch-all（最后）
       ],
     })
@@ -242,6 +336,18 @@ export class Humanize extends plugin {
       name: '伪人日志压缩归档',
       cron: '17 4 * * *',
       fnc: this.compressHumanizeLogs.bind(this),
+    }, {
+      name: '自我状态-反思',
+      cron: '37 4 * * *',
+      fnc: this.selfStateReflection.bind(this),
+    }, {
+      name: '自我状态-维护',
+      cron: '43 4 * * *',
+      fnc: this.selfStateMaintenance.bind(this),
+    }, {
+      name: '伪人记忆整合',
+      cron: '47 4 * * *',
+      fnc: this.humanizeMemoryConsolidate.bind(this),
     }]
     // 异步预热（不阻塞构造）
     getHumanize().catch(() => {})
@@ -254,6 +360,51 @@ export class Humanize extends plugin {
       const r = compressOldLogs(Config.path.humanizeLogs, { maxAgeMs: 24 * 3600 * 1000, logger: Log })
       if (r.compressed) Log.mark('[humanize] 日志压缩', `归档 ${r.compressed} 个旧日志（跳过 ${r.skipped} 个太新${r.failed ? `，失败 ${r.failed}` : ''}）`)
     } catch (e) { Log.warn('[humanize] 日志压缩失败', e?.message || e) }
+  }
+
+  /** 伪人独立记忆：每日"睡眠整合"（近期对话→长时记忆）+ 遗忘衰减。 */
+  async humanizeMemoryConsolidate() {
+    try {
+      const h = await getHumanize()
+      const cfg = h.cfgFn()
+      if (cfg.enable !== true || cfg.memory?.enabled === false) return
+      for (const gid of (cfg.groups || []).map(String)) {
+        try {
+          const ent = h.manager.getOrCreate(gid)
+          const msgs = ent.runtime.buffer.snapshot(100, { includeSelf: true })
+          const r = await h.hmem.consolidate({ groupId: gid, messages: msgs })
+          await h.hmem.decay(gid)
+          Log.mark('[humanize] 记忆整合', `群${gid} 新增${r.created} 合并${r.merged}${r.skipped ? `（跳过:${r.skipped}）` : ''}`)
+        } catch (e) { Log.warn('[humanize] 记忆整合失败', gid, e?.message || e) }
+      }
+    } catch (e) { Log.warn('[humanize] 记忆整合任务失败', e?.message || e) }
+  }
+
+  /** SelfState 每日反思（§13）与维护（衰减/过期/§20.5 恢复/retention）。 */
+  async selfStateReflection() {
+    const cfg = Config.get().agent?.selfState
+    if (cfg?.enabled !== true) return
+    try {
+      const ss = new SelfStateService({
+        provider: (await getRuntime().catch(() => null))?.provider || null,
+        cfg: () => cfg, botId: botNicknameSelfId(), dataDir: Config.path.data + '/groupworld',
+      })
+      await ss.init()
+      for (const gid of (Config.get().agent?.humanize?.groups || []).map(String)) await ss.runReflection(gid)
+    } catch (e) { Log.warn('[selfstate] 反思任务失败', e?.message || e) }
+  }
+
+  async selfStateMaintenance() {
+    const cfg = Config.get().agent?.selfState
+    if (cfg?.enabled !== true) return
+    try {
+      const ss = new SelfStateService({
+        provider: (await getRuntime().catch(() => null))?.provider || null,
+        cfg: () => cfg, botId: botNicknameSelfId(), dataDir: Config.path.data + '/groupworld',
+      })
+      await ss.init()
+      for (const gid of (Config.get().agent?.humanize?.groups || []).map(String)) await ss.runMaintenance(gid)
+    } catch (e) { Log.warn('[selfstate] 维护任务失败', e?.message || e) }
   }
 
   /** 旁听入口：8 步过滤 + 归一化 + 路由。永远 return false（不阻断）。 */
@@ -287,13 +438,23 @@ export class Humanize extends plugin {
     }
 
     // 富化 quotesBot：replyToId 命中缓冲中机器人自身消息
+    let quoteIsBot = false
     if (!norm.isSelf && norm.replyToId) {
       try {
         const ent = h.manager.getOrCreate(norm.groupId)
         const replied = ent.runtime.buffer.get(norm.replyToId)
-        if (replied?.isSelf) norm.quotesBot = true
+        if (replied?.isSelf) { norm.quotesBot = true; quoteIsBot = true }
       } catch { /* noop */ }
     }
+
+    // SelfState 感知（§4.2：即使最终 Planner ignore，指向机器人的事件仍改变内部状态；失败零影响）
+    try {
+      const ss = await h.ssLazy
+      if (ss && norm.userId) {
+        const persona = h.getPersona()
+        ss.onMessage(norm, { groupId: norm.groupId, quoteIsBot, personaText: persona.prompt, personaName: persona.name }).catch(() => {})
+      }
+    } catch { /* noop */ }
 
     // 路由到对应群运行时（写缓冲 + 必要时唤醒 debounce）
     try {
@@ -321,6 +482,21 @@ export class Humanize extends plugin {
       }
     }
     await this.e.reply(lines.join('\n'))
+    return true
+  }
+
+  /** #伪人记忆 [群号]——查看伪人独立记忆库（最近条目 + 统计）。 */
+  async humanizeMemory() {
+    let h
+    try { h = await getHumanize() } catch (e) { return this.e.reply(`伪人模式未就绪：${e?.message || e}`, true) }
+    const gid = String(this.e.msg.match(/\d+/)?.[1] || this.e.group_id || (h.cfgFn().groups || [])[0] || '')
+    if (!gid) return this.e.reply('请指定群号或在白名单群内使用：#伪人记忆 960179589', true)
+    const st = await h.hmem.stats(gid)
+    const rows = await h.hmem.recent(gid, 15)
+    if (!st?.total) return this.e.reply(`群 ${gid} 暂无伪人记忆（每日 04:47 自动整合，或等群聊积累后查看）。`, true)
+    const KIND_ZH = { impression: '印象', event: '事件', jargon: '群梗', style: '风格' }
+    const lines = rows.map((r) => `- [${KIND_ZH[r.kind] || r.kind}${r.user_id ? `@${String(r.user_id).slice(-4)}` : ''}] ${String(r.content).slice(0, 60)}（重要${(Number(r.importance) * 100) | 0}% 用${r.hit_count}次）`)
+    await this.e.reply([`伪人记忆（群 ${gid}，共 ${st.total} 条 / 累计引用 ${st.hits} 次）：`, ...lines].join('\n'), true)
     return true
   }
 
