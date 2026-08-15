@@ -130,7 +130,7 @@ export class HumanizePlanner {
     // 对话落地块（结构化归属+白名单+纠错约束）
     let groundingBlock = ''
     try {
-      if (this.getGrounding) groundingBlock = this.getGrounding(ctxMessages) || ''
+      if (this.getGrounding) groundingBlock = this.getGrounding(ctxMessages, { targetId: target?.id }) || ''
     } catch { /* noop */ }
     // SelfState 状态投影（enabled+非 shadow 时注入；失败/中性 → 零影响）
     let selfState = ''

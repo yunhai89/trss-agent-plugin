@@ -11,9 +11,13 @@
 import { textMentionsName } from './message-normalizer.js'
 
 /** 对最新一条外部消息做落地解析。 */
-export function resolveGrounding(messages = [], { knownBots = new Set() } = {}) {
+export function resolveGrounding(messages = [], { knownBots = new Set(), targetMessageId = null } = {}) {
   const arr = (Array.isArray(messages) ? messages : []).filter(Boolean)
-  const target = [...arr].reverse().find((m) => !m.isSelf)
+  // 目标解析修复：优先 Planner 实际选中的 targetMessageId（此前恒取最新一条——一批消息里
+  // Planner 想回前一条时，grounding 描述的是另一条，归属块与决策目标错位）
+  let target = null
+  if (targetMessageId != null) target = arr.find((m) => String(m.id) === String(targetMessageId)) || null
+  if (!target) target = [...arr].reverse().find((m) => !m.isSelf)
   if (!target) return null
   const byId = new Map(arr.map((m) => [String(m.id), m]))
   const selfIds = new Set(arr.filter((m) => m.isSelf).map((m) => String(m.userId)))

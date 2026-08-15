@@ -209,7 +209,8 @@ export class HumanizeMemoryStore {
    * @param {object} o { groupId, userId?, query?, topK?, kinds? }
    * @returns {Promise<Array>} 命中行（升序时间）；副作用：hit_count/last_used_at 推进
    */
-  async recall({ groupId, userId = null, query = '', topK = 5, kinds = null, allowedUsers = null } = {}) {
+  async recall({ groupId, userId = null, query = '', topK = 5, kinds = null, allowedUserIds = null, allowedUsers = null } = {}) {
+    // 参数名统一修复：调用链传 allowedUserIds（此前 recall 只认 allowedUsers → 白名单过滤静默失效）；allowedUsers 保留兼容旧测试
     if (!await this.init() || !this._ready) return []
     const rows = await this.dao.all('SELECT * FROM hm_memories WHERE group_id=?', [String(groupId)]).catch(() => [])
     if (!rows.length) return []
@@ -232,7 +233,8 @@ export class HumanizeMemoryStore {
       if (Array.isArray(kinds) && kinds.length && !kinds.includes(r.kind)) continue
       // 作用域白名单（MaiBot _is_hit_allowed 同款）：印象类记忆只允许本轮活跃人物命中，
       // 防旧对话人物（两小时前的"云海"）凭语义相似混入当前对话
-      if (Array.isArray(allowedUsers) && r.kind === 'impression' && r.user_id && !allowedUsers.map(String).includes(String(r.user_id))) continue
+      const allowSet = Array.isArray(allowedUserIds) ? allowedUserIds : allowedUsers
+      if (Array.isArray(allowSet) && r.kind === 'impression' && r.user_id && !allowSet.map(String).includes(String(r.user_id))) continue
       let kws = []; try { kws = JSON.parse(r.keywords || '[]') } catch { /* noop */ }
       // 语义余弦优先（同义换说可召回）；无向量/维度不符（换模型期）回落词面 bigram
       let sim = 0

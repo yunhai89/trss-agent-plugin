@@ -202,7 +202,7 @@ async function buildHumanize() {
     if (g) g.windowNames = winNames(msgs)
     return g
   }
-  const getGroundingBlock = (msgs) => { try { const g = getGroundingRaw(msgs); return g ? formatGroundingBlock(g) : '' } catch { return '' } }
+  const getGroundingBlock = (msgs, o = {}) => { try { const g = resolveGrounding(msgs, { knownBots: new Set([...(cfgFn().knownBots || []).map(String), ...botSelfIdsAll(rt)]), targetMessageId: o?.targetId }); if (g) g.windowNames = winNames(msgs); return g ? formatGroundingBlock(g) : '' } catch { return '' } }
 
   const makePlanner = (gid) => new H.HumanizePlanner({
     provider: rt.provider, cfg: cfgFn, readTools,
@@ -242,7 +242,7 @@ async function buildHumanize() {
     getWorldContext: gwReplyerCtx,
     getSelfCapsule: ssReplyerCap,
     enrichMedia,
-    getGrounding: (msgs) => { try { const g = getGroundingRaw(msgs); return g ? { grounding: g, block: formatGroundingBlock(g) } : null } catch { return null } },
+    getGrounding: (msgs, o = {}) => { try { const g = resolveGrounding(msgs, { knownBots: new Set([...(cfgFn().knownBots || []).map(String), ...botSelfIdsAll(rt)]), targetMessageId: o?.targetId }); if (g) g.windowNames = winNames(msgs); return g ? { grounding: g, block: formatGroundingBlock(g) } : null } catch { return null } },
     // 伪人独立记忆：对当前发言对象的印象 + 相关群梗（Replyer 用；失败/空零影响；热读配置）
     getMemoryBlock: async ({ groupId, targetUserId, queryText, allowedUserIds }) => {
       try {
@@ -497,11 +497,17 @@ export class Humanize extends plugin {
       if (ss && norm.userId) {
         const persona = h.getPersona()
         ss.onMessage(norm, { groupId: norm.groupId, quoteIsBot, personaText: persona.prompt, personaName: persona.name }).catch(() => {})
-        // 对象纠错（"我说的是X"）：冲销此前误指代产生的情绪/残留（情绪不能建立在错误指代上）
+        // 对象纠错：冲销误指代情绪（必须带完整窗口做 grounding——被纠正的X要在历史里才能解析；
+        // 此前只传 [norm]，named 恒空 → SS 冲销在生产是死代码）
         try {
-          const g = getGroundingRaw([norm])
-          if (g?.correction) ss.applyCorrection({ groupId: norm.groupId, userId: String(norm.userId) }).catch(() => {})
-        } catch { /* noop */ }
+          const buf = h.manager.getOrCreate(norm.groupId).runtime.buffer.snapshot(30, { includeSelf: true })
+          const g = getGroundingRaw([...buf, norm])
+          if (g?.correction) {
+            ss.applyCorrection({ groupId: norm.groupId, userId: String(norm.userId) }).catch((e) => Log.warn('[selfstate] 纠错冲销失败:', e?.message || e))
+            // 纠错后短暂退出线程：2 分钟内强信号不再豁免冷却（说一次看串了就退出，不继续纠缠）
+            try { h.manager.getOrCreate(norm.groupId).runtime._postCorrectionUntil = Date.now() + 2 * 60 * 1000 } catch { /* noop */ }
+          }
+        } catch (e) { Log.debug('[humanize] 纠错检测异常:', e?.message || e) }
       }
     } catch { /* noop */ }
 

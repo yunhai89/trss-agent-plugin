@@ -112,7 +112,7 @@ export class HumanizeReplyer {
     let groundingObj = null
     try {
       if (this.getGrounding) {
-        const r2 = this.getGrounding(ctxMessages)
+        const r2 = this.getGrounding(ctxMessages, { targetId: target?.id })
         groundingObj = r2?.grounding || null
         groundingBlock = r2?.block || ''
       }
@@ -156,8 +156,15 @@ export class HumanizeReplyer {
           if (rt2 && !whitelistViolations(rt2, groundingObj, groundingObj.windowNames || []).length) {
             text = rt2
             runtime?.trace?.record('grounding_whitelist_regen', { violations: vio.join(',') })
+          } else {
+            // fail-closed：重写仍越界 → 取消发送（此前照发=串人风险；不确定就闭嘴）
+            runtime?.trace?.record('grounding_violation_cancel', { violations: vio.join(','), regen: rt2.slice(0, 40) })
+            return { text: '', rewritten: false, cancelReason: 'grounding_violation' }
           }
-        } catch { /* 照发 */ }
+        } catch (e) {
+          runtime?.trace?.record('grounding_violation_cancel', { violations: vio.join(','), err: String(e?.message || e).slice(0, 60) })
+          return { text: '', rewritten: false, cancelReason: 'grounding_violation' }
+        }
       }
     }
 

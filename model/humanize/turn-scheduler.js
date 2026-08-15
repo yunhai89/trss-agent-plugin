@@ -108,7 +108,15 @@ export class TurnScheduler {
     if (!external.length) {  return }
 
     const now = Date.now()
-    const hasStrongSignal = external.some((m) => m.atBot || m.quotesBot || m.mentionsBotName)
+    const rawStrong = external.some((m) => m.atBot || m.quotesBot || m.mentionsBotName)
+    // 强信号豁免限制（Thread Engagement 温和版）：①同一人连续强信号豁免 ≥3 次后不再绕过冷却/频率
+    // （防对方每次引用→bot 无限续杯；正常斗嘴前 3 轮不受影响，换对象即重置）；②纠错后 2 分钟内不豁免
+    const strongExhausted = (rt._forcedStreak || 0) >= 3
+    const postCorrection = (rt._postCorrectionUntil || 0) > now
+    const hasStrongSignal = rawStrong && !strongExhausted && !postCorrection
+    if (rawStrong && (strongExhausted || postCorrection)) {
+      rt.trace?.record('strong_signal_exemption_limited', { streak: rt._forcedStreak || 0, postCorrection })
+    }
 
     // bot↔bot 闭环熔断（仅已知 bot 账号，config.humanize.knownBots；真人聊天不受影响）：
     // 与已知 bot 交替 ≥3 轮且无真人夹入 → 群级 10 分钟熔断；期间仅真人 @/直接提问可重新进入
@@ -380,6 +388,10 @@ export class TurnScheduler {
       try { await rt.store.markSent(rt.groupId, action.targetMessageId) } catch { /* noop */ }
       rt.recordReply(result.sentIds[0])
       rt._waitStreak = 0 // 发言即退出观望连击
+      // 强信号豁免计数：连续对同一人回复（换对象即重置——限制的是追同一人，不是参与度）
+      const tu = String(target?.userId || '')
+      rt._forcedStreak = (rt._forcedUser === tu) ? (rt._forcedStreak || 0) + 1 : 1
+      rt._forcedUser = tu
       this._appendSelf(text, result.sentIds[0]) // 自身发言入 buffer（解锁 presence/引用/追问信号）
       this._notifyDelivered(target, { sentText: text, replyGuide: action.replyGuide || '', sourceMessageId: result.sentIds[0] }) // GW 主观关系 + SS 出站期待
       rt.enterCooldown(c.cooldownSeconds ?? 45)
