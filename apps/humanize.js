@@ -126,8 +126,8 @@ async function buildHumanize() {
   // GroupWorld 局部社会现场（仅 online 时注入；GW 未就绪/失败 → 空现场，零影响）。复用 apps/groupworld 单例。
   const EMPTY_SCENE = { empty: true, text: '' }
   const gwLazy = getGroupWorld().catch(() => null)
-  const gwPlannerCtx = async (ctx) => { try { const gw = await gwLazy; return gw ? await gw.buildPlannerContext(ctx) : EMPTY_SCENE } catch { return EMPTY_SCENE } }
-  const gwReplyerCtx = async (ctx) => { try { const gw = await gwLazy; return gw ? await gw.buildReplyerContext(ctx) : EMPTY_SCENE } catch { return EMPTY_SCENE } }
+  const gwPlannerCtx = async (ctx) => { try { const gw = await gwLazy; return gw ? await gw.buildPlannerContext(ctx) : EMPTY_SCENE } catch (e) { Log.debug('[humanize] GW现场降级:', e?.message || e); return EMPTY_SCENE } }
+  const gwReplyerCtx = async (ctx) => { try { const gw = await gwLazy; return gw ? await gw.buildReplyerContext(ctx) : EMPTY_SCENE } catch (e) { Log.debug('[humanize] GW现场降级:', e?.message || e); return EMPTY_SCENE } }
   // SelfState（自我认知与情绪）：惰性单例，enabled=false 时 service.init 返 false 全链路 no-op。
   const NEUTRAL = { neutral: true, text: '' }
   const ssLazy = (() => {
@@ -146,8 +146,8 @@ async function buildHumanize() {
       return svc.init().then(() => svc).catch(() => null)
     } catch { return Promise.resolve(null) }
   })()
-  const ssPlannerProj = async (ctx) => { try { const ss = await ssLazy; return ss ? await ss.buildPlannerProjection(ctx) : NEUTRAL } catch { return NEUTRAL } }
-  const ssReplyerCap = async (ctx) => { try { const ss = await ssLazy; return ss ? await ss.buildReplyerCapsule(ctx) : NEUTRAL } catch { return NEUTRAL } }
+  const ssPlannerProj = async (ctx) => { try { const ss = await ssLazy; return ss ? await ss.buildPlannerProjection(ctx) : NEUTRAL } catch (e) { Log.debug('[humanize] SS投影降级:', e?.message || e); return NEUTRAL } }
+  const ssReplyerCap = async (ctx) => { try { const ss = await ssLazy; return ss ? await ss.buildReplyerCapsule(ctx) : NEUTRAL } catch (e) { Log.debug('[humanize] SS胶囊降级:', e?.message || e); return NEUTRAL } }
   const ssOnDelivered = async (info) => {
     try {
       const ss = await ssLazy

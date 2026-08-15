@@ -167,7 +167,7 @@ export class HumanizeReplyComposer {
           if (Array.isArray(seg) && seg.length) {
             try {
               const sid = await send(seg[0], { quoteTargetId: null })
-              if (sid) sentIds.push(sid)
+              if (sid) { sentIds.push(sid); this.stickerManager?.noteSent?.(sn) }
             } catch (e) { Log.warn('[humanize] 表情包发送失败', e?.message || e) }
           }
         }

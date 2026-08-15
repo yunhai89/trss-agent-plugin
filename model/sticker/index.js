@@ -283,6 +283,9 @@ export function buildCatalog(index, { listTopN = 30 } = {}) {
     topNames.add(name)
     if (boosted.length >= Math.ceil(listTopN * 1.3)) break
   }
+  // 展示顺序洗牌：按 usage 取样仍保留热度信号，但打破"最高使用恒排第一行"的注意力偏置
+  // （马太效应修复：怼脸吐舌曾因恒排第一被 LLM 连发 8 次）
+  for (let k = boosted.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [boosted[k], boosted[j]] = [boosted[j], boosted[k]] }
   const lines = boosted.map(([name, e]) => {
     const tags = e.tags?.length ? e.tags.join('/') : ''
     const desc = e.desc && e.desc !== name ? e.desc : ''

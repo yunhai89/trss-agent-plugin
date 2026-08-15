@@ -4,6 +4,8 @@
  * 仅适用于 OpenAI 兼容端点（DeepSeek/Kimi/Qwen/GLM 等均支持）；Anthropic 原生无 embeddings。
  */
 
+import Log from '../../utils/Log.js'
+
 function resolveClient(providerOrClient) {
   if (!providerOrClient) throw new Error('embed 需要 provider 或 client')
   return providerOrClient.client || providerOrClient
@@ -30,10 +32,38 @@ export async function embed(texts, opts = {}) {
 
   const isArray = Array.isArray(texts)
   const input = isArray ? texts : [texts]
-  const body = {
-    model: opts.model || client.embeddingModel || 'text-embedding-3-small',
-    input,
+  const model = opts.model || client.embeddingModel || 'text-embedding-3-small'
+
+  // 豆包多模态 embedding（doubao-embedding-vision-*）：不支持 OpenAI /embeddings，
+  // 走 /embeddings/multimodal，input=[{type:'text',text}]，返回 data.embedding（单对象）——
+  // 无批量，逐条并发 8 调用。此前按标准端点调被 400 且静默吞掉，表现为"embedding 从未被使用"。
+  if (/embedding-vision/i.test(model)) {
+    const rows = []
+    for (let i = 0; i < input.length; i += 8) {
+      const chunk = input.slice(i, i + 8)
+      const outs = await Promise.all(chunk.map(async (t) => {
+        const res = await fetcher(`${baseURL}/embeddings/multimodal`, {
+          method: 'POST',
+          headers: buildHeaders(client),
+          body: JSON.stringify({ model, input: [{ type: 'text', text: String(t) }] }),
+          signal: opts.signal || AbortSignal.timeout(opts.timeoutMs || 30000),
+        })
+        if (!res.ok) {
+          const err = `embed(multimodal) HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`
+          Log.warn('[embed]', err)
+          throw new Error(err)
+        }
+        const json = await res.json()
+        const emb = json?.data?.embedding || json?.data?.[0]?.embedding
+        if (!Array.isArray(emb) || !emb.length) throw new Error('embed(multimodal) 返回无向量')
+        return emb
+      }))
+      rows.push(...outs)
+    }
+    return isArray ? rows : rows[0] || []
   }
+
+  const body = { model, input }
   if (opts.dimensions != null) body.dimensions = opts.dimensions
 
   const signal = opts.signal || (opts.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : AbortSignal.timeout(30000))
@@ -45,6 +75,7 @@ export async function embed(texts, opts = {}) {
   })
   if (!res.ok) {
     const t = await res.text().catch(() => '')
+    Log.warn('[embed]', `HTTP ${res.status}: ${t.slice(0, 200)}（model=${model}）`)
     throw new Error(`embed HTTP ${res.status}: ${t}`)
   }
   const json = await res.json()

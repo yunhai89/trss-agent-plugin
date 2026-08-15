@@ -12,6 +12,7 @@
  * 算法升级（第一梯队 #1）：语义近邻层——seed-examples 每类原型句 embedding，候选消息余弦 top-k
  * 分类，与关键词命中融合；灰区/词义冲突升级 LLM。无 embedder / embedding 失败 → 全部回落纯关键词。
  */
+import Log from '../../utils/Log.js'
 import { cosine } from '../groupworld/embedding.js'
 import { SEED_EXAMPLES, SEM_CATEGORY_TO_EVENT } from './seed-examples.js'
 
@@ -66,7 +67,8 @@ export class SelfEventDetector {
       }
       if (!vecs.size) { this._semDisabled = true; return null }
       this._seedVecs = vecs
-    } catch {
+    } catch (e) {
+      Log.warn('[selfstate] 语义检测层例句向量初始化失败，语义层禁用（回落关键词）:', e?.message || e)
       this._semDisabled = true
       return null
     }

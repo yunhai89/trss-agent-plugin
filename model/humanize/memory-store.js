@@ -127,7 +127,7 @@ export class HumanizeMemoryStore {
     try {
       const v = await this.embedder.embed(String(content || ''))
       if (v) await this.dao.run('UPDATE hm_memories SET embedding=? WHERE id=?', [toBlob(v), id])
-    } catch { /* noop */ }
+    } catch (e) { Log.warn('[humanize-memory] 记忆向量入库失败 id=' + id + ':', e?.message || e) }
   }
 
   // ─────────────── 整合（睡眠：近期对话 → 长时记忆） ───────────────

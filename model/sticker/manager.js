@@ -184,6 +184,9 @@ export class StickerManager {
   _decide(content, ctx) {
     const acceptMap = new Map()
     if (!this.enabled()) return acceptMap
+    // 多样性硬闸（独立于 sendRate/cooldown 配置）：最近发过的表情（近 3 张）不再发——
+    // 防 LLM 对某张表情形成惯性（曾在无频率闸配置下连发同一张 8 次）
+    const recent = new Set(this._recentSent || [])
     const c = this.cfg
     if (c.groupOnly && !ctx?.isGroup) return acceptMap
     const key = this._key(ctx)
@@ -215,6 +218,7 @@ export class StickerManager {
         }
       }
       if (!entry || entry.nsfw) continue
+      if (recent.has(usedName)) continue // 最近发过：本轮不发（标记剥除，streak 打断）
       const abs = imageAbsOf(entry)
       if (!fs.existsSync(abs)) continue
       if (acceptMap.has(usedName)) continue
@@ -222,6 +226,12 @@ export class StickerManager {
       count++
     }
     return acceptMap
+  }
+
+  /** 记录实际发送的表情（多样性去重用；由 composer/主Agent 发送成功后调用）。 */
+  noteSent(names = []) {
+    if (!Array.isArray(names) || !names.length) return
+    this._recentSent = [...(this._recentSent || []), ...names.map(String)].slice(-3)
   }
 
   /** 门控副作用：更新冷却/防连发/usage。acceptMap 为空则记"本轮未带图"。 */

@@ -12,6 +12,8 @@
  * 设计约束：embedding 是可选增强——没配 recall.embedProvider 时一切照旧（textSim/词面）。
  */
 
+import Log from '../../utils/Log.js'
+
 /** 余弦相似度；任一为空/长度不匹配（不同模型维度）→ null（调用方自行兜底）。 */
 export function cosine(a, b) {
   if (!a || !b || !a.length || !b.length) return null
@@ -55,9 +57,9 @@ export function makeEmbedder({ embedFn, model = 'default' } = {}) {
       if (!t) return null
       try {
         const v = await embedFn(t)
-        if (!Array.isArray(v) || !v.length) return null
+        if (!Array.isArray(v) || !v.length) { Log.warn('[embedding] embedFn 返回空向量（model=' + this.model + '）'); return null }
         return Float32Array.from(v)
-      } catch { return null }
+      } catch (e) { Log.warn('[embedding] embed 失败（model=' + this.model + '）:', e?.message || e); return null }
     },
     /** 批量嵌入（并发钳 8；任一失败该条为 null，调用方自滤）。 */
     async embedBatch(texts) {

@@ -1356,6 +1356,7 @@ export class Chat extends plugin {
             for (const abs of acceptMap.values()) {
               try { await this.e.reply(segment.image(abs)) } catch (e) { Log.warn('[render] 表情包单独发送失败', e?.message || e) }
             }
+            rt.sticker?.noteSent?.([...acceptMap.keys()])
           }
         } catch (e) { Log.warn('[render] 文本回复发送失败', e?.message || e) }
       } else if (suffix) {
