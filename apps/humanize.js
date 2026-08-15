@@ -23,6 +23,7 @@ import { SelfStateService } from '../model/selfstate/index.js'
 import { buildEmbed } from '../model/llm/embed-wiring.js'
 import { makeEmbedder } from '../model/groupworld/embedding.js'
 import { createSearchManager, formatResults } from '../model/search/index.js'
+import { fetchReply } from '../model/media/collect.js'
 import * as H from '../model/humanize/index.js'
 
 let _humanize = null
@@ -202,7 +203,16 @@ async function buildHumanize() {
     if (g) g.windowNames = winNames(msgs)
     return g
   }
-  const getGroundingBlock = (msgs, o = {}) => { try { const g = resolveGrounding(msgs, { knownBots: new Set([...(cfgFn().knownBots || []).map(String), ...botSelfIdsAll(rt)]), targetMessageId: o?.targetId }); if (g) g.windowNames = winNames(msgs); return g ? formatGroundingBlock(g) : '' } catch { return '' } }
+  const getGroundingContext = (msgs, o = {}) => {
+    try {
+      const g = resolveGrounding(msgs, {
+        knownBots: new Set([...(cfgFn().knownBots || []).map(String), ...botSelfIdsAll(rt)]),
+        targetMessageId: o?.targetId,
+      })
+      if (g) g.windowNames = winNames(msgs)
+      return g ? { grounding: g, block: formatGroundingBlock(g) } : null
+    } catch { return null }
+  }
 
   const makePlanner = (gid) => new H.HumanizePlanner({
     provider: rt.provider, cfg: cfgFn, readTools,
@@ -224,7 +234,7 @@ async function buildHumanize() {
     getWorldContext: gwPlannerCtx,
     getSelfProjection: ssPlannerProj,
     enrichMedia,
-    getGrounding: getGroundingBlock, // 对话归属块（结构化+白名单+纠错约束）——此前漏接，planner 从未收到
+    getGrounding: getGroundingContext,
   })
   const makeReplyer = (gid) => new H.HumanizeReplyer({
     provider: rt.provider, cfg: cfgFn,
@@ -243,7 +253,7 @@ async function buildHumanize() {
     getWorldContext: gwReplyerCtx,
     getSelfCapsule: ssReplyerCap,
     enrichMedia,
-    getGrounding: (msgs, o = {}) => { try { const g = resolveGrounding(msgs, { knownBots: new Set([...(cfgFn().knownBots || []).map(String), ...botSelfIdsAll(rt)]), targetMessageId: o?.targetId }); if (g) g.windowNames = winNames(msgs); return g ? { grounding: g, block: formatGroundingBlock(g) } : null } catch { return null } },
+    getGrounding: getGroundingContext,
     // 伪人独立记忆：对当前发言对象的印象 + 相关群梗（Replyer 用；失败/空零影响；热读配置）
     getMemoryBlock: async ({ groupId, targetUserId, queryText, allowedUserIds }) => {
       try {
@@ -266,7 +276,7 @@ async function buildHumanize() {
 
   // getPersona：把 rt 闭包在内，供 onAmbient 的 SelfState 感知解析人设（onAmbient 作用域无 rt）
   const getPersona = () => resolveHumanizePersona(cfgFn(), rt)
-  return { manager, store, trace, memory, cfgFn, ssLazy, getPersona, hmem }
+  return { manager, store, trace, memory, cfgFn, ssLazy, getPersona, getGroundingRaw, webSearch, hmem }
 }
 
 /** 取伪人装配体（manager/hmem/trace 等；web 与测试用）。 */
@@ -417,7 +427,7 @@ export class Humanize extends plugin {
           Log.mark('[humanize] 记忆整合', `群${gid} 新增${r.created} 合并${r.merged}${r.skipped ? `（跳过:${r.skipped}）` : ''}${hourly ? ' [增量]' : ' [日全量]'}`)
           // 网络梗学习：整合时发现的词典外梗 → 上网查释义（去重+置信+重试三闸防污染）
           if (Array.isArray(r.suspected) && r.suspected.length) {
-            const lr = await h.hmem.learnJargonFromWeb({ groupId: gid, terms: r.suspected, webSearch })
+            const lr = await h.hmem.learnJargonFromWeb({ groupId: gid, terms: r.suspected, webSearch: h.webSearch })
             if (r.suspected.length) Log.mark('[humanize] 网络梗学习', `群${gid} 候选${r.suspected.join('、')} → 学会${lr.learned} 跳过${lr.skipped} 失败${lr.failed}`)
           }
         } catch (e) { Log.warn('[humanize] 记忆整合失败', gid, e?.message || e) }
@@ -482,35 +492,53 @@ export class Humanize extends plugin {
       try { await h.store.markDirectHandled(norm.groupId, norm.id) } catch { /* noop */ }
     }
 
-    // 富化 quotesBot：replyToId 命中缓冲中机器人自身消息
+    // 富化跨窗口引用：优先缓冲；未命中时用 getReply/get_msg/history 取轻量快照。
+    // 快照只挂在当前消息上，不把历史消息 append 成新的候选消息。
     let quoteIsBot = false
+    let ent = null
     if (!norm.isSelf && norm.replyToId) {
       try {
-        const ent = h.manager.getOrCreate(norm.groupId)
-        const replied = ent.runtime.buffer.get(norm.replyToId)
+        ent = h.manager.getOrCreate(norm.groupId)
+        let replied = ent.runtime.buffer.get(norm.replyToId) || norm.replySource
+        if (!replied || !String(replied.text || '').trim()) {
+          const rawReply = await fetchReply(e, {
+            bot: (typeof Bot !== 'undefined' && Bot) || null,
+            log: (msg) => Log.debug('[humanize] 引用补全:', msg),
+          })
+          const source = H.normalizeReplySource(rawReply, { selfIds, fallbackId: norm.replyToId })
+          if (source) {
+            norm.replySource = source
+            replied = source
+          }
+        }
         if (replied?.isSelf) { norm.quotesBot = true; quoteIsBot = true }
       } catch { /* noop */ }
     }
 
     // SelfState 感知（§4.2：即使最终 Planner ignore，指向机器人的事件仍改变内部状态；失败零影响）
+    let ss = null
     try {
-      const ss = await h.ssLazy
+      ss = await h.ssLazy
       if (ss && norm.userId) {
         const persona = h.getPersona()
         ss.onMessage(norm, { groupId: norm.groupId, quoteIsBot, personaText: persona.prompt, personaName: persona.name }).catch(() => {})
-        // 对象纠错：冲销误指代情绪（必须带完整窗口做 grounding——被纠正的X要在历史里才能解析；
-        // 此前只传 [norm]，named 恒空 → SS 冲销在生产是死代码）
-        try {
-          const buf = h.manager.getOrCreate(norm.groupId).runtime.buffer.snapshot(30, { includeSelf: true })
-          const g = getGroundingRaw([...buf, norm])
-          if (g?.correction) {
-            ss.applyCorrection({ groupId: norm.groupId, userId: String(norm.userId) }).catch((e) => Log.warn('[selfstate] 纠错冲销失败:', e?.message || e))
-            // 纠错后短暂退出线程：2 分钟内强信号不再豁免冷却（说一次看串了就退出，不继续纠缠）
-            try { h.manager.getOrCreate(norm.groupId).runtime._postCorrectionUntil = Date.now() + 2 * 60 * 1000 } catch { /* noop */ }
-          }
-        } catch (e) { Log.debug('[humanize] 纠错检测异常:', e?.message || e) }
       }
     } catch { /* noop */ }
+
+    // 对象纠错独立于 SelfState 开关：当前纠错消息允许回应一次，随后只暂停同一发送者 2 分钟。
+    // 必须带完整窗口做 grounding——被纠正的人名在历史里，单传 [norm] 无法识别。
+    if (norm.userId) {
+      try {
+        ent ||= h.manager.getOrCreate(norm.groupId)
+        const buf = ent.runtime.buffer.snapshot(30, { includeSelf: true })
+        const g = h.getGroundingRaw([...buf, norm])
+        if (g?.correction) {
+          ent.runtime.markReferenceCorrection(norm.userId, norm.id, Date.now() + 2 * 60 * 1000)
+          ss?.applyCorrection?.({ groupId: norm.groupId, userId: String(norm.userId) })
+            ?.catch?.((err) => Log.warn('[selfstate] 纠错冲销失败:', err?.message || err))
+        }
+      } catch (err) { Log.debug('[humanize] 纠错检测异常:', err?.message || err) }
+    }
 
     // 路由到对应群运行时（写缓冲 + 必要时唤醒 debounce）
     try {

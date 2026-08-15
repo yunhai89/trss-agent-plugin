@@ -44,6 +44,10 @@ export class GroupRuntime {
     // 最近回复时间戳（频率上限）
     this.recentReplyTs = []
 
+    // 人际轮次控制（进程内）：按用户隔离，避免一个人耗尽豁免后误伤同群其他人。
+    this._strongReplyByUser = new Map()
+    this._postCorrectionByUser = new Map()
+
     // 定时器（进程内，不序列化）
     this._debounceTimer = null
     this._waitTimer = null
@@ -159,6 +163,50 @@ export class GroupRuntime {
     if (messageId) this.buffer?.markSelf?.(messageId)
   }
 
+  /** 近 windowMs 内对该用户的强信号回复次数。过期自动清理。 */
+  strongReplyCount(userId, now = Date.now(), windowMs = 10 * 60 * 1000) {
+    const key = String(userId || '')
+    if (!key) return 0
+    const state = this._strongReplyByUser.get(key)
+    if (!state) return 0
+    if (now - Number(state.lastAt || 0) > windowMs) {
+      this._strongReplyByUser.delete(key)
+      return 0
+    }
+    return Math.max(0, Number(state.count) || 0)
+  }
+
+  /** 成功回复一条强信号消息；shadow 与真实发送均调用。 */
+  recordStrongReply(userId, now = Date.now()) {
+    const key = String(userId || '')
+    if (!key) return 0
+    const count = this.strongReplyCount(key, now) + 1
+    this._strongReplyByUser.set(key, { count, lastAt: now })
+    return count
+  }
+
+  /** 当前纠错消息允许处理一次，随后只暂停同一发送者，不静音整个群。 */
+  markReferenceCorrection(userId, messageId, until) {
+    const key = String(userId || '')
+    if (!key) return
+    this._postCorrectionByUser.set(key, {
+      allowMessageId: messageId != null ? String(messageId) : null,
+      until: Number(until) || Date.now(),
+    })
+  }
+
+  referenceCorrectionFor(userId, now = Date.now()) {
+    const key = String(userId || '')
+    if (!key) return null
+    const state = this._postCorrectionByUser.get(key)
+    if (!state) return null
+    if (Number(state.until || 0) <= now) {
+      this._postCorrectionByUser.delete(key)
+      return null
+    }
+    return state
+  }
+
   // ─────────────── 观察游标（标记已处理，防重复评估） ───────────────
 
   /** 把批次标记为已观察（lastProcessedSeq 前移到 batch 末尾）。 */
@@ -191,7 +239,7 @@ export class GroupRuntime {
         lastProcessedSeq: this.lastProcessedSeq,
         cooldownUntil: this.cooldownUntil,
         backoff: this.backoff?.snapshot?.(),
-        bufferTail: tail.map(({ seq, id, groupId, userId, displayName, timestamp, text, segments, replyToId, atBot, mentionsBotName, quotesBot, isCommand, isSelf, handledByDirectAgent, media }) => ({ seq, id, groupId, userId, displayName, timestamp, text, segments, replyToId, atBot, mentionsBotName, quotesBot, isCommand, isSelf, handledByDirectAgent, media })),
+        bufferTail: tail.map(({ seq, id, groupId, userId, displayName, timestamp, text, segments, replyToId, replySource, atBot, mentionsBotName, quotesBot, isCommand, isSelf, handledByDirectAgent, media }) => ({ seq, id, groupId, userId, displayName, timestamp, text, segments, replyToId, replySource, atBot, mentionsBotName, quotesBot, isCommand, isSelf, handledByDirectAgent, media })),
         phase: 'idle', // 重启后一律从 idle 开始（不恢复 planning）
       })
     } catch { /* noop */ }

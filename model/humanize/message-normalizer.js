@@ -7,7 +7,7 @@
  *  - 无稳定 message_id 时生成短期指纹（仅用于去重，不作永久业务主键）。
  *  - mentionsBotName 做最小边界匹配，避免子串误判（指南 §9.2）。
  *
- * 不做：网络请求、引用原文拉取（由 perception/composer 按需拉）。
+ * 不做：网络请求；跨窗口引用原文由 app 层拉取后交给 normalizeReplySource 压缩。
  */
 
 import { createHash } from 'node:crypto'
@@ -22,6 +22,8 @@ import { createHash } from 'node:crypto'
  * @property {string} text               纯文本（媒体标注占位）
  * @property {Array<object>} segments    原始消息段（克隆，避免污染事件）
  * @property {string|null} replyToId     被引用消息 id
+ * @property {{id:string,userId:string,displayName:string,text:string,isSelf:boolean}|null} replySource
+ *                                           被引用消息不在窗口时的轻量快照（由 e.source/get_msg 富化）
  * @property {boolean} atBot             显式 @机器人
  * @property {boolean} mentionsBotName   文本提及机器人昵称
  * @property {boolean} quotesBot         引用了机器人的消息（由 app 层据 self 发言标记富化）
@@ -132,6 +134,28 @@ function extractReplyToId(e, segments) {
 }
 
 /**
+ * 把 e.source / getReply / OneBot get_msg 返回值压成可持久化的引用快照。
+ * 不把历史消息重新 append 到 MessageBuffer，避免它被误当成一条新候选消息；Grounding 和
+ * prompt 只通过 target.replySource 消费这份只读上下文。
+ */
+export function normalizeReplySource(raw, { selfIds = [], fallbackId = null } = {}) {
+  if (!raw || typeof raw !== 'object') return null
+  const src = raw?.data?.message ? raw.data : raw
+  const segments = Array.isArray(src.message)
+    ? src.message.map((s) => (s?.data && typeof s.data === 'object' ? { ...s, ...s.data } : { ...s }))
+    : []
+  const userId = String(src.user_id ?? src.sender?.user_id ?? '')
+  if (!userId) return null
+  const id = String(src.message_id ?? src.id ?? fallbackId ?? '')
+  if (!id) return null
+  const displayName = String(src.sender?.card || src.sender?.nickname || src.nickname || userId)
+  const rawText = src.raw_message ?? src.msg ?? src.content
+  const text = typeof rawText === 'string' ? rawText.trim() : segmentsToText(segments)
+  const isSelf = src.isSelf === true || selfIds.some((x) => String(x) === userId)
+  return { id, userId, displayName: isSelf ? '我' : displayName, text, isSelf }
+}
+
+/**
  * 文本是否提及机器人昵称（最小边界匹配）。
  * - 昵称长度 < 2 不参与（单字误判率高）。
  * - 对含字母/数字的昵称要求前后非字母数字（避免 "AI" 命中 "EMAIL"）。
@@ -172,6 +196,7 @@ export function normalizeYunzaiEvent(e, opts = {}) {
   const text = String(e?.msg ?? segmentsToText(segments) ?? '')
   const media = extractMedia(segments)
   const replyToId = extractReplyToId(e, segments)
+  const replySource = normalizeReplySource(e?.source, { selfIds, fallbackId: replyToId })
 
   const atBot = !!(e?.atBot || segments.some((s) => s?.type === 'at' && selfIds.includes(String(s.qq))))
   const mentionsBotName = textMentionsName(text, botNames)
@@ -191,6 +216,7 @@ export function normalizeYunzaiEvent(e, opts = {}) {
     text,
     segments,
     replyToId,
+    replySource,
     atBot,
     mentionsBotName,
     quotesBot: false, // 由 app 层据「replyToId 是否命中机器人最近发言」富化

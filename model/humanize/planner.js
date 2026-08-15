@@ -105,6 +105,22 @@ export class HumanizePlanner {
     } catch { ctxMessages = snapshot }
     const groupContext = formatGroupContext(ctxMessages, { includeIds: true })
     const target = decision?.targetMessage || null
+
+    // Grounding 必须先于记忆：threadUserIds 是人物印象检索的硬作用域。
+    // 兼容旧注入器直接返回字符串；新注入器返回 { grounding, block }。
+    let groundingBlock = ''
+    let groundingObj = null
+    try {
+      if (this.getGrounding) {
+        const gr = this.getGrounding(ctxMessages, { targetId: target?.id })
+        if (typeof gr === 'string') groundingBlock = gr
+        else {
+          groundingObj = gr?.grounding || null
+          groundingBlock = gr?.block || ''
+        }
+      }
+    } catch { /* noop */ }
+
     let publicMemories = ''
     try {
       // 记忆检索门控：只对有实质文本的目标查（对齐 MaiBot——寒暄/短反应/纯媒体不查，免得注入无关记忆+白调一次）
@@ -125,17 +141,6 @@ export class HumanizePlanner {
           topicText: String(target.text || '').slice(0, 200),
         })
         socialScene = scene?.text || ''
-      }
-    } catch { /* noop */ }
-
-    // 对话落地块（结构化归属+白名单+纠错约束）；取对象形态拿 threadUserIds 供记忆作用域过滤
-    let groundingBlock = ''
-    let groundingObj = null
-    try {
-      if (this.getGrounding) {
-        const gr = this.getGrounding(ctxMessages, { targetId: target?.id })
-        groundingObj = gr?.grounding || null
-        groundingBlock = gr?.block || String(gr || '')
       }
     } catch { /* noop */ }
     // SelfState 状态投影（enabled+非 shadow 时注入；失败/中性 → 零影响）

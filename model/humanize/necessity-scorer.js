@@ -144,6 +144,7 @@ function isFollowupToBot(msg, messages) {
   if (msg.replyToId != null) {
     const src = messages.find((m) => m && String(m.id) === String(msg.replyToId))
     if (src && !src.isSelf) return false // 在回复别人，不是追问 bot
+    if (!src && msg.replySource && !msg.replySource.isSelf) return false // 跨窗口引用：轻量快照同样能确认在回复别人
   }
   const t = String(msg.text || '')
   return /[?？]/.test(t) || QUESTION_TERMS.some((w) => t.includes(w)) || DIRECT_REQUEST_TERMS.some((w) => t.includes(w))

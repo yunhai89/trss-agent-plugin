@@ -7,7 +7,7 @@
  * 红线：环境模式中，任何普通 assistant 文本都不能直接发送；只有 human_reply/human_react 才可对外发消息。
  */
 
-export { normalizeYunzaiEvent, isSelfEvent, collectSelfIds, fingerprintId, segmentsToText, textMentionsName } from './message-normalizer.js'
+export { normalizeYunzaiEvent, normalizeReplySource, isSelfEvent, collectSelfIds, fingerprintId, segmentsToText, textMentionsName } from './message-normalizer.js'
 export { MessageBuffer } from './message-buffer.js'
 export { HumanizeStore, newHolderId } from './store.js'
 export { Trace, hashGroupId, redactForLog } from './trace.js'

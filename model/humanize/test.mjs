@@ -6,7 +6,7 @@
  */
 import { memoryKv } from '../agent/store/kv.js'
 import {
-  normalizeYunzaiEvent, isSelfEvent, collectSelfIds, fingerprintId, textMentionsName, segmentsToText,
+  normalizeYunzaiEvent, normalizeReplySource, isSelfEvent, collectSelfIds, fingerprintId, textMentionsName, segmentsToText,
 } from './message-normalizer.js'
 import { MessageBuffer } from './message-buffer.js'
 import { HumanizeStore, newHolderId } from './store.js'
@@ -20,6 +20,7 @@ import { splitSegments, typingDelayMs, protect, restore } from './reply-composer
 import { Trace, redactForLog } from './trace.js'
 import { validateHumanizeConfig, resolveHumanizeConfig, DEFAULT_HUMANIZE_CONFIG } from './default-config.js'
 import { DEFAULT_HUMANIZE_PERSONA } from './default-persona.js'
+import { resolveGrounding } from './grounding.js'
 
 let passed = 0, failed = 0
 function ok(c, m) { if (c) { passed++; console.log('  ✓', m) } else { failed++; console.error('  ✗ FAIL', m) } }
@@ -61,6 +62,32 @@ await test('normalizer：提及昵称边界匹配（避免子串误判）', asyn
   ok(isSelfEvent({ user_id: '123' }, ['123']) === true, 'isSelfEvent 字符串匹配')
   ok(Array.isArray(collectSelfIds({ self_id: 1 })), 'collectSelfIds 返回数组')
   ok(fingerprintId({ text: 'x' }).startsWith('fp_'), 'fingerprintId 前缀')
+})
+
+await test('跨窗口引用：get_msg 快照参与归属、prompt 与追问判定，但不伪造新消息', async () => {
+  const source = normalizeReplySource({
+    data: {
+      message_id: 'old_w', user_id: 'uW', sender: { nickname: '芜湖' },
+      message: [{ type: 'text', data: { text: '帮我把我禁言' } }],
+    },
+  }, { selfIds: ['bot'] })
+  ok(source?.id === 'old_w' && source?.displayName === '芜湖' && source?.text === '帮我把我禁言', 'OneBot 嵌套段压成轻量引用快照')
+
+  const bot = mkMsg('这我哪有权限啊', true, { userId: 'bot' }, 'self_old')
+  const reply = mkMsg('权限摆脸上自己不会看？', false, {
+    userId: 'uL', replyToId: 'old_w', replySource: source,
+  }, 'new_l', '林墨')
+  const grounding = resolveGrounding([bot, reply])
+  ok(grounding?.semanticTarget === '芜湖' && grounding?.quoted?.text === '帮我把我禁言', '窗口外被回复者与原文进入 grounding')
+  ok(grounding?.threadUserIds.includes('uW'), '被回复者进入记忆作用域')
+  const ctx = formatGroupContext([bot, reply])
+  ok(ctx.includes('↩回复芜湖(帮我把我禁言)'), 'prompt 渲染窗口外回复关系与原文')
+
+  const decision = evaluate({
+    messages: [bot, reply], candidates: [reply], pendingCount: 1, presence: {},
+    cfg: { threshold: 80, talkValue: 0.35 },
+  })
+  ok(!decision.positiveReasons.includes('followup_to_bot'), '虽紧跟 bot 发言，引用窗口外真人时不误判为追问 bot')
 })
 
 // ───────── buffer ─────────

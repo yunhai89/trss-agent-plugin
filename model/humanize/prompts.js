@@ -195,7 +195,7 @@ export function formatGroupContext(messages = [], { includeIds = true, selfLabel
       if (m.replyToId && !m.quotesBot && !m.atBot) {
         // 回复目标解析到人名+被引原文摘要：窗口内 → ↩回复<名>(原文≤20字)；窗口外 → 明示不在近窗。
         // 带原文是关键：被回复消息里的"你/这个/权限"等指代只有看到原文才能消解，否则张冠李戴。
-        const src = byId.get(String(m.replyToId))
+        const src = byId.get(String(m.replyToId)) || m.replySource || null
         if (!src) rels.push('↩回复(不在近窗)')
         else {
           const q = String(src.text || '').replace(/\s+/g, ' ').slice(0, 32)
