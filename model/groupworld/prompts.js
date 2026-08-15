@@ -148,6 +148,17 @@ export function validateAnalyzerOutput(parsed, validMsgIds = new Set()) {
  * 把检索到的社会现场格式化为 prompt 片段。role: 'planner' | 'replyer'。
  * 传入的是 context-builder 已按预算截断后的结构化现场（见 retriever/context-builder）。
  */
+/** 旧事时间感：occurredAt → "（今天/N天前/N周前）"——旧人物/旧事不带时间会被 replyer 当眼前话题填指代空 */
+function agoTag(occurredAt, now = Date.now()) {
+  const t = Number(occurredAt)
+  if (!Number.isFinite(t) || t <= 0) return ''
+  const days = (now - t) / 86400e3
+  if (days < 1) return '（今天）'
+  if (days < 2) return '（昨天）'
+  if (days < 30) return `（${Math.round(days)}天前）`
+  return `（${Math.round(days / 7)}周前）`
+}
+
 export function buildSocialSceneBlock(scene, { role = 'planner' } = {}) {
   if (!scene || scene.empty) return ''
   const parts = []
@@ -164,7 +175,7 @@ export function buildSocialSceneBlock(scene, { role = 'planner' } = {}) {
     parts.push('【相关人物关系】' + scene.relevantRelationships.map((r) => `${r.summary}`).join('；'))
   }
   if (Array.isArray(scene.relevantEpisodes) && scene.relevantEpisodes.length) {
-    parts.push('【相关旧事】' + scene.relevantEpisodes.map((e) => `${e.summary}${e.confidence != null ? `(可信${(e.confidence * 100) | 0}%)` : ''}`).join('；'))
+    parts.push('【相关旧事】' + scene.relevantEpisodes.map((e) => `${e.summary}${agoTag(e.occurredAt)}${e.confidence != null ? `(可信${(e.confidence * 100) | 0}%)` : ''}`).join('；'))
   }
   if (role === 'planner' && scene.communitySummary) {
     parts.push(`【所在圈子】${scene.communitySummary}`)

@@ -295,6 +295,7 @@ agent:
     maxRepliesPer10Minutes: 4      # 10 分钟内最大回复数（频率硬上限）
     bufferCapacity: 150            # 单群消息缓冲条数
     bufferTtlHours: 2              # 缓冲 TTL（小时）
+    knownBots: []                   # 已知其它 bot 账号（QQ号，如林墨的bot）：互相连续对线3轮且无真人 → 熔断10分钟
     memory:                        # 伪人独立记忆库（独立 sqlite：data/humanize/memory.db；与主 Agent 记忆完全隔离）
       enabled: true                # 每日 04:47 睡眠整合近期对话→长时记忆；Planner/Replyer 按相关性检索注入
       maxPerQuery: 5               # Planner 单次注入条数

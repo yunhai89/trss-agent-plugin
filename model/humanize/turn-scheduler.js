@@ -110,6 +110,29 @@ export class TurnScheduler {
     const now = Date.now()
     const hasStrongSignal = external.some((m) => m.atBot || m.quotesBot || m.mentionsBotName)
 
+    // bot↔bot 闭环熔断（仅已知 bot 账号，config.humanize.knownBots；真人聊天不受影响）：
+    // 与已知 bot 交替 ≥3 轮且无真人夹入 → 群级 10 分钟熔断；期间仅真人 @/直接提问可重新进入
+    const knownBots = new Set([...(this._cfgFn?.().knownBots || []).map(String)])
+    if (knownBots.size && ctxWindow.length) {
+      let chain = 0
+      for (let i = ctxWindow.length - 1; i >= 0; i--) {
+        const m = ctxWindow[i]
+        if (!m) break
+        if (m.isSelf || knownBots.has(String(m.userId))) chain++
+        else break // 真人夹入即断
+      }
+      const humanNew = external.some((m) => !knownBots.has(String(m.userId)))
+      if (chain >= 3 && !humanNew) {
+        rt.botLoopUntil = now + 10 * 60 * 1000
+        rt.trace?.record('grounding_botloop_break', { chain, groupId: rt.groupId })
+        Log.mark('[humanize] bot↔bot 熔断', `群${rt.groupId} 连续${chain}节无真人，冷却10分钟`)
+      }
+      if (rt.botLoopUntil > now && !external.some((m) => m.atBot)) {
+        const humanQuestion = humanNew && external.some((m) => /[?？]|怎么|如何|为什么|什么/.test(String(m.text || '')))
+        if (!humanQuestion) { rt.setPhase('idle'); return }
+      }
+    }
+
     // 硬冷却：强信号绕过
     if (rt.isCoolingDown(now) && !hasStrongSignal) {
       Log.info('[humanize] debounce 跳过：冷却中 剩余' + Math.ceil((rt.cooldownUntil - now) / 1000) + 's')
@@ -250,12 +273,23 @@ export class TurnScheduler {
     switch (action.type) {
       case 'human_reply': return this._doReply(action, batch, decision, gen, turnId)
       case 'human_react': return this._doReact(action, batch, decision, gen, turnId)
-      case 'human_wait':
+      case 'human_wait': {
+        // 连续 wait 上限（MaiBot max_consecutive_wait_count 同款）：连续 3 次"等等再看"仍无后续
+        // → 视为对话休息，本群本轮直接收（下次新消息再评估），防 Planner 无限观望
+        rt._waitStreak = (rt._waitStreak || 0) + 1
+        if (rt._waitStreak >= 3) {
+          rt._waitStreak = 0
+          rt.backoff.recordNoAction()
+          rt.markObserved(batch)
+          rt.trace?.record('wait_rest', { turnId, reason: '连续3次等待，对话进入休息' })
+          return
+        }
         rt.scheduleWait(action.seconds || 5)
         rt.backoff.recordNoAction()
         rt.markObserved(batch)
-        rt.trace?.record('wait', { turnId, seconds: action.seconds, reason: action.reason })
+        rt.trace?.record('wait', { turnId, seconds: action.seconds, reason: action.reason, streak: rt._waitStreak })
         return
+      }
       case 'human_ignore':
       default:
         rt.backoff.recordNoAction()
@@ -345,6 +379,7 @@ export class TurnScheduler {
     if (result?.sentIds?.length) {
       try { await rt.store.markSent(rt.groupId, action.targetMessageId) } catch { /* noop */ }
       rt.recordReply(result.sentIds[0])
+      rt._waitStreak = 0 // 发言即退出观望连击
       this._appendSelf(text, result.sentIds[0]) // 自身发言入 buffer（解锁 presence/引用/追问信号）
       this._notifyDelivered(target, { sentText: text, replyGuide: action.replyGuide || '', sourceMessageId: result.sentIds[0] }) // GW 主观关系 + SS 出站期待
       rt.enterCooldown(c.cooldownSeconds ?? 45)

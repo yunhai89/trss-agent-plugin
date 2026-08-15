@@ -18,6 +18,7 @@ export { DEFAULT_BEHAVIOR_POLICY, resolveBehaviorPolicy, topicMatch, topicMatchS
 export { MemoryAdapter, groupPublicScope, formatPublicMemories } from './memory-adapter.js'
 export { HumanizeMemoryStore } from './memory-store.js'
 export { MediaDescriber } from './vision-context.js'
+export { resolveGrounding, formatGroundingBlock, whitelistViolations, windowNames } from './grounding.js'
 export { fillTemplate, buildPlannerSystem, buildReplyerSystem, formatGroupContext, formatNecessityForPlanner, highlightTarget, buildHumanizePersonaBlock, buildPlannerPersonaBlock, MEMORY_CONSOLIDATE_SYSTEM, buildConsolidatePrompt } from './prompts.js'
 export { GroupRuntime } from './group-runtime.js'
 export { TurnScheduler } from './turn-scheduler.js'

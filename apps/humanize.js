@@ -182,6 +182,16 @@ async function buildHumanize() {
   if (mediaDesc.available) Log.info('[humanize] 视觉已接入：伪人可看见群友图片（每轮最多 3 张新描述，按图缓存）')
   const enrichMedia = mediaDesc.available ? (msgs, o) => mediaDesc.annotate(msgs, o) : null
 
+  // 对话落地层（Conversation Grounding）：谁在对谁说+实体白名单+纠错检测+bot↔bot闭环
+  const { resolveGrounding, formatGroundingBlock, windowNames: winNames } = H
+  const getGroundingRaw = (msgs) => {
+    const knownBots = new Set([...(cfgFn().knownBots || []).map(String), ...botSelfIdsAll(rt)])
+    const g = resolveGrounding(msgs, { knownBots })
+    if (g) g.windowNames = winNames(msgs)
+    return g
+  }
+  const getGroundingBlock = (msgs) => { try { const g = getGroundingRaw(msgs); return g ? formatGroundingBlock(g) : '' } catch { return '' } }
+
   const makePlanner = (gid) => new H.HumanizePlanner({
     provider: rt.provider, cfg: cfgFn, readTools,
     // 独立记忆库检索（替换原 rt.recall 适配——伪人记忆与主 Agent 记忆彻底分离）
@@ -198,6 +208,7 @@ async function buildHumanize() {
     getWorldContext: gwPlannerCtx,
     getSelfProjection: ssPlannerProj,
     enrichMedia,
+    getGrounding: getGroundingBlock, // 对话归属块（结构化+白名单+纠错约束）——此前漏接，planner 从未收到
   })
   const makeReplyer = (gid) => new H.HumanizeReplyer({
     provider: rt.provider, cfg: cfgFn,
@@ -216,11 +227,12 @@ async function buildHumanize() {
     getWorldContext: gwReplyerCtx,
     getSelfCapsule: ssReplyerCap,
     enrichMedia,
+    getGrounding: (msgs) => { try { const g = getGroundingRaw(msgs); return g ? { grounding: g, block: formatGroundingBlock(g) } : null } catch { return null } },
     // 伪人独立记忆：对当前发言对象的印象 + 相关群梗（Replyer 用；失败/空零影响；热读配置）
-    getMemoryBlock: async ({ groupId, targetUserId, queryText }) => {
+    getMemoryBlock: async ({ groupId, targetUserId, queryText, allowedUserIds }) => {
       try {
         if (cfgFn().memory?.enabled === false) return ''
-        return await hmem.recallText({ groupId, userId: targetUserId, query: queryText, topK: 3, kinds: ['impression', 'jargon'] })
+        return await hmem.recallText({ groupId, userId: targetUserId, query: queryText, topK: 3, kinds: ['impression', 'jargon'], allowedUserIds })
       } catch { return '' }
     },
   })
@@ -453,6 +465,11 @@ export class Humanize extends plugin {
       if (ss && norm.userId) {
         const persona = h.getPersona()
         ss.onMessage(norm, { groupId: norm.groupId, quoteIsBot, personaText: persona.prompt, personaName: persona.name }).catch(() => {})
+        // 对象纠错（"我说的是X"）：冲销此前误指代产生的情绪/残留（情绪不能建立在错误指代上）
+        try {
+          const g = getGroundingRaw([norm])
+          if (g?.correction) ss.applyCorrection({ groupId: norm.groupId, userId: String(norm.userId) }).catch(() => {})
+        } catch { /* noop */ }
       }
     } catch { /* noop */ }
 

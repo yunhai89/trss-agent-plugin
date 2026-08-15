@@ -14,6 +14,7 @@
  *
  * @、引用、提及等强关联已在 relevance 体现；@ 由 Direct Agent 接管，环境模式主要走 quotesBot/mentionsBotName/追问。
  */
+import { textMentionsName } from './message-normalizer.js'
 
 /**
  * @typedef {Object} NecessityDecision
@@ -116,9 +117,13 @@ function pickTargetAndRelevance(candidates, lookback) {
   for (const m of candidates) {
     let rel = 0
     let reason = 'none'
+    // 昵称歧义降级（修"A提到我但也明确在叫别人"的误触发——MaiBot 昵称误判同款毛病的规避）：
+    // 同一句里 @ 了别人 / 边界匹配到其他成员名 → 提及 bot 名降为灰区信号，交 Planner 结合上下文判
+    const otherNames = otherNamesOf(lookback, m)
+    const toOther = addressesOther(m, otherNames)
     if (m.atBot) { rel = 100; reason = 'at_bot' }
     else if (m.quotesBot) { rel = 90; reason = 'quotes_bot' }
-    else if (m.mentionsBotName) { rel = 80; reason = 'mentions_bot_name' }
+    else if (m.mentionsBotName) { rel = toOther ? 45 : 80; reason = toOther ? 'mentions_bot_name_ambiguous' : 'mentions_bot_name' }
     else if (isFollowupToBot(m, lookback)) { rel = 55; reason = 'followup_to_bot' }
     if (rel > bestScore || best == null) { bestScore = rel; best = m; bestReason = reason }
   }
@@ -128,23 +133,53 @@ function pickTargetAndRelevance(candidates, lookback) {
 /**
  * 紧接机器人发言的明确追问：在完整序列里目标消息的上一条是 isSelf，且当前是疑问/请求。
  * 必须传入含 isSelf 的完整序列（rolling window），否则 prev.isSelf 恒为 false（曾为死代码）。
+ * 回复链归属修正（A说B误判主病灶）：消息若明确在回复某条**非 bot** 消息（replyToId 指向他人），
+ * 即使时间上紧跟 bot 发言也不算对 bot 的追问——之前只看时间相邻，A 回复 B 但 B 恰在 bot 后发言时误 +55。
  */
 function isFollowupToBot(msg, messages) {
   const idx = messages.indexOf(msg)
   if (idx <= 0) return false
   const prev = messages[idx - 1]
   if (!prev?.isSelf) return false
+  if (msg.replyToId != null) {
+    const src = messages.find((m) => m && String(m.id) === String(msg.replyToId))
+    if (src && !src.isSelf) return false // 在回复别人，不是追问 bot
+  }
   const t = String(msg.text || '')
   return /[?？]/.test(t) || QUESTION_TERMS.some((w) => t.includes(w)) || DIRECT_REQUEST_TERMS.some((w) => t.includes(w))
 }
 
+/** 从窗口提取"其他成员名"表（≥2 字、去重、排除发言人自己）——供指向判定/歧义降级。 */
+function otherNamesOf(messages, exceptMsg) {
+  const out = new Set()
+  for (const m of messages) {
+    if (!m || m.isSelf) continue
+    if (exceptMsg && m === exceptMsg) continue
+    const n = String(m.displayName || '').trim()
+    if (n.length >= 2 && n !== '我') out.add(n)
+  }
+  return [...out]
+}
+
+/** 消息是否明显在叫/回复群里另一个人：@ 了别人（非 bot），或文本里以边界规则叫了其他成员名。 */
+function addressesOther(msg, otherNames) {
+  if (!msg) return false
+  const segs = msg.segments || []
+  if (segs.some((s) => s?.type === 'at' && s.qq != null && !msg.atBot)) return true
+  const t = String(msg.text || '')
+  return otherNames.some((n) => textMentionsName(t, [n]))
+}
+
+
 /** directionPenalty：明显在叫群里另一个人（-30）。 */
-function directionPenaltyOf(msg) {
+function directionPenaltyOf(msg, otherNames = []) {
   if (!msg) return 0
   // @了别人（非机器人）
   const segs = msg.segments || []
   const atOther = segs.some((s) => s?.type === 'at' && s.qq != null && !msg.atBot)
   if (atOther || OTHER_ADDRESSEE.test(msg.text || '')) return 30
+  // 文本里边界规则叫了其他成员名（此前只认 @ 段——"小王你说句话"这类纯文本称呼漏判）
+  if (!atOther && otherNames.length && addressesOther(msg, otherNames) && !msg.mentionsBotName) return 30
   return 0
 }
 
@@ -224,13 +259,13 @@ export function evaluate({ messages = [], candidates, pendingCount, presence = {
   if (presencePen > 0) negative.push(`presence(${((presence.bot || 0) / Math.max(1, presence.total || 1) * 100).toFixed(0)}%)`)
   const cdPen = cfg.cooldownUntil ? cooldownPenalty(cfg.cooldownUntil, now) : 0
   if (cdPen > 0) negative.push('cooldown')
-  const dirPen = directionPenaltyOf(target)
+  const dirPen = directionPenaltyOf(target, otherNamesOf(messages, target))
   if (dirPen > 0) negative.push('other_addressee')
   // avoidTopics 回避主题惩罚（由 scheduler 据末条文本命中算出，避免在回避话题上参与）
   const avoidPen = Math.max(0, Number(cfg.avoidPenalty) || 0)
   if (avoidPen > 0) negative.push('avoid_topic')
 
-  // —— 合成 ——
+  // —— 合成 ——（注：不做"连续交锋退避"——被引用/被追问就该回，不逃避；理解错对象靠指代消解解决）
   const rawScore = relevance + c.score + topicBonus + focusBonus + pressure + idleBonus - presencePen - cdPen - dirPen - avoidPen
   const forcedCandidate = relevance >= 80 // 强信号不乘频率倍率
   const freqMul = 0.5 + 0.5 * talkValue

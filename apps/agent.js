@@ -814,7 +814,8 @@ function ctxOf(e) {
     userId,
     groupId,
     isGroup,
-    isGroupAdmin: !!(e.member?.is_admin || e.member?.is_owner),
+    // 群管理员识别：e.member（部分适配器）+ e.sender.role（OneBot11/NapCat 标准字段，群消息的 sender 带 role）
+    isGroupAdmin: !!(e.member?.is_admin || e.member?.is_owner || e.sender?.role === 'admin' || e.sender?.role === 'owner'),
     isolation,
     scopeUserId,
     scopeId,

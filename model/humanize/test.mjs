@@ -256,7 +256,7 @@ await test('prompts：formatGroupContext 渲染对话关系（@我/引用我/回
   ])
   ok(lines.includes('@我'), '@bot 标注')
   ok(lines.includes('引用我'), 'quotesBot 标注')
-  ok(lines.includes('↩[m9]'), 'replyToId 标注')
+  ok(lines.includes('↩回复(不在近窗)'), 'replyToId 标注（窗口外明示；窗口内升级为 ↩回复<人名>，见对话关系消歧测试）')
   ok(lines.includes('（我）'), 'self 标注')
   // highlightTarget 关系提示
   const ht = highlightTarget(mkMsg('在吗', false, { atBot: true, id: 'm1' }, 'm1', '甲'))
@@ -361,6 +361,65 @@ await test('config：persona 块结构 + prompt 超长裁剪', async () => {
   // 缺 persona 字段时归一为对象（防 v-model/解析报错）
   const r2 = validateHumanizeConfig({})
   ok(r2.config.persona && typeof r2.config.persona === 'object', '无 persona 时归一为对象')
+})
+
+// ───────── 对话关系消歧（A说B不再误判为说bot；MaiBot关系链+三处升级）─────────
+await test('对话关系：A 回复 B（非bot）时不误判为对 bot 的追问', async () => {
+  const { evaluate } = await import('./necessity-scorer.js')
+  // 场景：bot 发言 → B 发言 → A 回复 B 的消息（疑问句）——旧逻辑 followup +55 误触发
+  const bot = mkMsg('我刚才说完了', true, {}, 'b1')
+  const b = mkMsg('这游戏太难了', false, { userId: 'uB' }, 'mB', '小王')
+  const a = mkMsg('小王你怎么不早点说？', false, { userId: 'uA', replyToId: 'mB' }, 'mA', '阿三')
+  const r = evaluate({ messages: [bot, b, a], candidates: [a], presence: { bot: 1, other: 2 }, cfg: { threshold: 25, talkValue: 0.35 } })
+  ok(r.components.relevance < 55, `A 回复 B：不再触发 followup_to_bot（relevance=${r.components.relevance}）`)
+  ok(!r.positiveReasons.includes('followup_to_bot'), 'followup 原因不出现')
+  // 对照：A 无回复目标、紧跟 bot 的疑问句 → followup 仍生效（不误伤正常追问）
+  const a2 = mkMsg('那要怎么办？', false, { userId: 'uA' }, 'mA2', '阿三')
+  const r2 = evaluate({ messages: [bot, a2], candidates: [a2], presence: { bot: 1, other: 1 }, cfg: { threshold: 25, talkValue: 0.35 } })
+  ok(r2.positiveReasons.includes('followup_to_bot'), '正常追问 bot 仍触发 followup')
+})
+
+await test('对话关系：提及 bot 名但同时叫别人 → 歧义降级；纯文本叫人名 → 方向惩罚', async () => {
+  const { evaluate } = await import('./necessity-scorer.js')
+  const bot = mkMsg('我在', true, {}, 'b1')
+  const b = mkMsg('嗯嗯', false, { userId: 'uB' }, 'mB', '小王')
+  // A 一句话里既有 bot 名又叫了小王 → 80 降 45（灰区交 Planner）
+  const a = mkMsg('小汐你觉得呢，还是问小王吧', false, { userId: 'uA', mentionsBotName: true }, 'mA', '阿三')
+  const r = evaluate({ messages: [bot, b, a], candidates: [a], presence: { bot: 1, other: 2 }, cfg: { threshold: 25, talkValue: 0.35 } })
+  ok(r.components.relevance === 45, `昵称歧义降级（relevance=${r.components.relevance}，期望 45）`)
+  ok(r.positiveReasons.includes('mentions_bot_name_ambiguous'), '原因标记为歧义')
+  // 对照：只提 bot 名、无他人指向 → 80 不降
+  const a2 = mkMsg('小汐你觉得呢', false, { userId: 'uA', mentionsBotName: true }, 'mA2', '阿三')
+  const r2 = evaluate({ messages: [bot, a2], candidates: [a2], presence: { bot: 1, other: 1 }, cfg: { threshold: 25, talkValue: 0.35 } })
+  ok(r2.components.relevance === 80, `纯提及 bot 名不降级（relevance=${r2.components.relevance}）`)
+  // 纯文本叫他人名（不@）→ directionPenalty 生效
+  const a3 = mkMsg('小王你说句话啊', false, { userId: 'uA' }, 'mA3', '阿三')
+  const r3 = evaluate({ messages: [bot, b, a3], candidates: [a3], presence: { bot: 1, other: 2 }, cfg: { threshold: 25, talkValue: 0.35 } })
+  ok(r3.negativeReasons.includes('other_addressee'), '纯文本叫人名进方向惩罚')
+})
+
+await test('对话关系：上下文标注解析到人名（↩回复小王 / @小王 / ↩回复我）', async () => {
+  const bot = mkMsg('我发过言', true, { userId: '999' }, 'b1')
+  const b = mkMsg('有人问我问题', false, { userId: 'uB' }, 'mB', '小王')
+  const a = mkMsg('@123456 你看看这个？', false, { userId: 'uA', replyToId: 'mB', segments: [{ type: 'at', qq: '123456' }, { type: 'text', text: ' 你看看这个？' }] }, 'mA', '阿三')
+  const c = mkMsg('收到', false, { userId: '123456' }, 'mC', '老六')
+  const ctx = formatGroupContext([bot, b, a, c])
+  ok(ctx.includes('↩回复小王'), `回复标注带人名（含 ↩回复小王）`)
+  ok(ctx.includes('@老六'), `@QQ号 解析为人名（@老六）`)
+  const a2 = mkMsg('原来是这样', false, { userId: 'uA', replyToId: 'b1', quotesBot: true }, 'mA2', '阿三')
+  const ctx2 = formatGroupContext([bot, a2])
+  ok(ctx2.includes('↩引用我'), '回复 bot 消息仍标 ↩引用我')
+  // 窗口外回复目标明示
+  const a3 = mkMsg('嗯？', false, { userId: 'uA', replyToId: 'gone' }, 'mA3', '阿三')
+  const ctx3 = formatGroupContext([a3])
+  ok(ctx3.includes('↩回复(不在近窗)'), '窗口外回复目标明示不在近窗')
+})
+
+await test('对话关系：引用原文注入（指代消解）', async () => {
+  const w = mkMsg('帮我把我禁言', false, { userId: 'uW' }, 'mW', '芜湖')
+  const linmo = mkMsg('你搁这儿测试bot呢 权限摆脸上自己不会看', false, { userId: 'uL', replyToId: 'mW' }, 'mL', '林墨')
+  const ctx = formatGroupContext([w, linmo])
+  ok(ctx.includes('↩回复芜湖(帮我把我禁言)'), `回复标注带被引原文（${ctx.split('\n')[1]}）`)
 })
 
 // ───────── helper ─────────

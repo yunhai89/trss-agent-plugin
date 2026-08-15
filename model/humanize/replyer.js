@@ -14,6 +14,7 @@
 
 import { redactSecrets } from '../agent/redact.js'
 import { buildReplyerSystem, formatGroupContext, highlightTarget } from './prompts.js'
+import { whitelistViolations } from './grounding.js'
 
 const REPLY_LEAK_PATTERNS = [
   /作为一个\s*(AI|人工智能|语言模型)/, /根据系统(指令|提示|设定)/, /我(?:将|会)(?:调用|使用)工具/,
@@ -40,7 +41,7 @@ export class HumanizeReplyer {
   /**
    * @param {object} opts { provider, cfg, getPersonaVoice?:(groupId)=>string, getRecentBotText?:(groupId)=>string, getStyleExamples?:(groupId)=>string, getStickerCatalog?:(groupId)=>string }
    */
-  constructor({ provider, cfg, getPersonaVoice = null, getRecentBotText = null, getStyleExamples = null, getStickerCatalog = null, getWorldContext = null, getSelfCapsule = null, getMemoryBlock = null, enrichMedia = null } = {}) {
+  constructor({ provider, cfg, getPersonaVoice = null, getRecentBotText = null, getStyleExamples = null, getStickerCatalog = null, getWorldContext = null, getSelfCapsule = null, getMemoryBlock = null, enrichMedia = null, getGrounding = null } = {}) {
     this.provider = provider
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.getPersonaVoice = getPersonaVoice || (() => '')
@@ -51,6 +52,7 @@ export class HumanizeReplyer {
     this.getSelfCapsule = getSelfCapsule // SelfState 表达胶囊（enabled+非 shadow 时；失败/中性 → 零影响）
     this.getMemoryBlock = getMemoryBlock // 伪人独立记忆（对当前发言对象的印象等；失败/空 → 零影响）
     this.enrichMedia = enrichMedia // 视觉图描述（配了视觉模型时 '[图片]'→'[图:描述]'；未配/失败 → 原样）
+    this.getGrounding = getGrounding // 对话落地（归属块+实体白名单校验，越界打回重生成一次）
   }
 
   /**
@@ -105,11 +107,22 @@ export class HumanizeReplyer {
         selfCapsule = cap?.text || ''
       }
     } catch { /* noop */ }
-    // 伪人独立记忆（对当前发言对象的印象/群梗；失败/空 → 零影响）
+    // 对话落地：归属块注入 + 实体白名单（越界 → 带约束重生成一次）——先算，供记忆作用域过滤用
+    let groundingBlock = ''
+    let groundingObj = null
+    try {
+      if (this.getGrounding) {
+        const r2 = this.getGrounding(ctxMessages)
+        groundingObj = r2?.grounding || null
+        groundingBlock = r2?.block || ''
+      }
+    } catch { /* noop */ }
+    // 伪人独立记忆（对当前发言对象的印象/群梗；失败/空 → 零影响）。
+    // 作用域白名单（MaiBot _is_hit_allowed）：印象类只注入本轮活跃人物，旧对话人物不混入
     let memoryBlock = ''
     try {
       if (this.getMemoryBlock && target && groupId) {
-        memoryBlock = await this.getMemoryBlock({ groupId, targetUserId: target.userId, queryText: String(target.text || '').slice(0, 200) }) || ''
+        memoryBlock = await this.getMemoryBlock({ groupId, targetUserId: target.userId, queryText: String(target.text || '').slice(0, 200), allowedUserIds: groundingObj?.threadUserIds }) || ''
       }
     } catch { /* noop */ }
     const system = buildReplyerSystem({
@@ -122,6 +135,7 @@ export class HumanizeReplyer {
       approvedStyleExamples: this.getStyleExamples(groupId),
       recentMessages: recent,
       socialScene,
+      grounding: groundingBlock, // 对话归属块——此前漏传，模板 {{groundingBlock}} 恒空
       selfCapsule,
       memoryBlock,
       stickerCatalog,
@@ -129,6 +143,23 @@ export class HumanizeReplyer {
 
     let text = await this._call(system, model, temperature, maxTokens, signal)
     text = String(text || '').trim()
+
+    // 0. 实体白名单：回复点名了本轮不可谈论的人（旧记忆/旧上下文人物渗入）→ 带约束重生成一次；再违规照发但记 trace
+    if (groundingObj) {
+      const vio = whitelistViolations(text, groundingObj, groundingObj.windowNames || [])
+      if (vio.length) {
+        runtime?.trace?.record('grounding_whitelist_violation', { violations: vio.join(','), first: text.slice(0, 60) })
+        try {
+          const reSystem = system + `\n【硬约束】你刚才的草稿提到了与本轮对话无关的人（${vio.join('、')}）——本轮只允许谈及：${groundingObj.allowedEntities.join('、')}。重写，不得出现这些名字。`
+          const retry = await this._call(reSystem, model, temperature, maxTokens, signal)
+          const rt2 = String(retry || '').trim()
+          if (rt2 && !whitelistViolations(rt2, groundingObj, groundingObj.windowNames || []).length) {
+            text = rt2
+            runtime?.trace?.record('grounding_whitelist_regen', { violations: vio.join(',') })
+          }
+        } catch { /* 照发 */ }
+      }
+    }
 
     // 1. 空 → 取消
     if (!text || !text.replace(/\s/g, '')) {

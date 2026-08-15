@@ -35,6 +35,7 @@ export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为机器�
 【决策原则】
 - 参与与否、用什么态度，都须符合上方角色人设的性格与边界；对无聊/不感兴趣的话题，按角色性格可以沉默；
 - 优先处理明确提及机器人名字、引用或延续机器人上一条消息的内容；
+- 看清对话归属：标了「↩回复X」的消息是别人之间的对话，不是在对你说话——不要抢话认领；
 - 结合近期机器人发言占比（在场惩罚）与冷却状态，避免连续抢话；
 - 回复要像群聊接话，不是客服总结或答案报告；
 - 不在群聊中使用任何私聊记忆；
@@ -44,12 +45,13 @@ export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为机器�
 【当前门控决策（确定性评分，供参考，非命令）】
 {{necessityDecisionBlock}}
 
-【当前群公开上下文（最近消息，旧→新）】
+【当前群公开上下文（最近消息，旧→新；角注 ↩回复X(原文)=X 在回应谁说的话，其中的"你"指被回复者不是你）】
 {{groupContextBlock}}
 
 【可用群公开记忆】
 {{publicMemoriesBlock}}
 {{socialSceneBlock}}
+{{groundingBlock}}
 {{selfStateBlock}}`
 
 /** 构造 Planner system prompt。 */
@@ -61,6 +63,7 @@ export function buildPlannerSystem({
   groupContext = '',
   publicMemories = '',
   socialScene = '',
+  grounding = '',
   selfState = '',
 } = {}) {
   return fillTemplate(PLANNER_SYSTEM_TEMPLATE, {
@@ -71,6 +74,7 @@ export function buildPlannerSystem({
     groupContextBlock: groupContext || '（暂无上下文）',
     publicMemoriesBlock: publicMemories || '（无可用群公开记忆）',
     socialSceneBlock: socialScene ? `\n${socialScene}` : '',
+    groundingBlock: grounding ? `\n${grounding}` : '',
     selfStateBlock: selfState ? `\n${selfState}` : '',
   })
 }
@@ -102,9 +106,11 @@ export const REPLYER_SYSTEM_TEMPLATE = `你正在为群聊角色「{{personaName
 群内已审核表达习惯（可选，仅供参考，勿生硬套用）：
 {{approvedStyleExamples}}
 
-近期群聊（旧→新，{角注}标对话关系：@我=叫你、↩引用我=回复你、↩[id]=回复某人、（我）=你刚说的话，末尾为时间）：
+近期群聊（旧→新，{角注}标对话关系：@我=叫你、↩引用我=回复你、↩回复X(原文)=回复X说的那条、（我）=你刚说的话，末尾为时间）：
+注意指代：标了「↩回复X」的消息是 X 和 X 的被回复对象之间的对话——其中的"你"指 X 不是你；除非角注是 @我/↩引用我/·提及我，否则不是在对你说话。
 {{recentMessages}}
 {{socialSceneBlock}}
+{{groundingBlock}}
 {{memoryBlock}}
 {{selfCapsuleBlock}}
 {{stickerCatalogBlock}}
@@ -129,6 +135,7 @@ export function buildReplyerSystem({
   approvedStyleExamples = '',
   recentMessages = '',
   socialScene = '',
+  grounding = '',
   memoryBlock = '',
   selfCapsule = '',
   stickerCatalog = '',
@@ -143,6 +150,7 @@ export function buildReplyerSystem({
     approvedStyleExamples: approvedStyleExamples || '（暂无）',
     recentMessages: recentMessages || '（暂无）',
     socialSceneBlock: socialScene ? `\n${socialScene}\n` : '',
+    groundingBlock: grounding ? `\n${grounding}\n` : '',
     memoryBlock: memoryBlock ? `\n${memoryBlock}\n` : '',
     selfCapsuleBlock: selfCapsule ? `\n${selfCapsule}\n` : '',
     stickerCatalogBlock: stickerCatalog ? `\n${stickerCatalog}\n` : '',
@@ -157,17 +165,49 @@ export function buildReplyerSystem({
  * @param {object} opts { includeIds?:boolean, selfId?:string }
  */
 export function formatGroupContext(messages = [], { includeIds = true, selfLabel = '我', showRelations = true } = {}) {
+  // 关系链人名解析（升级：消灭"A ↩[m123]"式指向歧义——MaiBot 同款思路）。
+  // 从窗口内构建 id/用户 → 名字映射：回复标注解析到具体的人（↩回复小王/↩回复我），
+  // 正文里的 "@QQ号" 替换成 "@人名"，bot 自身消息的 userId 识别为"我"。
+  const selfIds = new Set()
+  const byId = new Map()
+  for (const m of messages) {
+    if (!m) continue
+    if (m.id != null) byId.set(String(m.id), m)
+    if (m.isSelf && m.userId != null) selfIds.add(String(m.userId))
+  }
+  const nameOfUser = (uid) => {
+    const k = String(uid)
+    if (selfIds.has(k)) return selfLabel
+    const hit = messages.find((m) => m && !m.isSelf && String(m.userId) === k)
+    return hit ? String(hit.displayName || hit.userId) : null
+  }
   return messages.map((m) => {
     const name = m.isSelf ? selfLabel : (m.displayName || m.userId || '?')
     const idTag = includeIds ? ` [${m.id}]` : ''
     // 对话关系标注（让 LLM 看到谁回复谁、谁@了bot、时间节奏）
     const rels = []
+    let text = String(m.text || '')
     if (showRelations) {
       if (m.isSelf) rels.push('（我）')
       else if (m.atBot) rels.push('@我')
       else if (m.quotesBot) rels.push('↩引用我')
       else if (m.mentionsBotName) rels.push('·提及我')
-      if (m.replyToId && !m.quotesBot && !m.atBot) rels.push(`↩[${m.replyToId}]`)
+      if (m.replyToId && !m.quotesBot && !m.atBot) {
+        // 回复目标解析到人名+被引原文摘要：窗口内 → ↩回复<名>(原文≤20字)；窗口外 → 明示不在近窗。
+        // 带原文是关键：被回复消息里的"你/这个/权限"等指代只有看到原文才能消解，否则张冠李戴。
+        const src = byId.get(String(m.replyToId))
+        if (!src) rels.push('↩回复(不在近窗)')
+        else {
+          const q = String(src.text || '').replace(/\s+/g, ' ').slice(0, 32)
+          const who = src.isSelf ? '我' : (src.displayName || src.userId)
+          rels.push(`↩回复${who}${q ? `(${q})` : ''}`)
+        }
+      }
+      // 正文 @QQ号 → @人名（在窗口内的人；bot 自己=我）——此前 "@123456" 全是数字，LLM 无法分辨 @ 的是谁
+      text = text.replace(/@(\d{4,})/g, (raw, qq) => {
+        const n = nameOfUser(qq)
+        return n ? `@${n}` : raw
+      })
       if (m.timestamp) {
         const t = new Date(m.timestamp)
         const hh = String(t.getHours()).padStart(2, '0')
@@ -176,7 +216,7 @@ export function formatGroupContext(messages = [], { includeIds = true, selfLabel
       }
     }
     const relTag = rels.length ? ` {${rels.join(' ')}}` : ''
-    return `${name}${idTag}${relTag}: ${m.text || '(无文本)'}`
+    return `${name}${idTag}${relTag}: ${text || '(无文本)'}`
   }).join('\n')
 }
 
@@ -188,7 +228,7 @@ export function highlightTarget(message) {
   if (message.quotesBot) rels.push('引用了我的消息')
   if (message.mentionsBotName) rels.push('提及了我')
   const relTag = rels.length ? `（${rels.join('，')}）` : ''
-  return `【候选目标 ${message.id}】${message.displayName || ''}${relTag}：“${String(message.text || '').slice(0, 120)}”`
+  return `【候选目标 ${message.id}】${message.displayName || ''}${relTag}：“${String(message.text || '').slice(0, 120)}”\n（你这次要回复的就是这条消息；不要把你自己的历史发言当成别人的发言；若这条消息回复的是第三人的消息，你在回应的是发送者本人）`
 }
 
 /**

@@ -63,6 +63,7 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
     quoteTarget: 'auto',
   },
   behaviorPolicy: { ...DEFAULT_BEHAVIOR_POLICY },
+  knownBots: [],              // 已知其它 bot 账号（QQ 号）：bot↔bot 交替≥3轮无真人 → 10分钟熔断（真人不受影响）
   memory: {                   // 伪人独立记忆库（MaiBot 式睡眠整合；独立 sqlite，与主 Agent 记忆隔离）
     enabled: true,
     maxPerQuery: 5,           // Planner 单次注入记忆条数上限

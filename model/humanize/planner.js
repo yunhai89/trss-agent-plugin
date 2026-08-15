@@ -44,7 +44,7 @@ export class HumanizePlanner {
    * @param {object} opts { provider, cfg, readTools?:Array, getMemories?:(query)=>Promise<string>, getBehaviorPolicyBlock?:()=>string, getPersonaName?:()=>string }
    *   readTools: 已过滤的白名单只读工具，每项 {name, description, parameters, execute(args)=>Promise<string|object>}
    */
-  constructor({ provider, cfg, readTools = [], getMemories = null, getBehaviorPolicyBlock = null, getPersonaName = null, getPersonaBlock = null, getWorldContext = null, getSelfProjection = null, enrichMedia = null } = {}) {
+  constructor({ provider, cfg, readTools = [], getMemories = null, getBehaviorPolicyBlock = null, getPersonaName = null, getPersonaBlock = null, getWorldContext = null, getSelfProjection = null, enrichMedia = null, getGrounding = null } = {}) {
     this.provider = provider
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.readTools = Array.isArray(readTools) ? readTools : []
@@ -55,6 +55,7 @@ export class HumanizePlanner {
     this.getWorldContext = getWorldContext // GroupWorld 局部社会现场（online 时由 apps 注入；失败/空 → 零影响）
     this.getSelfProjection = getSelfProjection // SelfState 状态投影（enabled+非shadow 时；失败/中性 → 零影响）
     this.enrichMedia = enrichMedia // 视觉图描述（配了视觉模型时 '[图片]'→'[图:描述]'；未配/失败 → 原样）
+    this.getGrounding = getGrounding // 对话落地（谁在对谁说+白名单+纠错约束；失败/空 → 零影响）
   }
 
   /** 从目标消息段提取 @ 的用户 id（供 GroupWorld 检索相关人）。 */
@@ -126,6 +127,11 @@ export class HumanizePlanner {
       }
     } catch { /* noop */ }
 
+    // 对话落地块（结构化归属+白名单+纠错约束）
+    let groundingBlock = ''
+    try {
+      if (this.getGrounding) groundingBlock = this.getGrounding(ctxMessages) || ''
+    } catch { /* noop */ }
     // SelfState 状态投影（enabled+非 shadow 时注入；失败/中性 → 零影响）
     let selfState = ''
     try {
@@ -143,6 +149,7 @@ export class HumanizePlanner {
       groupContext: (target ? highlightTarget(target) + '\n\n' : '') + groupContext,
       publicMemories,
       socialScene,
+      grounding: groundingBlock,
       selfState,
     })
 

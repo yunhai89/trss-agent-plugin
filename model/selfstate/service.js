@@ -232,6 +232,19 @@ export class SelfStateService {
     return true
   }
 
+  /** 对象纠错冲销（Conversation Grounding）：认错人后对方说"我说的是X" →
+   *  撤销错误指代产生的情绪与关系残留（复用 repair 路径：降即时 anger/hurt + 缓降残留 + 关心事 + 期待标记 repaired）。 */
+  async applyCorrection({ groupId, userId }) {
+    if (!await this.init() || !this._ready || !userId) return false
+    try {
+      await this.concerns.applyRepair({ botId: this.botId, groupId: String(groupId), actorUserId: String(userId), repairSignal: 1.0, sincerity: 0.95 })
+      await this.expectations.markRepaired({ botId: this.botId, groupId: String(groupId), targetUserId: String(userId) })
+      await this.dao.run("UPDATE ss_events SET status='misjudged' WHERE bot_id=? AND group_id=? AND actor_user_id=? AND status='active' AND event_type IN ('direct_insult','rejection','public_embarrassment') AND occurred_at>?", [this.botId, String(groupId), String(userId), Date.now() - 30 * 60000]).catch(() => {})
+      this.trace?.record?.('ss_correction', { groupId: String(groupId), target: String(userId), rolledBack: true })
+      return true
+    } catch (e) { Log.warn('[selfstate] 纠错冲销失败', e?.message || e); return false }
+  }
+
   async setExpressionFrozen(groupId, frozen) {
     if (!await this.init() || !this._ready) return false
     await this.dao.run('UPDATE ss_group_state SET expression_frozen=?, updated_at=? WHERE bot_id=? AND group_id=?', [frozen ? 1 : 0, Date.now(), this.botId, String(groupId)]).catch(() => {})
