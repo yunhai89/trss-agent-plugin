@@ -185,12 +185,16 @@ export class HumanizeReplyComposer {
       // 用 intent 作为「内容」让 sticker 概率门控；无匹配则不发
       const acceptMap = this.stickerManager.decide(action.intent || '反应', { isGroup: true, groupId: runtime.groupId })
       if (!acceptMap || !acceptMap.size) return null
-      const seg = this.stickerManager.applyText('', acceptMap)
-      if (Array.isArray(seg)) {
-        const sid = await send(seg, { quoteTargetId: target?.id || null })
+      // P1 修复（human_react 空段）：applyText('') 对空文本恒返回 []（无标记位可替换）——
+      // 此前 send([]) 适配器或发空气泡或静默失败，表情反应从未真正发出。与正文路径同修：构造单标记文本
+      const firstName = [...acceptMap.keys()][0]
+      const seg = this.stickerManager.applyText(`[sticker:${firstName}]`, acceptMap)
+      if (Array.isArray(seg) && seg.length) {
+        const sid = await send(seg[0], { quoteTargetId: target?.id || null })
+        if (sid) this.stickerManager?.noteSent?.([firstName])
         return sid
       }
-    } catch { /* noop */ }
+    } catch (e) { Log.warn('[humanize] react 表情发送失败:', e?.message || e) }
     return null
   }
 }

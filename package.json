@@ -42,5 +42,14 @@
   },
   "devDependencies": {
     "eslint": "^8.57.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "sqlite3",
+      "@karinjs/sqlite3",
+      "@napi-rs/canvas",
+      "@node-rs/jieba",
+      "esbuild"
+    ]
   }
 }

@@ -15,6 +15,7 @@
 import { redactSecrets } from '../agent/redact.js'
 import { buildReplyerSystem, formatGroupContext, highlightTarget } from './prompts.js'
 import { whitelistViolations } from './grounding.js'
+import { textSim, textFeatures } from '../groupworld/embedding.js'
 
 const REPLY_LEAK_PATTERNS = [
   /作为一个\s*(AI|人工智能|语言模型)/, /根据系统(指令|提示|设定)/, /我(?:将|会)(?:调用|使用)工具/,
@@ -41,11 +42,12 @@ export class HumanizeReplyer {
   /**
    * @param {object} opts { provider, cfg, getPersonaVoice?:(groupId)=>string, getRecentBotText?:(groupId)=>string, getStyleExamples?:(groupId)=>string, getStickerCatalog?:(groupId)=>string }
    */
-  constructor({ provider, cfg, getPersonaVoice = null, getRecentBotText = null, getStyleExamples = null, getStickerCatalog = null, getWorldContext = null, getSelfCapsule = null, getMemoryBlock = null, enrichMedia = null, getGrounding = null } = {}) {
+  constructor({ provider, cfg, getPersonaVoice = null, getRecentBotText = null, getRecentBotTexts = null, getStyleExamples = null, getStickerCatalog = null, getWorldContext = null, getSelfCapsule = null, getMemoryBlock = null, enrichMedia = null, getGrounding = null } = {}) {
     this.provider = provider
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.getPersonaVoice = getPersonaVoice || (() => '')
     this.getRecentBotText = getRecentBotText || (() => '')
+    this.getRecentBotTexts = getRecentBotTexts || (() => [])
     this.getStyleExamples = getStyleExamples || (() => '')
     this.getStickerCatalog = getStickerCatalog || (() => '')
     this.getWorldContext = getWorldContext // GroupWorld 局部社会现场（online 时；失败/空 → 零影响）
@@ -192,10 +194,32 @@ export class HumanizeReplyer {
     if (c.redactSecrets !== false) {
       text = redactSecrets(text)
     }
-    // 5. 与最近机器人回复高度重复 → 取消
-    const lastBot = this.getRecentBotText(groupId)
-    if (lastBot && similarity(text, lastBot) >= 0.9) {
-      runtime?.trace?.record('replyer_duplicate', { sim: similarity(text, lastBot) })
+    // 5. 重复检测（断点7升级）：近 8 条 bot 回复 bigram 语义相似（≥0.55 视角不同说法同主题）
+    //    或梗词复读（同一梗词出现在 ≥2 条近期回复——"马赛克"式换皮复读在此拦截）
+    const recentList = (this.getRecentBotTexts?.() || []).filter(Boolean)
+    const lastBot = recentList[recentList.length - 1] || this.getRecentBotText(groupId)
+    if (recentList.length >= 2) {
+      const sims = recentList.map((t) => textSim(text, t)).sort((x, y) => y - x)
+      const top2avg = (sims[0] + (sims[1] || 0)) / 2
+      if (top2avg >= 0.55) {
+        runtime?.trace?.record('replyer_duplicate_semantic', { top2avg: Math.round(top2avg * 100) / 100, len: recentList.length })
+        return { text: '', rewritten: false, cancelReason: 'duplicate_semantic' }
+      }
+      // 梗词复读：提取候选文本中的 2+ 字重复片段（bigram 交集高频段），若该片段在 ≥2 条近期回复出现 → 复读
+      const cand = String(text)
+      const repeatHit = recentList.filter((t) => {
+        const feats = [...textFeatures(cand)].filter((f) => f.length >= 2)
+        const prev = textFeatures(t)
+        let hit = 0
+        for (const f of feats) if (prev.has(f)) hit++
+        return feats.length > 0 && hit / feats.length >= 0.3
+      })
+      if (repeatHit.length >= 2) {
+        runtime?.trace?.record('replyer_meme_repeat', { hits: repeatHit.length, sample: cand.slice(0, 40) })
+        return { text: '', rewritten: false, cancelReason: 'meme_repeat' }
+      }
+    } else if (lastBot && textSim(text, lastBot) >= 0.9) {
+      runtime?.trace?.record('replyer_duplicate', { sim: textSim(text, lastBot) })
       return { text: '', rewritten: false, cancelReason: 'duplicate' }
     }
 

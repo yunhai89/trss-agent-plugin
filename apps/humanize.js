@@ -161,6 +161,8 @@ async function buildHumanize() {
       const gw = await gwLazy
       if (gw) await gw.recordInteraction(info)
     } catch { /* noop */ }
+    // 梗实际使用登记（6h 冷却数据源——仅真实发送的文本才计，检索不算）
+    try { if (info?.sentText) hmem.markJargonUsed(info.groupId, info.sentText).catch(() => {}) } catch { /* noop */ }
     await ssOnDelivered(info)
   }
   /** 取 bot 自身 id 集合（runtime 期）。 */
@@ -246,6 +248,19 @@ async function buildHumanize() {
         const self = ent?.runtime?.buffer?.snapshot(8, { includeSelf: true })?.filter((m) => m.isSelf) || []
         return self[self.length - 1]?.text || ''
       } catch { return '' }
+    },
+    // 断点7：最近 8 条 bot 回复全文（重复检测从"上一条0.9字符相似"升级为"近8条语义+梗词复读"）
+    getRecentBotTexts: () => {
+      try {
+        const ent = manager?.getOrCreate?.(gid)
+        return (ent?.runtime?.buffer?.snapshot(30, { includeSelf: true })?.filter((m) => m.isSelf) || []).slice(-8).map((m) => String(m.text || ''))
+      } catch { return [] }
+    },
+    getRecentBotTexts: () => {
+      try {
+        const ent = manager?.getOrCreate?.(gid)
+        return (ent?.runtime?.buffer?.snapshot(30, { includeSelf: true })?.filter((m) => m.isSelf) || []).slice(-8).map((m) => String(m.text || ''))
+      } catch { return [] }
     },
     getStyleExamples: () => '',
     // 表情包清单注入：reply.allowSticker !== false 且表情包启用时给 Replyer 看 [sticker:名称] 与可用名表
@@ -421,7 +436,10 @@ export class Humanize extends plugin {
           const ent = h.manager.getOrCreate(gid)
           const rt = ent.runtime
           if (hourly && !await h.hmem.shouldConsolidate(gid, rt.buffer.lastSeq, cfg.memory?.incrementalMinMessages ?? 20)) continue
-          const msgs = rt.buffer.snapshot(100, { includeSelf: true })
+          // 断点1修复：只整合水位之后的新消息（此前每轮取最近100条——同一事件反复整合+重要性反复+0.05，
+          // 造成"马赛克梗"被强化到最高权重。水位前的消息上轮已处理过）
+          const since = await h.hmem.consolidatedSeq(gid)
+          const msgs = rt.buffer.snapshotAfter(since).slice(-100)
           const r = await h.hmem.consolidate({ groupId: gid, messages: msgs })
           await h.hmem.decay(gid)
           Log.mark('[humanize] 记忆整合', `群${gid} 新增${r.created} 合并${r.merged}${r.skipped ? `（跳过:${r.skipped}）` : ''}${hourly ? ' [增量]' : ' [日全量]'}`)

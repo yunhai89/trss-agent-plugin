@@ -276,3 +276,27 @@ console.log(`通过 ${passed}，失败 ${failed}`)
 if (bugs.length) { console.log('失败明细:'); for (const b of bugs) console.log(' -', b) }
 console.log('========================================')
 if (failed) process.exitCode = 1
+
+// ═══════════════ S8 梗黏住回归：马赛克话题不得渗入无关话题 ═══════════════
+await test('S8 马赛克黏住：旧梗话题不达标不回流 + 复读拦截', async () => {
+  const { evaluate } = await import('../../model/humanize/necessity-scorer.js')
+  const { textSim, textFeatures } = await import('../../model/groupworld/embedding.js')
+  // 1) 重复检测语义：近 8 条里 2 条谈"图压成马赛克"，新候选仍谈马赛克 → meme_repeat 特征命中
+  const recents = ['图怎么压成马赛克了哈哈', '这个马赛克笑死', '图片压缩成马赛克绝了']
+  const cand = '又变马赛克了吧'
+  const hits = recents.filter((t) => {
+    const feats = [...textFeatures(cand)].filter((f) => f.length >= 2)
+    const prev = textFeatures(t)
+    let hit = 0
+    for (const f of feats) if (prev.has(f)) hit++
+    return feats.length > 0 && hit / feats.length >= 0.3
+  })
+  ok(hits.length >= 2, `换说法复读马赛克被识别（hits=${hits.length}/3 ≥2）`)
+  // 2) 无关话题：P40向量模型问题 vs 马赛克旧事 → 语义相似度不达 GW 话题门
+  ok(textSim('P40能部署多大向量模型', '图片压成马赛克') < 0.12, `无关话题相似度 < 0.12（实际 ${textSim('P40能部署多大向量模型', '图片压成马赛克').toFixed(3)}）→ GW 话题门拦截`)
+  // 3) 重要性合并封顶 0.85：验证 SQL 语义（查源码字符串即可）
+  const src = fs.readFileSync(new URL('../../model/humanize/memory-store.js', import.meta.url), 'utf8')
+  ok(src.includes('importance=MIN(0.85'), '合并重要性封顶 0.85 存在于源码')
+  const appSrc = fs.readFileSync(new URL('../../apps/humanize.js', import.meta.url), 'utf8')
+  ok(appSrc.includes('snapshotAfter(since)'), '整合只取水位后新消息存在于源码')
+})

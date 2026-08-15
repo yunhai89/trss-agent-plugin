@@ -112,8 +112,10 @@ export class WorldRetriever {
         const topicSimV = hybridSim(topicEmb, fromBlob(e.embedding), topicText, `${e.title} ${e.summary} ${tags.join(' ')}`)
         const rec = recencyFactor((now - (e.occurred_at || now)) / 86400000, 60)
         const score = retrievalScore({ currentTargetMatch: targetMatch, topicSimilarity: topicSimV, graphProximity: 0, recency: rec, importance: e.importance, confidence: e.confidence })
-        return { ...e, _score: score }
-      }).filter((e) => e._score > 0.05).sort((a, b) => b._score - a._score).slice(0, maxEpisodes)
+        return { ...e, _score: score, _topicSim: topicSimV }
+      // 断点5（马赛克黏住）：话题硬门——当前话题与旧事相似度 < 0.12 时即使 speaker 命中也不召回
+      // （此前 retrievalScore 里 targetMatch 单独就能把分数推过 0.05 门槛，旧梗反复回流）
+      }).filter((e) => e._score > 0.05 && (e._topicSim == null || e._topicSim >= 0.12)).sort((a, b) => b._score - a._score).slice(0, maxEpisodes)
       for (const e of scored) episodes.push({ id: e.id, summary: e.summary, confidence: e.confidence, occurredAt: e.occurred_at })
     }
 

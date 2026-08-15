@@ -184,6 +184,6 @@ export function buildSocialSceneBlock(scene, { role = 'planner' } = {}) {
   if (!body) return ''
   const head = role === 'planner'
     ? '【群聊社会记忆（仅供判断该不该参与/用什么态度；事实不确定的不要当真；不向群友复述档案）】'
-    : '【你与这位群友的过往（自然融入语气，可轻轻提及旧事，但不要像查档案一样罗列；不确定的别编）】'
+    : '【你与这位群友的过往（仅当当前话题与旧事直接相关才可提及，且一个话题最多提一次；不要主动翻旧账；不确定的别编）】'
   return `${head}\n${body}`
 }

@@ -220,7 +220,8 @@ export class HumanizePlanner {
 
       // 终止动作：校验并返回（同轮多发送动作只取一个）
       if (actionCalls.length) {
-        const hasTarget = (id) => !!snapshot.find((m) => m.id === String(id))
+        // P1 修复：目标只允许外部真实消息（此前含 bot 自身消息——Planner 可回复自己的历史发言）
+        const hasTarget = (id) => !!snapshot.find((m) => m.id === String(id) && !m.isSelf)
         const { action, violations } = pickSingleAction(actionCalls, { hasTarget })
         if (violations.length) runtime?.trace?.record('planner_schema_violation', { round, violations })
         logDecision(runtime, action, violations)

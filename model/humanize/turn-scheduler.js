@@ -84,6 +84,12 @@ export class TurnScheduler {
       rt.abortPlanning('new_message')
       rt.trace?.record('planner_interrupted', { by: msg.id })
     }
+    // P1 发送阶段打断：多气泡发送中途来新消息 → bump 代，composer 剩余段 isCurrent 校验失败自动取消
+    // （首段已发出的保留，不再继续发过时段落）
+    if (rt.phase === 'sending') {
+      rt.abortPlanning('new_message_during_send')
+      rt.trace?.record('send_interrupted', { by: msg.id })
+    }
     rt.scheduleDebounce(c.debounceMs ?? 1200)
     return false
   }
@@ -417,7 +423,8 @@ export class TurnScheduler {
       rt.recordReply(null)
       this._recordStrongReply(target)
       this._appendSelf(text, null) // shadow 也计入自身在场（presence/上下文）
-      this._notifyDelivered(target) // 写回 GroupWorld 主观关系（online 时；失败忽略）
+      // P1 修复：shadow 未真实发送 → 不写 GW 互动关系、不登记 SS 出站期待（此前假数据推高熟悉度）；
+      // 梗使用登记也只在真实发送路径（gwOnDelivered 由 _notifyDelivered 触发，此处跳过即正确）
       rt.backoff.recordSuccess()
       rt.markObserved(batch)
       rt.setPhase('idle')

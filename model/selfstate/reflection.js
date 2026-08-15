@@ -35,7 +35,7 @@ export class SelfReflectionJob {
     const budget = cfg.reflection?.maxReflectionsPerDay ?? 10
     if (created >= budget) return { created: 0 }
 
-    const candidates = await this._findCandidates({ botId, groupId, now })
+    const candidates = await this._findCandidates({ botId, groupId, now, budget })
     let n = 0
     for (const cand of candidates) {
       if (created + n >= budget) break
@@ -49,7 +49,7 @@ export class SelfReflectionJob {
   }
 
   /** §13.2 触发条件 → 反思候选（按 target 分组的事件束）。 */
-  async _findCandidates({ botId, groupId, now }) {
+  async _findCandidates({ botId, groupId, now, budget = 10 }) {
     const cfg = this._cfgFn()
     const minEvents = cfg.reflection?.minSignificantEvents ?? 3
     const since = now - 14 * 86400000

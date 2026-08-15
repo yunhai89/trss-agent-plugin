@@ -175,7 +175,7 @@ export class HumanizeMemoryStore {
         const oldKws = (() => { try { return JSON.parse(dup.keywords || '[]') } catch { return [] } })()
         const unionKws = [...new Set([...kws, ...oldKws])].slice(0, 8)
         await this.dao.run(
-          'UPDATE hm_memories SET content=?, keywords=?, importance=MIN(1, MAX(?, ?)+0.05), source_span=?, updated_at=? WHERE id=?',
+          'UPDATE hm_memories SET content=?, keywords=?, importance=MIN(0.85, MAX(?, ?)+0.05), source_span=?, updated_at=? WHERE id=?',
           [String(dup.content || '').length >= content.length ? dup.content : content, JSON.stringify(unionKws), Number(dup.importance) || 0, importance, span, now, dup.id],
         ).catch(() => {})
         Object.assign(dup, { content, keywords: JSON.stringify(unionKws), importance: Math.min(1, Math.max(Number(dup.importance) || 0, importance) + 0.05) })
@@ -247,7 +247,7 @@ export class HumanizeMemoryStore {
           sim = textSim(query, `${r.content} ${kws.join(' ')}`)
         }
       }
-      if (query && sim <= 0.05) continue
+      if (query && sim <= 0.05) continue // 地板保持 0.05（提到 0.22 会饿死中文短查询合法召回：权限摆脸上≈0.077）
       const targetBoost = (userId && r.user_id && String(r.user_id) === String(userId)) ? 0.25 : 0
       const recency = Math.max(0, 1 - (now - Number(r.updated_at || r.created_at)) / (30 * 86400e3)) * 0.15
       const score = sim * 0.6 + (Number(r.importance) || 0) * 0.2 + recency + targetBoost
@@ -256,8 +256,9 @@ export class HumanizeMemoryStore {
     }
     scored.sort((a, b) => b.score - a.score)
     const out = scored.slice(0, Math.max(1, topK | 0 || 5))
-    for (const { r } of out) {
-      await this.dao.run('UPDATE hm_memories SET hit_count=hit_count+1, last_used_at=? WHERE id=?', [now, r.id]).catch(() => {})
+    for (const { r, score } of out) {
+      // 断点4b：hit_count 只在真高相关（≥0.5）时累计——此前仅被检索就+1，保护陈旧记忆不被清理
+      if (score >= 0.5) await this.dao.run('UPDATE hm_memories SET hit_count=hit_count+1, last_used_at=? WHERE id=?', [now, r.id]).catch(() => {})
     }
     return out.map(({ r }) => r)
   }
@@ -306,11 +307,17 @@ export class HumanizeMemoryStore {
   async jargonDict(groupId) {
     if (!await this.init() || !this._ready) return ''
     const rows = await this.dao.all(
-      "SELECT content FROM hm_memories WHERE group_id=? AND kind='jargon' ORDER BY importance DESC LIMIT 25",
+      "SELECT content, last_used_at FROM hm_memories WHERE group_id=? AND kind='jargon' ORDER BY importance DESC LIMIT 40",
       [String(groupId)],
     ).catch((e) => { Log.warn('[humanize-memory] 梗词典查询失败:', e?.message || e); return [] })
     if (!rows.length) return ''
-    return '【本群梗/黑话词典（背景知识，自然理解使用，不向群友背诵）】\n' + rows.map((r) => `- ${r.content}`).join('\n')
+    // 断点3修复（梗黏住）：近 6h 实际用过的梗排到词典末尾并降量注入（最多 12 条，保底 6 条）——
+    // 此前 25 条全量无条件注入每次 Planner/Replyer，"马赛克梗"高频复用的结构性来源
+    const now = Date.now()
+    const fresh = rows.filter((r) => !r.last_used_at || now - Number(r.last_used_at) > 6 * 3600e3)
+    const recent = rows.filter((r) => r.last_used_at && now - Number(r.last_used_at) <= 6 * 3600e3)
+    const picked = [...fresh, ...recent].slice(0, Math.max(6, Math.min(12, fresh.length)))
+    return '【本群梗/黑话词典（背景知识，理解语境用；近期用过的梗别反复主动使用）】\n' + picked.map((r) => `- ${r.content}`).join('\n')
   }
 
   /**
@@ -375,6 +382,33 @@ export class HumanizeMemoryStore {
       }
     }
     return out
+  }
+
+  /**
+   * 梗实际使用登记：发送成功的回复文本里出现某梗词条（前缀词命中）→ 刷新 last_used_at（6h 冷却数据源）。
+   * 由发送成功回调调用（仅真实使用才冷却，检索不算）。
+   */
+  async markJargonUsed(groupId, sentText, now = Date.now()) {
+    if (!await this.init() || !this._ready || !sentText) return 0
+    try {
+      const rows = await this.dao.all("SELECT id, content FROM hm_memories WHERE group_id=? AND kind='jargon'", [String(groupId)])
+      let n = 0
+      for (const r of rows) {
+        const stem = String(r.content || '').split('=')[0] || ''
+        if (stem.length >= 2 && String(sentText).includes(stem)) {
+          await this.dao.run('UPDATE hm_memories SET last_used_at=?, updated_at=? WHERE id=?', [now, now, r.id]).catch(() => {})
+          n++
+        }
+      }
+      return n
+    } catch (e) { Log.warn('[humanize-memory] 梗使用登记失败:', e?.message || e); return 0 }
+  }
+
+  /** 读整合水位（供调用方只传新消息）。 */
+  async consolidatedSeq(groupId) {
+    if (!await this.init() || !this._ready) return 0
+    const r = await this.dao.get("SELECT value FROM hm_meta WHERE key='consolidated_seq:' || ?", [String(groupId)]).catch(() => null)
+    return Number(r?.value) || 0
   }
 
   /** 增量整合水位：距上次整合新增 ≥ n 条消息才值得再跑（存 hm_meta 跨重启）。 */
