@@ -69,6 +69,7 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
     maxPerQuery: 5,           // Planner 单次注入记忆条数上限
     maxPerGroup: 300,         // 单群记忆容量（超量按价值淘汰）
     minConsolidateMessages: 6, // 整合所需最少消息数
+    incrementalMinMessages: 20, // 每小时增量整合水位（新增 ≥N 条才跑；梗当天入库）
     forgetDays: 30,           // 超龄硬遗忘（天）
   },
   learning: {                 // Phase 4：仅 shadow 采集，不进 Prompt

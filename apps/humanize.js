@@ -22,6 +22,7 @@ import { getGroupWorld } from './groupworld.js'
 import { SelfStateService } from '../model/selfstate/index.js'
 import { buildEmbed } from '../model/llm/embed-wiring.js'
 import { makeEmbedder } from '../model/groupworld/embedding.js'
+import { createSearchManager, formatResults } from '../model/search/index.js'
 import * as H from '../model/humanize/index.js'
 
 let _humanize = null
@@ -182,6 +183,17 @@ async function buildHumanize() {
   if (mediaDesc.available) Log.info('[humanize] 视觉已接入：伪人可看见群友图片（每轮最多 3 张新描述，按图缓存）')
   const enrichMedia = mediaDesc.available ? (msgs, o) => mediaDesc.annotate(msgs, o) : null
 
+  // 网络梗学习用：复用主框架搜索引擎配置（agent.search 多源），无可用源 → 返回 null 走降级
+  let _searcher = null
+  const webSearch = async (q) => {
+    try {
+      if (!_searcher) _searcher = createSearchManager({ ...(Config.get().agent?.search || {}), fetcher: (typeof fetch !== 'undefined' && fetch) || undefined, logger: Log.tag('search') })
+      if (!_searcher.availableProviders?.length) { Log.warn('[humanize-memory] 未配搜索引擎，网络梗学习降级（等群友解释路径兜底）'); return null }
+      const r = await _searcher.search(q)
+      return formatResults(r, { maxResults: 5, maxContent: 400 })
+    } catch (e) { Log.warn('[humanize-memory] 梗搜索失败:', e?.message || e); return null }
+  }
+
   // 对话落地层（Conversation Grounding）：谁在对谁说+实体白名单+纠错检测+bot↔bot闭环
   const { resolveGrounding, formatGroundingBlock, windowNames: winNames } = H
   const getGroundingRaw = (msgs) => {
@@ -198,8 +210,11 @@ async function buildHumanize() {
     getMemories: async (q) => {
       try {
         if (cfgFn().memory?.enabled === false) return ''
-        return await hmem.recallText({ groupId: gid, query: String(q || '').slice(0, 200), topK: cfgFn().memory?.maxPerQuery ?? 5 })
-      } catch { return '' }
+        // 梗词典全量常驻（背景知识不按相关性查）+ 相关记忆 topK
+        const dict = await hmem.jargonDict(gid)
+        const rel = await hmem.recallText({ groupId: gid, query: String(q || '').slice(0, 200), topK: cfgFn().memory?.maxPerQuery ?? 5 })
+        return [dict, rel].filter(Boolean).join('\n')
+      } catch (e) { Log.debug('[humanize] 记忆检索降级:', e?.message || e); return '' }
     },
     getBehaviorPolicyBlock: () => formatPolicyBlock(cfgFn().behaviorPolicy),
     getPersonaName: () => cfgFn().persona?.name || cfgFn().personaName || botNickname() || '机器人',
@@ -232,8 +247,10 @@ async function buildHumanize() {
     getMemoryBlock: async ({ groupId, targetUserId, queryText, allowedUserIds }) => {
       try {
         if (cfgFn().memory?.enabled === false) return ''
-        return await hmem.recallText({ groupId, userId: targetUserId, query: queryText, topK: 3, kinds: ['impression', 'jargon'], allowedUserIds })
-      } catch { return '' }
+        const dict = await hmem.jargonDict(groupId)
+        const rel = await hmem.recallText({ groupId, userId: targetUserId, query: queryText, topK: 3, kinds: ['impression'], allowedUserIds })
+        return [dict, rel].filter(Boolean).join('\n')
+      } catch (e) { Log.debug('[humanize] 记忆注入降级:', e?.message || e); return '' }
     },
   })
   const makeComposer = () => new H.HumanizeReplyComposer({ cfg: cfgFn, stickerManager: sticker })
@@ -360,6 +377,10 @@ export class Humanize extends plugin {
       name: '伪人记忆整合',
       cron: '47 4 * * *',
       fnc: this.humanizeMemoryConsolidate.bind(this),
+    }, {
+      name: '伪人记忆增量整合',
+      cron: '23 * * * *', // 每小时轻整合：梗当天入库（此前每日一次，新梗要隔天才能被理解）
+      fnc: this.humanizeMemoryConsolidate.bind(this),
     }]
     // 异步预热（不阻塞构造）
     getHumanize().catch(() => {})
@@ -374,19 +395,30 @@ export class Humanize extends plugin {
     } catch (e) { Log.warn('[humanize] 日志压缩失败', e?.message || e) }
   }
 
-  /** 伪人独立记忆：每日"睡眠整合"（近期对话→长时记忆）+ 遗忘衰减。 */
+  /**
+   * 伪人独立记忆"睡眠整合"（近期对话→长时记忆）+ 遗忘衰减。
+   * 每小时增量版带水位闸（新增 ≥ incrementalMinMessages 条才烧 LLM）；04:47 每日版全量兜底。
+   */
   async humanizeMemoryConsolidate() {
     try {
       const h = await getHumanize()
       const cfg = h.cfgFn()
       if (cfg.enable !== true || cfg.memory?.enabled === false) return
+      const hourly = new Date().getHours() !== 4 // 04 点那次是每日全量，其余小时走水位闸
       for (const gid of (cfg.groups || []).map(String)) {
         try {
           const ent = h.manager.getOrCreate(gid)
-          const msgs = ent.runtime.buffer.snapshot(100, { includeSelf: true })
+          const rt = ent.runtime
+          if (hourly && !await h.hmem.shouldConsolidate(gid, rt.buffer.lastSeq, cfg.memory?.incrementalMinMessages ?? 20)) continue
+          const msgs = rt.buffer.snapshot(100, { includeSelf: true })
           const r = await h.hmem.consolidate({ groupId: gid, messages: msgs })
           await h.hmem.decay(gid)
-          Log.mark('[humanize] 记忆整合', `群${gid} 新增${r.created} 合并${r.merged}${r.skipped ? `（跳过:${r.skipped}）` : ''}`)
+          Log.mark('[humanize] 记忆整合', `群${gid} 新增${r.created} 合并${r.merged}${r.skipped ? `（跳过:${r.skipped}）` : ''}${hourly ? ' [增量]' : ' [日全量]'}`)
+          // 网络梗学习：整合时发现的词典外梗 → 上网查释义（去重+置信+重试三闸防污染）
+          if (Array.isArray(r.suspected) && r.suspected.length) {
+            const lr = await h.hmem.learnJargonFromWeb({ groupId: gid, terms: r.suspected, webSearch })
+            if (r.suspected.length) Log.mark('[humanize] 网络梗学习', `群${gid} 候选${r.suspected.join('、')} → 学会${lr.learned} 跳过${lr.skipped} 失败${lr.failed}`)
+          }
         } catch (e) { Log.warn('[humanize] 记忆整合失败', gid, e?.message || e) }
       }
     } catch (e) { Log.warn('[humanize] 记忆整合任务失败', e?.message || e) }

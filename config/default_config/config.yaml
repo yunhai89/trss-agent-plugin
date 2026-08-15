@@ -300,6 +300,7 @@ agent:
       enabled: true                # 每日 04:47 睡眠整合近期对话→长时记忆；Planner/Replyer 按相关性检索注入
       maxPerQuery: 5               # Planner 单次注入条数
       maxPerGroup: 300             # 单群容量（超量按重要性×使用率淘汰）
+      incrementalMinMessages: 20   # 每小时增量整合水位（新增≥N条才跑——梗当天入库，不用等次日）
       forgetDays: 30               # 超龄硬遗忘（天）
     idleBackoffBaseSeconds: 15     # 连续无动作退避基数（15/30/60/120/240…）
     idleBackoffCapSeconds: 300     # 退避上限

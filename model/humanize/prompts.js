@@ -278,7 +278,8 @@ export const MEMORY_CONSOLIDATE_SYSTEM = `你是角色记忆整合器。给你�
       "keywords": ["关键词", "最多8个"],
       "importance": 0.0~1.0
     }
-  ]
+  ],
+  "suspected_jargon": ["词典外黑话/梗，最多3个"]
 }
 
 kind 含义：impression=对某成员的印象/关系变化；event=群里发生的事（谁做了什么）；jargon=群梗/黑话/称呼（如"咕嘎"是什么意思）；style=我的表达方式被大家如何回应（哪种语气受欢迎/被嫌弃）。

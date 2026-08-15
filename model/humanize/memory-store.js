@@ -25,6 +25,7 @@ import { createHash } from 'node:crypto'
 import Log from '../../utils/Log.js'
 import { textSim, cosine, toBlob, fromBlob } from '../groupworld/embedding.js'
 import { parseLlmJson } from '../selfstate/prompts.js'
+import { textSim as _textSim } from '../groupworld/embedding.js'
 import { MEMORY_CONSOLIDATE_SYSTEM, buildConsolidatePrompt } from './prompts.js'
 
 const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0))
@@ -156,7 +157,8 @@ export class HumanizeMemoryStore {
       parsed = parseLlmJson(res?.content || '')
     } catch (e) { Log.warn('[humanize-memory] 整合 LLM 失败', e?.message || e); return { created: 0, merged: 0, skipped: 'llm' } }
     const cands = Array.isArray(parsed?.memories) ? parsed.memories : []
-    if (!cands.length) return { created: 0, merged: 0, skipped: 'empty' }
+    const suspected = (Array.isArray(parsed?.suspected_jargon) ? parsed.suspected_jargon : []).map((s) => String(s).slice(0, 24)).filter(Boolean).slice(0, 3)
+    if (!cands.length) return { created: 0, merged: 0, skipped: 'empty', suspected }
 
     let created = 0; let merged = 0
     const existing = await this.dao.all('SELECT * FROM hm_memories WHERE group_id=?', [String(groupId)])
@@ -197,8 +199,9 @@ export class HumanizeMemoryStore {
         [String(groupId), now, total - cap],
       ).catch(() => {})
     }
-    this.trace?.record?.('hm_consolidate', { groupId, created, merged, source: msgs.length })
-    return { created, merged }
+    await this.markConsolidated(groupId, Math.max(...msgs.map((x) => Number(x.seq) || 0), 0))
+    this.trace?.record?.('hm_consolidate', { groupId, created, merged, source: msgs.length, suspected: suspected.length })
+    return { created, merged, suspected }
   }
 
   // ─────────────── 检索（注入 Planner/Replyer） ───────────────
@@ -291,6 +294,98 @@ export class HumanizeMemoryStore {
       if (n) this.trace?.record?.('hm_decay', { groupId, removed: n })
       return n
     } catch { return 0 }
+  }
+
+  /**
+   * 本群梗词典（全量注入用）：jargon 类记忆不做相关性检索——梗是背景知识，
+   * 群里说"咕嘎"时按相关性查"咕嘎是什么"往往查不到，必须整本词典常驻 prompt。
+   * 上限 25 条（重要性降序），空库返回 ''。
+   */
+  async jargonDict(groupId) {
+    if (!await this.init() || !this._ready) return ''
+    const rows = await this.dao.all(
+      "SELECT content FROM hm_memories WHERE group_id=? AND kind='jargon' ORDER BY importance DESC LIMIT 25",
+      [String(groupId)],
+    ).catch((e) => { Log.warn('[humanize-memory] 梗词典查询失败:', e?.message || e); return [] })
+    if (!rows.length) return ''
+    return '【本群梗/黑话词典（背景知识，自然理解使用，不向群友背诵）】\n' + rows.map((r) => `- ${r.content}`).join('\n')
+  }
+
+  /**
+   * 网络梗学习（冷启动）：对整合时发现的词典外梗逐个上网搜索→LLM 提炼→去重入库。
+   * 防污染三闸：①预查去重（词面 bigram≥0.55 或向量余弦≥0.75 视为已收录，如 咕嘎/咕咕嘎嘎 同族）；
+   * ②置信门槛（提炼 confidence<0.6 不入库——错误解释比缺梗更毒，留给"问群友"路径兜底）；
+   * ③重试上限（同词最多搜 2 次仍无果则放弃，防反复烧搜索）。
+   * @param {object} o { groupId, terms[], webSearch(q)=>{text}, now }
+   */
+  async learnJargonFromWeb({ groupId, terms = [], webSearch = null, now = Date.now() }) {
+    const out = { learned: 0, skipped: 0, failed: 0 }
+    if (!await this.init() || !this._ready || typeof webSearch !== 'function') return out
+    const existing = await this.dao.all("SELECT content, keywords, embedding FROM hm_memories WHERE group_id=? AND kind='jargon'", [String(groupId)]).catch((e) => { Log.warn('[humanize-memory] 梗去重预查失败:', e?.message || e); return [] })
+    for (const term of (terms || []).slice(0, 3)) {
+      const q = `${term} 梗 什么意思 网络用语`
+      // 闸①：去重预查——keywords 精确命中（入库时已存词本身）> 词条前缀匹配 > 词面 bigram ≥0.55（同族变体）
+      let dup = existing.some((r) => {
+        let kws = []; try { kws = JSON.parse(r.keywords || '[]') } catch { /* noop */ }
+        const stem = String(r.content || '').split('=')[0] || ''
+        const containment = kws.some((k) => k.length >= 2 && term.length >= 2 && (k.includes(term) || term.includes(k)))
+          || (stem.length >= 2 && term.length >= 2 && (stem.includes(term) || term.includes(stem)))
+        return kws.includes(term) || String(r.content || '').startsWith(term + '=') || containment || _textSim(term, stem) >= 0.55
+      })
+      if (!dup && this.embedder) {
+        const tv = await this.embedder.embed(term).catch(() => null)
+        if (tv) for (const r of existing) {
+          const ev = fromBlob(r.embedding)
+          if (ev && cosine(tv, ev) >= 0.75) { dup = true; break }
+        }
+      }
+      if (dup) { out.skipped++; continue }
+      // 闸③：重试上限（hm_meta 计数）
+      const rt = await this.dao.get("SELECT value FROM hm_meta WHERE key='jargon_retry:' || ?", [String(groupId) + ':' + term]).catch(() => null)
+      if (Number(rt?.value) >= 2) { out.skipped++; continue }
+      // 搜索 + 提炼
+      try {
+        const raw = await webSearch(q)
+        if (!raw || String(raw).trim().length < 50) throw new Error('搜索无结果')
+        const res = await this.provider.chat({
+          model: this.cfg().model || undefined,
+          system: '你是网络梗释义器。给你一个词和搜索结果，输出纯 JSON：{"explanation":"一句话解释这个梗（≤50字）","confidence":0~1}。搜索结果不足以支撑解释时 confidence 给 0.5 以下。不要编造。',
+          messages: [{ role: 'user', content: `词：${term}\n搜索结果：\n${String(raw).slice(0, 2000)}` }],
+          tools: undefined, tool_choice: { mode: 'none' }, temperature: 0.2, max_tokens: 150, thinking: { type: 'disabled' }, stream: false,
+        })
+        const parsed = parseLlmJson(res?.content || '')
+        const conf = clamp01(parsed?.confidence)
+        if (conf < 0.6) throw new Error('低置信 ' + conf.toFixed(2))
+        const content = `${term}=${parsed.explanation}（网络解释，以本群实际用法为准）`
+        await this.dao.run(
+          `INSERT INTO hm_memories(group_id,user_id,kind,content,keywords,importance,source_span,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+          [String(groupId), null, 'jargon', content, JSON.stringify([term]), 0.5, 'web', now, now],
+        )
+        this._embedRow((await this.dao.get('SELECT id FROM hm_memories WHERE group_id=? AND content=? ORDER BY id DESC LIMIT 1', [String(groupId), content]))?.id, content).catch(() => {})
+        existing.push({ content, embedding: null })
+        out.learned++
+        this.trace?.record?.('hm_jargon_web', { groupId, term, conf })
+      } catch (e) {
+        const key = String(groupId) + ':' + term
+        await this.dao.run("INSERT OR REPLACE INTO hm_meta(key,value) VALUES ('jargon_retry:' || ?, ?)", [key, (Number(rt?.value) || 0) + 1]).catch(() => {})
+        out.failed++
+        Log.warn('[humanize-memory] 网络梗学习失败（' + term + '）:', e?.message || e)
+      }
+    }
+    return out
+  }
+
+  /** 增量整合水位：距上次整合新增 ≥ n 条消息才值得再跑（存 hm_meta 跨重启）。 */
+  async shouldConsolidate(groupId, currentSeq, minNew = 20) {
+    if (!await this.init() || !this._ready) return false
+    const r = await this.dao.get("SELECT value FROM hm_meta WHERE key='consolidated_seq:' || ?", [String(groupId)]).catch(() => null)
+    const last = Number(r?.value) || 0
+    return Number(currentSeq) - last >= minNew
+  }
+
+  /** 记录整合水位。 */
+  async markConsolidated(groupId, seq) {
+    await this.dao.run("INSERT OR REPLACE INTO hm_meta(key,value) VALUES ('consolidated_seq:' || ?, ?)", [String(groupId), Number(seq) || 0]).catch(() => {})
   }
 
   /** 管理查看：最近 N 条。 */
