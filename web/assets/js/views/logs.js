@@ -39,6 +39,16 @@
     gw_maint: { name: 'GW 维护', icon: 'refresh', color: 'var(--mint)', bg: 'var(--mint-bg)' },
     gw_community: { name: 'GW 圈子', icon: 'group', color: 'var(--honey)', bg: 'var(--honey-bg)' },
     gw_privacy: { name: 'GW 隐私', icon: 'shield', color: 'var(--rose)', bg: 'var(--rose-bg)' },
+    // —— SelfState 自我认知与情绪事件 ——
+    ss_event: { name: 'SS 事件', icon: 'bot', color: 'var(--sky)', bg: 'var(--sky-bg)' },
+    ss_appraise: { name: 'SS 评价', icon: 'cpu', color: 'var(--mint)', bg: 'var(--mint-bg)' },
+    ss_emotion: { name: 'SS 情绪', icon: 'bot', color: 'var(--honey)', bg: 'var(--honey-bg)' },
+    ss_expectation: { name: 'SS 期待', icon: 'clock', color: 'var(--vio)', bg: 'var(--vio-bg)' },
+    ss_concern: { name: 'SS 心事', icon: 'warn', color: 'var(--rose)', bg: 'var(--rose-bg)' },
+    ss_reflection: { name: 'SS 反思', icon: 'memory', color: 'var(--pri)', bg: 'var(--pri-soft)' },
+    ss_maint: { name: 'SS 维护', icon: 'refresh', color: 'var(--mint)', bg: 'var(--mint-bg)' },
+    ss_project: { name: 'SS 投影', icon: 'play', color: 'var(--sky)', bg: 'var(--sky-bg)' },
+    ss_privacy: { name: 'SS 控制', icon: 'shield', color: 'var(--rose)', bg: 'var(--rose-bg)' },
   }
   /* 未知 event 兜底：后端新增 event 类型时不再让 EV[e.event].color 崩掉整页 */
   const EV_FALLBACK = { name: '其他', icon: 'info', color: 'var(--ink3)', bg: 'var(--honey-bg)' }
@@ -155,6 +165,15 @@
           case 'gw_maint': return e.kind === 'weekly' ? `每周聚类 → ${e.communities ?? '?'} 圈子` : `每日维护 · 成员${e.members ?? '?'}`
           case 'gw_community': return `节点${e.nodes ?? '?'} → 圈子${e.communities ?? '?'}`
           case 'gw_privacy': return `${e.action || ''}${e.groupIdHash ? ' · ' + e.groupIdHash : ''}`
+          case 'ss_event': return `${e.type || '?'} by ${e.actor || '?'} · 可信${e.conf ?? '?'}`
+          case 'ss_appraise': return `${e.type || '?'} · 可信${e.conf ?? '?'}${e.llm ? ' · LLM' : ' · 规则'}`
+          case 'ss_emotion': return `${e.eventType || '?'} → ${(e.impulses || '').slice(0, 60)} · base ${e.base ?? '?'}`
+          case 'ss_expectation': return `${e.kind || '?'}${e.type ? ' ' + e.type : ''}${e.strength != null ? ' 强度' + e.strength : ''}${e.conf != null ? ' 可信' + e.conf : ''}`
+          case 'ss_concern': return `${e.kind || '?'} ${e.type || ''} → ${e.target || '?'}${e.intensity != null ? ' 强度' + e.intensity : ''}`
+          case 'ss_reflection': return `产出 ${e.created ?? '?'} 条（候选 ${e.candidates ?? '?'}）`
+          case 'ss_maint': return `衰减${e.decayed ?? 0} 过期${e.expired ?? 0} 残留衰减${e.residueDecay ?? 0}${e.recoveries ? ' 恢复' + e.recoveries : ''}`
+          case 'ss_project': return `${e.role || '?'} · ${e.mood || ''}${e.stance ? ' · ' + e.stance : ''}${e.tone ? ' · ' + e.tone : ''}`
+          case 'ss_privacy': return `${e.action || ''}`
           default: return ''
         }
       }

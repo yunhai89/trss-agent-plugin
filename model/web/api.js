@@ -320,6 +320,45 @@ router.get('/overview', asyncHandler(async (req, res) => {
   return ok(res, data)
 }))
 
+// ── SelfState 自我状态（主人面板 §19）──
+import { getSelfState } from '../../apps/humanize.js'
+async function getSs(res) {
+  try { return await getSelfState() }
+  catch (e) { fail(res, CODE.INTERNAL, `SelfState 未就绪：${e?.message || e}`); return null }
+}
+router.get('/selfstate/overview', asyncHandler(async (req, res) => {
+  const ss = await getSs(res); if (!ss) return
+  const groupId = String(req.query.groupId || '')
+  if (!groupId) return fail(res, CODE.BAD, '缺少 groupId')
+  return ok(res, await ss.getOverview(groupId))
+}))
+router.get('/selfstate/relations', asyncHandler(async (req, res) => {
+  const ss = await getSs(res); if (!ss) return
+  const groupId = String(req.query.groupId || '')
+  if (!groupId) return fail(res, CODE.BAD, '缺少 groupId')
+  return ok(res, await ss.getRelations(groupId))
+}))
+router.post('/selfstate/reset', asyncHandler(async (req, res) => {
+  const ss = await getSs(res); if (!ss) return
+  if (!req.body?.groupId) return fail(res, CODE.BAD, '缺少 groupId')
+  await ss.resetGroupState(req.body.groupId)
+  return ok(res, { ok: true }, '已重置该群自我状态')
+}))
+router.post('/selfstate/clear-member', asyncHandler(async (req, res) => {
+  const ss = await getSs(res); if (!ss) return
+  const { groupId, userId } = req.body || {}
+  if (!groupId || !userId) return fail(res, CODE.BAD, '缺少 groupId 或 userId')
+  await ss.clearMemberResidue(groupId, userId)
+  return ok(res, { ok: true }, '已清除该成员情感残留')
+}))
+router.post('/selfstate/freeze', asyncHandler(async (req, res) => {
+  const ss = await getSs(res); if (!ss) return
+  const { groupId, frozen } = req.body || {}
+  if (!groupId) return fail(res, CODE.BAD, '缺少 groupId')
+  await ss.setExpressionFrozen(groupId, !!frozen)
+  return ok(res, { ok: true }, frozen ? '已冻结情绪外显' : '已解冻')
+}))
+
 // ── 群聊小世界 GroupWorld 数据浏览（主人面板；§12.3 web 仅限主人，群内仅自查）──
 // GET /api/groupworld/stats?groupId= —— 数据规模 + 任务状态 + 今日调用
 router.get('/groupworld/stats', asyncHandler(async (req, res) => {
