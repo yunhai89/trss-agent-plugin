@@ -110,7 +110,8 @@ export class HumanizePlanner {
       // 记忆检索门控：只对有实质文本的目标查（对齐 MaiBot——寒暄/短反应/纯媒体不查，免得注入无关记忆+白调一次）
       const q = String(target?.text || '').trim()
       const worthRecall = q.length >= 4 && !/^\[.+\]$/.test(q) && !/^(?:6|666|哈哈|好的?|嗯|哦|确实|赞成|支持)$/.test(q)
-      if (this.getMemories && target && worthRecall) publicMemories = await this.getMemories(q, c.contextMessages ?? 30)
+      // 记忆作用域过滤（修 Planner 侧泄漏：旧人物印象曾可经 replyGuide 渗入——Replyer 修了 Planner 没修）
+      if (this.getMemories && target && worthRecall) publicMemories = await this.getMemories(q, { threadUserIds: groundingObj?.threadUserIds })
     } catch { /* noop */ }
 
     // GroupWorld 局部社会现场（online 时；失败/空 → 零影响，不阻断决策）
@@ -127,10 +128,15 @@ export class HumanizePlanner {
       }
     } catch { /* noop */ }
 
-    // 对话落地块（结构化归属+白名单+纠错约束）
+    // 对话落地块（结构化归属+白名单+纠错约束）；取对象形态拿 threadUserIds 供记忆作用域过滤
     let groundingBlock = ''
+    let groundingObj = null
     try {
-      if (this.getGrounding) groundingBlock = this.getGrounding(ctxMessages, { targetId: target?.id }) || ''
+      if (this.getGrounding) {
+        const gr = this.getGrounding(ctxMessages, { targetId: target?.id })
+        groundingObj = gr?.grounding || null
+        groundingBlock = gr?.block || String(gr || '')
+      }
     } catch { /* noop */ }
     // SelfState 状态投影（enabled+非 shadow 时注入；失败/中性 → 零影响）
     let selfState = ''

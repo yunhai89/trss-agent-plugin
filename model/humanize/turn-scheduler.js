@@ -111,12 +111,17 @@ export class TurnScheduler {
     const rawStrong = external.some((m) => m.atBot || m.quotesBot || m.mentionsBotName)
     // 强信号豁免限制（Thread Engagement 温和版）：①同一人连续强信号豁免 ≥3 次后不再绕过冷却/频率
     // （防对方每次引用→bot 无限续杯；正常斗嘴前 3 轮不受影响，换对象即重置）；②纠错后 2 分钟内不豁免
+    // streak 时间衰减：距上次强信号回复 >10 分钟视为新对话（否则正常聊过 3 次后永久失去豁免）
+    if ((rt._forcedAt || 0) && now - rt._forcedAt > 10 * 60 * 1000) { rt._forcedStreak = 0; rt._forcedUser = null }
     const strongExhausted = (rt._forcedStreak || 0) >= 3
     const postCorrection = (rt._postCorrectionUntil || 0) > now
     const hasStrongSignal = rawStrong && !strongExhausted && !postCorrection
-    if (rawStrong && (strongExhausted || postCorrection)) {
-      rt.trace?.record('strong_signal_exemption_limited', { streak: rt._forcedStreak || 0, postCorrection })
+    // 纠错退线程：postCorrection 期间新消息标记已观察（旧纠错消息不再被反复评估），本轮直接退出
+    if (postCorrection) { rt.markObserved(external); rt.setPhase('idle'); return }
+    if (rawStrong && strongExhausted) {
+      rt.trace?.record('strong_signal_exemption_limited', { streak: rt._forcedStreak || 0 })
     }
+    rt._turnStrong = rawStrong // 供发送侧 streak 计数（仅强信号轮次计入）
 
     // bot↔bot 闭环熔断（仅已知 bot 账号，config.humanize.knownBots；真人聊天不受影响）：
     // 与已知 bot 交替 ≥3 轮且无真人夹入 → 群级 10 分钟熔断；期间仅真人 @/直接提问可重新进入
@@ -194,6 +199,14 @@ export class TurnScheduler {
         ...decision, shouldPlan: true, forcedCandidate: false, isAmbient: true,
         positiveReasons: [...(decision.positiveReasons || []), 'ambient_chance'],
       }
+    }
+    // 豁免耗尽/纠错期同步降级决策（否则 scorer 的 forcedCandidate 仍会清空退避=无限续杯只是降速）
+    if (decision && (strongExhausted || postCorrection) && decision.forcedCandidate) {
+      decision.forcedCandidate = false
+      decision.bypassBackoff = false
+      decision.finalScore = Math.round((decision.finalScore || 0) * 0.5)
+      decision.shouldPlan = decision.finalScore >= decision.threshold
+      rt.trace?.record('forced_candidate_downgraded', { streak: rt._forcedStreak || 0, postCorrection })
     }
     const turnId = rt.trace?.newTurnId?.() || null
     rt.trace?.record('gate_decision', {
@@ -388,10 +401,13 @@ export class TurnScheduler {
       try { await rt.store.markSent(rt.groupId, action.targetMessageId) } catch { /* noop */ }
       rt.recordReply(result.sentIds[0])
       rt._waitStreak = 0 // 发言即退出观望连击
-      // 强信号豁免计数：连续对同一人回复（换对象即重置——限制的是追同一人，不是参与度）
+      // 强信号豁免计数（修正：只数强信号轮次——普通参与的回复不计入；换对象/非强信号轮即重置）
       const tu = String(target?.userId || '')
-      rt._forcedStreak = (rt._forcedUser === tu) ? (rt._forcedStreak || 0) + 1 : 1
-      rt._forcedUser = tu
+      if (rt._turnStrong) {
+        rt._forcedStreak = (rt._forcedUser === tu) ? (rt._forcedStreak || 0) + 1 : 1
+        rt._forcedUser = tu
+        rt._forcedAt = Date.now()
+      } else { rt._forcedStreak = 0; rt._forcedUser = null }
       this._appendSelf(text, result.sentIds[0]) // 自身发言入 buffer（解锁 presence/引用/追问信号）
       this._notifyDelivered(target, { sentText: text, replyGuide: action.replyGuide || '', sourceMessageId: result.sentIds[0] }) // GW 主观关系 + SS 出站期待
       rt.enterCooldown(c.cooldownSeconds ?? 45)

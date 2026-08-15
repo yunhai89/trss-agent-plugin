@@ -207,12 +207,13 @@ async function buildHumanize() {
   const makePlanner = (gid) => new H.HumanizePlanner({
     provider: rt.provider, cfg: cfgFn, readTools,
     // 独立记忆库检索（替换原 rt.recall 适配——伪人记忆与主 Agent 记忆彻底分离）
-    getMemories: async (q) => {
+    getMemories: async (q, o = {}) => {
       try {
         if (cfgFn().memory?.enabled === false) return ''
-        // 梗词典全量常驻（背景知识不按相关性查）+ 相关记忆 topK
+        // 梗词典全量常驻（背景知识不按相关性查）+ 相关记忆 topK（作用域过滤：印象只允许本轮活跃人物，
+        // 修 Planner 侧泄漏——旧人物印象曾可经 replyGuide 渗入最终回复）
         const dict = await hmem.jargonDict(gid)
-        const rel = await hmem.recallText({ groupId: gid, query: String(q || '').slice(0, 200), topK: cfgFn().memory?.maxPerQuery ?? 5 })
+        const rel = await hmem.recallText({ groupId: gid, query: String(q || '').slice(0, 200), topK: cfgFn().memory?.maxPerQuery ?? 5, allowedUserIds: o?.threadUserIds })
         return [dict, rel].filter(Boolean).join('\n')
       } catch (e) { Log.debug('[humanize] 记忆检索降级:', e?.message || e); return '' }
     },

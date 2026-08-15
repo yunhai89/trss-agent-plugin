@@ -228,7 +228,7 @@ export function highlightTarget(message) {
   if (message.quotesBot) rels.push('引用了我的消息')
   if (message.mentionsBotName) rels.push('提及了我')
   const relTag = rels.length ? `（${rels.join('，')}）` : ''
-  return `【候选目标 ${message.id}】${message.displayName || ''}${relTag}：“${String(message.text || '').slice(0, 120)}”\n（你这次要回复的就是这条消息；不要把你自己的历史发言当成别人的发言；若这条消息回复的是第三人的消息，你在回应的是发送者本人）`
+  return `【候选目标 ${message.id}】${message.displayName || ''}${relTag}：“${String(message.text || '').slice(0, 120)}”\n（你这次要回复的就是这条消息；不要把你自己的历史发言当成别人的发言。若这条消息回复的是第三人的消息：回复的对象是发送者本人，但谈论的内容对象是被回复的那位——别把两者混淆成同一个人）`
 }
 
 /**
