@@ -106,6 +106,37 @@ await test('Planner：只读工具回灌后继续，最终 reply', async () => {
   ok(action.type === 'human_reply', '第二轮返回 reply')
 })
 
+await test('P0：Planner 先解析 grounding，再按 threadUserIds 检索并注入记忆', async () => {
+  const { runtime } = mkCtx()
+  let memoryScope = null
+  let sentSystem = ''
+  const provider = {
+    chat: async ({ system }) => {
+      sentSystem = system
+      return { content: '', toolCalls: [], finishReason: 'stop', usage: null }
+    },
+  }
+  const planner = new HumanizePlanner({
+    provider,
+    cfg: () => ({ planner: { maxRounds: 1 } }),
+    getGrounding: () => ({
+      grounding: { threadUserIds: ['u1', 'u2'] },
+      block: 'GROUNDING_SCOPE_MARK',
+    }),
+    getMemories: async (_query, opts) => {
+      memoryScope = opts?.threadUserIds
+      return 'MEMORY_SCOPE_MARK'
+    },
+  })
+  const target = mkMsg('这个权限问题应该怎么处理', { id: 'scope_target', userId: 'u1' })
+  await planner.decide({
+    snapshot: [target], decision: { targetMessage: target, finalScore: 90, threshold: 80 },
+    runtime, cfg: { planner: { maxRounds: 1 } },
+  })
+  ok(JSON.stringify(memoryScope) === JSON.stringify(['u1', 'u2']), '记忆检索收到 grounding.threadUserIds')
+  ok(sentSystem.includes('GROUNDING_SCOPE_MARK') && sentSystem.includes('MEMORY_SCOPE_MARK'), 'Planner system 同时注入归属块与作用域内记忆')
+})
+
 // ───────── 代取消 ─────────
 await test('GroupRuntime：单代 token，旧代结果丢弃', async () => {
   const { runtime } = mkCtx()
@@ -117,6 +148,19 @@ await test('GroupRuntime：单代 token，旧代结果丢弃', async () => {
   ok(runtime.isCurrent(gen2) === true, 'gen2 当前')
   runtime.abortPlanning('new_message')
   ok(runtime.signal?.aborted === true, 'signal 已中止')
+})
+
+await test('GroupRuntime：强信号与纠错状态均按用户隔离并会过期', async () => {
+  const { runtime } = mkCtx()
+  const t = 1_000_000
+  runtime.recordStrongReply('u1', t)
+  runtime.recordStrongReply('u1', t + 1)
+  ok(runtime.strongReplyCount('u1', t + 2) === 2 && runtime.strongReplyCount('u2', t + 2) === 0, '强信号次数不跨用户')
+  ok(runtime.strongReplyCount('u1', t + 10 * 60 * 1000 + 2) === 0, '10 分钟后强信号次数自动过期')
+  runtime.markReferenceCorrection('u1', 'fix_once', t + 1000)
+  ok(runtime.referenceCorrectionFor('u1', t + 1)?.allowMessageId === 'fix_once', '纠错消息保留一次处理许可')
+  ok(runtime.referenceCorrectionFor('u2', t + 1) === null, '纠错暂停不跨用户')
+  ok(runtime.referenceCorrectionFor('u1', t + 1001) === null, '纠错暂停到期自动清理')
 })
 
 // ───────── shadow 端到端 ─────────
@@ -145,10 +189,85 @@ await test('shadow 端到端：消息→门控→reply→只 trace 不实发', a
   ok(events.some((e) => e.event === 'shadow_reply'), '记录了 shadow_reply')
   ok(runtime.cooldownUntil > Date.now(), '已进入冷却')
   ok(runtime.backoff.count === 0, 'reply 成功 → backoff 清零')
+  ok(runtime.strongReplyCount('u1') === 1, 'shadow 成功回复也计入该用户的强信号轮次')
+})
+
+await test('强信号限制按用户隔离：甲耗尽不影响乙，评分目标落到乙', async () => {
+  const { runtime } = mkCtx()
+  const cfg = () => validateHumanizeConfig({
+    enable: true, groups: ['g1'], shadow: true, threshold: 80, talkValue: 0.35,
+    debounceMs: 200, cooldownSeconds: 1,
+  }).config
+  const t = Date.now()
+  runtime.recordStrongReply('u1', t)
+  runtime.recordStrongReply('u1', t + 1)
+  runtime.recordStrongReply('u1', t + 2)
+  runtime.cooldownUntil = Date.now() + 1000
+  let plannerTarget = null
+  const planner = {
+    decide: async ({ decision }) => {
+      plannerTarget = decision.targetMessage?.id || null
+      return { type: 'human_ignore', reason: 'test' }
+    },
+  }
+  const sched = new TurnScheduler({
+    runtime, cfg, planner,
+    replyer: { generate: async () => ({ text: '' }) },
+    composer: { deliver: async () => ({ sentIds: [] }) }, send: async () => null,
+  })
+  await sched.onMessage(mkMsg('小猫你能不能帮我看看怎么做？', { userId: 'u1', mentionsBotName: true, id: 'u1_limited' }))
+  await sched.onMessage(mkMsg('小猫你能不能帮我看看怎么做？', { userId: 'u2', displayName: '乙', mentionsBotName: true, id: 'u2_fresh' }))
+  runtime.cancelDebounce()
+  await sched._onDebounced(runtime)
+  ok(plannerTarget === 'u2_fresh', '甲的 3 次配额只移除甲的强信号，乙仍可绕过冷却并成为目标')
+  ok(runtime.strongReplyCount('u2') === 0, 'Planner ignore 不误计乙的强信号回复')
+})
+
+await test('强信号耗尽后硬失去豁免，冷却跳过会推进游标避免旧消息复活', async () => {
+  const { runtime } = mkCtx()
+  const cfg = () => validateHumanizeConfig({
+    enable: true, groups: ['g1'], shadow: true, threshold: 20, talkValue: 1,
+    debounceMs: 200, cooldownSeconds: 60,
+  }).config
+  const t = Date.now()
+  for (let i = 0; i < 3; i++) runtime.recordStrongReply('u1', t + i)
+  runtime.cooldownUntil = Date.now() + 60_000
+  let plannerCalled = false
+  const sched = new TurnScheduler({
+    runtime, cfg, planner: { decide: async () => { plannerCalled = true; return { type: 'human_ignore' } } },
+    replyer: { generate: async () => ({ text: '' }) },
+    composer: { deliver: async () => ({ sentIds: [] }) }, send: async () => null,
+  })
+  await sched.onMessage(mkMsg('小猫你觉得呢？', { userId: 'u1', mentionsBotName: true, id: 'u1_fourth' }))
+  runtime.cancelDebounce()
+  await sched._onDebounced(runtime)
+  ok(plannerCalled === false, '即使阈值较低，第 4 次也不能保留强信号冷却豁免')
+  ok(runtime.lastProcessedSeq === runtime.buffer.lastSeq, '被冷却跳过的消息已观察，不会在下一条消息时复活')
+})
+
+await test('纠错退场按发送者隔离：拦甲后续但仍处理同批乙消息', async () => {
+  const { runtime } = mkCtx()
+  const cfg = () => validateHumanizeConfig({
+    enable: true, groups: ['g1'], shadow: true, threshold: 80, talkValue: 0.35, debounceMs: 200,
+  }).config
+  runtime.markReferenceCorrection('u1', 'correction_once', Date.now() + 120_000)
+  let plannerTarget = null
+  const sched = new TurnScheduler({
+    runtime, cfg,
+    planner: { decide: async ({ decision }) => { plannerTarget = decision.targetMessage?.id; return { type: 'human_ignore', reason: 'test' } } },
+    replyer: { generate: async () => ({ text: '' }) },
+    composer: { deliver: async () => ({ sentIds: [] }) }, send: async () => null,
+  })
+  await sched.onMessage(mkMsg('你怎么还在说', { userId: 'u1', quotesBot: true, id: 'u1_after_correction' }))
+  await sched.onMessage(mkMsg('小猫你觉得呢？', { userId: 'u2', displayName: '乙', mentionsBotName: true, id: 'u2_after_correction' }))
+  runtime.cancelDebounce()
+  await sched._onDebounced(runtime)
+  ok(plannerTarget === 'u2_after_correction', '只过滤纠错者甲，乙仍进入 Planner')
+  ok(runtime.lastProcessedSeq === runtime.buffer.lastSeq, '混合批次整体推进游标')
 })
 
 await test('端到端：shadow=false 时真实发送 + markSent + 记录回复', async () => {
-  const { runtime, trace, store } = mkCtx()
+  const { runtime, store } = mkCtx()
   const cfg = () => validateHumanizeConfig({
     enable: true, groups: ['g1'], shadow: false, threshold: 80, talkValue: 0.35,
     debounceMs: 200, cooldownSeconds: 1, planner: { maxRounds: 2 }, replyer: { maxChars: 200 },

@@ -1,4 +1,4 @@
-import { resolveGrounding, formatGroundingBlock, whitelistViolations, windowNames } from '/root/trss-agent-plugin/model/humanize/grounding.js'
+import { resolveGrounding, formatGroundingBlock, whitelistViolations, windowNames } from '../model/humanize/grounding.js'
 let p = 0, f = 0
 const ok = (c, m) => { c ? (p++, console.log(' ✓', m)) : (f++, console.error(' ✗', m)) }
 const mk = (id, uid, name, text, extra = {}) => ({ id, userId: uid, displayName: name, timestamp: Date.now(), text, segments: [{ type: 'text', text }], replyToId: null, atBot: false, mentionsBotName: false, quotesBot: false, isSelf: false, ...extra })

@@ -35,7 +35,9 @@ export function resolveGrounding(messages = [], { knownBots = new Set(), targetM
     if (n.length >= 2 && n !== '我' && String(m.userId) !== String(target.userId) && !memberNames.includes(n)) memberNames.push(n)
   }
   // 被回复者
-  const replySrc = target.replyToId ? byId.get(String(target.replyToId)) || null : null
+  const replySrc = target.replyToId
+    ? byId.get(String(target.replyToId)) || target.replySource || null
+    : null
   const quoted = replySrc ? { id: replySrc.id, userId: replySrc.userId, name: replySrc.isSelf ? '我' : String(replySrc.displayName || replySrc.userId), text: String(replySrc.text || '').replace(/\s+/g, ' ').slice(0, 32) } : null
   // 显式 @
   const mentions = (target.segments || []).filter((s) => s?.type === 'at' && s.qq != null).map((s) => ({ id: String(s.qq), name: nameOf(s.qq) || String(s.qq) }))

@@ -21,6 +21,9 @@ import { evaluate } from './necessity-scorer.js'
 import Log, { ANSI } from '../../utils/Log.js'
 import { topicMatchScore, hitsAvoidTopic } from './behavior-policy.js'
 
+const STRONG_EXEMPTION_LIMIT = 3
+const isStrongSignal = (m) => !!(m && (m.atBot || m.quotesBot || m.mentionsBotName))
+
 export class TurnScheduler {
   /**
    * @param {object} opts { runtime, cfg:()=>object, planner, replyer, composer, send, now? }
@@ -108,20 +111,56 @@ export class TurnScheduler {
     if (!external.length) {  return }
 
     const now = Date.now()
-    const rawStrong = external.some((m) => m.atBot || m.quotesBot || m.mentionsBotName)
-    // 强信号豁免限制（Thread Engagement 温和版）：①同一人连续强信号豁免 ≥3 次后不再绕过冷却/频率
-    // （防对方每次引用→bot 无限续杯；正常斗嘴前 3 轮不受影响，换对象即重置）；②纠错后 2 分钟内不豁免
-    // streak 时间衰减：距上次强信号回复 >10 分钟视为新对话（否则正常聊过 3 次后永久失去豁免）
-    if ((rt._forcedAt || 0) && now - rt._forcedAt > 10 * 60 * 1000) { rt._forcedStreak = 0; rt._forcedUser = null }
-    const strongExhausted = (rt._forcedStreak || 0) >= 3
-    const postCorrection = (rt._postCorrectionUntil || 0) > now
-    const hasStrongSignal = rawStrong && !strongExhausted && !postCorrection
-    // 纠错退线程：postCorrection 期间新消息标记已观察（旧纠错消息不再被反复评估），本轮直接退出
-    if (postCorrection) { rt.markObserved(external); rt.setPhase('idle'); return }
-    if (rawStrong && strongExhausted) {
-      rt.trace?.record('strong_signal_exemption_limited', { streak: rt._forcedStreak || 0 })
+
+    // 纠错退线程按用户隔离：当前纠错消息允许处理一次；其后两分钟只忽略同一发送者。
+    // 混合批次仍可回复其他人，不能因为甲纠正了一次就把乙也一起静音。
+    const blocked = []
+    const candidates = []
+    for (const m of external) {
+      const correction = rt.referenceCorrectionFor?.(m.userId, now)
+      if (correction && String(correction.allowMessageId || '') !== String(m.id)) blocked.push(m)
+      else candidates.push(m)
     }
-    rt._turnStrong = rawStrong // 供发送侧 streak 计数（仅强信号轮次计入）
+    if (blocked.length) {
+      const blockedIds = new Set(blocked.map((m) => String(m.id)))
+      ctxWindow = ctxWindow.filter((m) => !blockedIds.has(String(m.id)))
+      rt.trace?.record('post_correction_user_suppressed', {
+        users: [...new Set(blocked.map((m) => String(m.userId)))], count: blocked.length,
+      })
+    }
+    if (!candidates.length) {
+      rt.markObserved(external)
+      rt.setPhase('idle')
+      return
+    }
+
+    // 同一用户近 10 分钟已获 3 次强信号豁免后，彻底移除该用户本条消息的强信号标记，
+    // 再按普通消息重新评分；不是把总分打五折（低阈值下五折仍会错误保留 forcedCandidate）。
+    const limitedIds = new Set()
+    const limitedUsers = new Set()
+    for (const m of candidates) {
+      const correction = rt.referenceCorrectionFor?.(m.userId, now)
+      const isCurrentCorrection = correction && String(correction.allowMessageId || '') === String(m.id)
+      if (!isCurrentCorrection && isStrongSignal(m) && (rt.strongReplyCount?.(m.userId, now) || 0) >= STRONG_EXEMPTION_LIMIT) {
+        limitedIds.add(String(m.id))
+        limitedUsers.add(String(m.userId))
+      }
+    }
+    const scoreCopies = new Map()
+    const forScoring = (m) => {
+      const key = String(m?.id || '')
+      if (!limitedIds.has(key)) return m
+      if (!scoreCopies.has(key)) scoreCopies.set(key, { ...m, atBot: false, quotesBot: false, mentionsBotName: false })
+      return scoreCopies.get(key)
+    }
+    const scoringWindow = ctxWindow.map(forScoring)
+    const scoringCandidates = candidates.map(forScoring)
+    const hasStrongSignal = candidates.some((m) => isStrongSignal(m) && !limitedIds.has(String(m.id)))
+    if (limitedUsers.size) {
+      rt.trace?.record('strong_signal_exemption_limited', {
+        users: [...limitedUsers], limit: STRONG_EXEMPTION_LIMIT,
+      })
+    }
 
     // bot↔bot 闭环熔断（仅已知 bot 账号，config.humanize.knownBots；真人聊天不受影响）：
     // 与已知 bot 交替 ≥3 轮且无真人夹入 → 群级 10 分钟熔断；期间仅真人 @/直接提问可重新进入
@@ -134,21 +173,22 @@ export class TurnScheduler {
         if (m.isSelf || knownBots.has(String(m.userId))) chain++
         else break // 真人夹入即断
       }
-      const humanNew = external.some((m) => !knownBots.has(String(m.userId)))
+      const humanNew = candidates.some((m) => !knownBots.has(String(m.userId)))
       if (chain >= 3 && !humanNew) {
         rt.botLoopUntil = now + 10 * 60 * 1000
         rt.trace?.record('grounding_botloop_break', { chain, groupId: rt.groupId })
         Log.mark('[humanize] bot↔bot 熔断', `群${rt.groupId} 连续${chain}节无真人，冷却10分钟`)
       }
-      if (rt.botLoopUntil > now && !external.some((m) => m.atBot)) {
-        const humanQuestion = humanNew && external.some((m) => /[?？]|怎么|如何|为什么|什么/.test(String(m.text || '')))
-        if (!humanQuestion) { rt.setPhase('idle'); return }
+      if (rt.botLoopUntil > now && !candidates.some((m) => m.atBot)) {
+        const humanQuestion = humanNew && candidates.some((m) => /[?？]|怎么|如何|为什么|什么/.test(String(m.text || '')))
+        if (!humanQuestion) { rt.markObserved(external); rt.setPhase('idle'); return }
       }
     }
 
     // 硬冷却：强信号绕过
     if (rt.isCoolingDown(now) && !hasStrongSignal) {
       Log.info('[humanize] debounce 跳过：冷却中 剩余' + Math.ceil((rt.cooldownUntil - now) / 1000) + 's')
+      rt.markObserved(external)
       rt.setPhase('cooldown'); return
     }
 
@@ -156,6 +196,7 @@ export class TurnScheduler {
     const maxRate = c.behaviorPolicy?.maxRepliesPer10Minutes ?? rt.maxRepliesPer10Minutes
     if (maxRate > 0 && rt.replyCountIn(10 * 60 * 1000, now) >= maxRate && !hasStrongSignal) {
       Log.info('[humanize] debounce 跳过：频率上限 ' + rt.replyCountIn(10 * 60 * 1000, now) + '/' + maxRate)
+      rt.markObserved(external)
       rt.setPhase('idle'); return
     }
 
@@ -163,7 +204,7 @@ export class TurnScheduler {
     // presence + 评分
     const presence = rt.buffer.presenceStats((c.presenceWindowSeconds ?? 300) * 1000)
     const policy = c.behaviorPolicy || {}
-    const topicText = (external[external.length - 1] || {}).text || ''
+    const topicText = (candidates[candidates.length - 1] || {}).text || ''
     const topicBonus = topicMatchScore(topicText, policy.topics)
     // avoidTopics 回避主题：命中则给负分（避免在不该参与的话题上插话）
     const avoidHit = Array.isArray(policy.avoidTopics) && policy.avoidTopics.length > 0 && hitsAvoidTopic(topicText, policy.avoidTopics)
@@ -171,9 +212,9 @@ export class TurnScheduler {
 
     try {
       decision = evaluate({
-      messages: ctxWindow,          // 完整 rolling window（含 self）→ isFollowupToBot(+55) 可触发
-      candidates: external,         // 目标只从本批新消息里选
-      pendingCount: external.length, // 压力分按本批条数，不按窗口长度（避免恒满）
+      messages: scoringWindow,          // 完整 rolling window（含 self）→ isFollowupToBot(+55) 可触发
+      candidates: scoringCandidates,    // 目标只从本批可处理的新消息里选
+      pendingCount: candidates.length,  // 压力分按可处理批次条数，不按窗口长度（避免恒满）
       presence, now,
       cfg: {
         threshold: c.threshold ?? 80,
@@ -200,22 +241,14 @@ export class TurnScheduler {
         positiveReasons: [...(decision.positiveReasons || []), 'ambient_chance'],
       }
     }
-    // 豁免耗尽/纠错期同步降级决策（否则 scorer 的 forcedCandidate 仍会清空退避=无限续杯只是降速）
-    if (decision && (strongExhausted || postCorrection) && decision.forcedCandidate) {
-      decision.forcedCandidate = false
-      decision.bypassBackoff = false
-      decision.finalScore = Math.round((decision.finalScore || 0) * 0.5)
-      decision.shouldPlan = decision.finalScore >= decision.threshold
-      rt.trace?.record('forced_candidate_downgraded', { streak: rt._forcedStreak || 0, postCorrection })
-    }
     const turnId = rt.trace?.newTurnId?.() || null
     rt.trace?.record('gate_decision', {
-      turnId, batchSize: external.length, finalScore: decision.finalScore,
+      turnId, batchSize: candidates.length, finalScore: decision.finalScore,
       threshold: decision.threshold, shouldPlan: decision.shouldPlan,
       forcedCandidate: decision.forcedCandidate, reasons: { positive: decision.positiveReasons, negative: decision.negativeReasons },
       targetMessageId: decision.targetMessage?.id || null,
     })
-    Log.mark('[humanize] 门控', `群${rt.groupId} 批${external.length}条 分${decision.finalScore}/${decision.threshold}`, `+${(decision.positiveReasons || []).join('/') || '0'}`, `-${(decision.negativeReasons || []).join('/') || '0'}`, decision.shouldPlan ? `${ANSI.c}→ 进Planner${ANSI.R}` : `${ANSI.gry}→ 跳过(沉默)${ANSI.R}`)
+    Log.mark('[humanize] 门控', `群${rt.groupId} 批${candidates.length}条 分${decision.finalScore}/${decision.threshold}`, `+${(decision.positiveReasons || []).join('/') || '0'}`, `-${(decision.negativeReasons || []).join('/') || '0'}`, decision.shouldPlan ? `${ANSI.c}→ 进Planner${ANSI.R}` : `${ANSI.gry}→ 跳过(沉默)${ANSI.R}`)
 
     if (!decision.shouldPlan) {
       rt.markObserved(external) // 推进游标，避免重复评估
@@ -224,7 +257,7 @@ export class TurnScheduler {
     }
 
     // idle backoff（规划触发后、连续无动作时；强信号/批量绕过）
-    if (rt.backoff.shouldDelay({ pendingCount: external.length, forcedCandidate: decision.forcedCandidate, isGroup: true, now })) {
+    if (rt.backoff.shouldDelay({ pendingCount: candidates.length, forcedCandidate: decision.forcedCandidate, isGroup: true, now })) {
       rt.trace?.record('backoff_delay', { remaining: rt.backoff.remainingSec(now), count: rt.backoff.count })
       rt.markObserved(external)
       rt.setPhase('idle')
@@ -242,7 +275,7 @@ export class TurnScheduler {
     }
 
     const gen = rt.beginPlanning(batchId)
-    rt.trace?.record('planner_start', { turnId, gen, batchId, batchSize: external.length, targetMessageId: decision.targetMessage?.id || null })
+    rt.trace?.record('planner_start', { turnId, gen, batchId, batchSize: candidates.length, targetMessageId: decision.targetMessage?.id || null })
     try {
       const action = await this.planner.decide({
         snapshot: ctxWindow, decision, signal: rt.signal, runtime: rt, cfg: c,
@@ -286,6 +319,11 @@ export class TurnScheduler {
         atBot: false, mentionsBotName: false, quotesBot: false, replyToId: null,
       })
     } catch { /* noop */ }
+  }
+
+  /** 成功处理强信号后按目标用户计数；shadow 与真实发送走同一路径。 */
+  _recordStrongReply(target, now = Date.now()) {
+    if (isStrongSignal(target)) this.runtime.recordStrongReply?.(target.userId, now)
   }
 
   async _applyAction(action, batch, decision, gen, turnId) {
@@ -377,6 +415,7 @@ export class TurnScheduler {
       try { await rt.store.markSent(rt.groupId, action.targetMessageId) } catch { /* noop */ }
       rt.enterCooldown(c.cooldownSeconds ?? 45)
       rt.recordReply(null)
+      this._recordStrongReply(target)
       this._appendSelf(text, null) // shadow 也计入自身在场（presence/上下文）
       this._notifyDelivered(target) // 写回 GroupWorld 主观关系（online 时；失败忽略）
       rt.backoff.recordSuccess()
@@ -401,13 +440,7 @@ export class TurnScheduler {
       try { await rt.store.markSent(rt.groupId, action.targetMessageId) } catch { /* noop */ }
       rt.recordReply(result.sentIds[0])
       rt._waitStreak = 0 // 发言即退出观望连击
-      // 强信号豁免计数（修正：只数强信号轮次——普通参与的回复不计入；换对象/非强信号轮即重置）
-      const tu = String(target?.userId || '')
-      if (rt._turnStrong) {
-        rt._forcedStreak = (rt._forcedUser === tu) ? (rt._forcedStreak || 0) + 1 : 1
-        rt._forcedUser = tu
-        rt._forcedAt = Date.now()
-      } else { rt._forcedStreak = 0; rt._forcedUser = null }
+      this._recordStrongReply(target)
       this._appendSelf(text, result.sentIds[0]) // 自身发言入 buffer（解锁 presence/引用/追问信号）
       this._notifyDelivered(target, { sentText: text, replyGuide: action.replyGuide || '', sourceMessageId: result.sentIds[0] }) // GW 主观关系 + SS 出站期待
       rt.enterCooldown(c.cooldownSeconds ?? 45)
