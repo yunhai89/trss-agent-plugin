@@ -190,7 +190,10 @@ export class HumanizeMemoryStore {
           const importance = clamp01(c.importance ?? 0.5)
           // 去重合并：同群同 kind 同对象 且内容相似 ≥0.6 → 合并（保留更长内容、关键词并集；
           // 重要性 +0.05 每批每行至多一次——同批近重复候选不得反复加权）
-          const dup = existing.find((e) => e.kind === kind && (e.user_id || null) === userId && textSim(content, String(e.content || '')) >= 0.6)
+          // 去重合并：常规 ≥0.6；**已被反复使用的高热行放宽到 0.30**（校准值：同事件换皮变体
+          // 词面相似实测 0.30~0.32）——"压图马赛克"式的多行变体各自逃过使用冷却，必须并回同一行统一受冷却。
+          const dup = existing.find((e) => e.kind === kind && (e.user_id || null) === userId
+            && (textSim(content, String(e.content || '')) >= 0.6 || ((Number(e.hit_count) || 0) >= 5 && textSim(content, String(e.content || '')) >= 0.30)))
           if (dup) {
             const oldKws = (() => { try { return JSON.parse(dup.keywords || '[]') } catch { return [] } })()
             const unionKws = [...new Set([...kws, ...oldKws])].slice(0, 8)
@@ -260,10 +263,26 @@ export class HumanizeMemoryStore {
       }
     }
     let scored = []
+    // 话题硬门 + 使用冷却（防「昨天聊过的梗今天凭弱共词回流」——压图/马赛克式自我强化的根治）：
+    //  ① 话题性记忆（event/jargon/style）必须有真实话题相关，不是"分数够就进"：
+    //     embedding 路径余弦 ≥ topicGateEmb(0.50)、词面路径 ≥ topicGateLex(0.20)。
+    //     doubao 等中文 embedding 基线余弦偏高，「模型/图」类 query 对旧梗轻松 0.3~0.5，
+    //     旧 0.05 地板形同虚设（bug-patterns：重要性/新近度不能替代话题相关）。
+    //  ② 使用冷却：真实发送用过的记忆 72h 内不再主动注入；用户**明确再提**（强相似：
+    //     余弦 ≥0.65 / 词面 ≥0.40）才绕过——「主动引用预算」的硬实现。
+    //  ③ hit 轻惩罚：用得越多的梗略降权（盘包浆防护）；impression 免话题门（对人的合法联想）
+    //     但同样受使用冷却约束。
+    const mc = this.cfg().memory || {}
+    const topicGateEmb = Number.isFinite(Number(mc.topicGateEmb)) ? Number(mc.topicGateEmb) : 0.5
+    const topicGateLex = Number.isFinite(Number(mc.topicGateLex)) ? Number(mc.topicGateLex) : 0.2
+    const strongEmb = Number.isFinite(Number(mc.strongRecallEmb)) ? Number(mc.strongRecallEmb) : 0.65
+    const strongLex = Number.isFinite(Number(mc.strongRecallLex)) ? Number(mc.strongRecallLex) : 0.35
+    const useCooldownMs = (Number.isFinite(Number(mc.useCooldownHours)) ? Number(mc.useCooldownHours) : 72) * 3600e3
+    const usedEmb = qEmb != null
     for (const r of rows) {
       if (Array.isArray(kinds) && kinds.length && !kinds.includes(r.kind)) continue
       // 作用域白名单（MaiBot _is_hit_allowed 同款）：印象类记忆只允许本轮活跃人物命中，
-      // 防旧对话人物（两小时前的"云海"）凭语义相似混入当前对话
+      // 防旧对话人物（两小时前的"云云"）凭语义相似混入当前对话
       const allowSet = Array.isArray(allowedUserIds) ? allowedUserIds : allowedUsers
       if (Array.isArray(allowSet) && r.kind === 'impression' && r.user_id && !allowSet.map(String).includes(String(r.user_id))) continue
       let kws = []; try { kws = JSON.parse(r.keywords || '[]') } catch { /* noop */ }
@@ -278,10 +297,25 @@ export class HumanizeMemoryStore {
           sim = textSim(query, `${r.content} ${kws.join(' ')}`)
         }
       }
-      if (query && sim <= 0.05) continue // 地板保持 0.05（提到 0.22 会饿死中文短查询合法召回：权限摆脸上≈0.077）
+      if (query && sim <= 0.05 && !(r.kind !== 'impression' && kws.some((k) => k.length >= 2 && query.includes(k)))) continue // 基础地板（明确命中关键词除外）
+      // ① 话题硬门：话题性记忆必须过门槛（词面/余弦按实际路径取对应门），
+      //    或当前消息明确命中该条 ≥2 字关键词（提到「压图」本身就是话题相关）
+      const topicKind = r.kind !== 'impression'
+      const kwHit = kws.some((k) => k.length >= 2 && query.includes(k))
+      if (query && topicKind) {
+        const gate = usedEmb ? topicGateEmb : topicGateLex
+        if (sim < gate && !kwHit) continue
+      }
+      // ② 使用冷却：最近真实使用过 → 只有用户明确再提才放行（强相似或关键词命中）
+      const lastUsed = Number(r.last_used_at) || 0
+      if (query && lastUsed && now - lastUsed < useCooldownMs) {
+        const strong = usedEmb ? sim >= strongEmb : (sim >= strongLex || kwHit)
+        if (!strong) continue
+      }
       const targetBoost = (userId && r.user_id && String(r.user_id) === String(userId)) ? 0.25 : 0
       const recency = Math.max(0, 1 - (now - Number(r.updated_at || r.created_at)) / (30 * 86400e3)) * 0.15
-      const score = sim * 0.6 + (Number(r.importance) || 0) * 0.2 + recency + targetBoost
+      const hitPenalty = Math.min(0.15, (Number(r.hit_count) || 0) * 0.01)
+      const score = sim * 0.6 + (Number(r.importance) || 0) * 0.2 + recency + targetBoost - hitPenalty
       if (score < 0.12) continue
       scored.push({ r, score })
     }

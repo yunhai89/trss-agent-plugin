@@ -661,6 +661,67 @@ await test('cooldownSeconds=0 显式配置 → 不进入冷却', async () => {
   ok(runtime.isCoolingDown() === true, '正数仍正常冷却')
 })
 
+// ───────── 旧事回流根治：话题硬门 + 使用冷却 + 高热变体合并（压图/马赛克式自我强化） ─────────
+await test('记忆回流：弱共词过不了话题门，明确相关才召回', async () => {
+  const dir = path.join(os.tmpdir(), `hm-backflow-${process.pid}`)
+  fs.rmSync(dir, { recursive: true, force: true })
+  const store = new HumanizeMemoryStore({
+    dataDir: dir,
+    provider: { chat: async () => ({ content: JSON.stringify({ memories: [{ kind: 'event', content: '昨天把图压成了马赛克，大家笑死', keywords: ['压图'], importance: 0.6 }], suspected_jargon: [] }) }) },
+    cfg: () => ({ memory: { enabled: true, minConsolidateMessages: 2 } }),
+  })
+  await store.consolidate({ groupId: 'gbf', messages: [{ seq: 1, timestamp: Date.now() - 1000, text: 'a', isSelf: false }, { seq: 2, timestamp: Date.now(), text: 'b', isSelf: false }] })
+  // 弱共词（sim≈0.11，旧实现 0.05 地板放行 → 得分≈0.35 注入）：话题门拦截
+  const weak = await store.recall({ groupId: 'gbf', query: '那个马赛克图还有吗', topK: 5 })
+  ok(weak.length === 0, `弱共词被话题门拦下（实际召回 ${weak.length} 条；sim≈0.11 < 0.20）`)
+  // 明确相关（sim≈0.27 ≥ 0.20）：正常召回
+  const rel = await store.recall({ groupId: 'gbf', query: '图压成马赛克那事', topK: 5 })
+  ok(rel.length === 1, `明确相关仍可召回（实际 ${rel.length} 条）`)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('记忆回流：真实使用后 72h 冷却，用户明确再提才绕过', async () => {
+  const dir = path.join(os.tmpdir(), `hm-cool-${process.pid}`)
+  fs.rmSync(dir, { recursive: true, force: true })
+  const store = new HumanizeMemoryStore({
+    dataDir: dir,
+    provider: { chat: async () => ({ content: JSON.stringify({ memories: [{ kind: 'event', content: '昨天把图压成了马赛克，大家笑死', keywords: ['压图'], importance: 0.6 }], suspected_jargon: [] }) }) },
+    cfg: () => ({ memory: { enabled: true, minConsolidateMessages: 2 } }),
+  })
+  await store.consolidate({ groupId: 'gc', messages: [{ seq: 1, timestamp: Date.now() - 1000, text: 'a', isSelf: false }, { seq: 2, timestamp: Date.now(), text: 'b', isSelf: false }] })
+  const rows = await store.recall({ groupId: 'gc', query: '图压成马赛克那事', topK: 5 })
+  ok(rows.length === 1, '冷却前可召回（sim≈0.27 过话题门）')
+  await store.markUsed('gc', rows.map((r) => r.id)) // 真实发送登记使用
+  // 中等相关（sim 0.20~0.35、未命中关键词「压图」）→ 冷却期内不再主动注入
+  const mid = await store.recall({ groupId: 'gc', query: '图压成马赛克那事', topK: 5 })
+  ok(mid.length === 0, `冷却中不重复注入（实际 ${mid.length}）`)
+  // 用户明确再提（query 含关键词「压图」）→ 同时过话题门与冷却旁路
+  const strong = await store.recall({ groupId: 'gc', query: '上次压图那件事怎么样了', topK: 5 })
+  ok(strong.length === 1, `明确再提绕过冷却（实际 ${strong.length}）`)
+  // 冷却到期（手动把 last_used_at 挪到 73h 前）→ 恢复可召回
+  await store.dao.run('UPDATE hm_memories SET last_used_at=? WHERE group_id=?', [Date.now() - 73 * 3600e3, 'gc'])
+  const after = await store.recall({ groupId: 'gc', query: '图压成马赛克那事', topK: 5 })
+  ok(after.length === 1, '冷却到期恢复召回')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('记忆回流：高热行换皮变体并回同一行（不再四行各逃冷却）', async () => {
+  const dir = path.join(os.tmpdir(), `hm-merge-${process.pid}`)
+  fs.rmSync(dir, { recursive: true, force: true })
+  const store = new HumanizeMemoryStore({
+    dataDir: dir,
+    provider: { chat: async () => ({ content: JSON.stringify({ memories: [{ kind: 'event', content: '我又把图压成了马赛克被嫌弃', keywords: ['压图'], importance: 0.5 }], suspected_jargon: [] }) }) },
+    cfg: () => ({ memory: { enabled: true, minConsolidateMessages: 2 } }),
+  })
+  await store.init()
+  // 造高热旧行（hit_count=6、群级 user_id=NULL 与候选同域，同事件不同措辞，词面 sim≈0.32 < 常规 0.6）
+  await store.dao.run("INSERT INTO hm_memories(group_id,user_id,kind,content,keywords,importance,hit_count,last_used_at,created_at,updated_at) VALUES ('gm',NULL,'event','我把30张图极限压缩，压成了马赛克，被嫌弃说太多','[\"压图\"]',0.6,6,?,?,?)", [Date.now(), Date.now(), Date.now()])
+  await store.consolidate({ groupId: 'gm', messages: [{ seq: 1, timestamp: Date.now() - 1000, text: 'a', isSelf: false }, { seq: 2, timestamp: Date.now(), text: 'b', isSelf: false }] })
+  const rows = await store.dao.all("SELECT * FROM hm_memories WHERE group_id='gm' AND kind='event'")
+  ok(rows.length === 1, `高热行变体合并为同一行（实际 ${rows.length}；旧实现 0.6 阈值下会 +1 成两行各自逃冷却）`)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 // ───────── 总结 ─────────
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
