@@ -139,6 +139,8 @@ export class GroupWorldService {
         )
       }
     } catch (e) { Log.warn('[groupworld] recordInteraction 失败', e?.message || e) }
+    // 关系已变：失效该群检索缓存，下次注入读到新关系
+    try { this.contextBuilder?.invalidate?.(String(groupId)) } catch { /* noop */ }
   }
 
   _relDeltas(kind) {

@@ -101,7 +101,14 @@ export function requestTerminalApproval(info, ctx) {
     const bot = ctx?.bot || (typeof Bot !== 'undefined' && Bot) || null
     const cmd = String(info?.command || '').slice(0, 500)
     const text = `🖥️ 主机终端待审批 #${id}（${Math.round(timeoutMs / 1000)}s 超时自拒）：\n$ ${cmd}\n回复「#确认 ${id}」执行 /「#拒绝 ${id}」取消`
-    try { if (master) bot?.pickFriend?.(master)?.sendMsg?.(text) } catch { /* noop */ }
+    // 私聊通知 master：sendMsg 是异步的，异常要留痕（曾静默吞掉——通知失败时主人只能干等超时自拒，排障无线索）
+    try {
+      if (master) {
+        const p = bot?.pickFriend?.(master)
+        const r = p?.sendMsg?.(text)
+        if (r?.catch) r.catch((e) => Log.warn('[terminal] 审批私聊通知失败（主人可能收不到，只能等超时自拒）', e?.message || e))
+      }
+    } catch (e) { Log.warn('[terminal] 审批私聊通知构建失败', e?.message || e) }
     // 群里也提示一句（主人在群里操作时可见审批进度）
     try { if (ctx?.isGroup) ctx.e?.reply?.(`⏳ 主机命令待主人审批 #${id}…`) } catch { /* noop */ }
   })

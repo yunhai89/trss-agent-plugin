@@ -45,6 +45,7 @@ export function mcpResultToString({ content, isError } = {}) {
 export async function loadMcpTools(client, registry, { prefix, category = 'query', filter, logger } = {}) {
   if (!client || !registry) throw new Error('loadMcpTools 需要 client 与 registry')
   const { tools = [] } = await client.listTools()
+  let registered = 0
   for (const tool of tools) {
     if (typeof filter === 'function' && !filter(tool)) continue
     const origName = tool.name
@@ -62,6 +63,8 @@ export async function loadMcpTools(client, registry, { prefix, category = 'query
         return mcpResultToString(result)
       },
     })
+    registered++
   }
-  return tools.length
+  // 返回实际注册数（曾返回 tools.length——被 filter 拒掉的工具也计入，#mcp 状态面板数字偏大）
+  return registered
 }

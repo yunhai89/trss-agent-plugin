@@ -5,21 +5,22 @@
  *   draft     模型生成的原始候选
  *     → verified    静态(AST)+行为(沙箱测试/回放)验证全过
  *     → rejected    验证失败且不可修复 / 危险一票否决
- *   verified  → approved    主人审批通过
- *   approved  → stable      人工晋升（首次真实调用观察后）
+ *   verified  → stable      主人审批晋升（#采纳工具，直接进生产）
  *   stable    → quarantined 回归/安全告警（隔离）
  *            → deprecated  被替代或低价值（人工）
+ *
+ * 注：历史上的 approved 中间态从未被任何链路进入（引擎自动 draft→verified，
+ *     #采纳直接 verified→stable），已删除——审批动作即晋升动作。
  *
  * 修订永远创建新版本（parent_version_id 成链），不在原版本上改状态回 draft。
  */
 
-const STATES = new Set(['draft', 'rejected', 'verified', 'approved', 'stable', 'quarantined', 'deprecated'])
+const STATES = new Set(['draft', 'rejected', 'verified', 'stable', 'quarantined', 'deprecated'])
 
 const TRANSITIONS = {
   draft: ['verified', 'rejected'],
   rejected: [],
-  verified: ['approved', 'stable', 'rejected'],
-  approved: ['stable', 'rejected'],
+  verified: ['stable', 'rejected'],
   stable: ['quarantined', 'deprecated'],
   quarantined: ['deprecated'],
   deprecated: [],
@@ -39,6 +40,6 @@ export function isTerminal(s) { return s === 'rejected' || s === 'deprecated' }
 export function canServe(s) { return s === 'stable' }
 
 /** 需人工审批才能进入（写/消息/删除类第一版禁自动生成，仅 none/read 可生成但仍需审批晋升） */
-export function needsApproval(to) { return to === 'approved' || to === 'stable' }
+export function needsApproval(to) { return to === 'stable' }
 
 export const STATE = STATES

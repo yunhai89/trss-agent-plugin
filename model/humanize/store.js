@@ -91,18 +91,6 @@ export class HumanizeStore {
     return !!(await this.kv.get(k('sent', groupId, messageKey)))
   }
 
-  // ─────────────── 群级配置覆盖（长存） ───────────────
-
-  async setGroupConfig(groupId, cfg) {
-    if (!groupId) return
-    await this.kv.set(k('config', 'group', groupId), cfg || {})
-  }
-
-  async getGroupConfig(groupId) {
-    if (!groupId) return null
-    try { return await this.kv.get(k('config', 'group', groupId)) } catch { return null }
-  }
-
   // ─────────────── 可恢复轻状态（长存） ───────────────
   // 仅保存重启后仍有意义的：游标、冷却截止、连续 no_action 计数。
   // 不保存 AbortController/Timer/事件对象（不可序列化）。

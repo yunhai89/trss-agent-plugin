@@ -151,6 +151,9 @@ export function createStream(response, { reasoningFields = [], idleMs = 60000 } 
         const { done, value } = raced
         if (done) break
         buffer += decoder.decode(value, { stream: true })
+        // SSE 规范允许 \n\n / \r\n\r\n / \r\r 作事件分隔；只切 '\n\n' 会把 CRLF 服务的
+        // 整流切成一个事件都出不来（'\r\n\r\n' 内不含相邻 '\n\n'）。归一 CR 系行尾为 \n 后再切。
+        buffer = buffer.replace(/\r\n?/g, '\n')
         let sep
         while ((sep = buffer.indexOf('\n\n')) !== -1) {
           const evt = buffer.slice(0, sep)

@@ -40,8 +40,15 @@ export class EvolutionEngine {
       let tid = toolId
       if (!tid) {
         const exist = await this.registry.getByName(manifest.name)
-        if (exist) tid = exist.id
-        else {
+        if (exist) {
+          // 名字碰撞防线：只允许复用「已进化的」同名工具（修订流程）。
+          // 内置/受信工具（namespace !== 'evolved'）绝不可被进化候选挂靠——否则采纳后会顶掉
+          // builtin 的 active_version_id，等于用生成代码覆盖受信实现（可信基不可被工具进化）。
+          if (exist.namespace && exist.namespace !== 'evolved') {
+            return { ok: false, status: 'rejected', reason: `名字冲突：「${manifest.name}」与内置/受信工具同名，进化工具不可覆盖内置工具——请改名后重新描述能力` }
+          }
+          tid = exist.id
+        } else {
           tid = 'tool_' + crypto.randomBytes(6).toString('hex')
           await this.registry.createTool({ id: tid, name: manifest.name, namespace: 'evolved' })
         }

@@ -124,7 +124,7 @@ export const EXECUTION_BIAS = [
   '- 易变的事实（文件/版本/时间/服务状态/进程/价格）：用工具实时核验，不要凭记忆断言。',
   '- 数值计算（大数乘除/开方/统计/组合/复利/单位换算等）：用 `calculate` 工具精确算，不要心算——大数与浮点心算极易出错。',
   '- 多步任务中，调工具前先写一两句说明你下一步要做什么（如"我查一下车贷的常见模式"、"先算一下面积"）——这段文本会自动显示给用户，让他们知道你在干嘛。写在你调工具的那条消息里（与 tool_call 同一条、在工具之前），不是之后总结。最终答案直接回复。',
-  '- 被问及你的能力/技能/工具/MCP 时，直接从上方 <available_skills> 与【自我状态】回答——这些信息已在 system prompt 里。不要用 terminal 或任何工具去查看文件系统（ls skills/ 等），那是多余且错误的。',
+  '- 被问及你的能力/技能/工具/MCP 时，直接从上方 <available_skills> 与【运行能力盘点】回答——这些信息已在 system prompt 里。不要用 terminal 或任何工具去查看文件系统（ls skills/ 等），那是多余且错误的。',
   '- 工具结果若含图片（`![](url)`，如米游社攻略配图、网页搜索图片），在回复相关位置嵌入**正文主图**：去掉头像/图标/广告等无用小图，既不要全丢也不要堆砌；无图可嵌就正常文字回复。这些图片会自动渲染进回复图里。',
   '- 最终结论需要有依据，或明确指出阻塞点与下一步。',
 ].join('\n')
@@ -413,8 +413,6 @@ export const TEMPLATES = {
 
 输出 JSON：{ scores: {accuracy, citations, completeness, sourceQuality, efficiency}, pass: bool, rationale: string }`,
   },
-
-  // 注：evolution 变异器指令已移除——mutator.js 自带硬编码版（mutator.js:17/27），此处为未接入的死代码。
 }
 
 // ─── 辅助：从模板创建 SystemPromptBuilder 实例（便于定制）───

@@ -171,7 +171,7 @@ export async function nodeScheduleAdapter() {
  */
 export const reminderSetTool = {
   name: 'reminder_set',
-  description: '设置一次性定时任务（N分钟后/3点/明天X点 触发一次）。两种模式：① 只填 message → 到点发静态提醒消息；② 填 prompt → 到点跑 Agent 任务链（自主调工具完成，如联网搜索/查知识库）+ 发结果。用户说"N分钟后提醒我XX"或"N分钟后帮我搜索YY/做ZZ"时用。at 是未来时间、ISO 8601 带时区（如 2026-08-06T15:05:00+08:00），由你根据用户措辞 + 当前时间（见【自我状态】）推算。',
+  description: '设置一次性定时任务（N分钟后/3点/明天X点 触发一次）。两种模式：① 只填 message → 到点发静态提醒消息；② 填 prompt → 到点跑 Agent 任务链（自主调工具完成，如联网搜索/查知识库）+ 发结果。用户说"N分钟后提醒我XX"或"N分钟后帮我搜索YY/做ZZ"时用。at 是未来时间、ISO 8601 带时区（如 2026-08-06T15:05:00+08:00），由你根据用户措辞 + 当前时间（见【运行能力盘点】）推算。',
   category: 'personal',
   parameters: {
     type: 'object',

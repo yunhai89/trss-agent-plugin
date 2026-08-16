@@ -194,6 +194,25 @@ await test('流式：增量顺序与聚合结果', async () => {
   )
 })
 
+// ---------- 2b. 流式 CRLF 分隔（SSE 规范允许 \r\n\r\n；曾只切 '\n\n' 导致整流解析不出任何事件） ----------
+await test('流式：CRLF 行尾服务端可正常解析', async () => {
+  const sse = [
+    'data: {"choices":[{"index":0,"delta":{"content":"Hi"}}]}',
+    'data: {"choices":[{"index":0,"delta":{"content":"你"}}]}',
+    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+    'data: [DONE]',
+    '',
+  ].join('\r\n\r\n') + '\r\n\r\n'
+
+  const client = createClient({ ...presets.deepseek, fetch: async () => sseRes(sse) })
+  const stream = await client.chat.completions.create({ model: 'deepseek-chat', messages: [msg.user('hi')], stream: true })
+  const contents = []
+  for await (const part of stream) if (part.delta.content) contents.push(part.delta.content)
+  eq(contents, ['Hi', '你'], 'CRLF 流增量顺序')
+  eq(stream.content, 'Hi你', 'CRLF 流聚合 content')
+  eq(stream.finishReason, 'stop', 'CRLF 流 finishReason')
+})
+
 // ---------- 3. 重试：429 → 200 ----------
 await test('重试：429(rate_limit_exceeded) 后成功', async () => {
   const { calls, fn } = counter()

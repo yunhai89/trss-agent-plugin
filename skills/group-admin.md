@@ -7,7 +7,7 @@ priority: 7
 
 当用户想进行群管理操作时，按下列规范处理：
 
-可用工具（参考【自我状态】确认实际注册情况）：
+可用工具（参考【运行能力盘点】确认实际注册情况）：
 - 读类：`group_info`（群信息）、`group_member`（某成员）、`group_members`（成员列表）
 - 写类：`group_kick`（踢出）、`group_mute`（禁言 N 秒，0=解除）、`group_mute_all`（全体禁言）、`group_set_card`（群名片）、`group_set_title`（头衔）、`group_set_admin`（管理员）、`group_set_name`（改群名）
 

@@ -67,10 +67,11 @@ export function formatHistory(msgs, currentE, cap = 20) {
 const TOOL_CAT_LABEL = { query: '查询', personal: '个人', message: '消息', group_manage: '群管', system: '系统' }
 
 /**
- * 自我状态：工具清单 + MCP 协议/运行时 + 框架能力。核心让 AI"知道自己有什么"。
+ * 运行能力盘点：工具清单 + MCP 协议/运行时 + 框架能力。核心让 AI"知道自己有什么"。
+ * （曾名【自我状态】——与 SelfState 自我认知/情绪层（projector 的 planner 投影）纯命名撞车，已改名区分。）
  */
-function selfStatus(runtime, cfg) {
-  const lines = ['【自我状态】']
+function runtimeStatus(runtime, cfg) {
+  const lines = ['【运行能力盘点】']
   // 工具清单：只列能力类别 + 计数（审计 §3.2）。列全量工具名会①抵消 Tool Discovery 省 token 的收益；
   // ②模型见名无 schema 直接调用得 not_found；③形成模糊选择面降低路由准确率。需要具体工具调 tool_search。
   const tools = (runtime?.tools?.list?.() || runtime?.agent?.tools?.list?.() || []).filter((t) => t?.name && !t.name.startsWith('delegate__'))
@@ -179,7 +180,7 @@ export async function buildSituationalContext({ ctx, runtime, e, kv, cfg, bot, h
   const botNick = b?.nickname || (typeof Bot !== 'undefined' && Bot.nickname) || ''
   if (selfId || botNick) parts.push(`【机器人身份】${botNick || 'Bot'}（QQ: ${selfId}）——这是你自己的身份，用户问"你的QQ号/你是谁"时据此回答`)
   if (ctx?.isGroup) parts.push(`【发言者】${roleLabel(ctx)}（${ctx.userId}）。权限：${ctx.isMaster ? '可执行敏感指令' : '普通对话与查询类工具'}`)
-  parts.push(selfStatus(runtime, cfg))
+  parts.push(runtimeStatus(runtime, cfg))
   // 群聊环境提示：引导 AI 主动参考群聊上下文
   if (ctx?.isGroup && ctx?.groupId) {
     parts.push(`【群聊环境】你在群 ${ctx.groupId} 中。回答前请参考上方已注入的近期群聊记录；若上下文不足，主动调用 get_chat_history 工具拉取更多——不要等用户要求。`)

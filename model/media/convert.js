@@ -109,9 +109,9 @@ export function toGeminiBlocks(media, { caps = {}, degrade = 'note' } = {}) {
   return blocks
 }
 
-/** data: URL（OpenAI image_url 直接收 base64 data url 或 http url） */
+/** data: URL（OpenAI image_url 直接收 base64 data url；统一走 base64——直链省 token 的设想
+ *  曾以 `mf.__preferUrl` 预留，但从未赋值且各兼容端点对远程图支持不一（MiniMax 连 detail 都拒），已删） */
 function dataUrl(mf) {
-  if (/^https?:\/\//i.test(mf.url || '') && mf.__preferUrl) return mf.url
   return `data:${mf.mime};base64,${asBase64(mf.buffer)}`
 }
 

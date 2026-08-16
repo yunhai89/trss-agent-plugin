@@ -55,14 +55,15 @@ export async function runShell(command, { cwd, timeout = 60, maxOutput = 8000 } 
   })
 }
 
-/** 默认安全黑名单（即使主人确认也拦截）；可在 config.terminal.blocklist 覆盖/追加 */
+/** 默认安全黑名单（即使主人确认也拦截）；config.terminal.blocklist 在此基础上**追加**
+ *  （README 口径即追加——旧实现是整体覆盖，自定义后默认 9 条全失效，已修）。 */
 export const DEFAULT_BLOCKLIST = [
   'rm\\s+(-[a-z]*r[a-z]*f|[a-z]*-r[a-z]*f)', // rm -rf / rm -fr / rm -rfv 等（拦任何 rm 带 r+f flags，不管目标路径/通配符）
   'rm\\s+.*-rf', // 兜底：rm xxx -rf（flags 在后面）
   'mkfs\\.?[a-z0-9]*\\s+/dev/', // 格式化设备
   'dd\\s+.*of=/dev/', // dd 写设备
   ':\\(\\)\\s*\\{.*\\}\\s*;\\s*:', // fork bomb
-  'shutdown|reboot|halt|poweroff', // 关机重启
+  '(?:^|[;&|\\n(]\\s*)(?:shutdown|reboot|halt|poweroff)\\b', // 关机重启（须在命令位——`cat shutdown.log`/`echo rebooting` 不再误拦）
   'chmod\\s+-R?\\s*000\\s+/', // 去除根权限
   '>/dev/sda', // 直接写设备
   'mv\\s+/.+\\s+/dev/null', // mv 到 /dev/null
@@ -113,8 +114,8 @@ export function makeTerminalTool({ isMasterFn } = {}) {
       if (!checkMaster(ctx?.userId)) {
         return { error: '仅 terminal 主人可用。请由服务器持有者发 #agents设置主人（控制台会打印验证码），再把验证码直接发到会话认领。' }
       }
-      // ② 黑名单（代码层，已确认也拦）
-      const blocklist = Array.isArray(cfg.blocklist) ? cfg.blocklist : DEFAULT_BLOCKLIST
+      // ② 黑名单（代码层，已确认也拦）：默认集 + 用户追加（README：blocklist 追加灾难命令正则）
+      const blocklist = [...DEFAULT_BLOCKLIST, ...(Array.isArray(cfg.blocklist) ? cfg.blocklist : [])]
       if (matchesAny(cmd, blocklist)) return { error: '命令被安全策略拦截（黑名单）' }
       // ③ 审批门：每条命令需主人 #确认；cfg.skipConfirm=true 时 terminal 主人免确认直跑（黑名单仍硬拦，高危）
       if (cfg.skipConfirm !== true) {

@@ -114,8 +114,13 @@ export class GroupWorld extends plugin {
       ],
     })
     // 定时任务：小时增量分析 / 每日维护 / 每周小圈子
+    // analysis.schedule 接线（曾为死配置键，cron 硬编码）：构造期读取，改后需重启生效
+    const hourlyCron = (() => {
+      const s = String(cfgNow().analysis?.schedule || '').trim()
+      return /^(\S+\s+){4}\S+$/.test(s) ? s : '7 * * * *'
+    })()
     this.task = [
-      { name: '群世界-小时分析', cron: '7 * * * *', fnc: this.hourlyTask.bind(this) },
+      { name: '群世界-小时分析', cron: hourlyCron, fnc: this.hourlyTask.bind(this) },
       { name: '群世界-每日维护', cron: '30 4 * * *', fnc: this.dailyTask.bind(this) },
       { name: '群世界-每周聚类', cron: '15 3 * * 1', fnc: this.weeklyTask.bind(this) },
     ]

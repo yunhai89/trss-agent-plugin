@@ -11,6 +11,8 @@ function resolveClient(providerOrClient) {
   return providerOrClient.client || providerOrClient
 }
 
+let _warnedDefaultModel = false
+
 function buildHeaders(client) {
   const h = { 'Content-Type': 'application/json' }
   if (typeof client.authHeadersHook === 'function') Object.assign(h, client.authHeadersHook(client))
@@ -33,6 +35,12 @@ export async function embed(texts, opts = {}) {
   const isArray = Array.isArray(texts)
   const input = isArray ? texts : [texts]
   const model = opts.model || client.embeddingModel || 'text-embedding-3-small'
+  // 未显式指定模型时兜底到 OpenAI 默认名——非 OpenAI 端点大概率不认这个模型名（400），
+  // 留痕一次（防刷屏）免得像 doubao 那次一样被静默吞掉、表现为"embedding 从未被使用"。
+  if (!opts.model && !client.embeddingModel && !_warnedDefaultModel) {
+    _warnedDefaultModel = true
+    Log.warn('[embed] 未配置 embedding 模型，默认使用 text-embedding-3-small（非 OpenAI 端点请配 recall.embedProvider）baseURL=' + baseURL)
+  }
 
   // 豆包多模态 embedding（doubao-embedding-vision-*）：不支持 OpenAI /embeddings，
   // 走 /embeddings/multimodal，input=[{type:'text',text}]，返回 data.embedding（单对象）——

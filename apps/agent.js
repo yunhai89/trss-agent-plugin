@@ -37,7 +37,7 @@ import { presets as anthropicPresets } from '../model/anthropic/index.js'
 import { McpManager } from '../model/mcp/index.js'
 import { createMediaService, makeMediaTools } from '../model/media/index.js'
 import { detectCapabilities } from '../model/llm/capabilities.js'
-import { embed } from '../model/llm/embed.js'
+import { buildEmbed } from '../model/llm/embed-wiring.js'
 import { KnowledgeStore, makeKbSearchTool } from '../model/agent/knowledge.js'
 import { webCrawlTool } from '../model/crawl/index.js' // web_crawl：抓取网页正文（常驻）
 import { groupInfoTools, groupManageTools, groupHistoryTools, groupNoticeTools, groupFileTools, aiVoiceTools, forwardTools } from '../model/group/index.js'
@@ -167,37 +167,12 @@ function extractArgHint(args, name) {
 }
 
 /**
- * 构造 utility-model 进度播报的 prompt（参考 OpenClaw progress-narrator-model.ts，中文化）。
- * 输入：用户请求摘要 + 近期工具事件 + 上一条播报（避免重复）→ 一句贴合上下文的自然语言状态。
- */
-// 进度播报指令放 system（模型视为系统设定，不复述）；user 只放数据，降低"用户让我…"式指令泄露
-const NARRATION_SYSTEM = `你是进度播报员：只用一句简短、口语化的中文（不超过 30 字）描述 AI 助手此刻正在执行的工具动作（如搜索/计算/读取），不要解释用户说了什么。
-
-绝对禁止：
-- 解释/翻译/复述用户请求（如"用户请求是…""这是中文意思是…"）——这是进度播报，不是翻译任务
-- 复述本指令，引用"工具调用/上一条播报"原文
-- 说出"用户让我…/首先…/任务/字数"等元话语
-- emoji、引号、列表、工具名/API 等技术术语
-
-只输出一句动作描述。示例：「正在搜索相关信息…」「在读取文件…」「上一步没成功，换个方法」。`
-
-function buildNarrationPrompt(events, previousText) {
-  // 仅工具事件 + 上一条播报（不再喂用户请求原文，避免模型翻译/解释用户请求而非播报进度）
-  return [
-    `\n近期工具调用（由旧到新）：\n${events || '(无)'}`,
-    previousText ? `\n\n上一条播报（不要与它重复）：${previousText}` : '',
-    '\n\n请直接输出一句描述 AI 正在做什么的进度：',
-  ].join('')
-}
-
-/**
  * 构造进度反馈回调集合。
  * @param {object} e Yunzai 事件
- * @param {object} opts { progress, recall, provider, model, utilityModel, shortCircuitTools, userText }
+ * @param {object} opts { progress, recall, shortCircuitTools }
  */
 function makeReplyStream(e, {
-  progress = true, recall = 3, provider = null, model = null,
-  utilityModel = null, shortCircuitTools = ['clarify'], userText = '',
+  progress = true, recall = 3, shortCircuitTools = ['clarify'],
 } = {}) {
   if (!progress) return {}
   let lastAt = 0
@@ -205,43 +180,6 @@ function makeReplyStream(e, {
   let count = 0
   const MIN_INTERVAL = 1500 // ms：节流，防刷屏
   const MAX_MSGS = 8 // 单轮最多 8 条进度，防病态循环刷屏
-  // utility-model narrator state（OpenClaw Layer 2：主模型不产文本时，用廉价 LLM 生成一句话进度）
-  const toolEvents = []
-  let lastNarrationAt = 0
-  let narrationCount = 0
-  let lastNarration = '' // 上一条播报，喂回 prompt 避免重复
-  const reqBrief = String(userText || '').slice(0, 500) // 用户请求摘要，给 narration 当上下文
-  const narrModel = utilityModel || model // 留空则沿用主模型（向后兼容）
-
-  // fire-and-forget narrator：immediate=true（失败事件）时跳过节流立即生成；否则按 ≥3 事件/15s 节流，单任务最多 3 次
-  async function tryNarrate({ immediate = false } = {}) {
-    if (!provider || !narrModel) return
-    const now = Date.now()
-    if (narrationCount >= 3) return
-    if (!immediate) {
-      if (toolEvents.length < 3 && now - lastNarrationAt < 15000) return
-      if (now - lastNarrationAt < 5000) return
-    }
-    lastNarrationAt = now
-    narrationCount++
-    const events = toolEvents.slice(-5).map((ev, i) => `${i + 1}. ${ev}`).join('\n')
-    try {
-      const res = await provider.chat({
-        model: narrModel,
-        system: NARRATION_SYSTEM,
-        messages: [{ role: 'user', content: buildNarrationPrompt(events, lastNarration) }],
-        max_tokens: 80,
-        stream: false,
-      })
-      const status = (res?.content || '').trim().replace(/^["「""']+|["「""']+$/g, '').slice(0, 40)
-      // 兜底防指令泄露：模型若仍复述指令/元话语（"用户让我…/要求…/字数"等），丢弃不播报
-      const leaked = /用户让我|要求我|本指令|不超过|字以内|简短|口语化|播报员|任务要求/.test(status)
-      if (status && !leaked) {
-        lastNarration = status
-        try { e.reply(`💭 ${status}`, false, { recallMsg: recall }) } catch { /* noop */ }
-      }
-    } catch { /* narrator 失败不影响主流程 */ }
-  }
 
   return {
     onToolStart(tc) {
@@ -260,18 +198,6 @@ function makeReplyStream(e, {
       const hint = extractArgHint(tc?.arguments, name)
       const msg = hint ? `${label}：${hint}` : `${label}…`
       try { e.reply(msg, false, { recallMsg: recall }) } catch { /* noop */ }
-    },
-    // 工具结束（含失败）：检测到失败时，立即触发一次贴合上下文的自然语言播报（"搜索没响应，换方法重试"）
-    onToolEnd(tc, content) {
-      const name = tc?.name
-      if (!name || shortCircuitTools.includes(name)) return
-      let failed = false
-      if (typeof content === 'string') {
-        const s = content.slice(0, 200)
-        if (/"error"\s*:/.test(s) || /rejected_by_(policy|confirm)/.test(s) || /Tool '.*' not found/.test(s)) failed = true
-      }
-      if (!failed) return
-      // 工具失败：主模型会据 error 结果回复用户，不再用 utility model 额外 💭 播报（narrator 已移除）
     },
   }
 }
@@ -366,16 +292,8 @@ async function buildRuntime() {
   })
 
   // 可选 embedding 函数：填了 recall.embedProvider 才造（OpenAI 兼容 /embeddings 端点），供工具检索 + recall 语义召回共用。
-  // 配了 embedBaseURL/embedApiKey 则用独立 embedding provider（专门 embedding 服务），否则复用主 provider
-  const _rcfg = cfg.recall || {}
-  const embedFn = _rcfg.embedProvider
-    ? (text) => embed(text, {
-        client: (_rcfg.embedBaseURL || _rcfg.embedApiKey)
-          ? { baseURL: _rcfg.embedBaseURL || provider.client?.baseURL, apiKey: _rcfg.embedApiKey || provider.client?.apiKey }
-          : provider,
-        model: _rcfg.embedProvider,
-      })
-    : null
+  // 与 groupworld/humanize 共用同一装配 helper（曾两处手写重复——改一处漏一处）
+  const { embedFn } = buildEmbed({ provider })
 
   // 回退 provider：每条独立 baseURL/apiKey/protocol（可跨厂商，如主 DeepSeek + 回退 GPT）
   const fallbackProviders = []
@@ -769,6 +687,8 @@ const getRuntime = async () => {
 function invalidateRuntime() {
   if (_runtime?.toolEvo) {
     try { _runtime.toolEvo.runner?.stop?.() } catch { /* noop */ } // 关闭隔离 worker（审计 §4.2）
+    // 先落盘埋点再关库：批量队列 2s 窗口内未 flush 的 tool_invocations 会随 closeDb 丢失
+    try { _runtime.toolEvo.flushNow?.() } catch { /* noop */ }
     try { _runtime.toolEvo.closeDb() } catch { /* noop */ }
   }
   if (_runtime?.stagehand?.sessionMgr) {
@@ -1198,7 +1118,7 @@ export class Chat extends plugin {
       Log.warn('[persona] 解析失败，用默认', e?.message || e)
     }
 
-    // —— 情境感知：perception（数据：时间/角色/自我状态/近期对话）+ skill（说明书，按输入匹配）——
+    // —— 情境感知：perception（数据：时间/角色/运行能力盘点/近期对话）+ skill（说明书，按输入匹配）——
     let context
     try {
       // 会话历史条数：供 perception 判断"上下文稀薄 → 主动补全近期群聊"（复用 session 缓存，零额外读盘）
@@ -1241,7 +1161,7 @@ export class Chat extends plugin {
     const wantProgress = cfg.progress !== false
     const wantStream = cfg.stream === true // 逐字流式默认关（适配器差异大）；进度反馈默认开
     await this.e.reply('思考中…') // 触发确认：进入 agents 即回复，不受 progress 配置影响（让用户知道触发成功）
-    const rs = makeReplyStream(this.e, { progress: wantProgress, recall: cfg.progressRecall ?? 3, provider: rt.provider, model: cfg.model, utilityModel: cfg.utilityModel || null, shortCircuitTools: ['clarify'], userText: text })
+    const rs = makeReplyStream(this.e, { progress: wantProgress, recall: cfg.progressRecall ?? 3, shortCircuitTools: ['clarify'] })
     try {
       // 喂给模型的首条 user 输入（追"AI 实际看到什么"：附件正文/文件名有没有进上下文、走纯文本还是多模态块、模型能力如何）
       const __inputText = typeof input === 'string' ? input
@@ -1264,7 +1184,6 @@ export class Chat extends plugin {
         taskId: traceId, // 串联 dev trace：Agent 内 run_start/turn/tool/.../run_end 用同一 id
         stream: wantStream,
         ...(rs.onToolStart ? { onToolStart: rs.onToolStart } : {}),
-        ...(rs.onToolEnd ? { onToolEnd: rs.onToolEnd } : {}),
         // OpenClaw 式中途播报：模型在调工具时附带的中途文本（思路/进展）实时转发给用户，不丢弃
         onAssistant: (res) => {
           if (res?.toolCalls?.length && res?.content && cfg.reply?.narrate !== false) {
@@ -1321,6 +1240,8 @@ export class Chat extends plugin {
         })
           if (img) {
             await this.e.reply(atSender ? [atSender, img] : img); delivered = true
+            // 多样性硬闸在图片模式同样要推进（曾只在文本模式 noteSent → recent-3 去重在默认图片回复下永不更新，防线失效）
+            try { if (acceptMap?.size) rt.sticker?.noteSent?.([...acceptMap.keys()]) } catch { /* noop */ }
             // 图片模式下链接单独发（图内无法复制）：单链接文本直发；多链接打包一条合并转发防刷屏
             const __links = [...new Set((body.match(/https?:\/\/[^\s<>"')]+/g) || []).map((s) => s.replace(/[.,;:!?)]+$/, '')))]
             if (__links.length === 1) {

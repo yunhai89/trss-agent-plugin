@@ -215,7 +215,8 @@ export function createMessageStream(response, { idleMs = 60000 } = {}) {
         if (done) break
         buffer += decoder.decode(value, { stream: true })
         let sep
-        // SSE 事件以空行分隔
+        // SSE 事件以空行分隔；归一 CR 系行尾（\r\n/\r）为 \n——只切 '\n\n' 会把 CRLF 服务的整流切成一个事件都出不来
+        buffer = buffer.replace(/\r\n?/g, '\n')
         while ((sep = buffer.indexOf('\n\n')) !== -1) {
           const rawEvent = buffer.slice(0, sep)
           buffer = buffer.slice(sep + 2)

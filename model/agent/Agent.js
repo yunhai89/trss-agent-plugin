@@ -53,6 +53,16 @@ function isToolError(content) {
   return typeof content === 'string' && /"error"\s*:/.test(content)
 }
 
+/** 工具结果签名（LoopGovernor 判"新事实"用）：长度 + 首尾片段 + 简单散列，
+ *  区分"同参同结果空转"与"轮询状态变化"。结果已被 resultCap 截断，O(n) 开销可忽略。 */
+function resultSignature(content) {
+  if (content == null) return ''
+  const s = typeof content === 'string' ? content : (() => { try { return JSON.stringify(content) } catch { return String(content) } })()
+  let h = 5381
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0
+  return `${s.length}:${h}`
+}
+
 /**
  * 结构化截断 JSON 值，保证截断后仍可 JSON.parse（审计 §3.4）。
  * - 数组：留前 N 项 + { _truncated, omitted, total }，模型知道缺了多少；
@@ -280,23 +290,37 @@ export class Agent {
       const __toolListTokens = estimateMessages(toolList.map((t) => ({ content: JSON.stringify({ n: t.name, d: t.description, p: t.parameters }) })))
       breakdown.tools += __toolListTokens; breakdown.total = (breakdown.total || 0) + __toolListTokens
       const __t0 = Date.now()
+      // 流式增量守卫：本轮已有增量内容送达用户（onDelta 播报/逐字输出）后，
+      // 若 provider 中途失败，换 fallback 重跑会把同样的半截内容再发一遍——直接抛出，宁断不重。
+      let __emitted = false
+      const __delta = cb.onDelta ? (...a) => { __emitted = true; return cb.onDelta(...a) } : undefined
       // 主模型失败时依次尝试回退 provider（各自独立 baseURL/apiKey/protocol，可跨厂商）
       const __chatWith = (prov, m) => prov.chat({
         model: m, messages: this.messages, system,
         tools: toolList.length ? toolList : undefined, tool_choice: this.toolChoice,
         temperature: this.temperature, max_tokens: this.maxTokens, thinking: this.thinking,
-        signal, stream: wantStream, onDelta: cb.onDelta, onReasoning: cb.onReasoning,
+        signal, stream: wantStream, onDelta: __delta, onReasoning: cb.onReasoning,
         ...this._extraRunOpts(opts),
       })
       const __tries = [{ provider: this.provider, model: this.model }, ...this.fallbackProviders]
       let result, lastErr
       for (const t of __tries) {
         try { result = await __chatWith(t.provider, t.model); break }
-        catch (e) { lastErr = e; if (__tries.length > 1) this.logger('warn', `[fallback] 模型 ${t.model} 失败，尝试下一个`, e?.message || e) }
+        catch (e) {
+          lastErr = e
+          if (__emitted) {
+            this.logger('warn', `[fallback] 模型 ${t.model} 流式中途失败且已输出部分内容，不切换 provider（防重复输出）`, e?.message || e)
+            throw e
+          }
+          if (__tries.length > 1) this.logger('warn', `[fallback] 模型 ${t.model} 失败，尝试下一个`, e?.message || e)
+        }
       }
       if (!result) throw lastErr
       const __ms = Date.now() - __t0
-      if (result.usage) usage = mergeUsage(usage, result.usage)
+      if (result.usage) {
+        usage = mergeUsage(usage, result.usage)
+        this.governor?.noteUsage(result.usage) // token 预算接线（此前 noteUsage 从未被调用，tokenBudget 恒不触发）
+      }
       turns++
       this.logger('debug', `turn ${turns}`, 'model=', this.model, 'finish=', result.finishReason, 'contentLen=', (result.content || '').length, 'toolCalls=', result.toolCalls?.length || 0, 'reasoning=', !!result.reasoning, 'usage=', fmtUsage(result.usage), `ms=${__ms}`)
       this.devLog?.('turn', {
@@ -381,7 +405,7 @@ export class Agent {
           const tc = result.toolCalls[i]
           const trm = toolResults[i]
           const ok = !!trm && !isToolError(trm.content)
-          this.governor.noteToolCall(tc.name, tc.arguments, ok, ok)
+          this.governor.noteToolCall(tc.name, tc.arguments, ok, undefined, resultSignature(trm?.content))
         }
         const g = this.governor.shouldStop()
         if (g.stop) {

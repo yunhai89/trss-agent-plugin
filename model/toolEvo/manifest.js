@@ -9,7 +9,7 @@ import Ajv from 'ajv'
 
 const SEMVER_RE = /^\d+\.\d+\.\d+$/
 const NAME_RE = /^[a-z][a-z0-9_-]*$/
-const STATUS = ['draft', 'rejected', 'verified', 'approved', 'stable', 'quarantined', 'deprecated']
+const STATUS = ['draft', 'rejected', 'verified', 'stable', 'quarantined', 'deprecated']
 const SIDE_EFFECTS = ['none', 'read', 'write', 'network', 'message', 'delete']
 
 const MANIFEST_SCHEMA = {

@@ -56,7 +56,7 @@ const bad = (msg, e) => { failed++; console.error('  ✘ ' + msg + '\n    ' + (e
 for (const f of ['vendor/vue.global.prod.js', 'assets/js/mock.js', 'assets/js/components.js']) {
   try { run(f); ok('load ' + f) } catch (e) { bad('load ' + f, e) }
 }
-for (const f of ['dashboard', 'config', 'memory', 'recall', 'personas', 'skills', 'sessions', 'logs', 'schedule', 'confirm', 'suggestions', 'evolution', 'kb', 'humanize']) {
+for (const f of ['dashboard', 'config', 'memory', 'recall', 'personas', 'skills', 'sessions', 'logs', 'schedule', 'confirm', 'suggestions', 'evolution', 'kb', 'humanize', 'groupworld', 'selfstate', 'sticker']) {
   try { run(`assets/js/views/${f}.js`); ok(`load views/${f}.js`) } catch (e) { bad(`load views/${f}.js`, e) }
 }
 

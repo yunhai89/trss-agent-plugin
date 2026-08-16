@@ -1,5 +1,5 @@
 /**
- * Perception 离线自检 —— buildSituationalContext（时间/角色/自我状态/近期对话）。
+ * Perception 离线自检 —— buildSituationalContext（时间/角色/运行能力盘点/近期对话）。
  * 运行：node model/perception.test.mjs
  */
 import fs from 'node:fs'
@@ -44,8 +44,8 @@ await test('formatHistory：拼文本 + 跳过当前 + 正序', async () => {
   ok(messageToText({ message: [{ type: 'record' }, { type: 'text', text: 'x' }] }) === '[语音]x', '语音标注')
 })
 
-// ---------- 2. 自我状态：工具 + MCP + 能力 ----------
-await test('buildSituationalContext：自我状态（工具/MCP/能力）', async () => {
+// ---------- 2. 运行能力盘点：工具 + MCP + 能力 ----------
+await test('buildSituationalContext：运行能力盘点（工具/MCP/能力）', async () => {
   const kv = memoryKv()
   const cfg = { media: { enable: true }, vision: { model: 'mimo-2.5' } }
   const rt = mockRuntime({
@@ -56,7 +56,7 @@ await test('buildSituationalContext：自我状态（工具/MCP/能力）', asyn
   const out = await buildSituationalContext({ ctx, runtime: rt, e: null, kv, cfg })
   console.log('  输出片段：\n' + out.split('\n').map((l) => '    ' + l).join('\n'))
   ok(out.includes('【当前时间】'), '含时间')
-  ok(out.includes('【自我状态】'), '含自我状态')
+  ok(out.includes('【运行能力盘点】'), '含自我状态')
   ok(out.includes('查询类'), '列工具类别计数（审计 §3.2：不再列全量工具名，改类别+计数）')
   ok(!out.includes('web_search') && !out.includes('miyoushe_search'), '不列具体工具名（防见名无 schema 直调得 not_found）')
   ok(!out.includes('delegate__x'), '排除委派工具')
@@ -65,7 +65,7 @@ await test('buildSituationalContext：自我状态（工具/MCP/能力）', asyn
 })
 
 // ---------- 3. MCP 0 连接时的关键话术 ----------
-await test('MCP 未接入时：自我状态明确"协议可用但未接入"', async () => {
+await test('MCP 未接入时：运行能力盘点明确"协议可用但未接入"', async () => {
   const kv = memoryKv()
   const rt = mockRuntime({ toolNames: ['web_search'], mcpStatus: {} })
   const out = await buildSituationalContext({ ctx: { userId: 'u', isGroup: false }, runtime: rt, e: null, kv, cfg: {} })

@@ -20,7 +20,7 @@
  *     when    可选：关键词/正则/数组，命中用户输入时抢先加载该说明书正文（向后兼容）。
  *             字符串 / 字符串数组 / RegExp / { keywords:[], regex:[], always:false }
  *     always  true 时正文常驻（慎用，会占上下文）
- *     body    markdown 指令正文（可引用 perception 注入的"自我状态"等数据）
+ *     body    markdown 指令正文（可引用 perception 注入的"运行能力盘点"等数据）
  *
  * 文件形态（skills/ 目录自动加载）：
  *   - *.md  ：YAML frontmatter（name/description/when/priority/always）+ markdown 正文

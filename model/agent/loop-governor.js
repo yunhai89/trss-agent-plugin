@@ -53,6 +53,7 @@ export class LoopGovernor {
     this._consecutiveFailures = 0
     this._progressFlags = [] // 滚动窗口：最近 N 步是否产出新事实
     this._tokens = 0
+    this._seenFacts = new Set() // 本 run 已见过的事实键（指纹+结果签名）：重复出现不再算新事实
   }
 
   /**
@@ -60,15 +61,26 @@ export class LoopGovernor {
    * @param {string} name 工具名
    * @param {*} args 工具入参（指纹用）
    * @param {boolean} ok 是否成功（非 error）
-   * @param {boolean} hasNewFact 是否产出新事实（默认同 ok；成功工具视为进展）
+   * @param {boolean} [hasNewFact] 是否产出新事实；缺省由本组件判定：
+   *   成功 且 （工具+入参+结果签名）首次出现 才算新事实。
+   *   结果签名参与判定使轮询型工具（如 check_subagent）状态变化仍算进展，
+   *   而"同参同结果"的空转（A,B,A,B 交替或状态卡死）会触发 no_progress。
+   * @param {string} [resultSig] 工具结果签名（内容摘要；缺省只按指纹判重）
    */
-  noteToolCall(name, args, ok, hasNewFact) {
+  noteToolCall(name, args, ok, hasNewFact, resultSig) {
     const fp = fingerprint(name, args)
     if (fp === this._lastFingerprint) this._sameCount++
     else { this._lastFingerprint = fp; this._sameCount = 1 }
     if (ok === false) this._consecutiveFailures++
     else this._consecutiveFailures = 0
-    this._progressFlags.push(hasNewFact !== false)
+    let isNew = ok !== false
+    if (hasNewFact !== undefined) isNew = !!hasNewFact
+    else {
+      const factKey = resultSig === undefined ? fp : `${fp}|${resultSig}`
+      if (this._seenFacts.has(factKey)) isNew = false
+      else this._seenFacts.add(factKey)
+    }
+    this._progressFlags.push(isNew)
     if (this._progressFlags.length > this.noProgressWindow) this._progressFlags.shift()
   }
 

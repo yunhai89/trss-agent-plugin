@@ -937,6 +937,20 @@ await test('LoopGovernor 单元：指纹/重复/失败/无进展/预算', async 
   // token 预算
   const g4 = mk({ tokenBudget: 100 })
   g4.noteUsage({ input: 60, output: 50 }); eq(g4.shouldStop().reason, 'token_budget', 'token 超 100 → token_budget')
+  // 新事实判定（结果签名）：轮询状态变化=进展，同参同结果空转=no_progress
+  const g5 = mk({ noProgressWindow: 3 })
+  g5.noteToolCall('check', { id: 1 }, true, undefined, 's:1'); eq(g5.shouldStop().stop, false, '轮询首次不停')
+  g5.noteToolCall('check', { id: 1 }, true, undefined, 's:2'); eq(g5.shouldStop().stop, false, '状态变化=新事实（check_subagent 轮询合法）')
+  g5.noteToolCall('check', { id: 1 }, true, undefined, 's:2'); eq(g5.shouldStop().stop, false, '同结果重复但窗口未满不停')
+  g5.noteToolCall('check', { id: 1 }, true, undefined, 's:2'); eq(g5.shouldStop().stop, false, '窗口内仍含新事实不停')
+  g5.noteToolCall('check', { id: 1 }, true, undefined, 's:2'); eq(g5.shouldStop().reason, 'no_progress', '窗口全为重复结果 → no_progress')
+  // A,B,A,B 同结果交替空转不再绕过 no_progress（旧实现只看连续同指纹，交替可无限循环）
+  const g6 = mk({ noProgressWindow: 4, maxSameAction: 99 })
+  g6.noteToolCall('a', {}, true, undefined, 'x'); g6.noteToolCall('b', {}, true, undefined, 'y')
+  g6.noteToolCall('a', {}, true, undefined, 'x'); g6.noteToolCall('b', {}, true, undefined, 'y')
+  eq(g6.shouldStop().stop, false, '交替 4 步窗口内含新事实不停')
+  g6.noteToolCall('a', {}, true, undefined, 'x'); g6.noteToolCall('b', {}, true, undefined, 'y')
+  eq(g6.shouldStop().reason, 'no_progress', 'A,B,A,B 同结果交替窗口满 → no_progress')
 })
 
 await test('Agent 集成：重复动作终止 + 强制收尾（审计 §2.1 探针）', async () => {

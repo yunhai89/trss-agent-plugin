@@ -4,7 +4,7 @@
  * 与 PersonaVoice（怎么说，现有）分离：BehaviorPolicy 决定机器人何时、对什么话题参与。
  * 环境运行时按「机器人+群」绑 Persona，不沿用某用户 Direct Agent 人设。
  *
- * 可被群级覆盖（store.setGroupConfig）；resolveBehaviorPolicy 合并默认 + 群覆盖。
+ * 可被群级覆盖：配置 agent.humanize.groupsOverride.<gid>（runtime-manager 合并后经 resolveHumanizeConfig 生效）。
  */
 
 export const DEFAULT_BEHAVIOR_POLICY = Object.freeze({

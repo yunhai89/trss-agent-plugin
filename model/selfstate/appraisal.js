@@ -73,7 +73,7 @@ export class AppraisalEngine {
     }
 
     // ── 关系修正矩阵（§10.2）──
-    const adjusted = this._applyRelationModifiers(eventType, semantic, { closeness, relation, repetition, directedness })
+    const adjusted = this._applyRelationModifiers(eventType, semantic, { closeness, relation, repetition, directedness, quoteSuspicion: clamp01(det.quote_suspicion || 0) })
 
     const confidence = clamp01(candidate.confidence * 0.6 + directedness * 0.25 + (semantic.certainty ?? 0.15))
     if (confidence < (ed.minEventConfidence || 0.55)) return null
@@ -139,7 +139,7 @@ export class AppraisalEngine {
   }
 
   /** 关系修正（§10.2）→ 最终类型 + desirability/norm_violation。 */
-  _applyRelationModifiers(eventType, semantic, { closeness, relation, repetition, directedness }) {
+  _applyRelationModifiers(eventType, semantic, { closeness, relation, repetition, directedness, quoteSuspicion = 0 }) {
     let desirability = 0
     let norm_violation = 0
     let controllability = 0.4
@@ -172,8 +172,13 @@ export class AppraisalEngine {
     } else if (eventType === 'response_received') {
       desirability = 0.3
     }
-    // 引用嫌疑削弱敌意归因（§10.1-2）
-    if (norm_violation > 0.3 && (this._qs || 0) > 0) { /* quote handled via det in caller */ }
+    // 引用嫌疑削弱敌意归因（§10.1-2，接线修复——曾为 this._qs 恒 undefined 的死代码）：
+    // 回复他人（qs=0.5）或回复机器人但疑似转述第三方（qs=0.15）时，文本的敌意立场可能是被引用者的，
+    // 按 qs 比例把负面 desirability 与 norm_violation 往中性拉（削弱而非清除——直接发辱骂词仍保留底线反应）。
+    if (norm_violation > 0.3 && quoteSuspicion > 0) {
+      desirability *= (1 - 0.6 * quoteSuspicion)
+      norm_violation *= (1 - 0.5 * quoteSuspicion)
+    }
     return { eventType, desirability: Math.max(-1, Math.min(1, desirability)), norm_violation, controllability, playfulness: semantic.playfulness, hostility: semantic.hostility, repair_signal: semantic.repair_signal, closeness, repetition }
   }
 

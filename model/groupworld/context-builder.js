@@ -19,7 +19,11 @@ export class WorldContextBuilder {
     this.retriever = retriever
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.trace = trace
+    this._cache = new Map() // gather 结果 TTL 缓存（retrieval.cacheTtlSeconds，曾为死配置键）
   }
+
+  /** 失效某群缓存（recordInteraction 写回关系后调用，保证下次读到新关系）。 */
+  invalidate(groupId) { this._cache.delete(String(groupId)) }
 
   /** Planner 现场。返回 { empty, socialScene, text }。 */
   async buildPlannerContext(input) {
@@ -31,11 +35,31 @@ export class WorldContextBuilder {
     return this._build(input, 'replyer', Number(this._cfgFn().retrieval?.replyerTokenBudget) || 500)
   }
 
+  /**
+   * gather TTL 缓存：同一（群/焦点用户/角色/话题）在 cacheTtlSeconds 内复用检索结果。
+   * 主要收益是同轮 Planner+Replyer 双查询合一（topicText 同源必命中）；跨消息 60s 内
+   * 话题未变也命中。写入路径（recordInteraction/画像纠正）经 invalidate() 立即失效。
+   */
+  async _gatherCached(input, role, now) {
+    const ttl = Number(this._cfgFn().retrieval?.cacheTtlSeconds)
+    if (!Number.isFinite(ttl) || ttl <= 0) {
+      return this.retriever.gather({ botId: input.botId, groupId: input.groupId, focusUserId: input.focusUserId, relatedUserIds: input.relatedUserIds || [], topicText: input.topicText || '', now })
+    }
+    const key = `${role}|${input.groupId}|${input.focusUserId || ''}|${input.topicText || ''}`
+    const hit = this._cache.get(String(input.groupId))?.get(key)
+    if (hit && now - hit.at < ttl * 1000) return hit.raw
+    const raw = await this.retriever.gather({ botId: input.botId, groupId: input.groupId, focusUserId: input.focusUserId, relatedUserIds: input.relatedUserIds || [], topicText: input.topicText || '', now })
+    let bucket = this._cache.get(String(input.groupId))
+    if (!bucket) { bucket = new Map(); this._cache.set(String(input.groupId), bucket) }
+    bucket.set(key, { at: now, raw })
+    return raw
+  }
+
   async _build(input, role, budget) {
     const now = input.now || Date.now()
     let raw
     try {
-      raw = await this.retriever.gather({ botId: input.botId, groupId: input.groupId, focusUserId: input.focusUserId, relatedUserIds: input.relatedUserIds || [], topicText: input.topicText || '', now })
+      raw = await this._gatherCached(input, role, now)
     } catch (e) {
       // §15.1 降级：检索失败 → 空现场，不阻断
       this.trace?.record?.('gw_retrieve', { groupId: input.groupId, err: String(e?.message || e).slice(0, 80) })

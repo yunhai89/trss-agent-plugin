@@ -23,6 +23,7 @@ export class MediaDescriber {
     this.vision = vision
     this.maxPerTurn = Math.max(0, maxPerTurn | 0)
     this._cache = new Map() // urlHash → desc
+    this._transient = new Map() // urlHash → 瞬态失败重试时间戳（60s 冷却）
     this._cacheSize = cacheSize
     this._fetcher = fetcher || globalThis.fetch
     this.trace = trace
@@ -43,6 +44,12 @@ export class MediaDescriber {
       this._cache.delete(h); this._cache.set(h, v) // LRU touch
       return v
     }
+    // 瞬态失败短冷却（60s 后可重试）——曾把网络抖动也写进永久负缓存，一次瞬时错误让该图直到 LRU 淘汰都"失明"
+    const retryAt = this._transient.get(h)
+    if (retryAt) {
+      if (Date.now() < retryAt) return ''
+      this._transient.delete(h)
+    }
     try {
       const res = await this._fetcher(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(15000) })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -55,9 +62,16 @@ export class MediaDescriber {
       this._cache.set(h, desc)
       return desc
     } catch (e) {
-      if (this._cache.size >= this._cacheSize) { const k = this._cache.keys().next().value; this._cache.delete(k) }
-      this._cache.set(h, '') // 负缓存：本轮失败的图不再重试（占位保留）
-      this.trace?.record?.('vision_desc_fail', { urlHash: h, msg: String(e?.message || e).slice(0, 60) })
+      const msg = String(e?.message || e)
+      const deterministic = /not image:|too large/.test(msg) || /^HTTP 4\d\d/.test(msg)
+      if (deterministic) {
+        if (this._cache.size >= this._cacheSize) { const k = this._cache.keys().next().value; this._cache.delete(k) }
+        this._cache.set(h, '') // 永久负缓存：确定性失败（非图片/过大/4xx）不再重试
+      } else {
+        if (this._transient.size >= this._cacheSize) this._transient.clear()
+        this._transient.set(h, Date.now() + 60_000) // 瞬态失败（网络/5xx/超时/视觉模型）：60s 后可重试
+      }
+      this.trace?.record?.('vision_desc_fail', { urlHash: h, msg: msg.slice(0, 60), deterministic })
       return ''
     }
   }
