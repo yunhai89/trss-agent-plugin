@@ -31,7 +31,7 @@ export class TurnScheduler {
    *         presenceWindowSeconds/bypassPendingCount/contextMessages/behaviorPolicy）
    *   send: async (text:string, opts:{quoteTargetId?:string}) => sentMessageId|null
    */
-  constructor({ runtime, cfg, planner, replyer, composer, send, onDelivered = null }) {
+  constructor({ runtime, cfg, planner, replyer, composer, send, onDelivered = null, getScene = null }) {
     this.runtime = runtime
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.planner = planner
@@ -40,6 +40,8 @@ export class TurnScheduler {
     this.send = send
     // 可选：成功发送后回调（apps 注入 → GroupWorld.recordInteraction 写回主观关系；失败不影响发送）
     this.onDelivered = onDelivered
+    // 可选：本轮场景分析（apps 注入 ConversationSceneAnalyzer 封装；Gate/Planner/Replyer 共用产物）
+    this.getScene = getScene
     runtime.bindDriver({
       onDebounced: (rt) => this._onDebounced(rt),
       onWaitDue: (rt) => this._onWaitDue(rt),
@@ -268,6 +270,32 @@ export class TurnScheduler {
       return
     }
 
+    // ConversationScene（Grounding → Scene → Gate → Planner → Replyer；同一对象全程共用）。
+    // 失败/未注入 → scene=null，门控与下游全部零影响（降级不阻塞链路）。
+    let scene = null
+    try {
+      scene = await this.getScene?.({ runtime: rt, decision, messages: ctxWindow, now }) || null
+    } catch { scene = null }
+    rt.currentScene = scene
+
+    // 场景门控（强信号可豁免——@/引用机器人的消息不受场景压制）：
+    // ① 话题已收尾（phase=closed）且没直接叫机器人 → 默认沉默；
+    // ② 群友间动量高、没指向机器人、评分也非强信号 → 不抢话（降低插话概率的硬实现）。
+    if (scene && !hasStrongSignal && !decision.forcedCandidate) {
+      if (scene.phase === 'closed' && scene.directedAtBot < 0.5) {
+        rt.trace?.record('gate_scene_closed', { turnId, sceneType: scene.sceneType, phase: scene.phase })
+        rt.markObserved(external)
+        rt.setPhase('idle')
+        return
+      }
+      if ((scene.humanMomentum ?? 0) >= 0.7 && (scene.directedAtBot ?? 0) < 0.3 && !decision.isAmbient) {
+        rt.trace?.record('gate_scene_momentum', { turnId, momentum: scene.humanMomentum, directedAtBot: scene.directedAtBot })
+        rt.markObserved(external)
+        rt.setPhase('idle')
+        return
+      }
+    }
+
     // idle backoff（规划触发后、连续无动作时；强信号/批量绕过）
     if (rt.backoff.shouldDelay({ pendingCount: candidates.length, forcedCandidate: decision.forcedCandidate, isGroup: true, now })) {
       rt.trace?.record('backoff_delay', { remaining: rt.backoff.remainingSec(now), count: rt.backoff.count })
@@ -291,7 +319,7 @@ export class TurnScheduler {
     rt.trace?.record('planner_start', { turnId, gen, batchId, batchSize: candidates.length, targetMessageId: decision.targetMessage?.id || null })
     try {
       const action = await this.planner.decide({
-        snapshot: ctxWindow, decision, targetMessages: candidates, signal: rt.signal, runtime: rt, cfg: c,
+        snapshot: ctxWindow, decision, targetMessages: candidates, signal: rt.signal, runtime: rt, cfg: c, scene,
       })
       if (!rt.isCurrent(gen)) {
         rt.trace?.record('planner_stale', { gen, current: rt.plannerGeneration })
@@ -397,7 +425,7 @@ export class TurnScheduler {
     let text = ''
     try {
       Log.info('[humanize] Replyer 开始生成回复', `${ANSI.c}群${rt.groupId}${ANSI.R}`)
-      const res = await this.replyer.generate({ action, batch, decision, target, runtime: rt, signal: rt.signal, cfg: c })
+      const res = await this.replyer.generate({ action, batch, decision, target, runtime: rt, signal: rt.signal, cfg: c, scene: rt.currentScene || null })
       if (!rt.isCurrent(gen)) { Log.info('[humanize] Replyer 完成但代已过期，取消'); return }
       text = (res?.text || '').trim()
       Log.mark('[humanize] Replyer 完成', `${ANSI.g}len=${text.length}${ANSI.R}`, res?.cancelReason ? `${ANSI.y}取消:${res.cancelReason}${ANSI.R}` : `${ANSI.g}"${text.slice(0, 60)}"${ANSI.R}`)

@@ -70,15 +70,32 @@ export const parseCoreOutput = parseLlmJson
 export const parseAppraisalOutput = parseLlmJson
 export const parseReflectionOutput = parseLlmJson
 
-/** 构造歧义评价 user 消息（关系背景 + 规则信号 + 消息）。 */
+/** 构造歧义评价 user 消息（关系背景 + 规则信号 + 消息 + 会话现场）。 */
 export function buildAppraisalPrompt(candidate, relation, scene) {
   const rel = relation || {}
   const lines = [
     `消息：${candidate.text || '(见来源)'}`,
     `规则信号：${JSON.stringify(candidate.deterministicSignals || {})}`,
     `关系背景：熟悉度${fmt(rel.familiarity)}、好感${fmt(rel.affinity)}、互动风格=${rel.interaction_style || '未知'}、互损历史=${rel.reciprocalTeasing ? '有' : '未知'}`,
-    `现场：话题=${scene?.topic || '未知'}、群活跃=${scene?.groupActivity || '未知'}、语气=${scene?.conversationTone || '未知'}`,
+    `现场：${formatSceneForAppraisal(scene)}`,
   ]
   return lines.join('\n')
+}
+
+/** 现场渲染：兼容 ConversationScene（humanize 场景模块产物：sceneType/speechAct/tones/phase/...）
+ *  与旧松散形状（topic/groupActivity/conversationTone）。 */
+function formatSceneForAppraisal(scene) {
+  if (!scene || typeof scene !== 'object' || !Object.keys(scene).length) return '未知'
+  if (scene.sceneType) {
+    const bits = [
+      `类型=${scene.sceneType}`,
+      scene.speechAct ? `言语行为=${scene.speechAct}` : '',
+      Array.isArray(scene.tones) && scene.tones.length ? `语气=${scene.tones.join('/')}` : '',
+      scene.phase ? `阶段=${scene.phase}` : '',
+      Number.isFinite(Number(scene.directedAtBot)) ? `指向机器人=${Number(scene.directedAtBot).toFixed(2)}` : '',
+    ].filter(Boolean)
+    return bits.join('、')
+  }
+  return `话题=${scene.topic || '未知'}、群活跃=${scene.groupActivity || '未知'}、语气=${scene.conversationTone || '未知'}`
 }
 const fmt = (v) => (v == null ? '未知' : (Number(v) * 100).toFixed(0) + '%')

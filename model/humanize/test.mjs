@@ -259,7 +259,8 @@ await test('prompts：槽位替换 + Planner 含红线、无任务措辞', async
   ok(sys.includes('你不是「小猫」本人') && sys.includes('human_reply'), 'Planner 含红线 + 工具')
   ok(!/始终完成|失败后继续/.test(sys), 'Planner 无任务 Agent 措辞')
   const rsys = buildReplyerSystem({ replyGuide: '赞同', recentMessages: '甲: hi' })
-  ok(rsys.includes('只输出消息正文'), 'Replyer 含只输出正文约束')
+  ok(rsys.includes("你就是") && rsys.includes("本人"), 'Replyer 第一人称临场表达（你就是这个人，不是代写）')
+  ok(rsys.includes("正文"), "Replyer 仍约束只输出正文")
   const ctx = formatGroupContext([mkMsg('hi', false, {}, 'm1', '甲')])
   ok(ctx.includes('甲') && ctx.includes('[m1]'), 'formatGroupContext 含 id')
 })
@@ -302,31 +303,41 @@ await test('scorer：avoidTopics 命中给负分 + reason', async () => {
   ok(avd.negativeReasons.includes('avoid_topic'), '记 avoid_topic 负向原因')
 })
 
-// ───────── persona block（MaiBot 式人设）─────────
-await test('persona：buildHumanizePersonaBlock + Planner 注入 + 空回落', async () => {
+// ───────── persona block（Replyer 专用；Planner 不再接收人设）─────────
+await test('persona：buildHumanizePersonaBlock（第一人称）+ Planner 不含人设块', async () => {
   ok(buildHumanizePersonaBlock({ prompt: '' }) === '', '空 prompt 返回空串（调用方回落旧来源）')
   ok(buildHumanizePersonaBlock() === '', '无参返回空串')
   const blk = buildHumanizePersonaBlock({ name: '小汐', prompt: '你是小汐，爱接梗。【语气】轻松口语。' })
-  ok(blk.includes('小汐') && blk.includes('角色人设'), '人设块含角色名 + 标题')
+  ok(blk.includes('小汐') && blk.includes('你就是'), '人设块第二人称「你就是」+ 角色名')
   ok(blk.includes('底线'), '人设块含事实准确红线')
-  // Planner system 注入 personaBlock
-  const sys = buildPlannerSystem({ personaName: '小汐', personaBlock: blk, groupContext: '甲: hi' })
-  ok(sys.includes('角色人设') && sys.includes('轻松口语'), 'Planner system 含人设块')
-  // 未注入时不残留空行异常（"角色人设"字样会出现在原则里，但人设块标题不应出现）
-  const sys2 = buildPlannerSystem({ personaName: '机器人', groupContext: '甲: hi' })
-  ok(sys2.includes('行为政策') && !sys2.includes('角色人设参考'), '无人设时 Planner 正常、不含人设块')
+  // Planner system 不再接收人设（PersonaVoice 只给 Replyer）——喂全量人设会诱导决策器替角色写台词
+  const sys = buildPlannerSystem({ personaName: '小汐', groupContext: '甲: hi', sceneBlock: '【当前会话场景】' })
+  ok(!sys.includes('轻松口语') && !sys.includes('你就是'), 'Planner system 不含 PersonaVoice 人设正文')
+  ok(sys.includes('【当前会话场景】'), 'Planner system 含场景块')
+  ok(sys.includes('行为政策'), 'Planner system 含行为政策')
 })
 
-await test('persona：内置默认人设（去 AI 味、尊重看人、非空可渲染）', async () => {
-  ok(typeof DEFAULT_HUMANIZE_PERSONA.prompt === 'string' && DEFAULT_HUMANIZE_PERSONA.prompt.length > 200, '默认人设非空且有实质内容')
-  // 核心主张：尊重是看人的（不是“尊重每个用户”这类 AI 味措辞）
-  ok(/看人下菜|态度跟关系走|没有“尊重每个人”/.test(DEFAULT_HUMANIZE_PERSONA.prompt), '默认人设强调态度因人而异（非无差别尊重）')
-  ok(!/尊重每一位用户|尊重所有用户|礼貌对待每一个人/.test(DEFAULT_HUMANIZE_PERSONA.prompt), '不含“尊重每个用户”式 AI 味套话')
-  // 防 AI 味红线在
-  ok(DEFAULT_HUMANIZE_PERSONA.prompt.includes('很高兴帮你') || DEFAULT_HUMANIZE_PERSONA.prompt.includes('客服'), '默认人设含防 AI 味红线')
-  // 渲染成块可用
-  const blk = buildHumanizePersonaBlock({ name: DEFAULT_HUMANIZE_PERSONA.name, prompt: DEFAULT_HUMANIZE_PERSONA.prompt })
-  ok(blk.includes('角色人设') && blk.includes('看人下菜'), '默认人设可正确渲染为 Planner/Replyer 注入块')
+await test('persona：内置默认人设（28 岁女程序员、无欺骗规则、无写死姓名）', async () => {
+  const p = DEFAULT_HUMANIZE_PERSONA.prompt
+  ok(typeof p === 'string' && p.length >= 200 && [...p].length <= 450, `默认人设 200~400 字量级（实际 ${[...p].length}）`)
+  ok(/程序员|写代码/.test(p), '默认人设是 IT 程序员背景（能正常接技术话茬）')
+  // 必备反应习惯
+  ok(/吐槽.*接.*情绪|先顺着接一句情绪|先接住情绪/.test(p), '吐槽先接情绪、不急着分析')
+  ok(/正常答|正常回答/.test(p), '真问技术能正常回答（不是不懂技术的上班族）')
+  ok(/没听懂.*问|直接问一句/.test(p), '没听懂就自然追问，不胡乱补全')
+  ok(/自然停|不硬插/.test(p), '对方不想聊/聊得正顺时自然停下')
+  ok(/变短/.test(p), '累/忙/心情差回复明显变短')
+  // 反面清单（本次任务删除项）
+  ok(!p.includes('江野'), '默认人设不写死姓名「江野」')
+  ok(!/糊弄|别承认[，,]?.*人设|你不是.*AI/.test(p), '无「被问身份就糊弄」欺骗规则')
+  ok(!/看人下菜|没有.{0,4}尊重每个人/.test(p), '无夸张标签措辞')
+  ok(!/绝不|禁止/.test(p), '无大量「绝不/禁止」条款（不写成规则手册）')
+  ok(!/口癖|口头禅/.test(p), '无固定口头禅词库')
+  // 身份披露：直接被问 → 简短坦诚
+  ok(/承认一句|大方承认/.test(p), '被问身份简短坦诚披露')
+  // 渲染：默认名留空 → 由 resolvePersonaIdentity 统一取名，块标题不落「江野」
+  const blk = buildHumanizePersonaBlock({ name: '', prompt: p })
+  ok(blk.includes('你就是') && !blk.includes('江野'), '默认人设渲染块无写死姓名')
 })
 
 // ───────── reply-composer ─────────

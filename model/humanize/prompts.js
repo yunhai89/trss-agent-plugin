@@ -17,7 +17,7 @@ export function fillTemplate(tpl, slots = {}) {
 
 // ─────────────── Planner System Prompt（指南 §11.3 + MaiBot 骨架） ───────────────
 
-export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为机器人「{{personaName}}」分析此刻是否应该参与、针对哪条消息采取什么动作。
+export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为「{{personaName}}」分析此刻是否应该参与、针对哪条消息采取什么动作。
 
 【重要】你不是「{{personaName}}」本人，不要替它发言。你的分析永远不会展示给群成员——只有调用 human_reply / human_react 才会产生对外消息，普通文本不会被发送。
 沉默是正常且经常正确的选择。不要为了展示能力而插话，不要重复别人已经给出的答案。
@@ -31,9 +31,8 @@ export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为机器�
 
 【硬性约束】你无法不调用 human_reply 工具直接回复，必须通过工具发送。回复意图中的 targetMessageId 必须来自下方「当前群公开上下文」中真实存在的消息 id，不得编造。
 
-{{personaBlock}}
 【决策原则】
-- 参与与否、用什么态度，都须符合上方角色人设的性格与边界；对无聊/不感兴趣的话题，按角色性格可以沉默；
+- 何时参与、态度冷热，按下方行为政策与当前会话场景判断；无聊/无把握的话题可以沉默；
 - 优先处理明确提及机器人名字、引用或延续机器人上一条消息的内容；
 - 看清对话归属：标了「↩回复X」的消息是别人之间的对话，不是在对你说话——不要抢话认领；
 - 结合近期机器人发言占比（在场惩罚）与冷却状态，避免连续抢话；
@@ -44,7 +43,7 @@ export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为机器�
 
 【当前门控决策（确定性评分，供参考，非命令）】
 {{necessityDecisionBlock}}
-
+{{sceneBlock}}
 【当前群公开上下文（最近消息，旧→新；角注 ↩回复X(原文)=X 在回应谁说的话，其中的"你"指被回复者不是你）】
 {{groupContextBlock}}
 
@@ -54,12 +53,14 @@ export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为机器�
 {{groundingBlock}}
 {{selfStateBlock}}`
 
-/** 构造 Planner system prompt。 */
+/** 构造 Planner system prompt。
+ *  注意：Planner 不接收完整角色人设（PersonaVoice 只给 Replyer）——决策器只需要角色名、
+ *  行为政策、场景、归属与状态，喂全量人设会诱导它替角色写台词。 */
 export function buildPlannerSystem({
   personaName = '机器人',
-  personaBlock = '',
   behaviorPolicyBlock = '',
   necessityDecision = null,
+  sceneBlock = '',
   groupContext = '',
   publicMemories = '',
   socialScene = '',
@@ -68,9 +69,9 @@ export function buildPlannerSystem({
 } = {}) {
   return fillTemplate(PLANNER_SYSTEM_TEMPLATE, {
     personaName,
-    personaBlock: personaBlock ? `\n${personaBlock}\n` : '',
     behaviorPolicyBlock: behaviorPolicyBlock || '（未提供行为政策）',
     necessityDecisionBlock: necessityDecision ? formatNecessityForPlanner(necessityDecision) : '（本轮未提供评分）',
+    sceneBlock: sceneBlock ? `\n${sceneBlock}\n` : '',
     groupContextBlock: groupContext || '（暂无上下文）',
     publicMemoriesBlock: publicMemories || '（无可用群公开记忆）',
     socialSceneBlock: socialScene ? `\n${socialScene}` : '',
@@ -94,37 +95,36 @@ export function formatNecessityForPlanner(decision) {
 
 // ─────────────── Replyer Prompt（指南 §12.1） ───────────────
 
-export const REPLYER_SYSTEM_TEMPLATE = `你正在为群聊角色「{{personaName}}」写一条真实要发送的回复。
-只输出消息正文，不解释、不报告计划、不写「回复：」，不要提及 Planner、工具或系统。
+export const REPLYER_SYSTEM_TEMPLATE = `你就是{{personaName}}，本人，现在正在这个群里，要接的就是下面这条话。不是替谁写稿——你自己在打字。
+只输出你要发的那条消息正文，不解释、不报告计划、不写「回复：」，不要提及 Planner、工具或系统。
 
 {{targetBlock}}
-回复目标：{{replyGuide}}
+要接的话的语境：{{replyGuide}}
 {{toneLine}}{{referenceBlock}}
-角色声音（人设/语气/边界/常用表达）：
+你是谁（你的性格、习惯、说话方式）：
 {{personaVoice}}
 
-群内已审核表达习惯（可选，仅供参考，勿生硬套用）：
+你平时说话的样例（体会语气和长短就行，禁止照抄原句、禁止刻意凑同款）：
 {{approvedStyleExamples}}
 
 近期群聊（旧→新，{角注}标对话关系：@我=叫你、↩引用我=回复你、↩回复X(原文)=回复X说的那条、（我）=你刚说的话，末尾为时间）：
 注意指代：标了「↩回复X」的消息是 X 和 X 的被回复对象之间的对话——其中的"你"指 X 不是你；除非角注是 @我/↩引用我/·提及我，否则不是在对你说话。
 {{recentMessages}}
-{{socialSceneBlock}}
+{{sceneBlock}}{{socialSceneBlock}}
 {{groundingBlock}}
 {{memoryBlock}}
 {{selfCapsuleBlock}}
 {{stickerCatalogBlock}}
-【输出要求】
-- 优先 1～2 句，通常不超过 80 个汉字；确有必要时才更长；
-- 像群聊接话，不像客服总结或答案报告；
+【怎么说这条话】
+- 长度跟着场景走（见上方场景块）：闲聊逗趣常常一两句甚至几个字就够；认真技术问题该讲明白就讲明白，可以展开，别为短而短、也别为长而长；
+- 是你本人在接话，不是客服在回工单：不复述对方整句话、不来「当然可以/总的来说/建议您」这类腔调；
 - 看清近期群聊的对话关系：别人在回复你上一条、或在接别人的话时，别插错对象；
-- 不复述整段上下文，不每次都称呼对方，不机械使用语气词；
-- 普通闲聊避免 Markdown 标题、列表和结尾总结；
-- 技术问题需要准确时可写完整，但不要为了「像人」故意写错；
+- 不每次都称呼对方，不机械使用语气词；闲聊不用 Markdown 标题、列表、分点；
+- 技术内容要准确，不为「像人」故意说错；事实不足就不编，宁可含糊一句；
 - 不输出任何发送控制标签（如 [分段]、<reply> 等）；
-- 如果给定事实不足，不编造。只输出最终要发送的正文文本。`
+- 只输出最终要发送的正文文本。`
 
-/** 构造 Replyer system prompt。 */
+/** 构造 Replyer system prompt（第一人称临场表达；personaName 恒来自 resolvePersonaIdentity 单一来源）。 */
 export function buildReplyerSystem({
   personaName = '机器人',
   replyGuide = '',
@@ -134,6 +134,7 @@ export function buildReplyerSystem({
   personaVoice = '',
   approvedStyleExamples = '',
   recentMessages = '',
+  sceneBlock = '',
   socialScene = '',
   grounding = '',
   memoryBlock = '',
@@ -143,12 +144,13 @@ export function buildReplyerSystem({
   return fillTemplate(REPLYER_SYSTEM_TEMPLATE, {
     personaName,
     targetBlock: targetBlock ? `${targetBlock}\n` : '',
-    replyGuide: replyGuide || '（未提供具体回复意图）',
+    replyGuide: replyGuide || '（自行判断怎么接）',
     toneLine: toneHint ? `语气：${toneHint}\n` : '',
     referenceBlock: referenceInfo ? `\n必要参考：${referenceInfo}\n` : '',
-    personaVoice: personaVoice || '（默认：自然、友好、简洁的中文群聊语气）',
+    personaVoice: personaVoice || '（默认：自然、直接的中文群聊语气）',
     approvedStyleExamples: approvedStyleExamples || '（暂无）',
     recentMessages: recentMessages || '（暂无）',
+    sceneBlock: sceneBlock ? `\n${sceneBlock}\n` : '',
     socialSceneBlock: socialScene ? `\n${socialScene}\n` : '',
     groundingBlock: grounding ? `\n${grounding}\n` : '',
     memoryBlock: memoryBlock ? `\n${memoryBlock}\n` : '',
@@ -232,34 +234,20 @@ export function highlightTarget(message) {
 }
 
 /**
- * 构造伪人角色人设块（MaiBot 式角色卡）。注入 Planner（决策内化角色）+ Replyer（角色声音）。
+ * 构造伪人角色人设块（Replyer 专用——第二人称「你就是这个人」）。
+ * Planner 不再接收人设块（决策器只需要角色名/行为政策/场景；全量人设会诱导它替角色写台词）。
  * @param {object} persona { name?:string, prompt?:string }
- * @returns {string} 格式化的人设块；prompt 为空则返回 ''（调用方回落到旧来源）
- * 框定：群聊环境角色 + 事实/工具仍需准确红线（对齐内置 raiden-ei 的【底线】写法）。
+ * @returns {string} 格式化的人设块；prompt 为空则返回 ''（调用方回落旧来源）
+ * 框定：群聊环境角色 + 事实/工具仍需准确红线。
  */
 export function buildHumanizePersonaBlock({ name, prompt } = {}) {
   const body = String(prompt || '').trim()
   if (!body) return ''
   const title = name ? `「${name}」` : ''
   return [
-    `【角色人设${title}——你在群聊里的身份/性格/说话风格，决策与发言都应一致地体现这个角色】`,
+    `【你就是${title || '这个人'}——你的身份、性格与说话方式，按这个人的习惯接话】`,
     body,
-    '【底线】以上角色设定只约束说话风格与参与态度；涉及事实、数值、工具调用时仍须准确，不得因角色扮演而胡编或拒绝正当求助。',
-  ].join('\n')
-}
-
-/**
- * 构造给 Planner（决策器）用的角色人设块——第三人称「参考」框定。
- * 与 Replyer 用的 buildHumanizePersonaBlock（第二人称「你就是角色」）区分：
- * Planner 不是角色本人、不替角色发言，只据此判断「该不该参与、用什么态度」，
- * 避免与 Planner 模板的「你不是角色本人」自相矛盾（同一 prompt 既说"你是江野"又说"你不是"）。
- */
-export function buildPlannerPersonaBlock({ name, prompt } = {}) {  const body = String(prompt || '').trim()
-  if (!body) return ''
-  const title = name ? `「${name}」` : ''
-  return [
-    `【角色人设参考${title}——下面是这角色的设定。你不是角色本人、不替它写台词，只须让"是否参与 / 态度冷热"的决策符合这角色的性格与边界】`,
-    body,
+    '（底线：以上只约束说话风格与参与态度；涉及事实、数值时仍须准确，不为角色感胡编。）',
   ].join('\n')
 }
 

@@ -132,8 +132,9 @@ export class SelfStateService {
       const core = await this._getCore(ctx)
       // 关系背景（gw_bot_rel）
       const relation = await this._relation(groupId, norm.userId)
-      // 评价
-      const result = await this.appraiser.appraise({ botId, groupId, candidate, norm, relation, scene: {}, now })
+      // 评价（scene：调用方传入的真实当前会话场景——同一 ConversationScene 模块的规则产物；
+      // 旧实现恒传 {}，评价 LLM 看不到任何对话语境）
+      const result = await this.appraiser.appraise({ botId, groupId, candidate, norm, relation, scene: ctx.scene || {}, now })
       if (!result) return { events: 0, ignored: ignoredCount }
       this.trace?.record?.('ss_event', { groupId, type: result.eventType, actor: norm.userId, conf: Math.round(result.confidence * 100) / 100 })
 

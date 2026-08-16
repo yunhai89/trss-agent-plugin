@@ -139,6 +139,18 @@ export function validateHumanizeConfig(raw = {}, runtimeToolNames = null) {
     prompt: personaPrompt,
     fromPersonaId: String(c.persona.fromPersonaId || '').slice(0, 60),
     aliases: (Array.isArray(c.persona.aliases) ? c.persona.aliases : []).map((a) => String(a || '').trim().slice(0, 60)).filter((a) => a.length >= 2).slice(0, 8),
+    // 人工认可的风格示例（带 sceneType/speechAct/tone/familiarity/text 标签；Replyer 按场景检索 2~4 条）。
+    // 提供即全量覆盖默认样本；text 必须非空，总量封顶 60 条。
+    styleExamples: (Array.isArray(c.persona.styleExamples) ? c.persona.styleExamples : [])
+      .filter((e) => e && typeof e === 'object' && typeof e.text === 'string' && e.text.trim())
+      .slice(0, 60)
+      .map((e) => ({
+        sceneType: String(e.sceneType || '').slice(0, 24),
+        speechAct: String(e.speechAct || '').slice(0, 24),
+        tone: String(e.tone || '').slice(0, 16),
+        familiarity: Math.max(0, Math.min(1, Number(e.familiarity) || 0.5)),
+        text: e.text.trim().slice(0, 120),
+      })),
   }
 
   // groups 必须是数组

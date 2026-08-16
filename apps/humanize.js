@@ -217,6 +217,33 @@ async function buildHumanize() {
     } catch { return null }
   }
 
+  // ConversationScene 分析器（规则+LLM 混合；按 groupId+lastMessageId 缓存；失败降级规则不阻塞）
+  const sceneAnalyzer = new H.ConversationSceneAnalyzer({ provider: rt.provider, cfg: cfgFn, trace })
+
+  /** 近窗熟悉度代理：目标在近期群聊出现多 = 熟（GW online 时关系数据更准，此处零成本兜底）。 */
+  function familiarityProxy(gid, targetUserId, _recentSelfTexts) {
+    try {
+      const win = manager?.getOrCreate?.(gid)?.runtime?.buffer?.snapshot(20, { includeSelf: false }) || []
+      const n = win.filter((m) => targetUserId && String(m.userId) === String(targetUserId)).length
+      return n >= 3 ? 0.8 : n >= 1 ? 0.5 : 0.3
+    } catch { return 0.5 }
+  }
+
+  /** 本轮场景（Grounding → Scene；Gate/Planner/Replyer 共用同一对象）。RuntimeManager 按群转发。 */
+  const getSceneForTurn = async (gid, { runtime, decision, messages, now } = {}) => {
+    try {
+      const g = getGroundingContext(messages || [], { targetId: decision?.targetMessage?.id })
+      return await sceneAnalyzer.analyze({
+        groupId: gid,
+        messages: messages || [],
+        grounding: g?.grounding || null,
+        lastMessageId: decision?.targetMessage?.id || messages?.[messages.length - 1]?.id || null,
+        signal: runtime?.signal || null,
+        now,
+      })
+    } catch (e) { Log.debug('[humanize] 场景分析降级:', e?.message || e); return null }
+  }
+
   const makePlanner = (gid) => new H.HumanizePlanner({
     provider: rt.provider, cfg: cfgFn, readTools,
     // 独立记忆库检索（替换原 rt.recall 适配——伪人记忆与主 Agent 记忆彻底分离）
@@ -236,8 +263,8 @@ async function buildHumanize() {
     },
     getBehaviorPolicyBlock: () => formatPolicyBlock(cfgFn().behaviorPolicy),
     getPersonaName: () => H.resolvePersonaIdentity(cfgFn(), { botNickname: botNickname() }).name,
-    // 角色人设注入 Planner：第三人称"参考"框定（决策器不是角色本人，只据此判断该不该接/态度）
-    getPersonaBlock: () => H.buildPlannerPersonaBlock(resolveHumanizePersona(cfgFn(), rt)),
+    // 注意：Planner 不再接收完整 PersonaVoice（人设只给 Replyer）——决策器只需要角色名/行为政策/
+    // 场景/归属/状态；全量人设会诱导它替角色写台词。
     getWorldContext: gwPlannerCtx,
     getSelfProjection: ssPlannerProj,
     enrichMedia,
@@ -261,7 +288,26 @@ async function buildHumanize() {
         return (ent?.runtime?.buffer?.snapshot(30, { includeSelf: true })?.filter((m) => m.isSelf) || []).slice(-8).map((m) => String(m.text || ''))
       } catch { return [] }
     },
-    getStyleExamples: () => '',
+    // 自然风格示例：按当前 ConversationScene 检索 2~4 条（带场景/语气/熟悉度标签的人工样本）。
+    // 样本来源：persona.styleExamples（用户自定义，全量覆盖默认）> 默认人设配套 DEFAULT_STYLE_EXAMPLES
+    // （仅在使用默认人设时；自定义 persona 不带样本 → 不注入，避免风格错配）。
+    // 绝不收录机器人自己生成的消息（防 AI 味自我强化）；近期用词重复惩罚用最近真实发送的 bot 文本。
+    getStyleExamples: (_gid, o = {}) => {
+      try {
+        const cfg = cfgFn()
+        const usingDefault = !cfg.persona?.prompt && !cfg.persona?.fromPersonaId
+        const custom = Array.isArray(cfg.persona?.styleExamples) ? cfg.persona.styleExamples : []
+        const examples = custom.length ? custom : (usingDefault ? H.DEFAULT_STYLE_EXAMPLES : [])
+        if (!examples.length) return ''
+        const recent = (manager?.getOrCreate?.(_gid)?.runtime?.buffer?.snapshot(30, { includeSelf: true })?.filter((m) => m.isSelf) || []).slice(-8).map((m) => String(m.text || ''))
+        const picked = H.pickStyleExamples(examples, o?.scene || null, {
+          familiarity: familiarityProxy(_gid, o?.targetUserId, recent),
+          recentBotTexts: recent,
+          queryText: String(o?.queryText || '').slice(0, 100),
+        })
+        return H.formatStyleExamples(picked, { identityName: H.resolvePersonaIdentity(cfgFn(), { botNickname: botNickname() }).name })
+      } catch (e) { Log.debug('[humanize] 风格示例降级:', e?.message || e); return '' }
+    },
     // 表情包清单注入：reply.allowSticker !== false 且表情包启用时给 Replyer 看 [sticker:名称] 与可用名表
     getStickerCatalog: () => (cfgFn().reply?.allowSticker !== false && sticker?.enabled?.() ? (sticker.catalog?.() || '') : ''),
     getWorldContext: gwReplyerCtx,
@@ -289,6 +335,7 @@ async function buildHumanize() {
     // seq 地板（持久单调，锚在 hmem sqlite）：无 redis 时 KV 状态会丢，buffer 全过期后 seq 归零会
     // 被 hm 库的 consolidated_seq 高水位长期压制（项4）。floor 保证跨重启单调续号。
     seqFloor: { get: (gid) => hmem.getSeqFloor(gid), set: (gid, n) => hmem.setSeqFloor(gid, n) },
+    getScene: getSceneForTurn,
   })
 
   // 配置热重载：取消所有进行中规划/未发送分段 + 重建信号量上限
@@ -548,13 +595,20 @@ export class Humanize extends plugin {
       } catch { /* noop */ }
     }
 
-    // SelfState 感知（§4.2：即使最终 Planner ignore，指向机器人的事件仍改变内部状态；失败零影响）
+    // SelfState 感知（§4.2：即使最终 Planner ignore，指向机器人的事件仍改变内部状态；失败零影响）。
+    // scene：同一 ConversationScene 模块的**规则场景**（热路径逐消息感知不调 LLM；Gate/Planner/Replyer
+    // 轮次用的是混合场景——同一 schema 同一模块，评价 LLM 从此不再面对空 scene）
     let ss = null
     try {
       ss = await h.ssLazy
       if (ss && norm.userId) {
         const persona = h.getPersona()
-        ss.onMessage(norm, { groupId: norm.groupId, quoteIsBot, personaText: persona.prompt, personaName: persona.name }).catch(() => {})
+        let ruleScene = null
+        try {
+          const preBuf = h.manager?.getOrCreate?.(norm.groupId)?.runtime?.buffer?.snapshot(10, { includeSelf: true }) || []
+          ruleScene = H.ruleScene([...preBuf, norm], null, { now: Date.now() })
+        } catch { ruleScene = null }
+        ss.onMessage(norm, { groupId: norm.groupId, quoteIsBot, personaText: persona.prompt, personaName: persona.name, scene: ruleScene || undefined }).catch(() => {})
       }
     } catch { /* noop */ }
 

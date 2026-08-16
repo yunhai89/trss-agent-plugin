@@ -15,6 +15,7 @@ import { stringifyArgs } from '../agent/messages.js'
 import Log, { ANSI } from '../../utils/Log.js'
 import { ACTION_TOOLS, pickSingleAction, TERMINAL_ACTIONS } from './action-tools.js'
 import { buildPlannerSystem, formatGroupContext, highlightTarget } from './prompts.js'
+import { formatSceneBlock } from './scene.js'
 
 const LEAK_PATTERNS = [
   /作为一个\s*(AI|人工智能)/, /根据系统(指令|提示)/, /我将(调用|使用)工具/,
@@ -44,14 +45,13 @@ export class HumanizePlanner {
    * @param {object} opts { provider, cfg, readTools?:Array, getMemories?:(query)=>Promise<string>, getBehaviorPolicyBlock?:()=>string, getPersonaName?:()=>string }
    *   readTools: 已过滤的白名单只读工具，每项 {name, description, parameters, execute(args)=>Promise<string|object>}
    */
-  constructor({ provider, cfg, readTools = [], getMemories = null, getBehaviorPolicyBlock = null, getPersonaName = null, getPersonaBlock = null, getWorldContext = null, getSelfProjection = null, enrichMedia = null, getGrounding = null } = {}) {
+  constructor({ provider, cfg, readTools = [], getMemories = null, getBehaviorPolicyBlock = null, getPersonaName = null, getWorldContext = null, getSelfProjection = null, enrichMedia = null, getGrounding = null } = {}) {
     this.provider = provider
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.readTools = Array.isArray(readTools) ? readTools : []
     this.getMemories = getMemories
     this.getBehaviorPolicyBlock = getBehaviorPolicyBlock || (() => '')
     this.getPersonaName = getPersonaName || (() => '机器人')
-    this.getPersonaBlock = getPersonaBlock || (() => '')
     this.getWorldContext = getWorldContext // GroupWorld 局部社会现场（online 时由 apps 注入；失败/空 → 零影响）
     this.getSelfProjection = getSelfProjection // SelfState 状态投影（enabled+非shadow 时；失败/中性 → 零影响）
     this.enrichMedia = enrichMedia // 视觉图描述（配了视觉模型时 '[图片]'→'[图:描述]'；未配/失败 → 原样）
@@ -89,7 +89,7 @@ export class HumanizePlanner {
    * @param {object} ctx { snapshot, decision, targetMessages, signal, runtime, cfg }
    * @returns {Promise<object>} 动作 {type, ...} （human_reply/human_react/human_wait/human_ignore）
    */
-  async decide({ snapshot, decision, targetMessages = null, signal, runtime, cfg }) {
+  async decide({ snapshot, decision, targetMessages = null, signal, runtime, cfg, scene = null }) {
     const c = cfg || this._cfgFn()
     const pcfg = c.planner || {}
     const maxRounds = Math.max(1, Math.min(6, pcfg.maxRounds ?? c.maxPlannerRounds ?? 4))
@@ -154,7 +154,7 @@ export class HumanizePlanner {
 
     const system = buildPlannerSystem({
       personaName: this.getPersonaName(),
-      personaBlock: this.getPersonaBlock(),
+      sceneBlock: formatSceneBlock(scene, { role: 'planner' }),
       behaviorPolicyBlock: this.getBehaviorPolicyBlock(),
       necessityDecision: decision,
       groupContext: (target ? highlightTarget(target) + '\n\n' : '') + groupContext,

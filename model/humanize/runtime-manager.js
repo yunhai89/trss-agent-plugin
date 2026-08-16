@@ -38,7 +38,7 @@ export class RuntimeManager {
    *   cfg() 返回全局 humanize 配置；make*(groupId) 各返回对应服务实例。
    *   onDelivered?: 成功发送后回调（apps 注入 → GroupWorld.recordInteraction）
    */
-  constructor({ store, trace, cfg, makePlanner, makeReplyer, makeComposer, makeSend, onDelivered = null, seqFloor = null } = {}) {
+  constructor({ store, trace, cfg, makePlanner, makeReplyer, makeComposer, makeSend, onDelivered = null, seqFloor = null, getScene = null } = {}) {
     this.store = store
     this.trace = trace
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
@@ -48,6 +48,7 @@ export class RuntimeManager {
     this.makeSend = makeSend
     this.onDelivered = onDelivered
     this.seqFloor = seqFloor
+    this.getScene = getScene
     /** @type {Map<string, {runtime:GroupRuntime, scheduler:TurnScheduler}>} */
     this._groups = new Map()
     this._sem = new Semaphore(this._cfgFn()?.safety?.maxConcurrentGroups ?? 1)
@@ -106,6 +107,7 @@ export class RuntimeManager {
     const scheduler = new TurnScheduler({
       runtime, cfg: () => this._groupCfg(groupId),
       planner, replyer, composer, send, onDelivered: this.onDelivered,
+      getScene: this.getScene ? (o) => this.getScene(groupId, o) : null,
     })
     entry = { runtime, scheduler }
     this._groups.set(groupId, entry)

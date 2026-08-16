@@ -16,6 +16,8 @@ import { redactSecrets } from '../agent/redact.js'
 import { buildReplyerSystem, formatGroupContext, highlightTarget } from './prompts.js'
 import { whitelistViolations } from './grounding.js'
 import { textSim, textFeatures } from '../groupworld/embedding.js'
+import { formatSceneBlock, sceneLengthHint } from './scene.js'
+import { resolvePersonaIdentity } from './default-config.js'
 
 const REPLY_LEAK_PATTERNS = [
   /作为一个\s*(AI|人工智能|语言模型)/, /根据系统(指令|提示|设定)/, /我(?:将|会)(?:调用|使用)工具/,
@@ -26,6 +28,65 @@ const REPLY_LEAK_PATTERNS = [
 function looksLikeReplyLeak(text) {
   const t = String(text || '')
   return REPLY_LEAK_PATTERNS.some((re) => re.test(t))
+}
+
+// ─────────────── 轻量 AI 味检查（命中最多重生成一次，禁止循环） ───────────────
+// 只抓「客服/总结/机械」的强信号，不做大禁用词表——主体治理靠场景 + persona + 正向示例。
+
+/** 客服/总结腔：开头或句中出现工单式表达。 */
+const AI_FLAVOR_SERVICE_RE = /(?:^|[。！？\n])(?:当然可以|好的呢|以下是|总的来说|综上所述|建议您|希望对你有帮助|希望能帮到你|如果您还有|请参考以下|简单来说{2,})/
+/** 无必要的结构化：Markdown 标题/加粗/分点/编号（场景允许展开的技术问答除外）。 */
+const AI_FLAVOR_MARKDOWN_RE = /(^|\n)\s*(?:#{1,3}\s|[-*•]\s|\d+[.、]\s)|\*\*|```/
+
+/**
+ * 检测一条群聊回复的 AI 味。
+ * @param {string} text 候选回复
+ * @param {object} o { target?, recentBotTexts?:string[], scene? }
+ * @returns {{ hit:boolean, reasons:string[] }}
+ */
+export function detectAiFlavor(text, { target = null, recentBotTexts = [], scene = null } = {}) {
+  const t = String(text || '').trim()
+  if (!t) return { hit: false, reasons: [] }
+  const reasons = []
+
+  if (AI_FLAVOR_SERVICE_RE.test(t)) reasons.push('service_tone')
+
+  // 复述对方整句再回答：候选与目标消息词面高度重叠且候选明显长于一句反应
+  if (target?.text) {
+    const tgt = String(target.text)
+    if (tgt.length >= 8 && textSim(t, tgt) >= 0.7 && [...t].length > [...tgt].length * 0.9) reasons.push('restating')
+  }
+
+  // 无必要 Markdown（认真技术问答允许适当展开时放宽标题/分点）
+  const expandable = sceneLengthHint(scene) === 'expandable'
+  if (!expandable && AI_FLAVOR_MARKDOWN_RE.test(t)) reasons.push('markdown')
+
+  // 没被要求却输出长篇分析/教育（≥4 行或 ≥160 字的非技术闲聊长文）
+  const lines = t.split(/\n+/).filter(Boolean)
+  if (!expandable && (lines.length >= 4 || [...t].length >= 160) && (scene?.sceneType === 'venting' || scene?.speechAct === 'tease' || scene?.sceneType === 'banter')) reasons.push('over_analysis')
+
+  // 连续多轮同一口头禅/句式：开头 2~6 字的「款」与近期 bot 回复开头相同的 ≥2 次
+  const openerOf = (s) => (String(s).match(/^[^。！？!？\n，,]{2,6}/) || [''])[0]
+  const opener = openerOf(t)
+  if (opener.length >= 2) {
+    const hits = recentBotTexts.filter(Boolean).filter((b) => openerOf(b) === opener).length
+    if (hits >= 2) reasons.push('repeat_opener')
+  }
+  return { hit: reasons.length > 0, reasons }
+}
+
+/** AI 味修复重生成提示（一次性）。 */
+function aiFlavorHint(reasons, scene) {
+  const ZH = { service_tone: '别用「当然可以/以下是/总的来说/建议您」这类客服或总结腔，按你平时在群里说话的方式说', restating: '不要把对方的话复述一遍再回，直接接话', markdown: '群聊别用 Markdown 标题/列表/分点，用大白话说', over_analysis: '对方只是在闲聊/吐槽，不要输出长篇分析或教程——说一两句人话', repeat_opener: '你最近好几条回复都是同一个开头，换一种说法' }
+  const items = reasons.map((r) => ZH[r]).filter(Boolean)
+  return `【重写要求】你刚才的草稿有这些问题：${items.join('；')}。长度参考当前场景：${sceneLengthHint(scene) === 'very_short' ? '几个字到一句' : sceneLengthHint(scene) === 'short' ? '一句' : sceneLengthHint(scene) === 'expandable' ? '讲明白即可，不为短而短' : '一两句'}。重写后只输出正文。`
+}
+
+/** 近窗熟悉度代理：目标用户近期发言多 = 熟（GW 在线时由注入器覆盖更准的值）。 */
+function familiarityOf(batch, target) {
+  if (!target?.userId || !Array.isArray(batch)) return 0.5
+  const n = batch.filter((m) => m && !m.isSelf && String(m.userId) === String(target.userId)).length
+  return n >= 3 ? 0.8 : n >= 1 ? 0.5 : 0.3
 }
 
 /** 与最近机器人回复的重复度（简单 Jaccard 字符集）。 */
@@ -59,10 +120,11 @@ export class HumanizeReplyer {
 
   /**
    * 生成可见回复文本。
-   * @param {object} ctx { action, batch, decision, target, runtime, signal, cfg }
+   * @param {object} ctx { action, batch, decision, target, runtime, signal, cfg, scene? }
+   *   scene = 本轮 ConversationScene（Gate/Planner/Replyer 共用同一对象）
    * @returns {Promise<{text:string, rewritten:boolean, cancelReason?:string}>}
    */
-  async generate({ action, batch, target, runtime, signal, cfg }) {
+  async generate({ action, batch, target, runtime, signal, cfg, scene = null }) {
     const c = cfg || this._cfgFn()
     const rcfg = c.replyer || {}
     const model = rcfg.model || c.model || null
@@ -127,15 +189,25 @@ export class HumanizeReplyer {
         memoryBlock = await this.getMemoryBlock({ groupId, targetUserId: target.userId, queryText: String(target.text || '').slice(0, 200), allowedUserIds: groundingObj?.threadUserIds }) || ''
       }
     } catch { /* noop */ }
+    // 风格示例按当前场景检索 2~4 条（注入器可传对象参数拿 scene/熟悉度；旧字符串签名兼容）
+    let styleExamplesBlock = ''
+    try {
+      const raw = this.getStyleExamples(groupId, { scene, targetUserId: target?.userId, familiarity: familiarityOf(batch, target) })
+      styleExamplesBlock = typeof raw === 'string' ? raw : String(raw?.text || '')
+    } catch { /* noop */ }
+
+    // 身份单一来源：PersonaName 恒取 resolvePersonaIdentity（persona.name > 旧 personaName > botNickname）
+    const { name: identityName } = resolvePersonaIdentity(c)
     const system = buildReplyerSystem({
-      personaName: c.personaName || '机器人',
+      personaName: identityName,
       replyGuide: action.replyGuide || '',
       referenceInfo: action.referenceInfo || '',
       toneHint: action.toneHint || '',
       targetBlock: target ? highlightTarget(target) : '',
       personaVoice,
-      approvedStyleExamples: this.getStyleExamples(groupId),
+      approvedStyleExamples: styleExamplesBlock,
       recentMessages: recent,
+      sceneBlock: formatSceneBlock(scene, { role: 'replyer' }),
       socialScene,
       grounding: groundingBlock, // 对话归属块——此前漏传，模板 {{groundingBlock}} 恒空
       selfCapsule,
@@ -145,6 +217,25 @@ export class HumanizeReplyer {
 
     let text = await this._call(system, model, temperature, maxTokens, signal)
     text = String(text || '').trim()
+
+    // 轻量 AI 味检查：命中 → 带修复提示重生成一次（禁止循环）；仍命中则保留重写稿中较好者
+    {
+      const recentList0 = (this.getRecentBotTexts?.() || []).filter(Boolean)
+      const flavor = detectAiFlavor(text, { target, recentBotTexts: recentList0, scene })
+      if (flavor.hit) {
+        runtime?.trace?.record('replyer_ai_flavor', { reasons: flavor.reasons.join(','), first: text.slice(0, 60) })
+        try {
+          const reText = String(await this._call(system + '\n' + aiFlavorHint(flavor.reasons, scene), model, temperature, maxTokens, signal) || '').trim()
+          if (reText) {
+            const reFlavor = detectAiFlavor(reText, { target, recentBotTexts: recentList0, scene })
+            if (!reFlavor.hit || reFlavor.reasons.length < flavor.reasons.length) {
+              text = reText
+              runtime?.trace?.record('replyer_ai_flavor_regen', { ok: !reFlavor.hit, reasons: reFlavor.reasons.join(',') })
+            }
+          }
+        } catch { /* 保留原稿 */ }
+      }
+    }
 
     // 0. 实体白名单：回复点名了本轮不可谈论的人（旧记忆/旧上下文人物渗入）→ 带约束重生成一次；再违规照发但记 trace
     if (groundingObj) {

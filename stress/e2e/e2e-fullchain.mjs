@@ -54,7 +54,12 @@ RT.provider = { chat: async (opts) => {
     if (LLM.plannerMode === 'ignore') return { content: '先看看再说', toolCalls: [] }
     return { content: '值得接一句', toolCalls: [{ id: 'tc1', name: 'human_reply', arguments: { targetMessageId: String(LLM.plannerTarget), replyGuide: LLM.replyGuide } }] }
   }
-  if (sys.includes('你正在为群聊角色')) return { role: 'assistant', content: LLM.replyText }
+  if (sys.includes('你正在为群聊角色') || /你就是.+，本人，现在正在这个群里/.test(sys)) return { role: 'assistant', content: LLM.replyText }
+  // ConversationScene 场景分析器：返回合法低判（让混合路径走通；具体断言见 S3 的场景块注入）
+  if (sys.includes('群聊场景分析器')) {
+    const ids = [...new Set(String(opts.messages?.[0]?.content || '').match(/\[m\d+\]/g) || [])].map((s) => s.slice(1, -1)).slice(0, 3)
+    return { role: 'assistant', content: JSON.stringify({ sceneType: 'banter', speechAct: 'share', tones: ['playful'], phase: 'rising', directedAtBot: 0.2, replyAffordance: 0.4, humanMomentum: 0.5, ambiguity: 0.2, confidence: 0.8, evidenceMessageIds: ids }) }
+  }
   if (sys.includes('群聊事件评价器')) return { role: 'assistant', content: JSON.stringify(LLM.appraisal || { event_type: 'directed_message', semantic_signals: { playfulness: 0.2, hostility: 0.2, repair_signal: 0, sincerity: 0.5 }, directed_at_bot: 0.5, intent_confidence: 0.5 }) }
   if (sys.includes('群聊社会记忆抽取器')) {
     const ids = [...new Set(String(opts.messages?.[0]?.content || '').match(/m\d+/g) || [])].slice(0, 3)
@@ -164,8 +169,12 @@ await test('S3 伪人全链：昵称提及触发→planner/replyer→发送→on
   const plannerSys = promptLog.find((s) => s.includes('群聊参与决策器')) || ''
   ok(plannerSys.includes('自我状态偏置'), 'Planner prompt 注入 SelfState 投影（shadow=false）')
   ok(plannerSys.includes('当前发言者'), 'Planner prompt 注入 GroupWorld 社会现场（online=true）')
-  const replyerSys = promptLog.find((s) => s.includes('你正在为群聊角色')) || ''
+  const replyerSys = promptLog.find((s) => /你就是.+，本人，现在正在这个群里/.test(s) || s.includes('你正在为群聊角色')) || ''
   ok(replyerSys.includes('当前表达状态'), 'Replyer prompt 注入表达胶囊')
+  ok(replyerSys.includes('【当前会话场景'), 'Replyer prompt 注入 ConversationScene 场景块')
+  const plannerSysScene = promptLog.find((s) => s.includes('群聊参与决策器') && s.includes('【当前会话场景'))
+  ok(!!plannerSysScene, 'Planner prompt 注入同一场景块')
+  ok(!plannerSysScene?.includes('你就是'), 'Planner prompt 不含 PersonaVoice 正文')
   const exp = await dao.get("SELECT * FROM ss_expectations WHERE status='pending' ORDER BY id DESC LIMIT 1")
   ok(!!exp, `出站问句登记期待（id=${exp?.id}, type=${exp?.expectation_type}）`)
   const rel = await dao.get('SELECT familiarity FROM gw_bot_rel WHERE user_id=?', [U1])
@@ -203,8 +212,10 @@ await test('S5 冷落：目标绕开他人 + 到期 → sweep 判 ignored', asyn
   for (let i = 0; i < 10; i++) await dispatch(ev(U3, `闲聊填充第${i}条`, { msgId: `mFill${i}` }))
   await dao.run('UPDATE ss_expectations SET expires_at=? WHERE id=?', [Date.now() - 1000, exp.id])
   await dispatch(ev(U3, '话说回来', { msgId: 'mTrigger' })) // 任意消息触发 sweep
+  // 等完整契约（状态=ignored 且事件已落）：onMessage 是 fire-and-forget，状态 UPDATE 与事件
+  // INSERT 之间存在竞态窗口——只等其一会在负载下偶发早退（全量套件中曾抖动失败）
   await waitFor(async () => !!(await dao.get("SELECT id FROM ss_expectations WHERE id=? AND status='ignored'", [exp.id]))
-    || (await ssEvents('ignored_expectation')) >= 1)
+    && (await ssEvents('ignored_expectation')) >= 1)
   const judged = await dao.get('SELECT status,outcome FROM ss_expectations WHERE id=?', [exp.id])
   ok(judged?.status === 'ignored', `到期判定 ignored（实际 ${judged?.status}，target=${target}）`)
   ok(await ssEvents('ignored_expectation') >= 1, '产生 ignored_expectation 事件（修复回归：不再丢失）')
