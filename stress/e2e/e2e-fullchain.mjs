@@ -210,6 +210,10 @@ await test('S5 冷落：目标绕开他人 + 到期 → sweep 判 ignored', asyn
   await dispatch(ev(U2, '哈哈确实', { replyId: 'm2', msgId: 'mByp1' }))
   await dispatch(ev(U2, '对对就是这个', { replyId: 'm1', msgId: 'mByp2' }))
   for (let i = 0; i < 10; i++) await dispatch(ev(U3, `闲聊填充第${i}条`, { msgId: `mFill${i}` }))
+  // 等旁听链路把绕开/填充消息真正落进 gw_messages 再置过期：ignore 判定的群活跃与目标活动
+  // 证据读的是 gw_messages，而 onAmbient 摄入是 fire-and-forget——不等会在负载下偶发
+  // 「证据未落库 → 判 uncertain」的抖动（全量套件并行时曾两连挂，单独跑恒绿）
+  await waitFor(async () => (await dao.get('SELECT COUNT(*) c FROM gw_messages WHERE group_id=? AND message_id LIKE ?', [G, 'mFill%']))?.c >= 10)
   await dao.run('UPDATE ss_expectations SET expires_at=? WHERE id=?', [Date.now() - 1000, exp.id])
   await dispatch(ev(U3, '话说回来', { msgId: 'mTrigger' })) // 任意消息触发 sweep
   // 等完整契约（状态=ignored 且事件已落）：onMessage 是 fire-and-forget，状态 UPDATE 与事件

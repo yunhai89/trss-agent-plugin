@@ -1083,6 +1083,73 @@ await test('OpenRouter preset：OpenAI 兼容聚合网关（无需独立 provide
   ok(provider instanceof OpenAIProvider, 'openrouter 走 OpenAIProvider（OpenAI 兼容）')
 })
 
+// ---------- 缓存命中优化：system 分区排序 / anthropic cache_control / activeTools 跨轮持久 ----------
+
+await test('缓存经济学：system 按「静态→半动态→动态」排序，context 恒最后', async () => {
+  const { buildAgentSystemPrompt } = await import('../prompt/library.js')
+  const sys = buildAgentSystemPrompt({
+    identity: 'IDENTITY_MARK', serviceDirective: 'SERVICE_MARK',
+    toolCatalog: 'TOOLCAT_MARK', skillsSection: 'SKILL_MARK', stickerSection: 'STICKER_MARK',
+    recalledMemory: 'RECALL_MARK', memorySnapshot: 'MEMORY_MARK', context: 'CONTEXT_MARK',
+    examples: ['EXAMPLE_MARK'], guardHardening: 'GUARD_MARK',
+  })
+  const pos = (m) => sys.indexOf(m)
+  ok(pos('IDENTITY_MARK') < pos('TOOLCAT_MARK') && pos('TOOLCAT_MARK') < pos('SKILL_MARK') && pos('SKILL_MARK') < pos('STICKER_MARK'), '静态目录链按序前置')
+  ok(pos('STICKER_MARK') < pos('EXAMPLE_MARK') && pos('EXAMPLE_MARK') < pos('GUARD_MARK'), '示例/护栏（静态）在表情段之后')
+  ok(pos('GUARD_MARK') < pos('RECALL_MARK') && pos('RECALL_MARK') < pos('MEMORY_MARK'), '召回/快照（半动态）随后')
+  ok(pos('MEMORY_MARK') < pos('CONTEXT_MARK') && sys.trim().endsWith('CONTEXT_MARK'), '每轮必变的情境恒在末尾（前缀缓存只被打穿到此处为止）')
+})
+
+await test('Anthropic cache_control：开启后 system/tools/末消息带 ephemeral 断点，关闭不带', async () => {
+  let sentBody = null
+  const fetcher = async (url, opts) => {
+    sentBody = JSON.parse(opts.body)
+    return { ok: true, status: 200, headers: { get: () => null }, async text() { return JSON.stringify({ id: 'm', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 5, output_tokens: 1 } }) } }
+  }
+  const provider = new AnthropicProvider({ client: createAnthropicClient({ ...anthropicPresets.anthropic, apiKey: 'k', fetch: fetcher }) })
+  const tools = [{ name: 't1', description: 'd', parameters: { type: 'object', properties: {} } }, { name: 't2', description: 'd', parameters: { type: 'object', properties: {} } }]
+  await provider.chat({ model: 'claude-sonnet-4-5-20250929', system: 'SYS', messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'yo' }, { role: 'user', content: 'again' }], tools, cacheControl: true })
+  ok(Array.isArray(sentBody.system) && sentBody.system[0].cache_control?.type === 'ephemeral' && sentBody.system[0].text === 'SYS', 'system 转 block 且末块带 cache_control')
+  ok(sentBody.tools.at(-1).cache_control?.type === 'ephemeral' && !sentBody.tools[0].cache_control, 'tools 末个带断点、其余不带')
+  const lastMsg = sentBody.messages.at(-1)
+  const lastBlock = Array.isArray(lastMsg.content) ? lastMsg.content.at(-1) : null
+  ok(lastBlock?.cache_control?.type === 'ephemeral', '末消息末 block 带断点（上一轮末条=本轮命中点）')
+  await provider.chat({ model: 'claude-sonnet-4-5-20250929', system: 'SYS', messages: [{ role: 'user', content: 'hi' }] })
+  ok(typeof sentBody.system === 'string' && !JSON.stringify(sentBody).includes('cache_control'), '默认关闭：不携带任何 cache_control 字段')
+})
+
+await test('activeTools 跨轮持久：会话状态存取 + Agent 恢复扩充集（tools 前缀稳定）', async () => {
+  const os2 = os.tmpdir()
+  const kv = memoryKv()
+  const session = new SessionStore({ kv })
+  await session.createConversation('u1', null, 'c1')
+  await session.appendConversation('u1', null, 'c1', [], { activeTools: ['web_crawl', 'read_pdf'] })
+  ok(JSON.stringify(await session.getConversationState('u1', null, 'c1')) === JSON.stringify({ activeTools: ['web_crawl', 'read_pdf'] }), '会话状态 extra 存取往返')
+  await session.appendConversation('u1', null, 'c1', [{ role: 'user', content: 'q' }])
+  const st2 = await session.getConversationState('u1', null, 'c1')
+  ok(JSON.stringify(st2.activeTools) === JSON.stringify(['web_crawl', 'read_pdf']), '追加消息不动会话状态')
+
+  // Agent 集成：带 discovery + 预置状态 → 首轮 tools 即含恢复的工具（缓存前缀与上轮一致）
+  const provider = mockProvider([{ content: '好', finishReason: 'stop' }])
+  const mkTool = (name) => ({ name, description: 'd', parameters: { type: 'object' }, async execute() { return 'x' } })
+  const tools = new ToolRegistry().register(mkTool('web_crawl'), mkTool('read_pdf'), mkTool('calc'), mkTool('web_search'), mkTool('clarify'))
+  const agent = new Agent({
+    provider, tools, session, maxTurns: 2, reflect: 'off',
+    toolDiscovery: { enable: true, alwaysOn: ['web_search', 'clarify'] },
+  })
+  await agent.run('继续', { ctx: { userId: 'u1', groupId: null, scopeUserId: 'u1', conversationId: 'c1' } })
+  const firstTools = provider.calls.history[0].tools.map((t) => t.name)
+  ok(firstTools.includes('web_crawl') && firstTools.includes('read_pdf') && firstTools.includes('clarify'), `恢复上轮扩充集并入首轮 tools（实际 ${JSON.stringify(firstTools)}）`)
+  // 跨轮确定性：registry.match 按注册序输出（与 Set 插入序无关）→ 同状态两轮 tools 逐项一致
+  const provider2 = mockProvider([{ content: '好', finishReason: 'stop' }])
+  const agent2 = new Agent({ provider: provider2, tools, session, maxTurns: 2, reflect: 'off', toolDiscovery: { enable: true, alwaysOn: ['web_search', 'clarify'] } })
+  await agent2.run('再问', { ctx: { userId: 'u1', groupId: null, scopeUserId: 'u1', conversationId: 'c1' } })
+  const secondTools = provider2.calls.history[0].tools.map((t) => t.name)
+  ok(JSON.stringify(firstTools) === JSON.stringify(secondTools), `同会话状态两轮 tools 前缀逐字节一致（${JSON.stringify(firstTools)} vs ${JSON.stringify(secondTools)}）`)
+  const st3 = await session.getConversationState('u1', null, 'c1')
+  ok(Array.isArray(st3.activeTools) && st3.activeTools.includes('web_crawl'), 'run 结束把最终激活集写回会话状态')
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

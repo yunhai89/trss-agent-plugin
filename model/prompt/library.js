@@ -245,6 +245,10 @@ export function buildAgentSystemPrompt({
   examples = [],
   guardHardening = '',
 } = {}) {
+  // 缓存经济学（§6.6）：严格按「变更频率」排序——静态（身份/准则/取向/目录/技能/表情/示例/护栏）
+  // → 半动态（召回记忆/记忆快照，仅记忆写入时变）→ 动态（情境上下文，每轮必变）收尾。
+  // prompt/KV 缓存按前缀命中：动态内容前置会逐轮打穿其后所有段落的缓存
+  // （曾把每轮必变的 context 排在静态 examples/guard 之前——两段永远无法命中）。
   const parts = []
   if (identity) parts.push(String(identity).trim())
   // 服务准则 + 执行取向（行动偏向）——有身份层才注入，保证空入→空出
@@ -255,13 +259,13 @@ export function buildAgentSystemPrompt({
   if (toolCatalog) parts.push(String(toolCatalog).trim())
   if (skillsSection) parts.push(String(skillsSection).trim())
   if (stickerSection) parts.push(String(stickerSection).trim())
-  if (recalledMemory) parts.push(String(recalledMemory).trim())
-  if (memorySnapshot) parts.push(String(memorySnapshot).trim())
-  if (context) parts.push(String(context).trim())
   if (examples.length) {
     parts.push('## 示例\n' + examples.map((e) => `<example>\n${e}\n</example>`).join('\n'))
   }
   if (guardHardening) parts.push(String(guardHardening).trim())
+  if (recalledMemory) parts.push(String(recalledMemory).trim())
+  if (memorySnapshot) parts.push(String(memorySnapshot).trim())
+  if (context) parts.push(String(context).trim())
   return parts.filter(Boolean).join('\n\n')
 }
 

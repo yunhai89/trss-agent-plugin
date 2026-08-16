@@ -153,6 +153,7 @@ export class Agent {
     this.shortCircuitTools = config.shortCircuitTools || ['clarify']
     // 自我反思/自纠：最终回复交付前自检，发现实质问题则回环修正。off=关 | auto=仅多轮/用工具时(默认) | always=每次都反思
     this.reflect = config.reflect ?? 'auto'
+    this.cacheControl = config.cacheControl === true // Anthropic 显式 prompt 缓存断点（openai 兼容端为自动前缀缓存，无需开启）
     this.reflectMaxIterations = config.reflectMaxIterations ?? 1
 
     // 回退 provider 列表（每条 {provider, model}，独立 baseURL/apiKey/protocol，可跨厂商）；主模型失败时依次尝试
@@ -253,12 +254,24 @@ export class Agent {
     let lastContent = ''
     let usedTools = false      // 本轮是否调用过工具（auto 门控：仅非平凡任务触发反思，纯闲聊零延迟）
     let reflectIter = 0        // 已触发的反思回环次数（reflectMaxIterations 封顶，防无限循环）
-    // 工具按需发现：按 enable 初始化激活集 + per-instance 元工具（同 run 内激活持续、新 run 重置）
+    // 工具按需发现：按 enable 初始化激活集 + per-instance 元工具（同 run 内激活持续）
     const td = this.toolDiscovery
     const discoveryOn = !!(td?.enable && this.tools)
     if (discoveryOn) {
       this.activeTools = new Set(td.alwaysOn?.length ? td.alwaysOn : DEFAULT_ALWAYS_ON)
       this._metaTools = { tool_search: makeToolSearchTool(this.tools, this, td) }
+      // 跨轮恢复上一对话扩充过的工具集（会话级持久）：tools 数组参与请求前缀缓存——
+      // 若每轮重置回 alwaysOn，上一轮 tool_search 扩充过的对话本轮 tools 缩水 → 前缀在
+      // tools 处断裂，system+messages 全部 cache miss；且历史中的 tool_use 工具不在列表
+      // 可能被严格端点拒收。恢复顺序=上轮最终顺序（Set 保插入序），前缀逐字节一致。
+      if (useConv && typeof this.session.getConversationState === 'function') {
+        try {
+          const st = await this.session.getConversationState(scopeUserId, ctx.groupId, ctx.conversationId)
+          if (Array.isArray(st?.activeTools)) {
+            for (const n of st.activeTools) if (this.tools.has?.(n) && !this.activeTools.has(n)) this.activeTools.add(n)
+          }
+        } catch { /* 状态缺失按新对话处理 */ }
+      }
     } else {
       this.activeTools = null
       this._metaTools = {}
@@ -300,6 +313,7 @@ export class Agent {
         tools: toolList.length ? toolList : undefined, tool_choice: this.toolChoice,
         temperature: this.temperature, max_tokens: this.maxTokens, thinking: this.thinking,
         signal, stream: wantStream, onDelta: __delta, onReasoning: cb.onReasoning,
+        ...(this.cacheControl ? { cacheControl: true } : {}),
         ...this._extraRunOpts(opts),
       })
       const __tries = [{ provider: this.provider, model: this.model }, ...this.fallbackProviders]
@@ -454,7 +468,9 @@ export class Agent {
     // 反思草稿已 pop、反馈走 system 不进 messages，历史天然干净（无需额外过滤）
     const persistMsgs = this.messages.slice(sessStart)
     if (useConv) {
-      try { await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, persistMsgs) } catch (e) { this.logger('warn', 'conversation 持久化失败', e) }
+      // 连同本轮最终工具激活集一起持久（下轮恢复，保 tools 前缀稳定 → 缓存不 bust）
+      const extra = discoveryOn && this.activeTools ? { activeTools: [...this.activeTools] } : {}
+      try { await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, persistMsgs, extra) } catch (e) { this.logger('warn', 'conversation 持久化失败', e) }
     } else if (sessKey) {
       try { await this.session.append(sessKey, persistMsgs) } catch (e) { this.logger('warn', 'session 持久化失败', e) }
     }

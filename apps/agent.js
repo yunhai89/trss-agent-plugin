@@ -605,6 +605,7 @@ async function buildRuntime() {
       minScore: cfg.toolDiscovery?.minScore ?? 0.3,
     },
     reflect: cfg.reflect ?? 'auto',
+    cacheControl: cfg.cacheControl === true, // Anthropic 显式 prompt 缓存断点（tools/system/末消息；DeepSeek 等 OpenAI 兼容端自动前缀缓存，无需开）
     reflectMaxIterations: cfg.reflectMaxIterations ?? 1,
     stickers: getStickerManager({ logger: Log.tag('sticker') }), // 表情包清单注入（_assembleSystem 用 catalog()）
     devLog: (event, data, traceId, scope) => devLog(event, data, traceId, scope), // 详细 trace（框架无关，pino 文件）；库零依赖，由 apps 注入

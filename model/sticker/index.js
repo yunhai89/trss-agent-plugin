@@ -283,9 +283,10 @@ export function buildCatalog(index, { listTopN = 30 } = {}) {
     topNames.add(name)
     if (boosted.length >= Math.ceil(listTopN * 1.3)) break
   }
-  // 展示顺序洗牌：按 usage 取样仍保留热度信号，但打破"最高使用恒排第一行"的注意力偏置
-  // （马太效应修复：怼脸吐舌曾因恒排第一被 LLM 连发 8 次）
-  for (let k = boosted.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [boosted[k], boosted[j]] = [boosted[j], boosted[k]] }
+  // 展示顺序按名称排序（确定性）：catalog 注入 system prompt 前缀区，任何随机化都会逐轮
+  // 打穿 KV/prompt 缓存（曾 Fisher-Yates 洗牌——每轮 system 从此处起全部 cache miss）。
+  // 防马太不靠目录乱序：发送侧已有 recent-3 多样性硬闸 + 模糊匹配 top-5 随机，注意力偏置在那层防。
+  boosted.sort((a, b) => String(a[0]).localeCompare(String(b[0])))
   const lines = boosted.map(([name, e]) => {
     const tags = e.tags?.length ? e.tags.join('/') : ''
     const desc = e.desc && e.desc !== name ? e.desc : ''

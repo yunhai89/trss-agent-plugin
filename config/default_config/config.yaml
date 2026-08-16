@@ -46,6 +46,7 @@ agent:
   keepReasoning: false      # 是否把推理(reasoning_content)回灌历史（默认 false 省 context）
   stream: false             # 逐字流式输出（依赖适配器、不稳，默认关）
   reflect: auto             # 自我反思/自纠：off=关 | auto=仅多轮/用工具时(默认) | always=每次最终回复都反思
+  cacheControl: false      # Anthropic 协议显式 prompt 缓存断点（tools/system/末消息；OpenAI 兼容端自动前缀缓存无需开）
   reflectMaxIterations: 1   # 反思回环修正最大次数（封顶防无限循环）
   progress: true            # 工具调用时推送节流进度消息（消除干等，默认开）
   progressRecall: 3         # 进度消息多少秒后自动撤回（默认 3；适配器不支持则忽略）

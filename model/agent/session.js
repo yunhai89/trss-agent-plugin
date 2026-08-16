@@ -191,15 +191,23 @@ export class SessionStore {
     return { id: c.id, title: c.title, createdAt: c.createdAt, updatedAt: c.updatedAt }
   }
 
-  async appendConversation(userId, groupId, convId, msgs) {
+  async appendConversation(userId, groupId, convId, msgs, extra = {}) {
     const k = this.convKey(userId, groupId, String(convId))
     const c = (await this.kv.get(k)) || { id: String(convId), title: `对话 ${convId}`, messages: [], createdAt: Date.now() }
     const next = [...(c.messages || []), ...msgs]
     const trimmed = trimKeepFirst(next, this.window)
     c.messages = trimmed
     c.updatedAt = Date.now()
+    // extra：会话级非消息状态（如 toolDiscovery 的 activeTools——跨轮恢复保 tools 前缀稳定，缓存不 bust）
+    for (const [ek, ev] of Object.entries(extra || {})) if (ev !== undefined) c[ek] = ev
     await this.kv.set(k, c)
     return trimmed
+  }
+
+  /** 读会话级状态（不含 messages）。Agent.run 恢复 activeTools 用；旧对话无该字段返回空。 */
+  async getConversationState(userId, groupId, convId) {
+    const c = await this.kv.get(this.convKey(userId, groupId, String(convId)))
+    return { activeTools: c && Array.isArray(c.activeTools) ? c.activeTools : null }
   }
 
   async deleteConversation(userId, groupId, convId) {

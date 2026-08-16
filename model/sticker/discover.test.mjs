@@ -124,6 +124,19 @@ await test('index：buildCatalog 含新发现加权 + send_sticker 提示', asyn
   ok(cat.includes('共 42 个'), '注明总数')
 })
 
+// ─── 缓存确定性：catalog 注入 system 前缀区，输出必须逐字节稳定 ───
+await test('buildCatalog：同 index 两次输出完全一致（去随机，展示按名称排序）', async () => {
+  const idx = { stickers: {} }
+  for (let i = 0; i < 8; i++) idx.stickers['贴纸' + i] = { tags: ['t' + i], desc: 'd' + i, usageCount: 8 - i, source: i < 2 ? 'discovered' : 'repo', addedAt: i }
+  idx.stickers['高频贴'] = { tags: ['x'], desc: 'y', usageCount: 99 }
+  const a = buildCatalog(idx, { listTopN: 6 })
+  const b = buildCatalog(idx, { listTopN: 6 })
+  ok(a === b && a.length > 0, `两次输出逐字节一致（曾 Fisher-Yates 洗牌——每轮 system 从表情段起全部 cache miss）`)
+  const names = a.split('\n').slice(3).map((l) => (l.match(/- ✨?(.+?):/) || [])[1]).filter((x) => x && !x.includes('sticker'))
+  const sorted = [...names].sort((x, y) => x.localeCompare(y))
+  ok(JSON.stringify(names) === JSON.stringify(sorted), `展示按名称字典序（防「最高使用恒排第一」的注意力偏置由发送侧承担）`)
+})
+
 // ─── 总结 ───
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

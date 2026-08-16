@@ -17,8 +17,9 @@ export class OpenAIProvider extends Provider {
   async chat(opts) {
     const {
       model, messages, system, tools, tool_choice, temperature, max_tokens, thinking, top_p,
-      signal, stream, onDelta, onReasoning, ...rest
-    } = opts
+      signal, stream, onDelta, onReasoning, cacheControl: _cacheControl, ...rest
+    } = opts // cacheControl（Anthropic 专用 prompt 缓存断点）在此吞掉：OpenAI 兼容端为自动前缀缓存，
+    // 该字段既无意义、又不能随 ...rest 泄漏进请求体（部分端点对未知字段直接 400）
 
     const body = {
       model: model || this.defaultModel,

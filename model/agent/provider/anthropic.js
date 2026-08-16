@@ -120,7 +120,7 @@ export class AnthropicProvider extends Provider {
   async chat(opts) {
     const {
       model, messages, system, tools, tool_choice, temperature, max_tokens, thinking,
-      top_p, top_k, signal, stream, onDelta, onReasoning, stop_sequences, ...rest
+      top_p, top_k, signal, stream, onDelta, onReasoning, stop_sequences, cacheControl = false, ...rest
     } = opts
 
     const conv = toAnthropicMessages(messages, system)
@@ -130,7 +130,26 @@ export class AnthropicProvider extends Provider {
       messages: conv.messages,
       ...rest,
     }
-    if (conv.system != null) body.system = conv.system
+    // Prompt caching（Anthropic 需显式 cache_control 断点；写 1.25x / 读 0.1x，命中一次即回本）：
+    //   ① tools 末个 ② system（转 block 数组，末块）③ messages 末条末 block。
+    // 前缀顺序 tools → system → messages，断点设在各段末尾使「到此为止的前缀」可缓存；
+    // 工具循环每轮 messages 增长，上一轮的末条断点即本轮的命中点。
+    // 默认关：第三方 Anthropic 兼容网关未必认该字段（agent.cacheControl: true 开启）。
+    if (cacheControl) {
+      if (conv.system != null) {
+        body.system = [{ type: 'text', text: conv.system, cache_control: { type: 'ephemeral' } }]
+      }
+      const lastMsg = body.messages[body.messages.length - 1]
+      if (lastMsg) {
+        const blocks = Array.isArray(lastMsg.content) ? lastMsg.content : (lastMsg.content ? [{ type: 'text', text: lastMsg.content }] : [])
+        if (blocks.length) {
+          blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], cache_control: { type: 'ephemeral' } }
+          lastMsg.content = blocks
+        }
+      }
+    } else if (conv.system != null) {
+      body.system = conv.system
+    }
 
     const list = toolsToList(tools)
     if (list.length) {
@@ -139,6 +158,7 @@ export class AnthropicProvider extends Provider {
         description: t.description || '',
         input_schema: t.parameters || { type: 'object', properties: {} },
       }))
+      if (cacheControl) body.tools[body.tools.length - 1].cache_control = { type: 'ephemeral' }
       const tc = mapToolChoice(tool_choice, 'anthropic')
       if (tc) body.tool_choice = tc
     }
