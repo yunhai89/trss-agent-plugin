@@ -340,6 +340,58 @@ await test('S8 马赛克黏住：真实记忆→Planner/Replyer 链路不回流 
   ok(blocked.text === '' && blocked.cancelReason === 'meme_repeat', `生产 Replyer 拦截马赛克复读（cancel=${blocked.cancelReason}）`)
 })
 
+// ═══════════════ S9 显式 @ 的语义归属（优先级：引用 > 单一@ > 唯一点名 > unknown；歧义不猜） ═══════════════
+await test('S9 显式@归属：A @B → semanticTarget=B（含稳定 user id）', async () => {
+  const bMsg = mk('p9b', WANG, '小王', '我昨天说的方案你们看了吗')
+  const aMsg = mk('p9a', MU, '阿明', '@小王 方案我看了，有个问题', { segments: [{ type: 'at', qq: String(WANG) }] })
+  const g = resolveGrounding([bMsg, aMsg])
+  ok(g.semanticTarget === '小王', `A 明确 @B → semanticTarget=B（实际 ${g.semanticTarget}）`)
+  ok(g.semanticTargetUserId === String(WANG), `内部身份用稳定 user id（实际 ${g.semanticTargetUserId}）`)
+  ok(g.confidence === 0.8, `单一明确@ 置信 0.8（实际 ${g.confidence}）`)
+  ok(g.semanticAmbiguity == null, '无歧义')
+})
+
+await test('S9 引用与@冲突：A 引用 B 同时 @C → 引用优先并记录冲突', async () => {
+  const bMsg = mk('p9q', WU, '芜湖', '帮我把我禁言')
+  const cMsg = mk('p9c', WANG, '小王', '别禁言，说清楚')
+  const aMsg = mk('p9r', LU, '林墨', '@小王 你看芜湖说的这个', { replyToId: 'p9q', segments: [{ type: 'at', qq: String(WANG) }] })
+  const g = resolveGrounding([bMsg, cMsg, aMsg])
+  ok(g.semanticTarget === '芜湖', `引用对象优先（实际 ${g.semanticTarget}）`)
+  ok(g.semanticTargetUserId === String(WU), '引用优先的身份是 B')
+  ok(g.semanticAmbiguity?.kind === 'quote_vs_mention', `记录引用/@冲突（实际 ${JSON.stringify(g.semanticAmbiguity?.kind)}）`)
+  ok(Array.isArray(g.semanticAmbiguity?.mentions) && g.semanticAmbiguity.mentions.includes(String(WANG)), '冲突记录包含被@的 C')
+  ok(g.confidence < 0.9, `冲突时降置信（实际 ${g.confidence}）`)
+})
+
+await test('S9 多@：同时 @B @C → 歧义不静默选第一个', async () => {
+  const bMsg = mk('p9m1', WU, '芜湖', '我说一个方案')
+  const cMsg = mk('p9m2', WANG, '小王', '我说另一个')
+  const aMsg = mk('p9m3', MU, '阿明', '@芜湖 @小王 你们俩谁先说', { segments: [{ type: 'at', qq: String(WU) }, { type: 'at', qq: String(WANG) }] })
+  const g = resolveGrounding([bMsg, cMsg, aMsg])
+  ok(g.semanticTarget == null, `多@输出 unknown（实际 ${g.semanticTarget}），不猜第一个`)
+  ok(g.semanticAmbiguity?.kind === 'multi_mention', `歧义状态（实际 ${JSON.stringify(g.semanticAmbiguity?.kind)}）`)
+  ok(g.confidence <= 0.4, `歧义低置信（实际 ${g.confidence}）`)
+})
+
+await test('S9 提机器人昵称但明确@别人：不误判为在问机器人', async () => {
+  const bMsg = mk('p9n1', WANG, '小王', '小汐上次教我的方法我忘了')
+  const aMsg = mk('p9n2', MU, '阿明', '小汐说的那个 @小王 还记得吗', { mentionsBotName: true, segments: [{ type: 'at', qq: String(WANG) }] })
+  const g = resolveGrounding([bMsg, aMsg])
+  ok(g.semanticTarget === '小王' && g.semanticTargetUserId === String(WANG), `语义所指是被@的小王，不是机器人（实际 ${g.semanticTarget}）`)
+  ok(g.semanticAmbiguity == null, '正文提昵称+明确@单一他人 → 无歧义')
+  // formatGroundingBlock 渲染语义所指与@列表（供 Planner 结合判断）
+  const block = formatGroundingBlock(g)
+  ok(block.includes('小王') && block.includes('明确@了'), '归属块含被@对象')
+})
+
+await test('S9 多正文点名（无@无引用）→ 歧义不选第一个', async () => {
+  const bMsg = mk('p9d1', WU, '芜湖', '我在这')
+  const cMsg = mk('p9d2', WANG, '小王', '我也在')
+  const aMsg = mk('p9d3', MU, '阿明', '芜湖和小王你们打住')
+  const g = resolveGrounding([bMsg, cMsg, aMsg])
+  ok(g.semanticTarget == null && g.semanticAmbiguity?.kind === 'multi_named', `多点名 → unknown+歧义（实际 ${g.semanticTarget}/${JSON.stringify(g.semanticAmbiguity?.kind)}）`)
+})
+
 // ═══════════════ 汇总 ═══════════════
 console.log('\n========================================')
 console.log(`通过 ${passed}，失败 ${failed}`)

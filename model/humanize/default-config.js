@@ -17,11 +17,14 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
   triggerMode: 'necessity',   // necessity | frequency
   talkValue: 0.35,
   mentionHandledByDirectAgent: true,
+  personaName: '',             // 机器人在群里的名字（留空=自动探测 Bot.nickname）
+  botId: '',                   // bot 自身账号 id（默认自动取协议端 self_id；显式配置可覆盖，多协议/改名场景用）
 
   persona: {                  // 群聊角色人设（MaiBot 式，与主 Agent 人设独立）
     name: '',                 // 角色名（留空=用 personaName）
     prompt: '',               // 角色卡正文（自由多段）；最高优先级。空则回落 fromPersonaId/旧来源
     fromPersonaId: '',        // prompt 为空时，按 id/名复用 PersonaStore 人设 systemPrompt
+    aliases: [],              // 角色别名（均参与 @/提及昵称判定；与 name 一同人 identityNames）
   },
 
   debounceMs: 1200,
@@ -135,6 +138,7 @@ export function validateHumanizeConfig(raw = {}, runtimeToolNames = null) {
     name: String(c.persona.name || '').slice(0, 60),
     prompt: personaPrompt,
     fromPersonaId: String(c.persona.fromPersonaId || '').slice(0, 60),
+    aliases: (Array.isArray(c.persona.aliases) ? c.persona.aliases : []).map((a) => String(a || '').trim().slice(0, 60)).filter((a) => a.length >= 2).slice(0, 8),
   }
 
   // groups 必须是数组
@@ -198,3 +202,22 @@ function mergeConfig(base, over) {
 }
 
 function deepClone(v) { return v && typeof v === 'object' ? JSON.parse(JSON.stringify(v)) : v }
+
+/**
+ * 人设身份统一解析（单一来源）：persona.name（新）> personaName（旧兼容）> botNickname。
+ * Normalizer 的 botNames（@/提及判定）、Planner 的角色名、SelfState 的 personaName、
+ * Replyer 人设块必须同源消费本函数产物——否则一处叫角色名、一处叫"机器人"，
+ * 提及判定与自我认知互相打架。
+ * @param {object} cfg 已解析 humanize 配置
+ * @param {object} o { botNickname? } 协议端昵称（兜底名）
+ * @returns {{ name:string, aliases:string[], identityNames:string[] }} identityNames = 参与昵称判定的全部名字（去重、≥2字）
+ */
+export function resolvePersonaIdentity(cfg, { botNickname = '' } = {}) {
+  const persona = cfg?.persona || {}
+  const primary = String(persona.name || cfg?.personaName || '').trim()
+  const aliases = (Array.isArray(persona.aliases) ? persona.aliases : []).map((a) => String(a || '').trim()).filter((a) => a.length >= 2)
+  const bot = String(botNickname || '').trim()
+  const identityNames = [...new Set([...(primary ? [primary] : []), ...aliases, ...(bot ? [bot] : [])])]
+    .filter((n) => n.length >= 2)
+  return { name: primary || bot || '机器人', aliases, identityNames }
+}

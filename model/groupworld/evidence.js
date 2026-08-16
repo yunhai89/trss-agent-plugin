@@ -43,12 +43,14 @@ export class EvidenceResolver {
 
   /**
    * 合并一个画像候选 → upsert gw_traits + 写 gw_evidence。
-   * @param {object} o { groupId, userId, candidate, evidenceMsgs:[{message_id, text, sent_at}], sourceType?, now }
+   * @param {object} o { groupId, userId, candidate, evidenceMsgs:[{message_id, text, sent_at}], sourceType?, optOut?:Set, now }
    *   candidate = { trait_type, trait_key, trait_value, scope?, confidence?(候选，被忽略) }
+   *   optOut = 写入前最终复查的退出集合（分析时段与入库时段之间用户可能已退出，防旧 pending 重建画像）
    * @returns {Promise<{traitId:number, isNew:boolean, confidence:number}>}
    */
-  async mergeTraitCandidate({ groupId, userId, candidate, evidenceMsgs = [], sourceType = 'inferred', now = Date.now() }) {
+  async mergeTraitCandidate({ groupId, userId, candidate, evidenceMsgs = [], sourceType = 'inferred', optOut = null, now = Date.now() }) {
     if (!groupId || !userId || !candidate?.trait_type || !candidate?.trait_key) return { traitId: null, isNew: false, confidence: 0 }
+    if (optOut?.has?.(String(userId))) return { traitId: null, isNew: false, confidence: 0, skipped: 'optout' }
     const traitType = String(candidate.trait_type)
     const traitKey = String(candidate.trait_key).slice(0, 64)
     const value = String(candidate.trait_value || '').slice(0, 512)
@@ -82,7 +84,7 @@ export class EvidenceResolver {
         `UPDATE gw_traits SET trait_value=?, confidence=?, evidence_count=?, last_observed_at=?, status=?, updated_at=? WHERE id=?`,
         [keepValue, Math.round(conf * 10000) / 10000, evidenceCount, now, 'active', now, traitId],
       )
-      await this._writeEvidence(groupId, 'trait', traitId, evidenceMsgs, now)
+      await this._writeEvidence(groupId, 'trait', traitId, evidenceMsgs, now, '', String(userId))
       await this._storeEmbedding('gw_traits', traitId, keepValue)
       return { traitId, isNew: false, confidence: conf }
     }
@@ -96,7 +98,7 @@ export class EvidenceResolver {
     )
     traitId = res?.lastID ?? null
     if (traitId) {
-      await this._writeEvidence(groupId, 'trait', traitId, evidenceMsgs, now)
+      await this._writeEvidence(groupId, 'trait', traitId, evidenceMsgs, now, '', String(userId))
       await this._storeEmbedding('gw_traits', traitId, value)
     }
     return { traitId, isNew: true, confidence: conf }
@@ -104,10 +106,11 @@ export class EvidenceResolver {
 
   /**
    * 合并关系候选 → 更新 gw_edges.inferred_relation/relation_confidence（不重复统计 reply/mention）。
-   * @param {object} o { groupId, fromUserId, toUserId, hint, evidenceMsgs, now }
+   * @param {object} o { groupId, fromUserId, toUserId, hint, evidenceMsgs, optOut?:Set, now }
    */
-  async mergeRelationCandidate({ groupId, fromUserId, toUserId, hint, evidenceMsgs = [], now = Date.now() }) {
+  async mergeRelationCandidate({ groupId, fromUserId, toUserId, hint, evidenceMsgs = [], optOut = null, now = Date.now() }) {
     if (!groupId || !fromUserId || !toUserId || fromUserId === toUserId) return
+    if (optOut?.has?.(String(fromUserId)) || optOut?.has?.(String(toUserId))) return
     const conf = computeConfidence({ sourceType: 'inferred', evidenceCount: (evidenceMsgs.length || 1), distinctDates: 1, contradictions: 0, daysSince: 0 })
     try {
       const res = await this.dao.run(
@@ -121,27 +124,32 @@ export class EvidenceResolver {
         )
       }
       // 关系证据挂在虚拟 target（用 from→to 复合 id 不便；这里以 target_type='edge' + target_id=NULL + segment 证据文本留痕）
-      await this._writeEvidence(groupId, 'edge', 0, evidenceMsgs, now, `${fromUserId}>${toUserId}:${hint || ''}`)
+      await this._writeEvidence(groupId, 'edge', 0, evidenceMsgs, now, `${fromUserId}>${toUserId}:${hint || ''}`, String(fromUserId))
     } catch (e) { Log.warn('[groupworld] mergeRelationCandidate 失败', e?.message || e) }
   }
 
   /**
-   * 合并事件候选 → upsert gw_episodes（近似去重：同 group+title）。
-   * @param {object} o { groupId, candidate, participantIds, topicTags, evidenceMsgs, now }
+   * 合并事件候选 → upsert gw_episodes（近似去重：同 group+title / 语义近义）。
+   * @param {object} o { groupId, candidate, participantIds, topicTags, evidenceMsgs, optOut?:Set, now }
    *   candidate = { episode_type, title, summary, importance? }
+   *   participantIds/topicTags 须为**真实稳定 user id / 已校验标签**（analyzer 侧完成匿名反映射与校验）；
+   *   合并已有 episode 时参与者与标签取并集（不能只更新 summary 丢人物/话题）。
    */
-  async mergeEpisodeCandidate({ groupId, candidate, participantIds = [], topicTags = [], evidenceMsgs = [], now = Date.now() }) {
+  async mergeEpisodeCandidate({ groupId, candidate, participantIds = [], topicTags = [], evidenceMsgs = [], optOut = null, now = Date.now() }) {
     if (!groupId || !candidate?.title) return null
     const title = String(candidate.title).slice(0, 128)
     const summary = String(candidate.summary || '').slice(0, 1000)
+    // 退出建模者不进事件参与者（群级事件保留，但参与者名单剔除）
+    const parts = [...new Set((Array.isArray(participantIds) ? participantIds : []).map(String).filter((p) => p && !(optOut?.has?.(p))))].slice(0, 30)
+    const tags = [...new Set((Array.isArray(topicTags) ? topicTags : []).map((t) => String(t).trim()).filter(Boolean))].slice(0, 8)
     // 先算一次 embedding（语义去重 + 存储复用，避免双调）
     let emb = null
     if (this.embedder) emb = await this.embedder.embed(`${title} ${summary}`)
     // 去重：① 完全同 title；② 语义近义（余弦 ≥ episodeMergeSim，不再只认字面 title）
-    let existing = await this.dao.get('SELECT id, confidence, importance FROM gw_episodes WHERE group_id=? AND title=? AND status=? ORDER BY id DESC LIMIT 1', [groupId, title, 'active'])
+    let existing = await this.dao.get('SELECT id, confidence, importance, participant_ids, topic_tags FROM gw_episodes WHERE group_id=? AND title=? AND status=? ORDER BY id DESC LIMIT 1', [groupId, title, 'active'])
     if (!existing && emb) {
       try {
-        const cands = await this.dao.all("SELECT id, confidence, importance, embedding FROM gw_episodes WHERE group_id=? AND status='active'", [groupId])
+        const cands = await this.dao.all("SELECT id, confidence, importance, participant_ids, topic_tags, embedding FROM gw_episodes WHERE group_id=? AND status='active'", [groupId])
         for (const c of cands) {
           const sim = cosine(emb, fromBlob(c.embedding))
           if (sim != null && sim >= this.episodeMergeSim) { existing = c; break }
@@ -158,9 +166,16 @@ export class EvidenceResolver {
     const imp = Math.max(0, Math.min(1, Number(candidate.importance) || 0.4))
     if (existing) {
       const newConf = Math.max(Number(existing.confidence) || 0, conf)
+      // 参与者/话题标签并集合入（不能只更新 summary——曾把已有参与者清丢，检索端人物/话题匹配失效）
+      const mergeArr = (cur, add) => {
+        let a = []; try { a = JSON.parse(cur || '[]') } catch { /* noop */ }
+        return [...new Set([...a.map(String), ...add.map(String)])]
+      }
+      const mergedParts = mergeArr(existing.participant_ids, parts).slice(0, 30)
+      const mergedTags = mergeArr(existing.topic_tags, tags).slice(0, 8)
       await this.dao.run(
-        'UPDATE gw_episodes SET summary=?, importance=?, confidence=?, last_referenced_at=?, updated_at=? WHERE id=?',
-        [summary, Math.max(Number(existing.importance) || 0, imp), newConf, now, now, existing.id],
+        'UPDATE gw_episodes SET summary=?, importance=?, confidence=?, participant_ids=?, topic_tags=?, last_referenced_at=?, updated_at=? WHERE id=?',
+        [summary, Math.max(Number(existing.importance) || 0, imp), newConf, JSON.stringify(mergedParts), JSON.stringify(mergedTags), now, now, existing.id],
       )
       // 重复出现也要写证据（否则 distinctDates 无法跨日累积，置信恒封顶）
       await this._writeEvidence(groupId, 'episode', existing.id, evidenceMsgs, now)
@@ -170,7 +185,7 @@ export class EvidenceResolver {
       `INSERT INTO gw_episodes(group_id,episode_type,title,summary,participant_ids,topic_tags,importance,confidence,occurred_at,last_referenced_at,status,created_at,updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [groupId, String(candidate.episode_type || 'ongoing_topic').slice(0, 32), title, summary,
-        JSON.stringify(participantIds), JSON.stringify(topicTags), imp, Math.round(conf * 10000) / 10000, now, now, 'active', now, now],
+        JSON.stringify(parts), JSON.stringify(tags), imp, Math.round(conf * 10000) / 10000, now, now, 'active', now, now],
     )
     const epId = res?.lastID ?? null
     if (epId) {
@@ -180,17 +195,17 @@ export class EvidenceResolver {
     return epId
   }
 
-  /** 写一批证据行。 */
-  async _writeEvidence(groupId, targetType, targetId, evidenceMsgs, now, fallbackText = '') {
+  /** 写一批证据行。subjectUserId = 证据主体用户（隐私清理直接定位，不再依赖 target 反查）。 */
+  async _writeEvidence(groupId, targetType, targetId, evidenceMsgs, now, fallbackText = '', subjectUserId = null) {
     if (!Array.isArray(evidenceMsgs) || !evidenceMsgs.length) {
-      if (fallbackText) await this.dao.run('INSERT INTO gw_evidence(group_id,target_type,target_id,evidence_kind,evidence_text,weight,observed_at,created_at) VALUES (?,?,?,?,?,?,?,?)', [groupId, targetType, targetId || null, 'inferred', String(fallbackText).slice(0, 1000), 1, now, now])
+      if (fallbackText) await this.dao.run('INSERT INTO gw_evidence(group_id,target_type,target_id,subject_user_id,evidence_kind,evidence_text,weight,observed_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)', [groupId, targetType, targetId || null, subjectUserId, 'inferred', String(fallbackText).slice(0, 1000), 1, now, now])
       return
     }
     for (const m of evidenceMsgs.slice(0, 12)) {
       try {
         await this.dao.run(
-          'INSERT INTO gw_evidence(group_id,target_type,target_id,message_id,evidence_kind,evidence_text,weight,observed_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)',
-          [groupId, targetType, targetId || null, m.message_id ? String(m.message_id) : null, 'inferred', String(m.text || fallbackText).slice(0, 1000), 1, Number(m.sent_at) || now, now],
+          'INSERT INTO gw_evidence(group_id,target_type,target_id,subject_user_id,message_id,evidence_kind,evidence_text,weight,observed_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+          [groupId, targetType, targetId || null, subjectUserId, m.message_id ? String(m.message_id) : null, 'inferred', String(m.text || fallbackText).slice(0, 1000), 1, Number(m.sent_at) || now, now],
         )
       } catch { /* noop */ }
     }

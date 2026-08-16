@@ -14,13 +14,13 @@ import { evaluate, pressureScore, presencePenalty, cooldownPenalty } from './nec
 import { IdleBackoff } from './idle-backoff.js'
 import { validateActionCall, pickSingleAction, ACTION_TOOLS } from './action-tools.js'
 import { resolveBehaviorPolicy, topicMatchScore, withinReplyRate } from './behavior-policy.js'
-import { MemoryAdapter } from './memory-adapter.js'
 import { fillTemplate, buildPlannerSystem, buildReplyerSystem, formatGroupContext, highlightTarget, buildHumanizePersonaBlock } from './prompts.js'
 import { splitSegments, typingDelayMs, protect, restore } from './reply-composer.js'
 import { Trace, redactForLog } from './trace.js'
 import { validateHumanizeConfig, resolveHumanizeConfig, DEFAULT_HUMANIZE_CONFIG } from './default-config.js'
 import { DEFAULT_HUMANIZE_PERSONA } from './default-persona.js'
 import { resolveGrounding } from './grounding.js'
+import { resolvePersonaIdentity } from './default-config.js'
 
 let passed = 0, failed = 0
 function ok(c, m) { if (c) { passed++; console.log('  ✓', m) } else { failed++; console.error('  ✗ FAIL', m) } }
@@ -252,16 +252,6 @@ await test('behavior-policy：主题打分 + 频率上限', async () => {
   ok(w.within === false, '已达上限 3 不再允许')
 })
 
-// ───────── memory-adapter（隐私边界） ─────────
-await test('memory-adapter：private scope 抛错 + group_public 可读', async () => {
-  const mem = new MemoryAdapter({ recall: null, kv: memoryKv() })
-  let threw = false
-  try { mem.assertPublicScope('user_private') } catch { threw = true }
-  ok(threw === true, 'user_private scope 抛隐私边界错误')
-  ok(mem.assertPublicScope('group_public') === true, 'group_public 允许')
-  ok((await mem.retrieveGroupPublic('g', 'q')).length === 0, '无 recall 时返回空（不抛）')
-})
-
 // ───────── prompts ─────────
 await test('prompts：槽位替换 + Planner 含红线、无任务措辞', async () => {
   ok(fillTemplate('a {{x}} b', { x: 'Y' }) === 'a Y b', 'fillTemplate 替换')
@@ -458,6 +448,31 @@ function mkMsg(text, isSelf, extra = {}, id, name) {
     seq: extra.seq, ...extra,
   }
 }
+
+// ───────── 项9回归：人设身份单一来源 + cooldownSeconds=0 ─────────
+await test('persona 身份统一：persona.name > 旧 personaName > botNickname；aliases 入判定名表', async () => {
+  const p1 = resolvePersonaIdentity({ persona: { name: '江野', aliases: ['小江', '野哥'] } }, { botNickname: '云崽Bot' })
+  ok(p1.name === '江野', `主名 persona.name（实际 ${p1.name}）`)
+  ok(JSON.stringify(p1.identityNames) === JSON.stringify(['江野', '小江', '野哥', '云崽Bot']), `identityNames 含别名+bot 昵称（实际 ${JSON.stringify(p1.identityNames)}）`)
+
+  const p2 = resolvePersonaIdentity({ personaName: '旧名' }, { botNickname: '云崽Bot' })
+  ok(p2.name === '旧名', `旧 personaName 兼容（实际 ${p2.name}）`)
+  ok(p2.identityNames.includes('云崽Bot'), 'bot 昵称兜底入判定名表')
+
+  const p3 = resolvePersonaIdentity({}, { botNickname: '云崽Bot' })
+  ok(p3.name === '云崽Bot', `无配置回落 botNickname（实际 ${p3.name}）`)
+  const p4 = resolvePersonaIdentity({}, {})
+  ok(p4.name === '机器人', `全空回落"机器人"（实际 ${p4.name}）`)
+
+  // 校验层：aliases 归一（去空/短于2字截断）
+  const v = validateHumanizeConfig({ persona: { name: '江野', aliases: ['小江', '', 'a', '野哥'] } })
+  ok(JSON.stringify(v.config.persona.aliases) === JSON.stringify(['小江', '野哥']), `aliases 校验归一（实际 ${JSON.stringify(v.config.persona.aliases)}）`)
+})
+
+await test('cooldownSeconds=0：显式 0 保留（不被默认覆盖）', async () => {
+  const v = validateHumanizeConfig({ cooldownSeconds: 0 })
+  ok(v.config.cooldownSeconds === 0, `validate 保留显式 0（实际 ${v.config.cooldownSeconds}）`)
+})
 
 // ───────── 总结 ─────────
 console.log(`\n========================================`)

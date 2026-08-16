@@ -21,7 +21,7 @@ export class GroupRuntime {
   /**
    * @param {object} opts { groupId, buffer, store, backoff, trace, holderId, presenceWindowMs, cooldownSeconds }
    */
-  constructor({ groupId, buffer, store, backoff, trace, holderId, presenceWindowMs = 5 * 60 * 1000, cooldownSeconds = 45, maxRepliesPer10Minutes = 4 } = {}) {
+  constructor({ groupId, buffer, store, backoff, trace, holderId, presenceWindowMs = 5 * 60 * 1000, cooldownSeconds = 45, maxRepliesPer10Minutes = 4, seqFloor = null } = {}) {
     if (!groupId) throw new Error('GroupRuntime 需要 groupId')
     this.groupId = String(groupId)
     this.buffer = buffer
@@ -32,6 +32,7 @@ export class GroupRuntime {
     this.presenceWindowMs = presenceWindowMs
     this.cooldownSeconds = cooldownSeconds
     this.maxRepliesPer10Minutes = maxRepliesPer10Minutes
+    this.seqFloor = seqFloor // { get(groupId):Promise<number>, set(groupId,n):Promise } —— 持久单调 seq 地板（sqlite 锚）
 
     // 状态机
     this.phase = 'idle' // idle|debouncing|planning|waiting|sending|cooldown
@@ -47,6 +48,9 @@ export class GroupRuntime {
     // 人际轮次控制（进程内）：按用户隔离，避免一个人耗尽豁免后误伤同群其他人。
     this._strongReplyByUser = new Map()
     this._postCorrectionByUser = new Map()
+
+    // 本轮检索并注入 prompt 的记忆 id（Planner/Replyer 收集；仅真实发送成功才经 onDelivered 登记使用）
+    this.turnMemoryIds = new Set()
 
     // 定时器（进程内，不序列化）
     this._debounceTimer = null
@@ -66,9 +70,9 @@ export class GroupRuntime {
   /** 是否仍在冷却（强制候选可绕过——由 scheduler 判定，这里只报状态）。 */
   isCoolingDown(now = Date.now()) { return this.cooldownUntil > now }
 
-  /** 进入冷却（成功回复后）。 */
+  /** 进入冷却（成功回复后）。显式 0 = 不冷却（Number.isFinite 判定，不再用 || 兜底吞掉合法 0）。 */
   enterCooldown(seconds, now = Date.now()) {
-    const sec = Math.max(0, Number(seconds) || this.cooldownSeconds)
+    const sec = Number.isFinite(Number(seconds)) ? Math.max(0, Number(seconds)) : this.cooldownSeconds
     this.cooldownUntil = now + sec * 1000
     this.phase = 'cooldown'
   }
@@ -135,10 +139,13 @@ export class GroupRuntime {
   scheduleWait(seconds) {
     this.cancelWait()
     this.phase = 'waiting'
+    // 钳位与 action-tools 的 human_wait 校验一致（3-120 秒）。
+    // 旧写法 Math.max(1000, Math.min(120, s)) * 1000 在秒级取 max(1000,·)，恒为 1000 秒——
+    // 任何 wait 实际都等约 17 分钟（Planner 决策的 seconds 完全失效）。
     const t = setTimeout(() => {
       this._waitTimer = null
       try { this._driver?.onWaitDue(this) } catch (e) { this.trace?.record('error', { where: 'onWaitDue', msg: String(e?.message || e) }) }
-    }, Math.max(1000, Math.min(120, seconds | 0)) * 1000)
+    }, Math.max(3, Math.min(120, seconds | 0)) * 1000)
     if (t.unref) t.unref()
     this._waitTimer = t
   }
@@ -210,13 +217,34 @@ export class GroupRuntime {
   // ─────────────── 观察游标（标记已处理，防重复评估） ───────────────
 
   /** 把批次标记为已观察（lastProcessedSeq 前移到 batch 末尾）。 */
+  /**
+   * 标记批次已处理，推进游标——**连续 ACK 水位**语义：
+   * 只推进到「区间内所有需评估消息都已处理」的最大 seq；命令/Direct/self 消息无需评估，
+   * 可被越过；未评估的普通消息挡住水位（命令消息到达不得把更早待评估消息一并吞掉）。
+   */
   markObserved(batch) {
-    if (Array.isArray(batch) && batch.length) {
-      const lastSeq = batch[batch.length - 1].seq
-      if (Number.isFinite(lastSeq) && lastSeq > this.lastProcessedSeq) this.lastProcessedSeq = lastSeq
-    } else if (Number.isFinite(batch)) {
-      if (batch > this.lastProcessedSeq) this.lastProcessedSeq = batch
+    const items = (Array.isArray(batch) ? batch : [batch]).filter(Boolean)
+    const batchIds = new Set(items.map((m) => String(m.id || '')))
+    // seq 可能不在传入对象上（append 不回写原对象）——按 id 从 buffer 回查
+    const seqOf = (m) => {
+      const own = Number(m?.seq)
+      if (Number.isFinite(own)) return own
+      const inBuf = m?.id != null ? this.buffer.get(m.id) : null
+      return Number(inBuf?.seq)
     }
+    const seqs = items.map(seqOf).filter(Number.isFinite)
+    if (!seqs.length && !Number.isFinite(batch)) return
+    const maxSeq = seqs.length ? Math.max(...seqs) : Number(batch)
+    if (!(maxSeq > this.lastProcessedSeq)) return
+    let wm = this.lastProcessedSeq
+    for (const m of this.buffer.snapshotAfter(this.lastProcessedSeq)) {
+      // 无需评估的消息（self/命令/Direct 接管）可直接越过；需评估的未入批普通消息挡住水位。
+      // 不设 maxSeq 上界：处理 A 后，其后紧邻的命令 B 应被越过（B 不需要评估）。
+      const needsEval = !m.isSelf && !m.isCommand && !m.handledByDirectAgent
+      if (needsEval && !batchIds.has(String(m.id))) break
+      wm = m.seq
+    }
+    this.lastProcessedSeq = wm
   }
 
   // ─────────────── 取消所有 / 清场 ───────────────
@@ -242,6 +270,7 @@ export class GroupRuntime {
         bufferTail: tail.map(({ seq, id, groupId, userId, displayName, timestamp, text, segments, replyToId, replySource, atBot, mentionsBotName, quotesBot, isCommand, isSelf, handledByDirectAgent, media }) => ({ seq, id, groupId, userId, displayName, timestamp, text, segments, replyToId, replySource, atBot, mentionsBotName, quotesBot, isCommand, isSelf, handledByDirectAgent, media })),
         phase: 'idle', // 重启后一律从 idle 开始（不恢复 planning）
       })
+      await this.persistSeqFloor() // seq 地板随去抖持久化一并落 sqlite（崩窗 ≤2.5s 的序号空洞无害——单调即可）
     } catch { /* noop */ }
   }
 
@@ -253,6 +282,14 @@ export class GroupRuntime {
       this.persist().catch(() => {})
     }, 2500)
     if (this._persistTimer.unref) this._persistTimer.unref()
+  }
+
+  /** 持久化 seq 地板（跨重启单调）。KV 状态可能丢失（无 redis 时），地板锚在 sqlite 才可靠。 */
+  async persistSeqFloor() {
+    try {
+      const n = Number(this.buffer?.lastSeq)
+      if (Number.isFinite(n) && n > 0) await this.seqFloor?.set?.(this.groupId, n)
+    } catch { /* noop */ }
   }
 
   /** 从持久化恢复轻状态 + 近期消息缓冲。 */
@@ -272,6 +309,17 @@ export class GroupRuntime {
           if (n) this.trace?.record?.('buffer_restore', { groupId: this.groupId, restored: n })
         }
       }
+      // seq 地板（持久单调）：缓冲全部过期时 adopt 无从续号，用持久化 floor 保证 seq 跨重启不回退，
+      // 否则 hm 库的 consolidated_seq 高水位会长期压制新序列的整合（项4根因）。
+      const floor = await this.seqFloor?.get?.(this.groupId).catch(() => null)
+      if (Number.isFinite(floor) && floor > 0) this.buffer?.raiseSeqFloor?.(Number(floor))
     } catch { /* noop */ }
+  }
+
+  /** 恢复一次性保证（memoize）：首条消息 append 前完成恢复，
+   *  杜绝"先 append → restore 完成后 adopt 整体重建缓冲 → 首条消息被清掉"的竞态。 */
+  restored() {
+    this._restoredPromise ||= this.restore().catch(() => {})
+    return this._restoredPromise
   }
 }

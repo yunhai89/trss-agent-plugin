@@ -406,6 +406,261 @@ await test('P0：新消息中断规划后，旧代结果不发送', async () => 
   ok(composerDelivered === false, '新消息中断后，旧代 planner 结果不发送')
 })
 
+// ───────── 项7回归：命令/Direct 不吞更早待评估消息 ─────────
+await test('命令消息不吞更早待评估的普通消息（连续 ACK 水位）', async () => {
+  const { runtime } = mkCtx()
+  const cfg = () => validateHumanizeConfig({ enable: true, groups: ['g1'], shadow: true, threshold: 80, talkValue: 0.35, debounceMs: 200 }).config
+  const plannerTargets = []
+  const sched = new TurnScheduler({
+    runtime, cfg,
+    planner: { decide: async ({ decision }) => { plannerTargets.push(decision.targetMessage?.id); return { type: 'human_ignore', reason: 't' } } },
+    replyer: { generate: async () => ({ text: '' }) },
+    composer: { deliver: async () => ({ sentIds: [] }) }, send: async () => null,
+  })
+  await sched.onMessage(mkMsg('帮我看看这个方案行不行', { id: 'A_ord', mentionsBotName: true })) // A：普通待评估
+  await sched.onMessage(mkMsg('#ai 查天气', { id: 'B_cmd', isCommand: true }))                     // B：命令到达
+  runtime.cancelDebounce()
+  await sched._onDebounced(runtime)
+  ok(plannerTargets.includes('A_ord'), `A 仍进入 Planner（命令 B 不吞更早待评估消息；实际 targets=${JSON.stringify(plannerTargets)}）`)
+  ok(!plannerTargets.includes('B_cmd'), '命令 B 本身不进 Planner 候选')
+})
+
+await test('游标水位：命令消息可被越过但不复活、未评估普通消息挡住水位', async () => {
+  const { runtime, buffer } = mkCtx()
+  const a = mkMsg('A 话题', { id: 'wA' })
+  const b = mkMsg('#命令', { id: 'wB', isCommand: true })
+  const c = mkMsg('C 话题', { id: 'wC' })
+  buffer.append(a); buffer.append(b); buffer.append(c)
+  // 只结算 A：水位应推进到 A（越过其后紧邻的命令 B 不需要评估），但不能越过未评估的 C
+  runtime.markObserved([a])
+  ok(runtime.lastProcessedSeq === buffer.get('wB').seq, `水位越过命令 B 停在 C 前（实际 ${runtime.lastProcessedSeq}/${buffer.lastSeq}）`)
+  ok(runtime.buffer.snapshotAfter(runtime.lastProcessedSeq).some((m) => m.id === 'wC'), 'C 仍待评估')
+  // 全部结算后水位正常到顶
+  runtime.markObserved([c])
+  ok(runtime.lastProcessedSeq === buffer.lastSeq, `全部处理后水位到顶（实际 ${runtime.lastProcessedSeq}/${buffer.lastSeq}）`)
+  ok(runtime.buffer.snapshotAfter(runtime.lastProcessedSeq).length === 0, '命令消息不因水位推进而复活进批次')
+})
+
+// ───────── 项6回归：部分发送只登记已发内容 ─────────
+await test('真实 composer：三段只发出一段（中途代变）→ sentIds/sentTexts 只含首段', async () => {
+  const { runtime } = mkCtx()
+  const { HumanizeReplyComposer } = await import('./reply-composer.js')
+  const composer = new HumanizeReplyComposer({ cfg: () => ({ reply: { maxBubbles: 3 } }) })
+  const target = mkMsg('嗯？', { id: 'pp_t' })
+  const sendCalls = []
+  const send = async (seg) => {
+    sendCalls.push(seg)
+    if (sendCalls.length === 1) { runtime.beginPlanning('batch'); return 'pp_s1' } // 首段发出后立刻 bump 代 → 后续段 superseded_mid
+    return 'pp_s2'
+  }
+  // 确定性：splitSegments 的概率合并依赖 rand()——注入恒 1（永不 < mergeProb → 永不合并），保证三段拆分
+  const origRandom = Math.random
+  Math.random = () => 1
+  let res
+  try {
+    res = await composer.deliver({ text: '第一段内容\n第二段内容\n第三段内容', action: {}, target, runtime, send, signal: null, cfg: { reply: { maxBubbles: 3 } } })
+  } finally { Math.random = origRandom }
+  ok(res.sentIds.length === 1 && res.sentIds[0] === 'pp_s1', `只发出首段（实际 ${JSON.stringify(res.sentIds)}）`)
+  ok(res.sentTexts && res.sentTexts.length === 1 && res.sentTexts[0] === '第一段内容', `sentTexts 只含已发段（实际 ${JSON.stringify(res.sentTexts)}）`)
+  ok(res.cancelled === true, `中断标记（${res.cancelReason}）`)
+})
+
+await test('调度层：部分发送只登记已发段（buffer/通知只用 deliveredText）', async () => {
+  const { runtime } = mkCtx()
+  const cfg = () => validateHumanizeConfig({ enable: true, groups: ['g1'], shadow: false, threshold: 80, talkValue: 0.35, debounceMs: 200, cooldownSeconds: 1, replyer: { maxChars: 500 } }).config
+  const targetId = 'p_target'
+  let deliveredInfo = null
+  const sched = new TurnScheduler({
+    runtime, cfg,
+    planner: { decide: async () => ({ type: 'human_reply', targetMessageId: targetId, replyGuide: 'g', quote: false, toolCallId: 'c1' }) },
+    replyer: { generate: async () => ({ text: '第一段\n第二段\n第三段' }) },
+    composer: { deliver: async () => ({ sentIds: ['p_sent_1'], sentTexts: ['第一段'], cancelled: true, cancelReason: 'superseded_mid' }) },
+    send: async () => 'p_sent_1',
+    onDelivered: async (info) => { deliveredInfo = info },
+  })
+  await sched.onMessage(mkMsg('小猫你觉得呢', { mentionsBotName: true, id: targetId }))
+  await sleep(350)
+  ok(deliveredInfo && deliveredInfo.sentText === '第一段', `GW/SS/梗登记只见首段（实际 ${JSON.stringify(deliveredInfo?.sentText)}）`)
+  const selfMsg = runtime.buffer.get('p_sent_1')
+  ok(selfMsg && selfMsg.text === '第一段', `buffer 自身消息只记已发段（实际 ${JSON.stringify(selfMsg?.text)}）`)
+})
+
+await test('调度层：首段发送失败 → 零 delivered 状态', async () => {
+  const { runtime } = mkCtx()
+  const cfg = () => validateHumanizeConfig({ enable: true, groups: ['g1'], shadow: false, threshold: 80, talkValue: 0.35, debounceMs: 200, cooldownSeconds: 1, replyer: { maxChars: 500 } }).config
+  const targetId = 'f_target'
+  let deliveredInfo = null
+  const sched = new TurnScheduler({
+    runtime, cfg,
+    planner: { decide: async () => ({ type: 'human_reply', targetMessageId: targetId, replyGuide: 'g', quote: false, toolCallId: 'c1' }) },
+    replyer: { generate: async () => ({ text: '要发的内容' }) },
+    composer: { deliver: async () => ({ sentIds: [], sentTexts: [], cancelled: true, cancelReason: 'send_failed' }) },
+    send: async () => null,
+    onDelivered: async (info) => { deliveredInfo = info },
+  })
+  await sched.onMessage(mkMsg('小猫你觉得呢', { mentionsBotName: true, id: targetId }))
+  await sleep(350)
+  ok(deliveredInfo == null, '发送失败不产生 delivered 状态（onDelivered 不触发）')
+  ok(!runtime.buffer.snapshot(20, { includeSelf: true }).some((m) => m.isSelf && m.id === 'any_sent'), '失败内容不写入 buffer 自身消息')
+})
+
+await test('调度层：全部发送成功 → deliveredText 与实际发送内容一致', async () => {
+  const { runtime } = mkCtx()
+  const cfg = () => validateHumanizeConfig({ enable: true, groups: ['g1'], shadow: false, threshold: 80, talkValue: 0.35, debounceMs: 200, cooldownSeconds: 1, replyer: { maxChars: 500 } }).config
+  const targetId = 'ok_target'
+  let deliveredInfo = null
+  const sched = new TurnScheduler({
+    runtime, cfg,
+    planner: { decide: async () => ({ type: 'human_reply', targetMessageId: targetId, replyGuide: 'g', quote: false, toolCallId: 'c1' }) },
+    replyer: { generate: async () => ({ text: '首段\n次段' }) },
+    composer: { deliver: async () => ({ sentIds: ['ok1', 'ok2'], sentTexts: ['首段', '次段'], cancelled: false }) },
+    send: async () => 'okx',
+    onDelivered: async (info) => { deliveredInfo = info },
+  })
+  await sched.onMessage(mkMsg('小猫你觉得呢', { mentionsBotName: true, id: targetId }))
+  await sleep(350)
+  ok(deliveredInfo && deliveredInfo.sentText === '首段\n次段', `deliveredText=实际发送内容（实际 ${JSON.stringify(deliveredInfo?.sentText)}）`)
+})
+
+// ───────── 项5回归：被检索≠被使用 ─────────
+await test('memory：recall 不增使用计数，markUsed 才登记', async () => {
+  const dir = path.join(os.tmpdir(), `hm-use-${process.pid}`)
+  fs.rmSync(dir, { recursive: true, force: true })
+  const store = new HumanizeMemoryStore({
+    dataDir: dir,
+    provider: { chat: async () => ({ content: JSON.stringify({ memories: [{ kind: 'impression', about_user: 'u1', content: '对甲的印象=爱聊服务器', keywords: ['服务器'], importance: 0.7 }], suspected_jargon: [] }) }) },
+    cfg: () => ({ memory: { enabled: true, minConsolidateMessages: 2 } }),
+  })
+  await store.consolidate({ groupId: 'gu', messages: [{ seq: 1, timestamp: Date.now() - 1000, text: '甲聊服务器', isSelf: false }, { seq: 2, timestamp: Date.now(), text: '乙聊服务器', isSelf: false }] })
+  const rows = await store.recall({ groupId: 'gu', query: '服务器', topK: 5 })
+  ok(rows.length >= 1, '召回命中')
+  const rowOf = async (id) => store.dao.get('SELECT hit_count, last_used_at FROM hm_memories WHERE id=?', [id])
+  let after = await rowOf(rows[0].id)
+  ok(Number(after.hit_count) === 0, `recall 本身不增 hit_count（实际 ${after.hit_count}）`)
+  ok(after.last_used_at == null, 'recall 不推进 last_used_at')
+  await store.markUsed('gu', rows.map((r) => r.id))
+  after = await rowOf(rows[0].id)
+  ok(Number(after.hit_count) === 1 && after.last_used_at != null, `markUsed 登记真实使用（hit=${after.hit_count}）`)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('memory：整合原子性——中途写失败整批回滚、水位不推进', async () => {
+  const dir = path.join(os.tmpdir(), `hm-txn-${process.pid}`)
+  fs.rmSync(dir, { recursive: true, force: true })
+  const store = new HumanizeMemoryStore({
+    dataDir: dir,
+    provider: { chat: async () => ({ content: JSON.stringify({ memories: [
+      { kind: 'event', content: '事件A：群里讨论了部署', keywords: ['部署'], importance: 0.6 },
+      { kind: 'event', content: '事件B：群里讨论了回滚', keywords: ['回滚'], importance: 0.6 },
+    ], suspected_jargon: [] }) }) },
+    cfg: () => ({ memory: { enabled: true, minConsolidateMessages: 2 } }),
+  })
+  await store.init()
+  // 注入：第二条 INSERT 失败 → 整批必须回滚（无部分记忆、水位不推进）
+  const orig = store.dao.run.bind(store.dao)
+  let insertN = 0
+  store.dao.run = async (sql, p = []) => {
+    if (/INSERT INTO hm_memories/.test(sql) && ++insertN === 2) throw new Error('injected write failure')
+    return orig(sql, p)
+  }
+  let threw = false
+  try { await store.consolidate({ groupId: 'gt', messages: [{ seq: 1, timestamp: Date.now() - 1000, text: 'a', isSelf: false }, { seq: 2, timestamp: Date.now(), text: 'b', isSelf: false }] }) } catch { threw = true }
+  ok(threw, '写失败时 consolidate 抛错（不静默当成功）')
+  const left = await store.dao.all('SELECT * FROM hm_memories WHERE group_id=?', ['gt'])
+  ok(left.length === 0, `无部分记忆残留（实际 ${left.length} 条）`)
+  ok(await store.consolidatedSeq('gt') === 0, `水位未推进（实际 ${await store.consolidatedSeq('gt')}）`)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('memory：同一批同来源候选不重复 +0.05 强化', async () => {
+  const dir = path.join(os.tmpdir(), `hm-boost-${process.pid}`)
+  fs.rmSync(dir, { recursive: true, force: true })
+  const store = new HumanizeMemoryStore({
+    dataDir: dir,
+    provider: { chat: async () => ({ content: JSON.stringify({ memories: [
+      { kind: 'jargon', content: '雨伞=形容离谱', keywords: ['雨伞'], importance: 0.5 },
+      { kind: 'jargon', content: '雨伞=形容离谱啦', keywords: ['雨伞'], importance: 0.5 }, // 同义近重复（同批；词面 sim 0.8）
+    ], suspected_jargon: [] }) }) },
+    cfg: () => ({ memory: { enabled: true, minConsolidateMessages: 2 } }),
+  })
+  await store.consolidate({ groupId: 'gb', messages: [{ seq: 1, timestamp: Date.now() - 1000, text: 'x', isSelf: false }, { seq: 2, timestamp: Date.now(), text: 'y', isSelf: false }] })
+  const rows = await store.dao.all("SELECT * FROM hm_memories WHERE group_id='gb'")
+  ok(rows.length === 1, `近重复合并为一条（实际 ${rows.length}）`)
+  ok(Math.abs(Number(rows[0].importance) - 0.5) < 1e-9, `同批只允许一次重要性提升上限（合并不加权；实际 ${rows[0].importance}）`)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+// ───────── 项4回归：整合水位跨重启 ─────────
+await test('整合水位：buffer seq 回退（重启过期）仍触发整合——安全重置到合法边界', async () => {
+  const dir = path.join(os.tmpdir(), `hm-wm-${process.pid}`)
+  fs.rmSync(dir, { recursive: true, force: true })
+  const store = new HumanizeMemoryStore({
+    dataDir: dir,
+    provider: { chat: async () => ({ content: JSON.stringify({ memories: [{ kind: 'event', content: '新纪元事件', keywords: [], importance: 0.5 }], suspected_jargon: [] }) }) },
+    cfg: () => ({ memory: { enabled: true, minConsolidateMessages: 2 } }),
+  })
+  await store.init()
+  await store.markConsolidated('gw', 5000) // 旧 incarnation 的高水位（buffer 已全部过期丢失）
+  ok(await store.shouldConsolidate('gw', 3, 2) === true, `current(3) < watermark(5000) → 判定需要整合（重置路径），而非长期 false`)
+  // cron 同款逻辑：回退时安全重置水位到 0，再取全部当前缓冲消息整合（旧消息已不在 buffer，不会重复强化）
+  const { runtime: rt2 } = mkCtx()
+  for (let i = 1; i <= 3; i++) rt2.buffer.append(mkMsg(`新消息${i}`, { id: `wm${i}` }))
+  let since = await store.consolidatedSeq('gw')
+  if (since > rt2.buffer.lastSeq) { await store.markConsolidated('gw', 0); since = 0 }
+  const msgs = rt2.buffer.snapshotAfter(since)
+  ok(msgs.length === 3, `重置后取到全部 3 条新消息（实际 ${msgs.length}）`)
+  const r = await store.consolidate({ groupId: 'gw', messages: msgs })
+  ok(r.created === 1, `整合执行（created=${r.created}）`)
+  ok(await store.consolidatedSeq('gw') === 3, `水位推进到新边界 3（实际 ${await store.consolidatedSeq('gw')}）`)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('整合水位：正常重启（buffer 恢复）不重复整合', async () => {
+  const dir = path.join(os.tmpdir(), `hm-wm2-${process.pid}`)
+  fs.rmSync(dir, { recursive: true, force: true })
+  const store = new HumanizeMemoryStore({
+    dataDir: dir,
+    provider: { chat: async () => ({ content: JSON.stringify({ memories: [], suspected_jargon: [] }) }) },
+    cfg: () => ({ memory: { enabled: true, minConsolidateMessages: 2 } }),
+  })
+  await store.init()
+  const { buffer: buf1 } = mkCtx()
+  for (let i = 1; i <= 5; i++) buf1.append(mkMsg(`旧消息${i}`, { id: `o${i}` }))
+  await store.consolidate({ groupId: 'gn', messages: buf1.snapshotAfter(0) })
+  ok(await store.consolidatedSeq('gn') === 5, '第一轮水位 5')
+  // 模拟重启：新 buffer 恢复了尾部（seq 延续），无新增 → 不再整合
+  const { buffer: buf2 } = mkCtx()
+  buf2.adopt(buf1.snapshot(50, { includeSelf: true }))
+  ok(await store.shouldConsolidate('gn', buf2.lastSeq, 2) === false, `无新增不整合（lastSeq=${buf2.lastSeq}）`)
+  // 新增 2 条 → 触发，且只整合新增
+  buf2.append(mkMsg('新1', { id: 'n1' })); buf2.append(mkMsg('新2', { id: 'n2' }))
+  ok(await store.shouldConsolidate('gn', buf2.lastSeq, 2) === true, '新增达标触发')
+  const fresh = buf2.snapshotAfter(await store.consolidatedSeq('gn'))
+  ok(fresh.length === 2 && fresh.every((m) => m.id.startsWith('n')), `只整合新增 2 条（实际 ${fresh.length}）`)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('buffer：raiseSeqFloor 单调——重启后 seq 不回退', async () => {
+  const { buffer } = mkCtx()
+  buffer.append(mkMsg('a', { id: 'fa' }))
+  ok(buffer.lastSeq === 1, '初始 seq=1')
+  buffer.raiseSeqFloor(5000)
+  ok(buffer.lastSeq === 5000, `floor 抬升后 lastSeq=${buffer.lastSeq}`)
+  buffer.append(mkMsg('b', { id: 'fb' }))
+  ok(buffer.get('fb').seq === 5001, `新消息 seq=5001（实际 ${buffer.get('fb').seq}）`)
+  buffer.raiseSeqFloor(100) // 回退型 floor 不生效
+  ok(buffer.lastSeq === 5001, 'floor 只增不减')
+})
+
+// ───────── 项9回归 ─────────
+await test('cooldownSeconds=0 显式配置 → 不进入冷却', async () => {
+  const { runtime } = mkCtx({ cooldownSeconds: 0 })
+  runtime.enterCooldown(0)
+  ok(runtime.isCoolingDown() === false, `显式 0 不冷却（实际 cooldownUntil=${runtime.cooldownUntil}）`)
+  runtime.enterCooldown(5)
+  ok(runtime.isCoolingDown() === true, '正数仍正常冷却')
+})
+
 // ───────── 总结 ─────────
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

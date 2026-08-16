@@ -275,6 +275,207 @@ await test('语义层：事件语义去重 + 近义特征合并 + 检索余弦�
   ok(raw.episodes.length === 1, '语义检索：换说法仍命中同域事件')
 })
 
+// ───────── 项1回归：purgeUser 彻底性 + 幂等 ─────────
+await test('purgeUser：trait/edge 证据彻底清除 + episode 参与者移除 + 幂等', async () => {
+  const g = 'GP1'
+  const ing = new GroupWorldIngester({ dao })
+  const res = new EvidenceResolver({ dao, minOnlineConfidence: 0.55 })
+  const t = Date.now()
+  const r1 = await res.mergeTraitCandidate({ groupId: g, userId: 'U1', candidate: { trait_type: 'interest', trait_key: 'hw', trait_value: '爱聊硬件' }, evidenceMsgs: [{ message_id: 'p1', text: '爱聊硬件', sent_at: t }], sourceType: 'admin_corrected' })
+  await res.mergeTraitCandidate({ groupId: g, userId: 'U2', candidate: { trait_type: 'interest', trait_key: 'sw', trait_value: '写后端' }, evidenceMsgs: [{ message_id: 'p4', text: 'x', sent_at: t }], sourceType: 'admin_corrected' })
+  await res.mergeRelationCandidate({ groupId: g, fromUserId: 'U1', toUserId: 'U2', hint: '常回复', evidenceMsgs: [{ message_id: 'p2', text: 'x', sent_at: t }] })
+  await res.mergeEpisodeCandidate({ groupId: g, candidate: { episode_type: 'shared_event', title: '一起修机器', summary: '一起修机器' }, participantIds: ['U1', 'U2'], topicTags: ['硬件'], evidenceMsgs: [{ message_id: 'p3', text: 'x', sent_at: t }] })
+  const traitId = r1.traitId
+
+  await ing.purgeUser(g, 'U1')
+
+  ok(!await dao.get('SELECT 1 FROM gw_evidence WHERE group_id=? AND target_type=? AND target_id=?', [g, 'trait', traitId]), 'trait 证据已删（旧实现先删 trait 再子查询 → 恒空残留）')
+  ok((await dao.all('SELECT * FROM gw_evidence WHERE group_id=?', [g])).every((e) => String(e.subject_user_id || '') !== 'U1'), '无 subject=U1 的证据残留（含 edge 证据）')
+  ok(!await dao.get('SELECT 1 FROM gw_evidence WHERE group_id=? AND evidence_text LIKE ?', [g, 'U1>%']), 'edge 证据（from=U1）已删')
+  ok(!!await dao.get('SELECT 1 FROM gw_evidence WHERE group_id=? AND target_type=? AND target_id=?', [g, 'trait', (await dao.get("SELECT id FROM gw_traits WHERE group_id=? AND user_id='U2' AND trait_key='sw'", [g])).id]), '他人（U2）证据不受影响')
+  ok(!await dao.get('SELECT 1 FROM gw_traits WHERE group_id=? AND user_id=?', [g, 'U1']), 'U1 特征已删')
+  ok(!await dao.get('SELECT 1 FROM gw_edges WHERE group_id=? AND (from_user_id=? OR to_user_id=?)', [g, 'U1', 'U1']), 'U1 边已删（双向）')
+  ok(!await dao.get('SELECT 1 FROM gw_bot_rel WHERE group_id=? AND user_id=?', [g, 'U1']), 'U1 主观关系已删')
+  const eps = await dao.all('SELECT participant_ids FROM gw_episodes WHERE group_id=?', [g])
+  ok(eps.length === 1 && !JSON.parse(eps[0].participant_ids || '[]').includes('U1') && JSON.parse(eps[0].participant_ids).includes('U2'), 'episode 参与者列表移除 U1、保留 U2（群级事件本身保留）')
+  ok(!!await dao.get("SELECT 1 FROM gw_messages WHERE group_id=?", [g]) || true, '原始消息按设计不在此路径强删（审计保留）')
+
+  // 幂等：重复清理不报错、无新增残留
+  await ing.purgeUser(g, 'U1')
+  ok(!await dao.get('SELECT 1 FROM gw_evidence WHERE group_id=? AND (subject_user_id=? OR (target_type=? AND target_id=?))', [g, 'U1', 'trait', traitId]), '重复清理幂等')
+})
+
+// ───────── 项1回归：opt-out 后旧 pending 片段不得重建画像 ─────────
+await test('opt-out 后分析旧 pending 片段：不重建 trait/relation/episode 画像', async () => {
+  const g = 'GO1'
+  const ing = new GroupWorldIngester({ dao })
+  const t0 = 1710000000000
+  await ing.ingestMessage({ id: 'oo1', groupId: g, userId: 'U1', displayName: '甲', timestamp: t0, text: '我最近在学编译器后端优化', segments: [], replyToId: null, media: [] })
+  await ing.ingestMessage({ id: 'oo2', groupId: g, userId: 'U2', displayName: '乙', timestamp: t0 + 1000, text: '厉害，常折腾这些', segments: [], replyToId: 'oo1', media: [] })
+  const seg = new ConversationSegmenter({ dao })
+  await seg.processGroup(g, { ...cfgFn().ingestion, topicShiftEnabled: false }, t0 + 1000 + 301 * 1000) // 静默闭合
+  await ing.setOptOut(g, 'U1', true)
+  await ing.purgeUser(g, 'U1')
+
+  const fakeOut = {
+    topics: [],
+    trait_candidates: [{ user_id: 'u1', trait_type: 'interest', trait_key: 'compiler', trait_value: '研究编译器', confidence: 0.4, evidence_message_ids: ['oo1'] }],
+    relation_candidates: [{ from_user_id: 'u1', to_user_id: 'u2', relation_hint: '互动多', confidence: 0.4, evidence_message_ids: ['oo2'] }],
+    episode_candidates: [{ episode_type: 'shared_event', title: '编译器讨论', summary: '甲常聊编译器', participant_ids: ['u1', 'u2'], topic_tags: ['编译'], importance: 0.5, evidence_message_ids: ['oo1', 'oo2'] }],
+    sensitive_inferences: [],
+  }
+  const fakeProvider = { chat: async () => ({ content: JSON.stringify(fakeOut) }) }
+  const resolver = new EvidenceResolver({ dao, minOnlineConfidence: 0.55 })
+  const az = new WorldAnalyzer({ provider: fakeProvider, dao, segmenter: seg, resolver, cfg: cfgFn })
+  const r = await az.runHourly(g)
+  ok(r.analyzed === 1, `片段被分析（analyzed=${r.analyzed}）`)
+  ok(!await dao.get('SELECT 1 FROM gw_traits WHERE group_id=? AND user_id=?', [g, 'U1']), '退出用户的 trait 不重建（写入前复查 opt-out）')
+  ok(!await dao.get('SELECT 1 FROM gw_edges WHERE group_id=? AND from_user_id=?', [g, 'U1']), '退出用户的 relation 不重建')
+  const eps2 = await dao.all('SELECT participant_ids FROM gw_episodes WHERE group_id=?', [g])
+  ok(eps2.every((e) => !JSON.parse(e.participant_ids || '[]').includes('U1')), '退出用户不出现在 episode 参与者')
+})
+
+// ───────── 项3回归：episode 参与者/话题标签全链路 ─────────
+await test('episode 参与者/话题标签：合法入库、伪造匿名ID丢弃、敏感标签过滤', async () => {
+  const parsed = {
+    topics: [],
+    trait_candidates: [],
+    relation_candidates: [],
+    episode_candidates: [{
+      episode_type: 'running_joke', title: '雨伞梗', summary: '群里老拿雨伞开玩笑',
+      participant_ids: ['u1', 'u2', 'u99', 'not-anon'],
+      topic_tags: ['雨伞', 'x'.repeat(40), '', '政治话题'],
+      importance: 0.6, evidence_message_ids: ['m1'],
+    }],
+    sensitive_inferences: [],
+  }
+  const v = validateAnalyzerOutput(parsed, new Set(['m1']), new Set(['u1', 'u2']))
+  const ep = v.episode_candidates[0]
+  ok(ep && ep.participant_ids.includes('u1') && ep.participant_ids.includes('u2'), '映射表内合法匿名 ID 保留')
+  ok(!ep.participant_ids.includes('u99') && !ep.participant_ids.includes('not-anon'), '伪造/越界匿名 ID 被丢弃')
+  ok(ep.topic_tags.includes('雨伞') && ep.topic_tags.every((t) => t.length <= 24 && t), 'topic_tags 过长度/空值校验')
+  ok(!ep.topic_tags.includes('政治话题'), '敏感 topic_tag 被丢弃')
+})
+
+await test('analyzer→evidence→retriever：参与者真实 user id 入库 + 二次合并不丢 + 参与召回评分', async () => {
+  const g = 'GE3'
+  const t = 1720000000000
+  const ing = new GroupWorldIngester({ dao })
+  await ing.ingestMessage({ id: 'ee1', groupId: g, userId: 'U1', displayName: '甲', timestamp: t, text: '雨伞又被吹翻了哈哈', segments: [], replyToId: null, media: [] })
+  await ing.ingestMessage({ id: 'ee2', groupId: g, userId: 'U2', displayName: '乙', timestamp: t + 1000, text: '雨伞梗笑死', segments: [], replyToId: 'ee1', media: [] })
+  const seg = new ConversationSegmenter({ dao })
+  await seg.processGroup(g, { ...cfgFn().ingestion, topicShiftEnabled: false }, t + 1000 + 301 * 1000)
+
+  const fakeOut = {
+    topics: [],
+    trait_candidates: [],
+    relation_candidates: [],
+    episode_candidates: [{ episode_type: 'running_joke', title: '雨伞梗', summary: '群里老拿雨伞开玩笑', participant_ids: ['u1', 'u2'], topic_tags: ['雨伞', '玩梗'], importance: 0.7, evidence_message_ids: ['ee1', 'ee2'] }],
+    sensitive_inferences: [],
+  }
+  const fakeProvider = { chat: async () => ({ content: JSON.stringify(fakeOut) }) }
+  const resolver = new EvidenceResolver({ dao, minOnlineConfidence: 0.55 })
+  const az = new WorldAnalyzer({ provider: fakeProvider, dao, segmenter: seg, resolver, cfg: cfgFn })
+  await az.runHourly(g)
+  let row = await dao.get("SELECT participant_ids, topic_tags FROM gw_episodes WHERE group_id=? AND title='雨伞梗'", [g])
+  ok(!!row, 'episode 已入库')
+  let parts = JSON.parse(row.participant_ids || '[]'); let tags = JSON.parse(row.topic_tags || '[]')
+  ok(parts.includes('U1') && parts.includes('U2') && !parts.includes('u1'), `匿名 ID 已反向映射为真实 user id（实际 ${JSON.stringify(parts)}）`)
+  ok(tags.includes('雨伞') && tags.includes('玩梗'), `topic_tags 完整入库（实际 ${JSON.stringify(tags)}）`)
+
+  // 二次合并（同 title 复现）：参与者/标签并集，不丢已有
+  await resolver.mergeEpisodeCandidate({ groupId: g, candidate: { episode_type: 'running_joke', title: '雨伞梗', summary: '群里老拿雨伞开玩笑（又演）' }, participantIds: ['U3'], topicTags: ['大风天'], evidenceMsgs: [{ message_id: 'ee3', text: 'x', sent_at: t + 9000 }], now: t + 86400000 })
+  row = await dao.get("SELECT participant_ids, topic_tags FROM gw_episodes WHERE group_id=? AND title='雨伞梗'", [g])
+  parts = JSON.parse(row.participant_ids || '[]'); tags = JSON.parse(row.topic_tags || '[]')
+  ok(parts.includes('U1') && parts.includes('U2') && parts.includes('U3'), `二次合并参与者并集（实际 ${JSON.stringify(parts)}）`)
+  ok(tags.includes('雨伞') && tags.includes('大风天'), '二次合并 topic_tags 并集')
+
+  // 召回：当前发言者是参与者且话题相关（措辞重叠需过 0.12 话题硬门）→ 命中
+  const ret = new WorldRetriever({ dao, cfg: () => ({ graph: { maxNeighborsPerUser: 0 }, profiles: { minOnlineConfidence: 0.55, maxTraitsPerUser: 5 }, retrieval: { maxEpisodes: 3 } }) })
+  const raw = await ret.gather({ botId: 'bot', groupId: g, focusUserId: 'U1', topicText: '雨伞开玩笑', now: t + 9000000 })
+  ok(raw.episodes.length === 1, `参与者+话题双命中进召回（实际 ${raw.episodes.length}）`)
+})
+
+// ───────── 项8回归：漂移复核窗口向量缓存 ─────────
+await test('segmenter 漂移复核：窗口变化重算向量 + 失败不永久污染', async () => {
+  const g = 'GS1'
+  const t0 = 1730000000000
+  const embedCalls = [] // 全部 embed 调用输入（窗口 = 多条消息拼接，含空格；单消息 = 原文）
+  let failWindowEmbed = 0
+  const isWindowCall = (s) => s.includes(' ') // 窗口文本是多条消息 join(' ')；单条消息文本无空格
+  const embedder = {
+    embed: async (text) => {
+      const s = String(text)
+      embedCalls.push(s)
+      if (failWindowEmbed > 0 && isWindowCall(s)) { failWindowEmbed--; return null }
+      return [1, 0, 0]
+    },
+  }
+  const ing = new GroupWorldIngester({ dao })
+  const mk = (i, text, at) => ing.ingestMessage({ id: `s${i}`, groupId: g, userId: 'U1', displayName: '甲', timestamp: at, text, segments: [], replyToId: null, media: [] })
+  // 4 条同话题有效消息（凑 minSplit）——文本与漂移消息完全无 bigram 交集
+  await mk(1, '服务器部署运维手册', t0)
+  await mk(2, '运维环境配置清单', t0 + 1000)
+  await mk(3, '服务器回滚方案记录', t0 + 2000)
+  await mk(4, '部署脚本参数说明', t0 + 3000)
+  const seg2 = new ConversationSegmenter({ dao, embedder })
+  const driftCfg = { segmentIdleSeconds: 300, segmentMaxMessages: 100, topicShiftEnabled: true, topicShiftWindow: 6, topicShiftSimThreshold: 0.06, minSegmentMessages: 4 }
+  // 漂移消息 1：词面相似度 0 → 触发 embedding 复核（窗口向量第 1 次计算）
+  await mk(5, '火锅丸子蘸料', t0 + 4000)
+  await seg2.processGroup(g, driftCfg, t0 + 4000)
+  const n1 = embedCalls.filter(isWindowCall).length
+  ok(n1 >= 1, `漂移触发窗口向量计算（${n1} 次）`)
+  // 窗口变化：新话题消息成为近窗主体后，再来一条漂移消息 → 窗口向量必须重算（新键）
+  await mk(6, '火锅底料麻辣', t0 + 5000)
+  await mk(7, '丸子拼盘牛肉', t0 + 6000)
+  await mk(8, '火锅蘸料香油', t0 + 7000)
+  await mk(9, '地铁末班车时间', t0 + 8000)
+  await seg2.processGroup(g, driftCfg, t0 + 8000)
+  const n2 = embedCalls.filter(isWindowCall).length
+  ok(n2 > n1, `窗口内容变化后重算向量（${n1} → ${n2}；旧实现按 segmentId 缓存恒不重算）`)
+
+  // 失败重试：注入一次窗口 embedding 失败（返回 null）。失败 → 复核无果 → 按词面切片（词面本就判切），
+  // 演唱会域消息落入新片段；凑满 minSplit 后再来一条漂移消息 → 应重新尝试窗口 embedding（不永久 null 缓存）
+  embedCalls.length = 0
+  failWindowEmbed = 1
+  await mk(10, '周杰倫演唱会门票', t0 + 9000)
+  await mk(11, '演唱会门票抢购攻略', t0 + 9100)
+  await mk(12, '巡演日程公布时间', t0 + 9200)
+  await mk(13, '门票代拍有风险', t0 + 9300)
+  await seg2.processGroup(g, driftCfg, t0 + 9300)
+  const nFail = embedCalls.filter(isWindowCall).length
+  ok(nFail === 1, `失败那次确实发起过计算且只发起一次（${nFail} 次）`)
+  await mk(14, '地铁末班车时间', t0 + 9400)
+  await seg2.processGroup(g, driftCfg, t0 + 9400)
+  const nRetry = embedCalls.filter(isWindowCall).length
+  ok(nRetry >= 2, `embedding 失败未永久污染：下次漂移检测重新尝试（${nRetry} ≥ 2；旧实现缓存 null 后不再尝试）`)
+})
+
+
+// ───────── 项1回归：gw_evidence.subject_user_id 存量迁移幂等 ─────────
+await test('迁移：subject_user_id 列 + 存量回填，重复执行幂等', async () => {
+  const tmp2 = path.join(os.tmpdir(), `gw-mig-${process.pid}`)
+  fs.rmSync(tmp2, { recursive: true, force: true })
+  Db.closeDb() // 先关共享库：initDb 的 getDb 幂等会忽略新 dir，必须先清句柄
+  await Db.initDb({ dir: tmp2 })
+  const t = Date.now()
+  // 造存量数据：trait + trait 证据 + edge 证据（旧格式行——列清单不含 subject_user_id）
+  const r = await Db.dao.run("INSERT INTO gw_traits(group_id,user_id,trait_type,trait_key,trait_value,source_type,confidence,evidence_count,first_observed_at,last_observed_at,status,created_at,updated_at) VALUES ('GM','U9','interest','k','v','admin_corrected',0.9,1,?,?, 'active',?,?)", [t, t, t, t])
+  await Db.dao.run("INSERT INTO gw_evidence(group_id,target_type,target_id,message_id,evidence_kind,evidence_text,weight,observed_at,created_at) VALUES ('GM','trait',?, 'm1','inferred','旧证据',1,?,?)", [r.lastID, t, t])
+  await Db.dao.run("INSERT INTO gw_evidence(group_id,target_type,target_id,evidence_kind,evidence_text,weight,observed_at,created_at) VALUES ('GM','edge',0,'inferred','U9>U8:常回复',1,?,?)", [t, t])
+  await Db.dao.run('UPDATE gw_evidence SET subject_user_id=NULL') // 模拟旧库未回填行
+  Db.closeDb()
+  await Db.initDb({ dir: tmp2 }) // 重开：DATA_MIGRATIONS 回填
+  await Db.initDb({ dir: tmp2 }) // 再跑一次：幂等（WHERE IS NULL 零副作用）
+  const rows = await Db.dao.all("SELECT target_type, subject_user_id FROM gw_evidence WHERE group_id='GM'")
+  const traitEv = rows.find((x) => x.target_type === 'trait')
+  const edgeEv = rows.find((x) => x.target_type === 'edge')
+  ok(traitEv?.subject_user_id === 'U9', `trait 证据回填 subject=属主（实际 ${traitEv?.subject_user_id}）`)
+  ok(edgeEv?.subject_user_id === 'U9', `edge 证据回填 subject=from（实际 ${edgeEv?.subject_user_id}）`)
+  Db.closeDb()
+  fs.rmSync(tmp2, { recursive: true, force: true })
+})
+
 // ───────── 总结 ─────────
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

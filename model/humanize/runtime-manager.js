@@ -38,7 +38,7 @@ export class RuntimeManager {
    *   cfg() 返回全局 humanize 配置；make*(groupId) 各返回对应服务实例。
    *   onDelivered?: 成功发送后回调（apps 注入 → GroupWorld.recordInteraction）
    */
-  constructor({ store, trace, cfg, makePlanner, makeReplyer, makeComposer, makeSend, onDelivered = null } = {}) {
+  constructor({ store, trace, cfg, makePlanner, makeReplyer, makeComposer, makeSend, onDelivered = null, seqFloor = null } = {}) {
     this.store = store
     this.trace = trace
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
@@ -47,6 +47,7 @@ export class RuntimeManager {
     this.makeComposer = makeComposer
     this.makeSend = makeSend
     this.onDelivered = onDelivered
+    this.seqFloor = seqFloor
     /** @type {Map<string, {runtime:GroupRuntime, scheduler:TurnScheduler}>} */
     this._groups = new Map()
     this._sem = new Semaphore(this._cfgFn()?.safety?.maxConcurrentGroups ?? 1)
@@ -83,9 +84,10 @@ export class RuntimeManager {
       presenceWindowMs: (gcfg.presenceWindowSeconds ?? 300) * 1000,
       cooldownSeconds: gcfg.cooldownSeconds ?? 45,
       maxRepliesPer10Minutes: gcfg.behaviorPolicy?.maxRepliesPer10Minutes ?? gcfg.maxRepliesPer10Minutes ?? 4,
+      seqFloor: this.seqFloor,
     })
-    // 恢复轻状态（游标/冷却/backoff）
-    runtime.restore().catch(() => {})
+    // 恢复轻状态（游标/冷却/backoff）：不在此 fire-and-forget——
+    // 消息路径经 route() await runtime.restored() 后才 append，防 adopt 覆盖竞态（见 GroupRuntime.restored）。
 
     // 包装 planner：在全局信号量内执行 decide（限制并发 Planning 群数）
     const innerPlanner = this.makePlanner(groupId)
@@ -114,6 +116,9 @@ export class RuntimeManager {
   async route(groupId, msg) {
     if (!groupId) return false
     const entry = this.getOrCreate(String(groupId))
+    // 首条消息 append 前确保恢复完成（memoize，仅首条等待）：恢复中的 adopt 会整体重建缓冲，
+    // 若 append 先行会被清掉（曾致重启后触发建群的那条消息丢失）。
+    await entry.runtime.restored()
     const r = await entry.scheduler.onMessage(msg)
     // 消息已入缓冲 → 去抖持久化缓冲尾部（重启后可恢复上下文）
     entry.runtime.schedulePersist()

@@ -96,12 +96,13 @@ const SCHEMA = {
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   )`,
-  // §5.4 证据（可回溯；evidence_text 短摘要）
+  // §5.4 证据（可回溯；evidence_text 短摘要；subject_user_id = 证据主体用户，隐私清理直接定位）
   gw_evidence: `CREATE TABLE IF NOT EXISTS gw_evidence (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     group_id TEXT NOT NULL,
     target_type TEXT NOT NULL,
     target_id INTEGER,
+    subject_user_id TEXT,
     message_id TEXT,
     segment_id TEXT,
     evidence_kind TEXT NOT NULL,
@@ -394,6 +395,9 @@ export function getDb({ dir } = {}) {
 const COLUMN_MIGRATIONS = [
   ['gw_traits', 'embedding', 'ALTER TABLE gw_traits ADD COLUMN embedding BLOB'],
   ['gw_episodes', 'embedding', 'ALTER TABLE gw_episodes ADD COLUMN embedding BLOB'],
+  // 证据主体列（隐私清理修复）：evidence 原本只能经 target_id→gw_traits 间接定位用户，
+  // traits 先删后子查询即成孤儿。subject_user_id 让证据行自带归属，purgeUser 可直接定位。
+  ['gw_evidence', 'subject_user_id', 'ALTER TABLE gw_evidence ADD COLUMN subject_user_id TEXT'],
   // SelfState §6.6：gw_bot_rel 关系情感扩展列（关系性情绪衰减慢于即时情绪，由 maintenance 处理）
   ['gw_bot_rel', 'gratitude', 'ALTER TABLE gw_bot_rel ADD COLUMN gratitude REAL NOT NULL DEFAULT 0'],
   ['gw_bot_rel', 'hurt', 'ALTER TABLE gw_bot_rel ADD COLUMN hurt REAL NOT NULL DEFAULT 0'],
@@ -402,6 +406,19 @@ const COLUMN_MIGRATIONS = [
   ['gw_bot_rel', 'guardedness', 'ALTER TABLE gw_bot_rel ADD COLUMN guardedness REAL NOT NULL DEFAULT 0'],
   ['gw_bot_rel', 'unresolved_event_count', 'ALTER TABLE gw_bot_rel ADD COLUMN unresolved_event_count INTEGER NOT NULL DEFAULT 0'],
   ['gw_bot_rel', 'last_affective_event_at', 'ALTER TABLE gw_bot_rel ADD COLUMN last_affective_event_at INTEGER'],
+]
+
+/**
+ * 存量数据回填（幂等，WHERE ... IS NULL 保证重复执行零副作用）：
+ *  - trait 证据：subject = 所属 trait 的 user_id；
+ *  - edge 证据：subject = from 用户（evidence_text 约定 "from>to:hint" 前缀，解析失败留空由 purge 兜底路径处理）。
+ * 迁移后新写入由 _writeEvidence 直接携带 subject_user_id。
+ */
+const DATA_MIGRATIONS = [
+  `UPDATE gw_evidence SET subject_user_id = (SELECT t.user_id FROM gw_traits t WHERE t.id = gw_evidence.target_id)
+   WHERE target_type='trait' AND subject_user_id IS NULL`,
+  `UPDATE gw_evidence SET subject_user_id = substr(evidence_text, 1, instr(evidence_text, '>') - 1)
+   WHERE target_type='edge' AND subject_user_id IS NULL AND evidence_text LIKE '_%>_%'`,
 ]
 
 /** 初始化：建全部表 + 索引 + 迁移 + PRAGMA（WAL 并发读、外键约束）。幂等。 */
@@ -422,6 +439,9 @@ export async function initDb({ dir }) {
         try { await runP(db, ddl) } catch (e2) { if (!/duplicate column/i.test(String(e2?.message || e2))) throw e2 }
       }
     } catch (e) { Log.warn(`[groupworld] 列迁移失败 ${table}.${col}:`, e?.message || e) }
+  }
+  for (const sql of DATA_MIGRATIONS) {
+    try { await runP(db, sql) } catch (e) { Log.warn('[groupworld] 存量回填失败:', e?.message || e) }
   }
   return db
 }

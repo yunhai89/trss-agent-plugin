@@ -46,7 +46,8 @@ export class TurnScheduler {
     })
   }
 
-  /** 触发 onDelivered 回调（写回 GroupWorld 主观关系 + SelfState 出站期待登记；任何异常吞掉）。 */
+  /** 触发 onDelivered 回调（写回 GroupWorld 主观关系 + SelfState 出站期待 + 记忆真实使用登记）。
+   *  异常必须留痕（GW/SS 写回失败不该影响发送，但也不能无声吞掉）。 */
   async _notifyDelivered(target, ctx = {}) {
     if (!this.onDelivered || !target) return
     try {
@@ -58,8 +59,10 @@ export class TurnScheduler {
         sentText: ctx.sentText || '',
         replyGuide: ctx.replyGuide || '',
         sourceMessageId: ctx.sourceMessageId || null,
+        // 本轮真实使用的记忆 id（Planner/Replyer 检索时收集）——只有真实发送才登记使用
+        usedMemoryIds: Array.isArray(ctx.usedMemoryIds) ? ctx.usedMemoryIds : [],
       })
-    } catch { /* noop */ }
+    } catch (e) { Log.warn('[humanize] onDelivered 回调失败（GW/SS/记忆写回受影响）', e?.message || e) }
   }
 
   cfg() { return this._cfgFn() || {} }
@@ -72,9 +75,10 @@ export class TurnScheduler {
 
     // self 消息：只入 buffer（presence/上下文），不触发、不中断自己的规划
     if (msg.isSelf) return false
-    // 命令 / 已被 Direct Agent 接管：推进游标，绝不触发
+    // 命令 / 已被 Direct Agent 接管：绝不触发；标记自身已观察（markObserved 的连续 ACK 语义
+    // 只会越过无需评估的消息——更早待评估的普通消息 A 不被顺带吞掉）
     if (msg.isCommand || msg.handledByDirectAgent) {
-      rt.markObserved(buffer.lastSeq)
+      rt.markObserved([msg])
       return false
     }
 
@@ -102,8 +106,10 @@ export class TurnScheduler {
     let snapshot, external, ctxWindow, decision
     try {
       snapshot = rt.buffer.snapshotAfter(rt.lastProcessedSeq)
-      // 防 cursor > buffer（重启后 buffer 清空但 cursor 从持久化恢复 → 所有消息被当"已处理"跳过）
-      if (!snapshot.length && rt.buffer.size > 0 && rt.lastProcessedSeq > 0) {
+      // 防 cursor > buffer（重启后 buffer 清空但 cursor 从持久化恢复 → 所有消息被当"已处理"跳过）。
+      // 只在真正越界时归零：曾用「批空」判定，命令消息推进游标后的空批被误判为越界而整体回退，
+      // 造成旧消息反复复活评估（与"命令吞掉待评估消息"是同族游标语义错误）。
+      if (!snapshot.length && rt.buffer.size > 0 && rt.lastProcessedSeq > rt.buffer.lastSeq) {
         rt.lastProcessedSeq = 0
         snapshot = rt.buffer.snapshotAfter(0)
       }
@@ -114,7 +120,7 @@ export class TurnScheduler {
       ctxWindow = rt.buffer.snapshot(c.contextMessages ?? 30)
         .filter((m) => m && !m.isCommand && !m.handledByDirectAgent)
     } catch (e) { Log.warn('[humanize] snapshot 异常', e?.message || e); rt.setPhase('idle'); return }
-    if (!external.length) {  return }
+    if (!external.length) { rt.setPhase('idle'); return } // 早退也须复位 phase（否则停在 debouncing，后续 _onWaitDue 等按 phase 判断的逻辑误判）
 
     const now = Date.now()
 
@@ -281,6 +287,7 @@ export class TurnScheduler {
     }
 
     const gen = rt.beginPlanning(batchId)
+    rt.turnMemoryIds?.clear?.() // 新一轮：清除上轮收集的记忆 id（只有本轮真实发送的才登记使用）
     rt.trace?.record('planner_start', { turnId, gen, batchId, batchSize: candidates.length, targetMessageId: decision.targetMessage?.id || null })
     try {
       const action = await this.planner.decide({
@@ -293,7 +300,9 @@ export class TurnScheduler {
       rt.trace?.record('planner_action', { turnId, gen, action: { type: action.type, target: action.targetMessageId || null, reason: action.reason || '' } })
       // 把 ctxWindow（含 self + 近期上下文）作为 batch 透传给 Replyer；
       // markObserved 取其末尾 seq 前移游标（命令类已在 onMessage 即时标记，无副作用）。
-      await this._applyAction(action, ctxWindow, decision, gen, turnId)
+      // batch 用 external（含被纠错策略压制的消息——它们已被"考虑并压制"，算已处理；
+      // ctxWindow 已把 blocked 过滤掉，用它会让被压制消息永远挡住水位）
+      await this._applyAction(action, external, decision, gen, turnId)
     } catch (e) {
       rt.trace?.record('planner_error', { turnId, gen, msg: String(e?.message || e) })
       rt.backoff.recordNoAction(now)
@@ -313,7 +322,8 @@ export class TurnScheduler {
     const rt = this.runtime
     const c = this.cfg()
     try {
-      rt.buffer.append({
+      // appendOrUpdate：composer 已用首段 sentId 先入 buffer（只含首段文本），此处合并为完整回复文本
+      rt.buffer.appendOrUpdate({
         id: String(sentId || `self_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`),
         groupId: rt.groupId,
         userId: c.botId || 'self',
@@ -438,15 +448,19 @@ export class TurnScheduler {
     }
 
     if (result?.sentIds?.length) {
+      // deliveredText = 实际发送段拼接（部分发送中断时只含已发段——未发送内容不得进
+      // buffer/GW/SS/期待/梗使用等任何持久化或情绪关系状态）
+      const deliveredText = Array.isArray(result.sentTexts) ? result.sentTexts.filter(Boolean).join('\n') : text
       try { await rt.store.markSent(rt.groupId, action.targetMessageId) } catch { /* noop */ }
       rt.recordReply(result.sentIds[0])
       rt._waitStreak = 0 // 发言即退出观望连击
       this._recordStrongReply(target)
-      this._appendSelf(text, result.sentIds[0]) // 自身发言入 buffer（解锁 presence/引用/追问信号）
-      this._notifyDelivered(target, { sentText: text, replyGuide: action.replyGuide || '', sourceMessageId: result.sentIds[0] }) // GW 主观关系 + SS 出站期待
+      this._appendSelf(deliveredText, result.sentIds[0]) // 自身发言入 buffer（解锁 presence/引用/追问信号）
+      this._notifyDelivered(target, { sentText: deliveredText, replyGuide: action.replyGuide || '', sourceMessageId: result.sentIds[0], usedMemoryIds: [...(rt.turnMemoryIds || [])] }) // GW 主观关系 + SS 出站期待 + 记忆真实使用
+        .catch((e) => Log.warn('[humanize] onDelivered 未捕获异常', e?.message || e))
       rt.enterCooldown(c.cooldownSeconds ?? 45)
       rt.backoff.recordSuccess()
-      rt.trace?.record('delivery', { turnId, sent: true, count: result.sentIds.length, cancelled: !!result.cancelled })
+      rt.trace?.record('delivery', { turnId, sent: true, count: result.sentIds.length, cancelled: !!result.cancelled, deliveredLen: deliveredText.length })
     } else {
       rt.trace?.record('delivery', { turnId, sent: false, cancelReason: result?.cancelReason || 'unknown' })
     }

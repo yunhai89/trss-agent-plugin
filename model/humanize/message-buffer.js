@@ -27,6 +27,21 @@ export class MessageBuffer {
     this._ids = new Set()
   }
 
+  /**
+   * 追加或合并（bot 自身发言用）：同 id 已存在且任一侧为 isSelf 时，用新字段覆盖旧条目（seq 不变）。
+   * 场景：composer 每段以 sentId 先入 buffer；随后 _appendSelf 用首段 id 写**完整回复文本**——
+   * 旧语义下 append 的去重会把全文静默丢弃，buffer 里首段 id 只剩首段文本。
+   */
+  appendOrUpdate(msg) {
+    if (!msg || !msg.id) return -1
+    const existing = this._items.find((m) => m.id === msg.id)
+    if (existing && (existing.isSelf || msg.isSelf)) {
+      Object.assign(existing, { ...msg, seq: existing.seq })
+      return existing.seq
+    }
+    return this.append(msg)
+  }
+
   /** 单调递增序号（当前最大） */
   get lastSeq() { return this._seq }
 
@@ -56,6 +71,8 @@ export class MessageBuffer {
    * 恢复预置消息（重启后从持久化回填缓冲；修复重启丢全部上下文）。
    * 只收 id/seq 合法且未超 TTL 的条目（旧序→新序），按容量截断；恢复后 _seq 取最大值，
    * 新消息 seq 继续递增，与持久化的游标（lastProcessedSeq）保持同一序号空间。
+   * 全部条目超 TTL 被过滤时 _seq 归零——须由调用方再 raiseSeqFloor(floor) 维持跨重启单调
+   * （否则下游持久水位（hm consolidated_seq）会长期大于新序列，增量逻辑失效）。
    */
   adopt(items) {
     if (!Array.isArray(items) || !items.length) return 0
@@ -72,6 +89,12 @@ export class MessageBuffer {
     }
     this._seq = valid.length ? valid[valid.length - 1].seq : 0
     return valid.length
+  }
+
+  /** 抬升 seq 地板（只增不减）：重启且缓冲全过期时，用持久化地板续号，保证 seq 跨重启单调。 */
+  raiseSeqFloor(n) {
+    const v = Number(n)
+    if (Number.isFinite(v) && v > this._seq) this._seq = v
   }
 
   /** 标记某条消息为机器人自身发言（presence 统计用）。 */

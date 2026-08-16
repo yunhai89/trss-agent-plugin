@@ -108,7 +108,6 @@ async function buildHumanize() {
       devLog('humanize', rec, rec.turnId || null, null, { dir: Config.path.humanizeLogs, filename: `humanize-${day}.log` })
     },
   })
-  const memory = new H.MemoryAdapter({ recall: rt.recall, memory: rt.memory, kv: rt.kv })
   // 伪人独立记忆库（MaiBot 式睡眠整合；独立 sqlite，与主 Agent 的 recall/KV 完全隔离）
   // embedder：配置 agent.recall.embedProvider 后记忆检索走语义余弦（同义换说可召回），未配回落词面
   const { embedFn: memEmbedFn, embedModel: memEmbedModel } = buildEmbed(rt)
@@ -140,7 +139,7 @@ async function buildHumanize() {
         provider: rt.provider,
         cfg: () => Config.get().agent?.selfState || {},
         botId: botSelfIdsAll(rt)[0] || 'bot',
-        botNames: [cfgFn().personaName, botNickname()].filter(Boolean),
+        botNames: H.resolvePersonaIdentity(cfgFn(), { botNickname: botNickname() }).identityNames,
         trace: { record: (event, data = {}) => { try { devLog(event, data, null, 'selfstate').catch(() => {}) } catch { /* noop */ } } },
         dataDir: Config.path.data + '/groupworld',
         embedFn, embedModel,
@@ -163,6 +162,8 @@ async function buildHumanize() {
     } catch { /* noop */ }
     // 梗实际使用登记（6h 冷却数据源——仅真实发送的文本才计，检索不算）
     try { if (info?.sentText) hmem.markJargonUsed(info.groupId, info.sentText).catch(() => {}) } catch { /* noop */ }
+    // 记忆真实使用登记：只有真实发送成功且注入本轮 prompt 的记忆才计 hit（recall 本身零副作用）
+    try { if (info?.usedMemoryIds?.length) hmem.markUsed(info.groupId, info.usedMemoryIds).catch(() => {}) } catch { /* noop */ }
     await ssOnDelivered(info)
   }
   /** 取 bot 自身 id 集合（runtime 期）。 */
@@ -225,12 +226,16 @@ async function buildHumanize() {
         // 梗词典按当前目标文本窄化注入；近期由 bot 真实使用过的梗在 store 层冷却，
         // 不再整本常驻 Planner。
         const dict = await hmem.jargonDict(gid, { queryText: q })
-        const rel = await hmem.recallText({ groupId: gid, query: String(q || '').slice(0, 200), topK: cfgFn().memory?.maxPerQuery ?? 5, allowedUserIds: o?.threadUserIds })
+        // 收集本轮注入的记忆 id（真实发送成功后经 onDelivered → markUsed 登记使用）
+        const collected = []
+        const rel = await hmem.recallText({ groupId: gid, query: String(q || '').slice(0, 200), topK: cfgFn().memory?.maxPerQuery ?? 5, allowedUserIds: o?.threadUserIds, collectIds: collected })
+        const tset = manager?.getOrCreate?.(gid)?.runtime?.turnMemoryIds
+        if (tset) for (const id of collected) tset.add(id)
         return [dict, rel].filter(Boolean).join('\n')
       } catch (e) { Log.debug('[humanize] 记忆检索降级:', e?.message || e); return '' }
     },
     getBehaviorPolicyBlock: () => formatPolicyBlock(cfgFn().behaviorPolicy),
-    getPersonaName: () => cfgFn().persona?.name || cfgFn().personaName || botNickname() || '机器人',
+    getPersonaName: () => H.resolvePersonaIdentity(cfgFn(), { botNickname: botNickname() }).name,
     // 角色人设注入 Planner：第三人称"参考"框定（决策器不是角色本人，只据此判断该不该接/态度）
     getPersonaBlock: () => H.buildPlannerPersonaBlock(resolveHumanizePersona(cfgFn(), rt)),
     getWorldContext: gwPlannerCtx,
@@ -268,7 +273,10 @@ async function buildHumanize() {
       try {
         if (cfgFn().memory?.enabled === false) return ''
         const dict = await hmem.jargonDict(groupId, { queryText: queryText })
-        const rel = await hmem.recallText({ groupId, userId: targetUserId, query: queryText, topK: 3, kinds: ['impression'], allowedUserIds })
+        const collected = []
+        const rel = await hmem.recallText({ groupId, userId: targetUserId, query: queryText, topK: 3, kinds: ['impression'], allowedUserIds, collectIds: collected })
+        const tset = manager?.getOrCreate?.(groupId)?.runtime?.turnMemoryIds
+        if (tset) for (const id of collected) tset.add(id)
         return [dict, rel].filter(Boolean).join('\n')
       } catch (e) { Log.debug('[humanize] 记忆注入降级:', e?.message || e); return '' }
     },
@@ -276,7 +284,12 @@ async function buildHumanize() {
   const makeComposer = () => new H.HumanizeReplyComposer({ cfg: cfgFn, stickerManager: sticker })
   const makeSend = (gid) => makeSendFn(gid)
 
-  manager = new H.RuntimeManager({ store, trace, cfg: cfgFn, makePlanner, makeReplyer, makeComposer, makeSend, onDelivered: gwOnDelivered })
+  manager = new H.RuntimeManager({
+    store, trace, cfg: cfgFn, makePlanner, makeReplyer, makeComposer, makeSend, onDelivered: gwOnDelivered,
+    // seq 地板（持久单调，锚在 hmem sqlite）：无 redis 时 KV 状态会丢，buffer 全过期后 seq 归零会
+    // 被 hm 库的 consolidated_seq 高水位长期压制（项4）。floor 保证跨重启单调续号。
+    seqFloor: { get: (gid) => hmem.getSeqFloor(gid), set: (gid, n) => hmem.setSeqFloor(gid, n) },
+  })
 
   // 配置热重载：取消所有进行中规划/未发送分段 + 重建信号量上限
   Config.onChange(() => {
@@ -285,7 +298,7 @@ async function buildHumanize() {
 
   // getPersona：把 rt 闭包在内，供 onAmbient 的 SelfState 感知解析人设（onAmbient 作用域无 rt）
   const getPersona = () => resolveHumanizePersona(cfgFn(), rt)
-  return { manager, store, trace, memory, cfgFn, ssLazy, getPersona, getGroundingRaw, webSearch, hmem }
+  return { manager, store, trace, cfgFn, ssLazy, getPersona, getGroundingRaw, webSearch, hmem }
 }
 
 /** 取伪人装配体（manager/hmem/trace 等；web 与测试用）。 */
@@ -327,7 +340,8 @@ function makeSendFn(groupId) {
  */
 function resolveHumanizePersona(cfg, rt) {
   const persona = (cfg && cfg.persona) || {}
-  const name = String(persona.name || '').trim()
+  // 角色名单一来源（persona.name > 旧 personaName > botNickname）：Normalizer/Planner/Replyer/SelfState 同源
+  const { name } = H.resolvePersonaIdentity(cfg, { botNickname: botNickname() })
   let prompt = String(persona.prompt || '').trim()
   if (!prompt && persona.fromPersonaId) {
     try {
@@ -432,7 +446,14 @@ export class Humanize extends plugin {
           if (hourly && !await h.hmem.shouldConsolidate(gid, rt.buffer.lastSeq, cfg.memory?.incrementalMinMessages ?? 20)) continue
           // 断点1修复：只整合水位之后的新消息（此前每轮取最近100条——同一事件反复整合+重要性反复+0.05，
           // 造成"马赛克梗"被强化到最高权重。水位前的消息上轮已处理过）
-          const since = await h.hmem.consolidatedSeq(gid)
+          let since = await h.hmem.consolidatedSeq(gid)
+          // 水位回退保护（项4）：旧 incarnation 高水位 + 缓冲全过期重启 → seq 从 0 重来会小于水位，
+          // 增量整合长期不跑。安全重置到 0（旧消息已不在缓冲，重置不会重复强化已整合内容）。
+          if (since > rt.buffer.lastSeq) {
+            Log.info('[humanize] 记忆整合水位回退，重置到 0 重整合当前缓冲', `群${gid}`, since, '→', 0)
+            await h.hmem.markConsolidated(gid, 0)
+            since = 0
+          }
           const msgs = rt.buffer.snapshotAfter(since).slice(-100)
           const r = await h.hmem.consolidate({ groupId: gid, messages: msgs })
           await h.hmem.decay(gid)
@@ -487,7 +508,7 @@ export class Humanize extends plugin {
     if (cfg.enable !== true || !Array.isArray(cfg.groups) || !cfg.groups.map(String).includes(String(e.group_id))) return false
 
     const selfIds = botSelfIds(e)
-    const botNames = [cfg.personaName, botNickname()].filter(Boolean)
+    const botNames = H.resolvePersonaIdentity(cfg, { botNickname: botNickname() }).identityNames
     const norm = H.normalizeYunzaiEvent(e, {
       selfIds,
       botNames,

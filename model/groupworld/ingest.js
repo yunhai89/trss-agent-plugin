@@ -167,17 +167,42 @@ export class GroupWorldIngester {
 
   // —— 清理（被 deleteUserProfile / 群清理调用）——
 
-  /** 删某成员全部派生数据（画像/特征/证据/边/主观关系）。原始消息保留（审计），但下游失效。
-   *  纯删除：不写 optout（#删除≠#关闭；是否停止建模由 service.setOptOut 单独决定）。 */
+  /** 删某成员全部派生数据（画像/特征/证据/边/主观关系/事件参与者/圈子成员）。原始消息保留（审计），但下游失效。
+   *  纯删除：不写 optout（#删除≠#关闭；是否停止建模由 service.setOptOut 单独决定）。
+   *  幂等：全部为 DELETE/JSON 过滤操作，重复执行零副作用。 */
   async purgeUser(groupId, userId) {
     if (!groupId || !userId) return
     try {
       await this.dao.txn(async () => {
         await this.dao.run('DELETE FROM gw_member_profiles WHERE group_id=? AND user_id=?', [groupId, userId])
+        // 证据先删（trait 子查询须在 traits 删除**之前**执行；曾因顺序颠倒致证据恒残留），
+        // 双路径兜底：subject_user_id 直接定位 + trait 子查询覆盖未回填的存量行
+        await this.dao.run(
+          'DELETE FROM gw_evidence WHERE group_id=? AND (subject_user_id=? OR (target_type=? AND target_id IN (SELECT id FROM gw_traits WHERE group_id=? AND user_id=?)))',
+          [groupId, userId, 'trait', groupId, userId],
+        )
+        // edge 证据（from=该用户；evidence_text "from>to:hint" 前缀兜底，覆盖未回填存量）
+        await this.dao.run("DELETE FROM gw_evidence WHERE group_id=? AND target_type='edge' AND (subject_user_id=? OR evidence_text LIKE ?)", [groupId, userId, `${userId}>%`])
         await this.dao.run('DELETE FROM gw_traits WHERE group_id=? AND user_id=?', [groupId, userId])
-        await this.dao.run('DELETE FROM gw_evidence WHERE group_id=? AND target_type=? AND target_id IN (SELECT id FROM gw_traits WHERE group_id=? AND user_id=?)', [groupId, 'trait', groupId, userId])
         await this.dao.run('DELETE FROM gw_edges WHERE group_id=? AND (from_user_id=? OR to_user_id=?)', [groupId, userId, userId])
         await this.dao.run('DELETE FROM gw_bot_rel WHERE group_id=? AND user_id=?', [groupId, userId])
+        // 事件为群级数据不整行删，但参与者列表必须移除该用户（可恢复画像的关联）
+        const eps = await this.dao.all('SELECT id, participant_ids FROM gw_episodes WHERE group_id=?', [groupId]).catch(() => [])
+        for (const ep of eps) {
+          let parts = []; try { parts = JSON.parse(ep.participant_ids || '[]') } catch { /* noop */ }
+          if (parts.map(String).includes(String(userId))) {
+            await this.dao.run('UPDATE gw_episodes SET participant_ids=?, updated_at=? WHERE id=?', [JSON.stringify(parts.map(String).filter((p) => p !== String(userId))), Date.now(), ep.id])
+          }
+        }
+        // 圈子（阶段统计）：成员表移除该用户；若因此空心化则整行删除（下周聚类自然重建）
+        const cms = await this.dao.all('SELECT id, member_ids, core_member_ids FROM gw_communities WHERE group_id=?', [groupId]).catch(() => [])
+        for (const cm of cms) {
+          const strip = (s) => { let a = []; try { a = JSON.parse(s || '[]') } catch { /* noop */ } return a.map(String).filter((p) => p !== String(userId)) }
+          const members = strip(cm.member_ids)
+          const cores = strip(cm.core_member_ids)
+          if (members.length === 0) await this.dao.run('DELETE FROM gw_communities WHERE id=?', [cm.id])
+          else await this.dao.run('UPDATE gw_communities SET member_ids=?, core_member_ids=? WHERE id=?', [JSON.stringify(members), JSON.stringify(cores), cm.id])
+        }
       })
       Log.mark('[groupworld]', `${ANSI.y}清理成员${ANSI.R} 群${groupId} 用户${userId}`)
     } catch (e) { Log.warn('[groupworld] purgeUser 失败', e?.message || e) }

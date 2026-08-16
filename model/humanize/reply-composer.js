@@ -13,6 +13,7 @@
  */
 
 import Log from '../../utils/Log.js'
+import { resolvePersonaIdentity } from './default-config.js'
 
 // URL 边界：排除空白/尖括号/引号/括号 + 全部 CJK 标点 + 全角空格，
 // 否则 "看 https://x.com，超好笑" 会被贪婪匹配成 "https://x.com，超好笑"
@@ -105,22 +106,23 @@ export class HumanizeReplyComposer {
     // 先剥除文本中的 [sticker:...] 标记（防泄漏到正文）
     const cleanText = this.stickerManager ? this.stickerManager.applyText(text, new Map()) : text
     const segments = splitSegments(cleanText, { maxBubbles })
-    if (!segments.length) return { sentIds: [], cancelled: true, cancelReason: 'no_segments' }
+    if (!segments.length) return { sentIds: [], sentTexts: [], cancelled: true, cancelReason: 'no_segments' }
 
     const gen = runtime.plannerGeneration
     const sentIds = []
+    const sentTexts = [] // 与 sentIds 一一对应：实际发送成功的各段文本（部分发送中断时只含已发段）
     const botId = c.botId || 'bot'
 
     for (let i = 0; i < segments.length; i++) {
       // 取消：代变化（新消息重规划）/ 信号中止 / 目标失效
       if (!runtime.isCurrent(gen) || signal?.aborted) {
-        return { sentIds, cancelled: true, cancelReason: 'superseded' }
+        return { sentIds, sentTexts, cancelled: true, cancelReason: 'superseded' }
       }
       // 后续段：模拟输入延迟（指南 §13：第一段尽快发，后续段按长度延迟）
       if (i > 0) {
         await sleep(typingDelayMs(segments[i], rcfg))
         if (!runtime.isCurrent(gen) || signal?.aborted) {
-          return { sentIds, cancelled: true, cancelReason: 'superseded_mid' }
+          return { sentIds, sentTexts, cancelled: true, cancelReason: 'superseded_mid' }
         }
       }
       // 首段可引用目标（action.quote）；后续段不重复引用
@@ -130,20 +132,22 @@ export class HumanizeReplyComposer {
         sentId = await send(segments[i], { quoteTargetId })
       } catch (e) {
         runtime.trace?.record('send_error', { segment: i, msg: String(e?.message || e) })
-        return { sentIds, cancelled: true, cancelReason: 'send_error' }
+        return { sentIds, sentTexts, cancelled: true, cancelReason: 'send_error' }
       }
       if (sentId) {
         sentIds.push(sentId)
-        // 把机器人自身发言写入 buffer（presence 占比统计 + 后续 quotesBot 判定）
+        sentTexts.push(segments[i]) // deliveredText 语义：只有真实发出的段才算「已交付」
+        // 把机器人自身发言写入 buffer（presence 占比统计 + 后续 quotesBot 判定）；displayName 与
+        // Planner/Replyer 人设名同源（resolvePersonaIdentity 单一来源，不再一处角色名一处"我"）
         runtime.buffer.append({
-          id: sentId, groupId: runtime.groupId, userId: botId, displayName: '我',
+          id: sentId, groupId: runtime.groupId, userId: botId, displayName: resolvePersonaIdentity(c).name,
           timestamp: Date.now(), text: segments[i], segments: [],
           replyToId: null, atBot: false, mentionsBotName: false, quotesBot: false,
           isCommand: false, isSelf: true, handledByDirectAgent: false, media: [],
         })
       } else {
         // send 返回 null = 静默失败 → 中止后续段（防"失败后继续发"）
-        return { sentIds, cancelled: true, cancelReason: 'send_failed' }
+        return { sentIds, sentTexts, cancelled: true, cancelReason: 'send_failed' }
       }
     }
 
@@ -174,7 +178,7 @@ export class HumanizeReplyComposer {
       } catch (e) { Log.warn('[humanize] 表情包附加异常', e?.message || e) }
     }
 
-    return { sentIds, cancelled: false }
+    return { sentIds, sentTexts, cancelled: false }
   }
 
   /** 纯表情反应（第一版：发送一个 sticker）。 */

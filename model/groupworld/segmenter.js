@@ -113,19 +113,23 @@ export class ConversationSegmenter {
   }
 
   /** embedding 复核：新消息与片段近窗是否仍同话题（余弦 ≥0.55 视为同话题）。
-   *  近窗向量按 segmentId 缓存（片段存活期内不重算）；任一向量缺失 → false（回落词面判定）。 */
+   *  近窗向量按「segmentId + 窗口内容哈希」缓存：recentTexts 随每条消息演进，窗口变了必须重算
+   *  （曾只按 segmentId 缓存一次——后续消息一直与旧窗口向量比较，漂移检测失真）。
+   *  失败/null 不落缓存：下次漂移检测可重试（曾把 null 永久缓存，一次瞬时失败污染整个片段）。 */
   async _sameTopicByEmbed(open, winText, msgText) {
     try {
       if (!open?.id) return false
-      if (!this._winEmbCache.has(open.id)) {
+      const key = `${open.id}:${createHash('sha1').update(String(winText)).digest('hex').slice(0, 12)}`
+      let winEmb = this._winEmbCache.get(key)
+      if (winEmb === undefined) {
         const v = await this.embedder.embed(winText)
-        if (!v) { this._winEmbCache.set(open.id, null); return false }
-        this._winEmbCache.set(open.id, v)
-        if (this._winEmbCache.size > 50) { // 简单容量控制：超 50 清一轮（旧片段已闭合）
-          for (const k of this._winEmbCache.keys()) { if (k !== open.id) this._winEmbCache.delete(k) }
+        if (!v) return false // 失败不缓存 → 可重试
+        winEmb = v
+        this._winEmbCache.set(key, v)
+        if (this._winEmbCache.size > 100) { // 容量控制：清掉其它片段的旧键
+          for (const k of this._winEmbCache.keys()) { if (!k.startsWith(`${open.id}:`)) this._winEmbCache.delete(k) }
         }
       }
-      const winEmb = this._winEmbCache.get(open.id)
       if (!winEmb) return false
       const msgEmb = await this.embedder.embed(msgText)
       if (!msgEmb) return false

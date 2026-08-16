@@ -70,6 +70,7 @@ export class WorldAnalyzer {
     const maxAttempts = Math.max(1, retryCount + 1)
     const idMap = this._buildIdMap(seg.messages)
     const validMsgIds = new Set(seg.messages.map((m) => m.message_id))
+    const validAnonIds = new Set(Object.values(idMap))
     const prompt = buildAnalyzerPrompt(seg, idMap)
 
     let parsed = null
@@ -86,25 +87,32 @@ export class WorldAnalyzer {
       return false
     }
 
-    const validated = validateAnalyzerOutput(parsed, validMsgIds)
+    const validated = validateAnalyzerOutput(parsed, validMsgIds, validAnonIds)
     const revMap = {}; for (const [uid, anon] of Object.entries(idMap)) revMap[anon] = uid
     const evOf = (ids) => seg.messages.filter((m) => ids.includes(m.message_id)).map((m) => ({ message_id: m.message_id, text: m.plain_text, sent_at: m.sent_at }))
 
     try {
       await this.dao.txn(async () => {
+        // 写入前最终复查 opt-out（分析发生在 LLM 调用之后，用户可能在排队期间已退出建模，
+        // 旧 pending 片段不得重建其画像/关系/事件参与者）
+        const optRows = await this.dao.all('SELECT user_id FROM gw_optout WHERE group_id=?', [groupId]).catch(() => [])
+        const optOut = new Set((optRows || []).map((r) => String(r.user_id)))
+        if (this.botId) optOut.add(String(this.botId))
         for (const t of validated.trait_candidates) {
           const userId = revMap[t.user_id]; if (!userId) continue
           // 不给 bot 自己提画像（bot 消息留在片段里供对话上下文，但"关于我自己的特征"无意义且占据画像预算）
           if (this.botId && String(userId) === String(this.botId)) continue
-          await this.resolver.mergeTraitCandidate({ groupId, userId, candidate: t, evidenceMsgs: evOf(t.evidence_message_ids), sourceType: 'inferred', now })
+          await this.resolver.mergeTraitCandidate({ groupId, userId, candidate: t, evidenceMsgs: evOf(t.evidence_message_ids), sourceType: 'inferred', optOut, now })
         }
         for (const r of validated.relation_candidates) {
           const fromUserId = revMap[r.from_user_id]; const toUserId = revMap[r.to_user_id]
           if (!fromUserId || !toUserId) continue
-          await this.resolver.mergeRelationCandidate({ groupId, fromUserId, toUserId, hint: r.relation_hint, evidenceMsgs: evOf(r.evidence_message_ids), now })
+          await this.resolver.mergeRelationCandidate({ groupId, fromUserId, toUserId, hint: r.relation_hint, evidenceMsgs: evOf(r.evidence_message_ids), optOut, now })
         }
         for (const e of validated.episode_candidates) {
-          await this.resolver.mergeEpisodeCandidate({ groupId, candidate: e, participantIds: [], topicTags: [], evidenceMsgs: evOf(e.evidence_message_ids), now })
+          // 匿名 ID → 真实稳定 user id（内部身份不用匿名标识；伪造 ID 已在 validate 阶段丢弃）
+          const participants = (e.participant_ids || []).map((a) => revMap[a]).filter(Boolean)
+          await this.resolver.mergeEpisodeCandidate({ groupId, candidate: e, participantIds: participants, topicTags: e.topic_tags || [], evidenceMsgs: evOf(e.evidence_message_ids), optOut, now })
         }
         await this.dao.run("UPDATE gw_segments SET status='analyzed', analyzed_at=?, attempt=attempt+1 WHERE id=?", [now, seg.segment.id])
         await this.dao.run('UPDATE gw_cursor SET last_analyzed_segment_id=?, daily_calls_today=daily_calls_today+1, daily_calls_date=? WHERE group_id=?', [seg.segment.id, dateKey(new Date(now)), groupId])

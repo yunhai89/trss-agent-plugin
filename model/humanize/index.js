@@ -15,7 +15,6 @@ export { evaluate as evaluateNecessity, pressureScore, presencePenalty, cooldown
 export { IdleBackoff } from './idle-backoff.js'
 export { ACTION_TOOLS, ACTION_PRIORITY, TERMINAL_ACTIONS, SEND_ACTIONS, validateActionCall, pickSingleAction, isSilentAction, ACTION_LABEL } from './action-tools.js'
 export { DEFAULT_BEHAVIOR_POLICY, resolveBehaviorPolicy, topicMatch, topicMatchScore, hitsAvoidTopic, withinReplyRate } from './behavior-policy.js'
-export { MemoryAdapter, groupPublicScope, formatPublicMemories } from './memory-adapter.js'
 export { HumanizeMemoryStore } from './memory-store.js'
 export { MediaDescriber } from './vision-context.js'
 export { resolveGrounding, formatGroundingBlock, whitelistViolations, windowNames } from './grounding.js'
@@ -30,6 +29,6 @@ export { HumanizeReplyComposer, splitSegments, typingDelayMs } from './reply-com
 /** 默认人类化配置（指南 §15）。默认全关，需显式白名单。 */
 export { DEFAULT_HUMANIZE_CONFIG } from './default-config.js'
 /** 配置校验（buildRuntime/应用启动时调用，硬约束）。 */
-export { validateHumanizeConfig, resolveHumanizeConfig } from './default-config.js'
+export { validateHumanizeConfig, resolveHumanizeConfig, resolvePersonaIdentity } from './default-config.js'
 /** 内置默认伪人人设（persona 留空时启用，刻意去 AI 味、尊重看人）。 */
 export { DEFAULT_HUMANIZE_PERSONA } from './default-persona.js'

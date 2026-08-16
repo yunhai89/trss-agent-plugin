@@ -32,7 +32,7 @@ source 一律 inferred（系统会重算置信，你给的 confidence 只是候�
   "topics": [{ "name": string, "participant_ids": ["u17"], "confidence": 0.0~1.0 }],
   "trait_candidates": [{ "user_id": "u17", "trait_type": "...", "trait_key": "短键如server_ops", "trait_value": "描述", "scope": "可选", "confidence": 0.0~0.45, "evidence_message_ids": ["m1"] }],
   "relation_candidates": [{ "from_user_id": "u17", "to_user_id": "u09", "relation_hint": "描述", "confidence": 0.0~0.45, "evidence_message_ids": ["m1"] }],
-  "episode_candidates": [{ "episode_type": "running_joke|shared_event|ongoing_topic|conflict|achievement", "title": "简短", "summary": "一句话", "participant_ids": ["u17"], "importance": 0.0~1.0, "evidence_message_ids": ["m1"] }],
+  "episode_candidates": [{ "episode_type": "running_joke|shared_event|ongoing_topic|conflict|achievement", "title": "简短", "summary": "一句话", "participant_ids": ["u17"], "topic_tags": ["短标签≤12字"], "importance": 0.0~1.0, "evidence_message_ids": ["m1"] }],
   "sensitive_inferences": []
 }`
 
@@ -102,18 +102,25 @@ export function isSensitiveContent(text) {
  * 校验 + 规整分析器输出，丢弃非法/敏感候选。返回规整后的对象。
  * @param {object} parsed
  * @param {Set} validMsgIds 片段内真实 message_id 集合（过滤编造的 evidence）
+ * @param {Set} [validAnonIds] 片段匿名映射表内的真实匿名 id（u<n>）集合——模型输出的
+ *   participant_ids 只接受映射表内 ID，伪造/越界 ID 一律丢弃（不能直接信任 LLM）。
+ *   缺省时 participant 恒为空（旧行为，向后兼容）。
  */
-export function validateAnalyzerOutput(parsed, validMsgIds = new Set()) {
+export function validateAnalyzerOutput(parsed, validMsgIds = new Set(), validAnonIds = new Set()) {
   const out = { topics: [], trait_candidates: [], relation_candidates: [], episode_candidates: [], sensitive_inferences: [] }
   if (!parsed || typeof parsed !== 'object') return out
 
   const hasEvidence = (ids) => Array.isArray(ids) && ids.length && ids.every((x) => validMsgIds.has(String(x)))
   const clamp = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, Number(v) || 0))
+  // 匿名参与者过滤：只保留映射表内真实 ID（字符串化比较）
+  const validParticipants = (ids) => (Array.isArray(ids) ? [...new Set(ids.map(String).filter((x) => validAnonIds.has(x)))] : [])
+  // topic_tags 校验：非空字符串、≤24 字、不含敏感内容、最多 6 个
+  const validTags = (tags) => (Array.isArray(tags) ? [...new Set(tags.map((t) => String(t || '').trim()).filter((t) => t && [...t].length <= 24 && !isSensitiveContent(t)))].slice(0, 6) : [])
 
   for (const t of [parsed.topics].flat()) {
     if (!t || !t.name) continue
     if (isSensitiveContent(t.name)) { out.sensitive_inferences.push({ kind: 'topic', value: String(t.name).slice(0, 60) }); continue }
-    out.topics.push({ name: String(t.name).slice(0, 64), participant_ids: [], confidence: clamp(t.confidence, 0, 0.9) })
+    out.topics.push({ name: String(t.name).slice(0, 64), participant_ids: validParticipants(t.participant_ids), confidence: clamp(t.confidence, 0, 0.9) })
   }
   for (const c of [parsed.trait_candidates].flat()) {
     if (!c || !c.user_id || !TRAIT_TYPES.has(c.trait_type) || !c.trait_key || !c.trait_value) continue
@@ -137,7 +144,7 @@ export function validateAnalyzerOutput(parsed, validMsgIds = new Set()) {
     if (!e || !e.title || !e.summary) continue
     if (!EP_TYPES.has(e.episode_type)) e.episode_type = 'ongoing_topic'
     if (isSensitiveContent(e.title) || isSensitiveContent(e.summary) || !hasEvidence(e.evidence_message_ids)) { out.sensitive_inferences.push({ kind: 'episode', value: String(e.title).slice(0, 60) }); continue }
-    out.episode_candidates.push({ episode_type: e.episode_type, title: String(e.title).slice(0, 128), summary: String(e.summary).slice(0, 1000), participant_ids: [], topic_tags: [], importance: clamp(e.importance, 0, 1), evidence_message_ids: e.evidence_message_ids.map(String) })
+    out.episode_candidates.push({ episode_type: e.episode_type, title: String(e.title).slice(0, 128), summary: String(e.summary).slice(0, 1000), participant_ids: validParticipants(e.participant_ids), topic_tags: validTags(e.topic_tags), importance: clamp(e.importance, 0, 1), evidence_message_ids: e.evidence_message_ids.map(String) })
   }
   return out
 }

@@ -144,6 +144,11 @@ export class HumanizeMemoryStore {
     if (msgs.length < (mc.minConsolidateMessages ?? 6)) return { created: 0, merged: 0, skipped: 'few' }
     if (!this.provider) return { created: 0, merged: 0, skipped: 'no_provider' }
 
+    // 解析失败退避：invalid_json 刻意不推水位（防丢数据），但若不设退避，模型持续输出坏 JSON 时
+    // 每小时 :23 的增量 cron 会反复烧同一批消息的 LLM。失败后 6h 内不再尝试该群。
+    const failUntil = await this.dao.get("SELECT value FROM hm_meta WHERE key='consol_fail_until:' || ?", [String(groupId)]).catch(() => null)
+    if (failUntil && Number(failUntil.value) > now) return { created: 0, merged: 0, skipped: 'backoff' }
+
     const span = `${new Date(msgs[0].timestamp).toISOString().slice(0, 16)}~${new Date(msgs[msgs.length - 1].timestamp).toISOString().slice(0, 16)}`
     let parsed = null
     try {
@@ -162,49 +167,70 @@ export class HumanizeMemoryStore {
     if (!cands.length) {
       // 合法空结果表示这批消息已经审视过，必须推进水位；格式错误/解析失败不能推进。
       if (hasLegalEmptyResult) await this.markConsolidated(groupId, Math.max(...msgs.map((x) => Number(x.seq) || 0), 0))
+      else await this.dao.run("INSERT OR REPLACE INTO hm_meta(key,value) VALUES ('consol_fail_until:' || ?, ?)", [String(groupId), now + 6 * 3600 * 1000]).catch(() => {})
       return { created: 0, merged: 0, skipped: hasLegalEmptyResult ? 'empty' : 'invalid_json', suspected }
     }
 
     let created = 0; let merged = 0
-    const existing = await this.dao.all('SELECT * FROM hm_memories WHERE group_id=?', [String(groupId)])
-    for (const c of cands) {
-      const content = String(c.content || '').trim().slice(0, 300)
-      if (!content) continue
-      const kind = ['impression', 'event', 'jargon', 'style'].includes(c.kind) ? c.kind : 'event'
-      const userId = c.about_user ? String(c.about_user) : null
-      const kws = (Array.isArray(c.keywords) ? c.keywords : []).map((k) => String(k).slice(0, 12)).slice(0, 8)
-      const importance = clamp01(c.importance ?? 0.5)
-      // 去重合并：同群同 kind 同对象 且内容相似 ≥0.6 → 合并（保留更长内容、关键词并集、重要性取大+0.05）
-      const dup = existing.find((e) => e.kind === kind && (e.user_id || null) === userId && textSim(content, String(e.content || '')) >= 0.6)
-      if (dup) {
-        const oldKws = (() => { try { return JSON.parse(dup.keywords || '[]') } catch { return [] } })()
-        const unionKws = [...new Set([...kws, ...oldKws])].slice(0, 8)
-        await this.dao.run(
-          'UPDATE hm_memories SET content=?, keywords=?, importance=MIN(0.85, MAX(?, ?)+0.05), source_span=?, updated_at=? WHERE id=?',
-          [String(dup.content || '').length >= content.length ? dup.content : content, JSON.stringify(unionKws), Number(dup.importance) || 0, importance, span, now, dup.id],
-        ).catch(() => {})
-        Object.assign(dup, { content, keywords: JSON.stringify(unionKws), importance: Math.min(1, Math.max(Number(dup.importance) || 0, importance) + 0.05) })
-        this._embedRow(dup.id, String(dup.content || '').length >= content.length ? dup.content : content).catch(() => {}) // 内容变了重嵌
-        merged++
-      } else {
-        const r = await this.dao.run(
-          `INSERT INTO hm_memories(group_id,user_id,kind,content,keywords,importance,source_span,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
-          [String(groupId), userId, kind, content, JSON.stringify(kws), importance, span, now, now],
-        ).catch(() => null)
-        if (r?.lastID) { existing.push({ id: r.lastID, kind, user_id: userId, content, keywords: JSON.stringify(kws), importance }); this._embedRow(r.lastID, content).catch(() => {}); created++ }
-      }
+    // 写入阶段整体进事务：候选写入/合并/去重/容量淘汰/水位推进原子化——
+    // 任一必要写失败整批回滚（不留半完成记忆、不推水位；曾逐条 .catch 吞错继续走）。
+    // 嵌入回填（_embedRow）在事务外补偿执行（网络 IO 不锁库）。
+    const embedLater = []
+    try {
+      await this.dao.txn(async () => {
+        const existing = await this.dao.all('SELECT * FROM hm_memories WHERE group_id=?', [String(groupId)])
+        const boosted = new Set() // 同批同一行至多一次 importance 提升（防同批近重复反复加权）
+        const createdInBatch = new Set() // 本批新建的行：与其合并=同一 source span，不加权
+        for (const c of cands) {
+          const content = String(c.content || '').trim().slice(0, 300)
+          if (!content) continue
+          const kind = ['impression', 'event', 'jargon', 'style'].includes(c.kind) ? c.kind : 'event'
+          const userId = c.about_user ? String(c.about_user) : null
+          const kws = (Array.isArray(c.keywords) ? c.keywords : []).map((k) => String(k).slice(0, 12)).slice(0, 8)
+          const importance = clamp01(c.importance ?? 0.5)
+          // 去重合并：同群同 kind 同对象 且内容相似 ≥0.6 → 合并（保留更长内容、关键词并集；
+          // 重要性 +0.05 每批每行至多一次——同批近重复候选不得反复加权）
+          const dup = existing.find((e) => e.kind === kind && (e.user_id || null) === userId && textSim(content, String(e.content || '')) >= 0.6)
+          if (dup) {
+            const oldKws = (() => { try { return JSON.parse(dup.keywords || '[]') } catch { return [] } })()
+            const unionKws = [...new Set([...kws, ...oldKws])].slice(0, 8)
+            const keepContent = String(dup.content || '').length >= content.length ? dup.content : content
+            const bump = (boosted.has(dup.id) || createdInBatch.has(dup.id)) ? 0 : 0.05
+            await this.dao.run(
+              'UPDATE hm_memories SET content=?, keywords=?, importance=MIN(0.85, MAX(?, ?)+?), source_span=?, updated_at=? WHERE id=?',
+              [keepContent, JSON.stringify(unionKws), Number(dup.importance) || 0, importance, bump, span, now, dup.id],
+            )
+            boosted.add(dup.id)
+            Object.assign(dup, { content, keywords: JSON.stringify(unionKws), importance: Math.min(1, Math.max(Number(dup.importance) || 0, importance) + bump) })
+            embedLater.push([dup.id, keepContent]) // 内容变了重嵌（事务外）
+            merged++
+          } else {
+            const r = await this.dao.run(
+              `INSERT INTO hm_memories(group_id,user_id,kind,content,keywords,importance,source_span,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+              [String(groupId), userId, kind, content, JSON.stringify(kws), importance, span, now, now],
+            )
+            if (r?.lastID) { existing.push({ id: r.lastID, kind, user_id: userId, content, keywords: JSON.stringify(kws), importance }); createdInBatch.add(r.lastID); embedLater.push([r.lastID, content]); created++ }
+          }
+        }
+        // 超量淘汰：按 价值 = importance×(1+log(1+hit)) − 周龄衰减 排序删最低
+        const cap = mc.maxPerGroup ?? 300
+        const total = existing.length
+        if (total > cap) {
+          await this.dao.run(
+            `DELETE FROM hm_memories WHERE id IN (
+               SELECT id FROM hm_memories WHERE group_id=? ORDER BY (importance*(1+ln(1+hit_count))) - ((?-updated_at)/604800000.0)*0.08 ASC LIMIT ?)`,
+            [String(groupId), now, total - cap],
+          )
+        }
+        await this.markConsolidated(groupId, Math.max(...msgs.map((x) => Number(x.seq) || 0), 0))
+        await this.dao.run("DELETE FROM hm_meta WHERE key='consol_fail_until:' || ?", [String(groupId)]) // 成功后清退避
+      })
+    } catch (e) {
+      Log.warn('[humanize-memory] 整合事务回滚（无部分记忆、水位未推进）', e?.message || e)
+      throw e
+    } finally {
+      for (const [id, text] of embedLater) this._embedRow(id, text).catch(() => {}) // 已回滚的行为 UPDATE no-op，无害
     }
-    // 超量淘汰：按 价值 = importance×(1+log(1+hit)) − 周龄衰减 排序删最低
-    const cap = mc.maxPerGroup ?? 300
-    const total = existing.length
-    if (total > cap) {
-      await this.dao.run(
-        `DELETE FROM hm_memories WHERE id IN (
-           SELECT id FROM hm_memories WHERE group_id=? ORDER BY (importance*(1+ln(1+hit_count))) - ((?-updated_at)/604800000.0)*0.08 ASC LIMIT ?)`,
-        [String(groupId), now, total - cap],
-      ).catch(() => {})
-    }
-    await this.markConsolidated(groupId, Math.max(...msgs.map((x) => Number(x.seq) || 0), 0))
     this.trace?.record?.('hm_consolidate', { groupId, created, merged, source: msgs.length, suspected: suspected.length })
     return { created, merged, suspected }
   }
@@ -261,16 +287,28 @@ export class HumanizeMemoryStore {
     }
     scored.sort((a, b) => b.score - a.score)
     const out = scored.slice(0, Math.max(1, topK | 0 || 5))
-    for (const { r, score } of out) {
-      // 断点4b：hit_count 只在真高相关（≥0.5）时累计——此前仅被检索就+1，保护陈旧记忆不被清理
-      if (score >= 0.5) await this.dao.run('UPDATE hm_memories SET hit_count=hit_count+1, last_used_at=? WHERE id=?', [now, r.id]).catch(() => {})
-    }
+    // 「被检索」不等于「被使用」：recall 是纯读（不增 hit_count/last_used_at，防自我强化反馈环）；
+    // 真实使用由 markUsed 在「真实发送成功」后登记（turn-scheduler → onDelivered → markUsed）。
     return out.map(({ r }) => r)
   }
 
-  /** 格式化为 prompt 注入块（角色主观视角；标注不复述）。 */
-  async recallText(o) {
+  /** 登记真实使用（仅真实发送成功且确实注入本轮 prompt 的记忆；shadow/ignore/取消/失败不得调用）。 */
+  async markUsed(groupId, ids, now = Date.now()) {
+    if (!await this.init() || !this._ready || !Array.isArray(ids) || !ids.length) return 0
+    let n = 0
+    for (const id of ids) {
+      const r = await this.dao.run('UPDATE hm_memories SET hit_count=hit_count+1, last_used_at=?, updated_at=? WHERE id=? AND group_id=?', [now, now, Number(id), String(groupId)]).catch(() => null)
+      if (r?.changes) n++
+    }
+    return n
+  }
+
+  /** 格式化为 prompt 注入块（角色主观视角；标注不复述）。
+   *  o.collectIds：可选数组——命中的行 id 追加进去（调用方收集「本轮注入」的记忆，
+   *  仅真实发送成功后才 markUsed 登记使用；recall/recallText 本身零副作用）。 */
+  async recallText(o = {}) {
     const rows = await this.recall(o)
+    if (Array.isArray(o.collectIds)) for (const r of rows) o.collectIds.push(r.id)
     if (!rows.length) return ''
     const KIND_ZH = { impression: '印象', event: '事件', jargon: '群梗', style: '风格反馈' }
     const lines = rows.map((r) => {
@@ -418,12 +456,32 @@ export class HumanizeMemoryStore {
     return Number(r?.value) || 0
   }
 
-  /** 增量整合水位：距上次整合新增 ≥ n 条消息才值得再跑（存 hm_meta 跨重启）。 */
+  /** 增量整合水位：距上次整合新增 ≥ n 条消息才值得再跑（存 hm_meta 跨重启）。
+   *  序号回退（current < last，如旧 incarnation 高水位 + 缓冲全过期重启）时返回 true——
+   *  调用方应安全重置水位到当前边界再整合（旧消息已不在缓冲，不会重复强化）。 */
   async shouldConsolidate(groupId, currentSeq, minNew = 20) {
     if (!await this.init() || !this._ready) return false
     const r = await this.dao.get("SELECT value FROM hm_meta WHERE key='consolidated_seq:' || ?", [String(groupId)]).catch(() => null)
     const last = Number(r?.value) || 0
-    return Number(currentSeq) - last >= minNew
+    const cur = Number(currentSeq)
+    if (Number.isFinite(cur) && cur < last) return true // 回退 → 需要整合（重置路径）
+    return cur - last >= minNew
+  }
+
+  /** seq 地板（持久单调；GroupRuntime.restore/persistSeqFloor 经 apps 注入使用）。 */
+  async getSeqFloor(groupId) {
+    if (!await this.init() || !this._ready) return 0
+    const r = await this.dao.get("SELECT value FROM hm_meta WHERE key='buffer_seq_floor:' || ?", [String(groupId)]).catch(() => null)
+    return Number(r?.value) || 0
+  }
+
+  async setSeqFloor(groupId, n) {
+    if (!await this.init() || !this._ready) return
+    const v = Number(n)
+    if (!Number.isFinite(v) || v <= 0) return
+    const r = await this.dao.get("SELECT value FROM hm_meta WHERE key='buffer_seq_floor:' || ?", [String(groupId)]).catch(() => null)
+    const prev = Number(r?.value) || 0
+    if (v > prev) await this.dao.run("INSERT OR REPLACE INTO hm_meta(key,value) VALUES ('buffer_seq_floor:' || ?, ?)", [String(groupId), String(Math.floor(v))]).catch(() => {})
   }
 
   /** 记录整合水位。 */
