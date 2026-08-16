@@ -13,7 +13,7 @@ import Config from '../../utils/Config.js'
 function shellQuote(s) { return `"${String(s).replace(/"/g, '\\"')}"` }
 
 function _trunc(s, max = 8000) {
-  const t = String(s == null ? '' : '')
+  const t = String(s ?? '')
   return t.length <= max ? t : t.slice(0, max) + `\n…[已截断，共 ${t.length} 字符]`
 }
 

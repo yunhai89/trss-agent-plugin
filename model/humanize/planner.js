@@ -86,10 +86,10 @@ export class HumanizePlanner {
 
   /**
    * 决策一轮。
-   * @param {object} ctx { snapshot, decision, signal, runtime, cfg }
+   * @param {object} ctx { snapshot, decision, targetMessages, signal, runtime, cfg }
    * @returns {Promise<object>} 动作 {type, ...} （human_reply/human_react/human_wait/human_ignore）
    */
-  async decide({ snapshot, decision, signal, runtime, cfg }) {
+  async decide({ snapshot, decision, targetMessages = null, signal, runtime, cfg }) {
     const c = cfg || this._cfgFn()
     const pcfg = c.planner || {}
     const maxRounds = Math.max(1, Math.min(6, pcfg.maxRounds ?? c.maxPlannerRounds ?? 4))
@@ -218,10 +218,14 @@ export class HumanizePlanner {
       const actionCalls = toolCalls.filter((tc) => TERMINAL_ACTIONS.has(tc.name))
       const readCalls = toolCalls.filter((tc) => !TERMINAL_ACTIONS.has(tc.name))
 
-      // 终止动作：校验并返回（同轮多发送动作只取一个）
+      // 终止动作：校验并返回（同轮多发送动作只取一个）。
+      // targetMessages 是本轮门控产生的待回复集合；上下文窗口只用于理解对话，不能成为目标。
       if (actionCalls.length) {
-        // P1 修复：目标只允许外部真实消息（此前含 bot 自身消息——Planner 可回复自己的历史发言）
-        const hasTarget = (id) => !!snapshot.find((m) => m.id === String(id) && !m.isSelf)
+        const targetPool = Array.isArray(targetMessages)
+          ? targetMessages
+          : (decision?.targetMessage ? [decision.targetMessage] : [])
+        // P1 修复：目标只允许本轮真实新消息（此前在整个上下文窗口验证，Planner 可选中旧消息）
+        const hasTarget = (id) => !!targetPool.find((m) => m.id === String(id) && !m.isSelf)
         const { action, violations } = pickSingleAction(actionCalls, { hasTarget })
         if (violations.length) runtime?.trace?.record('planner_schema_violation', { round, violations })
         logDecision(runtime, action, violations)

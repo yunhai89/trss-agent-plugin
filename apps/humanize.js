@@ -222,9 +222,9 @@ async function buildHumanize() {
     getMemories: async (q, o = {}) => {
       try {
         if (cfgFn().memory?.enabled === false) return ''
-        // 梗词典全量常驻（背景知识不按相关性查）+ 相关记忆 topK（作用域过滤：印象只允许本轮活跃人物，
-        // 修 Planner 侧泄漏——旧人物印象曾可经 replyGuide 渗入最终回复）
-        const dict = await hmem.jargonDict(gid)
+        // 梗词典按当前目标文本窄化注入；近期由 bot 真实使用过的梗在 store 层冷却，
+        // 不再整本常驻 Planner。
+        const dict = await hmem.jargonDict(gid, { queryText: q })
         const rel = await hmem.recallText({ groupId: gid, query: String(q || '').slice(0, 200), topK: cfgFn().memory?.maxPerQuery ?? 5, allowedUserIds: o?.threadUserIds })
         return [dict, rel].filter(Boolean).join('\n')
       } catch (e) { Log.debug('[humanize] 记忆检索降级:', e?.message || e); return '' }
@@ -256,12 +256,6 @@ async function buildHumanize() {
         return (ent?.runtime?.buffer?.snapshot(30, { includeSelf: true })?.filter((m) => m.isSelf) || []).slice(-8).map((m) => String(m.text || ''))
       } catch { return [] }
     },
-    getRecentBotTexts: () => {
-      try {
-        const ent = manager?.getOrCreate?.(gid)
-        return (ent?.runtime?.buffer?.snapshot(30, { includeSelf: true })?.filter((m) => m.isSelf) || []).slice(-8).map((m) => String(m.text || ''))
-      } catch { return [] }
-    },
     getStyleExamples: () => '',
     // 表情包清单注入：reply.allowSticker !== false 且表情包启用时给 Replyer 看 [sticker:名称] 与可用名表
     getStickerCatalog: () => (cfgFn().reply?.allowSticker !== false && sticker?.enabled?.() ? (sticker.catalog?.() || '') : ''),
@@ -273,7 +267,7 @@ async function buildHumanize() {
     getMemoryBlock: async ({ groupId, targetUserId, queryText, allowedUserIds }) => {
       try {
         if (cfgFn().memory?.enabled === false) return ''
-        const dict = await hmem.jargonDict(groupId)
+        const dict = await hmem.jargonDict(groupId, { queryText: queryText })
         const rel = await hmem.recallText({ groupId, userId: targetUserId, query: queryText, topK: 3, kinds: ['impression'], allowedUserIds })
         return [dict, rel].filter(Boolean).join('\n')
       } catch (e) { Log.debug('[humanize] 记忆注入降级:', e?.message || e); return '' }

@@ -74,7 +74,11 @@ export class WorldContextBuilder {
       seenRel.add(String(u.userId))
       relevantRelationships.push({ summary: `${u.displayName}（${u.tier ? TIER_LABEL[u.tier] || '?' : '在场'}）${u.edge?.hint ? '：' + u.edge.hint : ''}` })
     }
-    const relevantEpisodes = (raw.episodes || []).map((e) => ({ summary: e.summary, confidence: e.confidence }))
+    const relevantEpisodes = (raw.episodes || []).map((e) => ({
+      summary: e.summary,
+      confidence: e.confidence,
+      occurredAt: e.occurredAt,
+    }))
     // preferred_name（称呼）透传给 Replyer（修 M6：查了却丢，无法自然称呼）
     const botRelation = raw.botRel
       ? { familiarity: raw.botRel.familiarity, affinity: raw.botRel.affinity, interactionStyle: raw.botRel.interaction_style || '', preferredName: raw.botRel.preferred_name || '' }

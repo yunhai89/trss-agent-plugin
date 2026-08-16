@@ -156,9 +156,14 @@ export class HumanizeMemoryStore {
       })
       parsed = parseLlmJson(res?.content || '')
     } catch (e) { Log.warn('[humanize-memory] 整合 LLM 失败', e?.message || e); return { created: 0, merged: 0, skipped: 'llm' } }
-    const cands = Array.isArray(parsed?.memories) ? parsed.memories : []
+    const hasLegalEmptyResult = parsed !== null && typeof parsed === 'object' && Array.isArray(parsed.memories)
+    const cands = hasLegalEmptyResult ? parsed.memories : []
     const suspected = (Array.isArray(parsed?.suspected_jargon) ? parsed.suspected_jargon : []).map((s) => String(s).slice(0, 24)).filter(Boolean).slice(0, 3)
-    if (!cands.length) return { created: 0, merged: 0, skipped: 'empty', suspected }
+    if (!cands.length) {
+      // 合法空结果表示这批消息已经审视过，必须推进水位；格式错误/解析失败不能推进。
+      if (hasLegalEmptyResult) await this.markConsolidated(groupId, Math.max(...msgs.map((x) => Number(x.seq) || 0), 0))
+      return { created: 0, merged: 0, skipped: hasLegalEmptyResult ? 'empty' : 'invalid_json', suspected }
+    }
 
     let created = 0; let merged = 0
     const existing = await this.dao.all('SELECT * FROM hm_memories WHERE group_id=?', [String(groupId)])
@@ -300,23 +305,25 @@ export class HumanizeMemoryStore {
   }
 
   /**
-   * 本群梗词典（全量注入用）：jargon 类记忆不做相关性检索——梗是背景知识，
-   * 群里说"咕嘎"时按相关性查"咕嘎是什么"往往查不到，必须整本词典常驻 prompt。
-   * 上限 25 条（重要性降序），空库返回 ''。
+   * 本群梗词典（按当前话题注入用）：只保留当前消息真实提到的梗；机器人近期用过的梗
+   * 在冷却期内完全不注入。这样 Planner/Replyer 仍能理解群友正在使用的黑话，但不会把
+   * 旧梗（如“马赛克”）作为背景知识重新塞回无关话题。
    */
-  async jargonDict(groupId) {
+  async jargonDict(groupId, { queryText = '', now = Date.now() } = {}) {
     if (!await this.init() || !this._ready) return ''
     const rows = await this.dao.all(
       "SELECT content, last_used_at FROM hm_memories WHERE group_id=? AND kind='jargon' ORDER BY importance DESC LIMIT 40",
       [String(groupId)],
     ).catch((e) => { Log.warn('[humanize-memory] 梗词典查询失败:', e?.message || e); return [] })
     if (!rows.length) return ''
-    // 断点3修复（梗黏住）：近 6h 实际用过的梗排到词典末尾并降量注入（最多 12 条，保底 6 条）——
-    // 此前 25 条全量无条件注入每次 Planner/Replyer，"马赛克梗"高频复用的结构性来源
-    const now = Date.now()
+    // 只要有真实的最近使用时间就视为冷却中；不能再用“保底 N 条”把队尾旧梗捞回来。
     const fresh = rows.filter((r) => !r.last_used_at || now - Number(r.last_used_at) > 6 * 3600e3)
-    const recent = rows.filter((r) => r.last_used_at && now - Number(r.last_used_at) <= 6 * 3600e3)
-    const picked = [...fresh, ...recent].slice(0, Math.max(6, Math.min(12, fresh.length)))
+    const q = String(queryText || '')
+    const termOf = (r) => String(r.content || '').split('=')[0]?.trim() || ''
+    const picked = (q ? fresh.filter((r) => q.includes(termOf(r))) : fresh)
+      .filter((r) => termOf(r).length >= 2)
+      .slice(0, 12)
+    if (!picked.length) return ''
     return '【本群梗/黑话词典（背景知识，理解语境用；近期用过的梗别反复主动使用）】\n' + picked.map((r) => `- ${r.content}`).join('\n')
   }
 

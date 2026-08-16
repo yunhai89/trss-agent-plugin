@@ -4,12 +4,16 @@
  * 运行：node model/humanize/integration.test.mjs
  */
 import { memoryKv } from '../agent/store/kv.js'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { GroupRuntime } from './group-runtime.js'
 import { MessageBuffer } from './message-buffer.js'
 import { IdleBackoff } from './idle-backoff.js'
 import { HumanizeStore, newHolderId } from './store.js'
 import { Trace } from './trace.js'
 import { HumanizePlanner } from './planner.js'
+import { HumanizeMemoryStore } from './memory-store.js'
 import { TurnScheduler } from './turn-scheduler.js'
 import { validateHumanizeConfig } from './default-config.js'
 
@@ -86,6 +90,43 @@ await test('Planner：非法目标 → violation 后 ignore/丢弃', async () =>
   const action = await planner.decide({ snapshot, decision: { targetMessage: snapshot[0] }, runtime, cfg: { planner: { maxRounds: 4 } } })
   // 非法目标 → pickSingleAction 返回 ignore（all_invalid）
   ok(action.type === 'human_ignore', '非法目标 → 不产生发送')
+})
+
+await test('Planner：Provider 指定上下文旧消息 → 拒绝旧目标', async () => {
+  const { runtime } = mkCtx()
+  const provider = mockProvider([{
+    content: '模型选择了旧消息',
+    toolCalls: [{ id: 'old', name: 'human_reply', arguments: { targetMessageId: 'old-id', replyGuide: '旧话题' } }],
+    finishReason: 'tool_calls',
+  }])
+  const planner = new HumanizePlanner({ provider, cfg: () => ({ planner: { maxRounds: 1 } }) })
+  const oldMsg = mkMsg('旧的马赛克话题', { id: 'old-id' })
+  const current = mkMsg('现在的P40部署问题', { id: 'current-id' })
+  const action = await planner.decide({
+    snapshot: [oldMsg, current],
+    decision: { targetMessage: current },
+    runtime,
+    cfg: { planner: { maxRounds: 1 } },
+  })
+  ok(action.type === 'human_ignore' && action.reason === 'all_invalid', '旧上下文消息不能成为 Planner 发送目标')
+})
+
+await test('Memory：合法空结果推进整合水位，避免同批消息反复整合', async () => {
+  const dir = path.join(os.tmpdir(), `humanize-empty-memory-${process.pid}`)
+  fs.rmSync(dir, { recursive: true, force: true })
+  const store = new HumanizeMemoryStore({
+    dataDir: dir,
+    provider: { chat: async () => ({ content: '{"memories":[],"suspected_jargon":[]}' }) },
+    cfg: () => ({ memory: { enabled: true, minConsolidateMessages: 2 } }),
+  })
+  const msgs = [
+    { seq: 1, timestamp: Date.now() - 2000, text: '第一条', isSelf: false },
+    { seq: 2, timestamp: Date.now(), text: '第二条', isSelf: false },
+  ]
+  const result = await store.consolidate({ groupId: 'g-empty', messages: msgs })
+  ok(result.skipped === 'empty', `合法空结果返回 skipped=empty（实际 ${result.skipped}）`)
+  ok(await store.consolidatedSeq('g-empty') === 2, `空结果也推进水位到 2（实际 ${await store.consolidatedSeq('g-empty')}）`)
+  fs.rmSync(dir, { recursive: true, force: true })
 })
 
 await test('Planner：只读工具回灌后继续，最终 reply', async () => {
@@ -165,7 +206,7 @@ await test('GroupRuntime：强信号与纠错状态均按用户隔离并会过�
 
 // ───────── shadow 端到端 ─────────
 await test('shadow 端到端：消息→门控→reply→只 trace 不实发', async () => {
-  const { runtime, trace } = mkCtx()
+  const { runtime, trace, store } = mkCtx()
   const cfg = () => validateHumanizeConfig({
     enable: true, groups: ['g1'], shadow: true, threshold: 80, talkValue: 0.35,
     debounceMs: 200, cooldownSeconds: 1, planner: { maxRounds: 2 }, replyer: { maxChars: 200 },
@@ -178,6 +219,10 @@ await test('shadow 端到端：消息→门控→reply→只 trace 不实发', a
   const composer = { deliver: async () => ({ sentIds: ['sent1'], cancelled: false }) }
   let sentCount = 0
   const send = async () => { sentCount++; return 'sent_' + sentCount }
+  const cooldownBefore = runtime.cooldownUntil
+  let shadowSuccessCalled = false
+  const originalRecordSuccess = runtime.backoff.recordSuccess.bind(runtime.backoff)
+  runtime.backoff.recordSuccess = (...args) => { shadowSuccessCalled = true; return originalRecordSuccess(...args) }
 
   const sched = new TurnScheduler({ runtime, cfg, planner, replyer, composer, send })
   // 强关联消息（mentionsBotName）→ 必触发门控
@@ -187,9 +232,12 @@ await test('shadow 端到端：消息→门控→reply→只 trace 不实发', a
   ok(sentCount === 0, 'shadow 模式：composer.deliver 未被调用 → 真实 send 0 次')
   const events = trace.recent({ limit: 50 })
   ok(events.some((e) => e.event === 'shadow_reply'), '记录了 shadow_reply')
-  ok(runtime.cooldownUntil > Date.now(), '已进入冷却')
-  ok(runtime.backoff.count === 0, 'reply 成功 → backoff 清零')
-  ok(runtime.strongReplyCount('u1') === 1, 'shadow 成功回复也计入该用户的强信号轮次')
+  ok(runtime.cooldownUntil === cooldownBefore, 'shadow 不进入真实冷却')
+  ok(shadowSuccessCalled === false, 'shadow 不触发 backoff.recordSuccess')
+  ok(runtime.strongReplyCount('u1') === 0, 'shadow 不消耗强信号额度')
+  ok(runtime.replyCountIn(10 * 60 * 1000) === 0, 'shadow 不计入回复频率')
+  ok(runtime.buffer.snapshot(20, { includeSelf: true }).every((m) => !m.isSelf || m.id === targetId) && !runtime.buffer.get('shadow-self'), 'shadow 不写入伪造自身消息')
+  ok(await store.isSent('g1', targetId) === false, 'shadow 不 markSent')
 })
 
 await test('强信号限制按用户隔离：甲耗尽不影响乙，评分目标落到乙', async () => {

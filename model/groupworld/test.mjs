@@ -166,6 +166,26 @@ await test('context-builder：极小预算下截断特征', async () => {
   ok(estTokens(out.text) <= 200, `截断后 token 受控（${estTokens(out.text)}tok ≤ 200）`)
 })
 
+await test('context-builder：旧事 occurredAt 透传并渲染时间感', async () => {
+  const now = Date.now()
+  const occurredAt = now - 3 * 86400e3
+  const cb = new WorldContextBuilder({
+    retriever: {
+      gather: async () => ({
+        empty: false,
+        focusProfile: null,
+        focusTraits: [],
+        edges: [],
+        episodes: [{ summary: '之前讨论过部署', confidence: 0.8, occurredAt }],
+      }),
+    },
+    cfg: () => ({}),
+  })
+  const out = await cb.buildReplyerContext({ groupId: 'CTX', focusUserId: 'u1', now })
+  ok(out.socialScene?.relevantEpisodes?.[0]?.occurredAt === occurredAt, 'structured scene 保留 occurredAt')
+  ok(out.text.includes('3天前'), `prompt 渲染旧事时间感（${out.text.includes('3天前') ? '3天前' : '缺失'}）`)
+})
+
 // ───────── 跨 bot 主观关系隔离 ─────────
 await test('recordInteraction：跨 bot 主观关系隔离', async () => {
   // 直接写 gw_bot_rel 模拟两个 bot

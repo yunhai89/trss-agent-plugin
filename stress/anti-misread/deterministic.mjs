@@ -20,6 +20,8 @@ import { resolveGrounding, formatGroundingBlock, whitelistViolations, windowName
 import { evaluate } from '../../model/humanize/necessity-scorer.js'
 import { formatGroupContext } from '../../model/humanize/prompts.js'
 import { HumanizeMemoryStore } from '../../model/humanize/memory-store.js'
+import { HumanizePlanner } from '../../model/humanize/planner.js'
+import { HumanizeReplyer } from '../../model/humanize/replyer.js'
 import * as Db from '../../model/groupworld/db.js'
 import { SelfStateService } from '../../model/selfstate/service.js'
 
@@ -270,33 +272,77 @@ await test('S7 bot↔bot 熔断：与已知 bot 交替 4 轮 → botChain>=3；�
   ok(chainOfTail(tailHuman) === 0, `scheduler 语义：真人夹入尾部 chain=0（${chainOfTail(tailHuman)}）→ 不熔断`)
 })
 
+// ═══════════════ S8 梗黏住回归：马赛克话题不得渗入无关话题 ═══════════════
+await test('S8 马赛克黏住：真实记忆→Planner/Replyer 链路不回流 + 复读拦截', async () => {
+  const TMP = path.join(os.tmpdir(), `amr-s8-${process.pid}`)
+  fs.rmSync(TMP, { recursive: true, force: true })
+  const hmem = new HumanizeMemoryStore({ dataDir: TMP, cfg: () => ({}), trace: { record() {} } })
+  ok(await hmem.init() === true, 'S8 使用真实 HumanizeMemoryStore/SQLite')
+  const t = Date.now()
+  const insertJargon = async (content) => hmem.dao.run(
+    'INSERT INTO hm_memories(group_id,user_id,kind,content,keywords,importance,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)',
+    [G, null, 'jargon', content, '[]', 0.9, t, t],
+  )
+  await insertJargon('马赛克=图片被压得完全看不清')
+  await insertJargon('咕嘎=群里的奇怪叫声')
+  ok(await hmem.markJargonUsed(G, '我刚才又发了马赛克') === 1, '真实发送登记：马赛克进入近期使用冷却')
+  const unrelatedDict = await hmem.jargonDict(G, { queryText: 'P40能部署多大向量模型' })
+  ok(!unrelatedDict.includes('马赛克'), '无关 P40 目标不注入马赛克词典')
+  const directDict = await hmem.jargonDict(G, { queryText: '这个马赛克怎么回事' })
+  ok(!directDict.includes('马赛克='), '冷却中的马赛克即使被再次提到也不回流给生成层')
+  ok((await hmem.jargonDict(G, { queryText: '咕嘎是什么意思' })).includes('咕嘎='), '对照：未冷却且当前话题命中的梗仍可注入')
+
+  const oldMsg = mk('s8-old', WU, '芜湖', '这张图压成马赛克了')
+  const current = mk('s8-new', MU, '阿明', 'P40能部署多大向量模型')
+  const snapshot = [oldMsg, current]
+  const runtime = { groupId: G, trace: { record() {} } }
+  const cfg = () => ({ planner: { maxRounds: 1 }, replyer: { maxChars: 100 } })
+  let plannerSystem = ''
+  const plannerProvider = {
+    chat: async (req) => {
+      plannerSystem = String(req.system || '')
+      return {
+        content: '用户在问硬件部署能力',
+        toolCalls: [{ id: 's8p', name: 'human_reply', arguments: { targetMessageId: current.id, replyGuide: '按显存与量化给建议' } }],
+        finishReason: 'tool_calls',
+      }
+    },
+  }
+  const planner = new HumanizePlanner({
+    provider: plannerProvider, cfg,
+    getMemories: async (q) => hmem.jargonDict(G, { queryText: q }),
+  })
+  const action = await planner.decide({ snapshot, decision: { targetMessage: current }, runtime, cfg: cfg() })
+  ok(action.type === 'human_reply' && action.targetMessageId === current.id, `真实 Planner 接受当前目标（${action.type}/${action.targetMessageId}）`)
+  ok(!plannerSystem.includes('马赛克='), '真实 Planner prompt 不包含冷却中的马赛克词典')
+
+  let replyerSystem = ''
+  const makeReplyProvider = (content) => ({
+    chat: async (req) => { replyerSystem = String(req.system || ''); return { content, finishReason: 'stop' } },
+  })
+  const makeReplyer = (recent) => new HumanizeReplyer({
+    provider: makeReplyProvider('P40跑量化后的模型比较稳'), cfg,
+    getMemoryBlock: async ({ queryText }) => hmem.jargonDict(G, { queryText }),
+    getRecentBotTexts: () => recent,
+  })
+  const good = await makeReplyer(['之前聊P40的时候我说过', 'P40功耗其实还行']).generate({
+    action, batch: snapshot, target: current, runtime,
+  })
+  ok(good.text === 'P40跑量化后的模型比较稳', `真实 Replyer 正常输出无关话题（cancel=${good.cancelReason || 'none'}）`)
+  ok(!replyerSystem.includes('马赛克='), '真实 Replyer prompt 不包含冷却中的马赛克词典')
+
+  const repeatReplyer = new HumanizeReplyer({
+    provider: makeReplyProvider('这个图又变马赛克了'), cfg,
+    getMemoryBlock: async ({ queryText }) => hmem.jargonDict(G, { queryText }),
+    getRecentBotTexts: () => ['我发的图怎么成马赛克了', '这个马赛克太糊了'],
+  })
+  const blocked = await repeatReplyer.generate({ action, batch: snapshot, target: current, runtime })
+  ok(blocked.text === '' && blocked.cancelReason === 'meme_repeat', `生产 Replyer 拦截马赛克复读（cancel=${blocked.cancelReason}）`)
+})
+
 // ═══════════════ 汇总 ═══════════════
 console.log('\n========================================')
 console.log(`通过 ${passed}，失败 ${failed}`)
 if (bugs.length) { console.log('失败明细:'); for (const b of bugs) console.log(' -', b) }
 console.log('========================================')
 if (failed) process.exitCode = 1
-
-// ═══════════════ S8 梗黏住回归：马赛克话题不得渗入无关话题 ═══════════════
-await test('S8 马赛克黏住：旧梗话题不达标不回流 + 复读拦截', async () => {
-  const { evaluate } = await import('../../model/humanize/necessity-scorer.js')
-  const { textSim, textFeatures } = await import('../../model/groupworld/embedding.js')
-  // 1) 重复检测语义：近 8 条里 2 条谈"图压成马赛克"，新候选仍谈马赛克 → meme_repeat 特征命中
-  const recents = ['图怎么压成马赛克了哈哈', '这个马赛克笑死', '图片压缩成马赛克绝了']
-  const cand = '又变马赛克了吧'
-  const hits = recents.filter((t) => {
-    const feats = [...textFeatures(cand)].filter((f) => f.length >= 2)
-    const prev = textFeatures(t)
-    let hit = 0
-    for (const f of feats) if (prev.has(f)) hit++
-    return feats.length > 0 && hit / feats.length >= 0.3
-  })
-  ok(hits.length >= 2, `换说法复读马赛克被识别（hits=${hits.length}/3 ≥2）`)
-  // 2) 无关话题：P40向量模型问题 vs 马赛克旧事 → 语义相似度不达 GW 话题门
-  ok(textSim('P40能部署多大向量模型', '图片压成马赛克') < 0.12, `无关话题相似度 < 0.12（实际 ${textSim('P40能部署多大向量模型', '图片压成马赛克').toFixed(3)}）→ GW 话题门拦截`)
-  // 3) 重要性合并封顶 0.85：验证 SQL 语义（查源码字符串即可）
-  const src = fs.readFileSync(new URL('../../model/humanize/memory-store.js', import.meta.url), 'utf8')
-  ok(src.includes('importance=MIN(0.85'), '合并重要性封顶 0.85 存在于源码')
-  const appSrc = fs.readFileSync(new URL('../../apps/humanize.js', import.meta.url), 'utf8')
-  ok(appSrc.includes('snapshotAfter(since)'), '整合只取水位后新消息存在于源码')
-})

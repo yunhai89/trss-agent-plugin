@@ -2,8 +2,6 @@ node_modules/
 *.log
 .DS_Store
 
-# pnpm 自动生成的 allowBuilds 提示文件（build 已用 .npmrc ignore-scripts 解决，此文件不入库）
-pnpm-workspace.yaml
 
 # 文档（根目录 README.md / 开发指南.md 保留入库，其余 .md 忽略；skills/ 下的运行时技能文件是插件必需，放行）
 *.md

@@ -284,7 +284,7 @@ export class TurnScheduler {
     rt.trace?.record('planner_start', { turnId, gen, batchId, batchSize: candidates.length, targetMessageId: decision.targetMessage?.id || null })
     try {
       const action = await this.planner.decide({
-        snapshot: ctxWindow, decision, signal: rt.signal, runtime: rt, cfg: c,
+        snapshot: ctxWindow, decision, targetMessages: candidates, signal: rt.signal, runtime: rt, cfg: c,
       })
       if (!rt.isCurrent(gen)) {
         rt.trace?.record('planner_stale', { gen, current: rt.plannerGeneration })
@@ -418,14 +418,8 @@ export class TurnScheduler {
     if (c.shadow !== false) {
       Log.mark('[humanize] shadow 回复', `${ANSI.m}群${rt.groupId}${ANSI.R}`, `${ANSI.m}"${text.slice(0, 80)}"${ANSI.R}`)
       rt.trace?.record('shadow_reply', { turnId, text: text.slice(0, 200), target: action.targetMessageId, quote: !!action.quote })
-      try { await rt.store.markSent(rt.groupId, action.targetMessageId) } catch { /* noop */ }
-      rt.enterCooldown(c.cooldownSeconds ?? 45)
-      rt.recordReply(null)
-      this._recordStrongReply(target)
-      this._appendSelf(text, null) // shadow 也计入自身在场（presence/上下文）
-      // P1 修复：shadow 未真实发送 → 不写 GW 互动关系、不登记 SS 出站期待（此前假数据推高熟悉度）；
-      // 梗使用登记也只在真实发送路径（gwOnDelivered 由 _notifyDelivered 触发，此处跳过即正确）
-      rt.backoff.recordSuccess()
+      // shadow 只是观测决策，不是一次真实控制事件：不 markSent、不计回复/强信号、
+      // 不写伪造 self 消息、不进入真实冷却，也不改变退避状态。游标仍推进，避免同批重复评估。
       rt.markObserved(batch)
       rt.setPhase('idle')
       return

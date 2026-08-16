@@ -1,0 +1,12 @@
+allowBuilds:
+  # 逐个审查结论：当前锁定图中的 install 生命周包都不需要执行。
+  # @google/genai 的 prepare 指向 npm 发布包中不存在的 scripts/prepare.js，允许会直接失败；
+  # 其 dist/node/web 发布物已完整。
+  '@google/genai': false
+  # protobufjs 的 postinstall 只做版本方案兼容提示，不生成运行所需文件。
+  protobufjs: false
+  # native 产物由 optionalDependencies 提供；esbuild 不在锁定依赖图中。
+  '@karinjs/sqlite3': false
+  '@napi-rs/canvas': false
+  '@node-rs/jieba': false
+  esbuild: false
