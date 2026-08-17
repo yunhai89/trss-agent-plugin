@@ -641,16 +641,20 @@ await test('集成：session 跨轮持久化', async () => {
   eq((await session.get(session.key('g1', 'u1'))).length, 4, '第二轮累计 4 条')
 })
 
-await test('集成：recall 注入 system + 轮后抽取', async () => {
+await test('集成：recall 注入本轮 user 消息（system 保持静态前缀）+ 轮后抽取', async () => {
   const kv = memoryKv()
   const recall = new RecallStore({ kv })
   await recall.writeMemory({ content: '用户喜欢简洁', level: 'L3', confidence: 0.8 }, 'u1')
   let sysSeen = null
-  const provider = { async chat(opts) { sysSeen = opts.system; return { content: 'ok', finishReason: 'stop' } } }
+  let msgsSeen = null
+  const provider = { async chat(opts) { sysSeen = opts.system; msgsSeen = opts.messages; return { content: 'ok', finishReason: 'stop' } } }
   const agent = new Agent({ provider, recall, maxTurns: 5 })
   // 查询须与记忆相关（"简洁回复"↔"喜欢简洁"）；审计 §3.1 后零相关记忆不再注入，故不用无关词如"你好"
   await agent.run('简洁回复', { ctx: { role: 'member', isMaster: true, userId: 'u1', groupId: 'g1' } })
-  ok(sysSeen.includes('喜欢简洁'), 'recall 注入 system')
+  ok(!sysSeen.includes('喜欢简洁'), 'system 不再含召回记忆（纯静态前缀，缓存友好）')
+  const lastUser = [...(msgsSeen || [])].reverse().find((m) => m.role === 'user')
+  ok(String(lastUser?.content || '').includes('喜欢简洁') && String(lastUser?.content || '').includes('【用户消息】'), '召回记忆并入本轮 user 消息（带边界标注）')
+  ok(String(lastUser?.content || '').includes('简洁回复'), '用户原文保留在【用户消息】段')
   await delay(20)
   ok((await recall.listByUser('u1')).length >= 1, '记忆仍在')
 })

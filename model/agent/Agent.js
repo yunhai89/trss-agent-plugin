@@ -237,14 +237,27 @@ export class Agent {
       return m
     })
 
-    // 追加 user 消息（保留多模态对象形态，仅替换文本内容）
-    this.messages.push(this._buildUserMessage(input, userText))
-
-    // recall：检索注入（按 scopeUserId 隔离：群共享模式下读群共享记忆）
+    // recall：检索注入（按 scopeUserId 隔离：群共享模式下读群共享记忆）。
+    // 提前到 user 消息构造之前——召回记忆与情境上下文并入本轮 user 消息尾部（见下），
+    // 使 system 成为纯静态前缀：DeepSeek 等 OpenAI 兼容端按「tools+system+messages」
+    // 前缀缓存，system 尾部若有每轮必变的内容（时间/情境），其后全部历史都 miss。
     let memories = null
     if (this.recall && ctx) {
       try { memories = await this.recall.retrieve(rawText, scopeUserId, this.recallTopK) } catch { memories = null }
     }
+    let recalledMemory = ''
+    if (this.recall && memories && memories.length) recalledMemory = this.recall.formatForPrompt(memories) || ''
+    const dynParts = []
+    if (context) dynParts.push(String(context))
+    if (recalledMemory) dynParts.push(recalledMemory)
+    // 动态情境块并入 user 文本（持久化该形态——下轮前缀与本轮完全一致，缓存不打穿；
+    // 明确边界标注，模型不当作用户亲述）
+    if (dynParts.length) {
+      userText = `【本轮情境参考（系统注入，非用户发言）】\n${dynParts.join('\n\n')}\n\n【用户消息】\n${userText}`
+    }
+
+    // 追加 user 消息（保留多模态对象形态，仅替换文本内容）
+    this.messages.push(this._buildUserMessage(input, userText))
 
     this._pendingReflect = null // 每 run 重置反思反馈（防跨 run 串）
     this.governor?.reset()
@@ -540,9 +553,9 @@ export class Agent {
     }
     const skillsSection = this.skills ? buildSkillsPromptSection(this.skills.catalog()) : ''
     const stickerSection = this.stickers ? buildStickerPromptSection(this.stickers.catalog()) : ''
-    let recalledMemory = ''
-    if (this.recall && memories && memories.length) recalledMemory = this.recall.formatForPrompt(memories) || ''
-    // 声明式记忆按 scopeId 隔离（每群每用户各自一份 MEMORY.md/USER.md）
+    // 声明式记忆按 scopeId 隔离（每群每用户各自一份 MEMORY.md/USER.md）。
+    // 注意：recalledMemory / context（每轮必变的动态内容）已移入本轮 user 消息（见 run），
+    // system 保持静态前缀以最大化 prompt 缓存命中；此函数的 context/memories 参数仅保留兼容。
     const memorySnapshot = this.memory ? (this.memory.snapshotAll(scopeId) || '') : ''
     const guardHardening = this.guard ? (this.guard.systemHardening() || '') : ''
     const system = buildAgentSystemPrompt({
@@ -551,16 +564,14 @@ export class Agent {
       toolCatalog,
       skillsSection,
       stickerSection,
-      recalledMemory,
       memorySnapshot,
-      context,
       guardHardening,
     })
     // token 分段估算（供 token_breakdown；toolListTokens 在 run 处每轮补，因 _assembleSystem 早于 toolList 合成）
     const breakdown = tokenBreakdown({
-      identity, service: SERVICE_DIRECTIVE, context: context || '', guard: guardHardening,
+      identity, service: SERVICE_DIRECTIVE, context: '', guard: guardHardening,
       toolCatalog, toolListTokens: 0,
-      recalledMemory, memorySnapshot, skills: skillsSection, sticker: stickerSection,
+      recalledMemory: '', memorySnapshot, skills: skillsSection, sticker: stickerSection,
       conversationTokens: this._estimateMessagesTokens(),
     }, this.estimateTokens)
     // 反思反馈拼入 system（非 messages）：让模型视为系统自检指令而非用户输入（审计 §3.7 根治）

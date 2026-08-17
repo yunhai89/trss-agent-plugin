@@ -286,7 +286,7 @@ router.get('/overview', asyncHandler(async (req, res) => {
   if (_overviewCache && Date.now() - _overviewCache.at < 60000) return ok(res, _overviewCache.data)
   const r = await getRuntime().catch(() => null)
   const since = Date.now() - 7 * 86400000
-  const { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens } = aggregateStats(Config.path.logs, { since, topK: 5 })
+  const { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached } = aggregateStats(Config.path.logs, { since, topK: 5 })
   // perceptions（kv.scan）
   const perceptions = []
   if (r?.kv) {
@@ -315,7 +315,7 @@ router.get('/overview', asyncHandler(async (req, res) => {
     scopes: fs.existsSync(Config.path.memories) ? fs.readdirSync(Config.path.memories).length : 0,
     conversations,
   }
-  const data = { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, perceptions, counts }
+  const data = { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached, perceptions, counts }
   _overviewCache = { at: Date.now(), data }
   return ok(res, data)
 }))
