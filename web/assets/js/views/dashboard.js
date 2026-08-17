@@ -44,12 +44,22 @@
       const chart = computed(() => {
         const W = 560, Hgt = 180, PAD = 8
         const trend = M.tokenTrend || []
-        const empty = { W, H: Hgt, lineIn: '', lineOut: '', lineCached: '', areaIn: '', areaOut: '', days: [], dots: [], single: false, hasCached: false }
+        const empty = { W, H: Hgt, lineIn: '', lineOut: '', lineHitIn: '', lineHitOut: '', lineMissIn: '', lineMissOut: '', areaIn: '', areaOut: '', days: [], dots: [], single: false, hasCached: false }
         if (!trend.length) return empty
-        const hasCached = trend.some((d) => (d.cached || 0) > 0) // 无缓存数据的日子（旧日志）不画空线
-        // 未命中缓存 = 输入中没走缓存的部分（miss = input - cached，钳 0）——成本大头就是它
-        for (const d of trend) d.miss = Math.max(0, (d.input || 0) - (d.cached || 0))
-        const maxV = Math.max(...trend.map((d) => Math.max(d.input + d.output, d.cached || 0))) || 1
+        const hasCached = trend.some((d) => (d.cacheRead || 0) > 0 || (d.cached || 0) > 0 || (d.uncached || 0) > 0)
+        // 四条缓存线（命中/未命中 × 输入/输出）：
+        //   命中输入 = cacheRead；未命中输入 = uncached（后端未回填时用 input-cacheRead 钳 0）
+        //   输出按该日命中输入占比线性拆分 hitOut/missOut（输出生成本身不走前缀缓存，此处是成本归因视角）
+        for (const d of trend) {
+          const read = d.cacheRead ?? d.cached ?? 0
+          const obsIn = d.observedInput || (read > 0 ? Math.max(read, d.input || 0) : 0)
+          d.hitIn = read
+          d.missIn = d.uncached != null ? d.uncached : Math.max(0, (d.input || 0) - read)
+          const ratio = obsIn > 0 ? Math.min(1, read / obsIn) : 0
+          d.hitOut = Math.round((d.output || 0) * ratio)
+          d.missOut = (d.output || 0) - d.hitOut
+        }
+        const maxV = Math.max(...trend.map((d) => Math.max(d.input + d.output, d.hitIn + d.missIn))) || 1
         const denom = (trend.length - 1) || 1
         const pt = (i, v) => [PAD + (i * (W - PAD * 2)) / denom, Hgt - PAD - (v / maxV) * (Hgt - PAD * 2 - 14)]
         const line = (key) => trend.map((d, i) => pt(i, d[key]).map((n) => n.toFixed(1)).join(',')).join(' ')
@@ -57,10 +67,10 @@
           const pts = trend.map((d, i) => pt(i, d[key]))
           return `M${pts[0][0]},${Hgt - PAD} ` + pts.map((p) => `L${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ') + ` L${pts[pts.length - 1][0]},${Hgt - PAD} Z`
         }
-        const dots = trend.length === 1 ? [{ x: pt(0, 0)[0], yIn: pt(0, trend[0].input)[1], yOut: pt(0, trend[0].output)[1], yCached: hasCached ? pt(0, trend[0].cached || 0)[1] : null, yMiss: hasCached ? pt(0, trend[0].miss || 0)[1] : null }] : []
+        const dots = trend.length === 1 ? [{ x: pt(0, 0)[0], yIn: pt(0, trend[0].input)[1], yOut: pt(0, trend[0].output)[1], yHitIn: hasCached ? pt(0, trend[0].hitIn || 0)[1] : null, yHitOut: hasCached ? pt(0, trend[0].hitOut || 0)[1] : null, yMissIn: hasCached ? pt(0, trend[0].missIn || 0)[1] : null, yMissOut: hasCached ? pt(0, trend[0].missOut || 0)[1] : null }] : []
         // 每日数值表（图旁 tokens 明细，与折线同序；天多时倒序显示最新在前）
-        const rows = [...trend].reverse().map((d) => ({ day: d.day, input: d.input || 0, cached: d.cached || 0, miss: d.miss || 0, output: d.output || 0 }))
-        return { W, H: Hgt, lineIn: line('input'), lineOut: line('output'), lineCached: hasCached ? line('cached') : '', lineMiss: hasCached ? line('miss') : '', areaIn: area('input'), areaOut: area('output'), days: trend.map((d) => d.day), dots, single: trend.length === 1, hasCached, rows }
+        const rows = [...trend].reverse().map((d) => ({ day: d.day, input: d.input || 0, cached: d.hitIn || 0, miss: d.missIn || 0, output: d.output || 0, hitOut: d.hitOut || 0, missOut: d.missOut || 0 }))
+        return { W, H: Hgt, lineIn: line('input'), lineOut: line('output'), lineHitIn: hasCached ? line('hitIn') : '', lineHitOut: hasCached ? line('hitOut') : '', lineMissIn: hasCached ? line('missIn') : '', lineMissOut: hasCached ? line('missOut') : '', areaIn: area('input'), areaOut: area('output'), days: trend.map((d) => d.day), dots, single: trend.length === 1, hasCached, rows }
       })
 
       /* 请求趋势柱状图（每日对话轮次 = run_end 计数） */
@@ -179,8 +189,10 @@
             <div class="row g14" style="font-size:12px">
               <span class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:#6366f1"></i>输入</span>
               <span class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:#2dd4bf"></i>输出</span>
-              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:transparent;border:2px dashed #f59e0b"></i>缓存命中</span>
-              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:transparent;border:2px dotted #f43f5e"></i>未命中</span>
+              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:transparent;border:2px dashed #2563eb"></i>命中·输入</span>
+              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:transparent;border:2px dashed #38bdf8"></i>命中·输出</span>
+              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:transparent;border:2px dotted #f97316"></i>未命中·输入</span>
+              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:transparent;border:2px dotted #eab308"></i>未命中·输出</span>
             </div>
           </div>
           <svg v-if="chart.lineIn" :viewBox="'0 0 ' + chart.W + ' ' + chart.H" style="width:100%;margin-top:14px;display:block">
@@ -198,15 +210,21 @@
               pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:1;animation:dashIn 1.4s .2s var(--eo) forwards"/>
             <polyline :points="chart.lineOut" fill="none" stroke="#2dd4bf" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
               pathLength="1" style="stroke-dasharray:1;stroke-dashoffset:1;animation:dashIn 1.4s .5s var(--eo) forwards"/>
-            <polyline v-if="chart.lineCached" :points="chart.lineCached" fill="none" stroke="#f59e0b" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
-              stroke-dasharray="6 5"/>
-            <polyline v-if="chart.lineMiss" :points="chart.lineMiss" fill="none" stroke="#f43f5e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
-              stroke-dasharray="2 4"/>
+            <polyline v-if="chart.lineHitIn" :points="chart.lineHitIn" fill="none" stroke="#2563eb" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"
+              stroke-dasharray="10 5"/>
+            <polyline v-if="chart.lineHitOut" :points="chart.lineHitOut" fill="none" stroke="#38bdf8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+              stroke-dasharray="4 4"/>
+            <polyline v-if="chart.lineMissIn" :points="chart.lineMissIn" fill="none" stroke="#f97316" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"
+              stroke-dasharray="2 3"/>
+            <polyline v-if="chart.lineMissOut" :points="chart.lineMissOut" fill="none" stroke="#eab308" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+              stroke-dasharray="1 4"/>
             <template v-if="chart.single && chart.dots.length">
               <circle :cx="chart.dots[0].x" :cy="chart.dots[0].yIn" r="3.5" fill="#6366f1"/>
               <circle :cx="chart.dots[0].x" :cy="chart.dots[0].yOut" r="3.5" fill="#2dd4bf"/>
-              <circle v-if="chart.dots[0].yCached != null" :cx="chart.dots[0].x" :cy="chart.dots[0].yCached" r="3.5" fill="none" stroke="#f59e0b" stroke-width="2.2"/>
-              <circle v-if="chart.dots[0] && chart.dots[0].yMiss != null" :cx="chart.dots[0].x" :cy="chart.dots[0].yMiss" r="3" fill="none" stroke="#f43f5e" stroke-width="1.8"/>
+              <circle v-if="chart.dots[0].yHitIn != null" :cx="chart.dots[0].x" :cy="chart.dots[0].yHitIn" r="3.5" fill="none" stroke="#2563eb" stroke-width="2.6"/>
+              <circle v-if="chart.dots[0].yHitOut != null" :cx="chart.dots[0].x" :cy="chart.dots[0].yHitOut" r="3" fill="none" stroke="#38bdf8" stroke-width="1.8"/>
+              <rect v-if="chart.dots[0].yMissIn != null" :x="chart.dots[0].x - 3.2" :y="chart.dots[0].yMissIn - 3.2" width="6.4" height="6.4" fill="none" stroke="#f97316" stroke-width="2.6"/>
+              <rect v-if="chart.dots[0].yMissOut != null" :x="chart.dots[0].x - 2.8" :y="chart.dots[0].yMissOut - 2.8" width="5.6" height="5.6" fill="none" stroke="#eab308" stroke-width="1.8"/>
             </template>
           </svg>
           <div v-if="chart.lineIn" class="row-b" style="padding:0 8px;font-size:11px;color:var(--ink3)">
@@ -217,8 +235,8 @@
               <thead><tr style="color:var(--ink3);text-align:right">
                 <th style="text-align:left;padding:6px 8px;font-weight:600">日期</th>
                 <th style="padding:6px 6px;color:#6366f1">输入</th>
-                <th v-if="chart.hasCached" style="padding:6px 6px;color:#f59e0b">命中</th>
-                <th v-if="chart.hasCached" style="padding:6px 6px;color:#f43f5e">未命中</th>
+                <th v-if="chart.hasCached" style="padding:6px 6px;color:#2563eb">命中·输入</th>
+                <th v-if="chart.hasCached" style="padding:6px 6px;color:#f97316">未命中·输入</th>
                 <th style="padding:6px 6px;color:#2dd4bf">输出</th>
               </tr></thead>
               <tbody>
@@ -264,7 +282,7 @@
         <div class="card pad lift" style="--i:9">
           <div class="row-b wrap g10">
             <div class="ct">
-              <span class="ct-ico" style="background:linear-gradient(135deg,#f59e0b,#f43f5e)"><v-icon name="zap"/></span>
+              <span class="ct-ico" style="background:linear-gradient(135deg,#2563eb,#f97316)"><v-icon name="zap"/></span>
               <div><div class="ct-t">Token 缓存统计</div><div class="ct-s">观测口径：未观测旧日志不进命中率 · cold/warm 分层</div></div>
             </div>
             <div class="row g6" style="font-size:11px">
@@ -286,13 +304,13 @@
                   <span class="num" style="font-weight:700">{{ fmt.num(cacheStats.input) }}</span>
                 </div>
                 <div class="row g6" style="margin-bottom:6px;font-size:11px">
-                  <span style="color:#f59e0b">缓存读取 {{ fmt.num(cacheStats.cached) }}（{{ cacheStats.hitRate != null ? cacheStats.hitRate.toFixed(1) : '?' }}%）</span>
-                  <span style="color:#f43f5e">未缓存输入 {{ fmt.num(cacheStats.miss) }}</span>
+                  <span style="color:#2563eb">缓存读取 {{ fmt.num(cacheStats.cached) }}（{{ cacheStats.hitRate != null ? cacheStats.hitRate.toFixed(1) : '?' }}%）</span>
+                  <span style="color:#f97316">未缓存输入 {{ fmt.num(cacheStats.miss) }}</span>
                   <span v-if="cacheStats.cacheWrite > 0" style="color:#a78bfa">缓存写入 {{ fmt.num(cacheStats.cacheWrite) }}</span>
                 </div>
                 <div style="display:flex;height:10px;border-radius:6px;overflow:hidden;background:var(--line)">
-                  <i :style="{width: cacheStats.hitRate + '%', background: 'linear-gradient(90deg,#f59e0b,#fbbf24)', transition: 'width .8s var(--eo)'}"></i>
-                  <i :style="{width: cacheStats.missRate + '%', background: 'linear-gradient(90deg,#f43f5e,#fb7185)'}"></i>
+                  <i :style="{width: cacheStats.hitRate + '%', background: 'linear-gradient(90deg,#2563eb,#38bdf8)', transition: 'width .8s var(--eo)'}"></i>
+                  <i :style="{width: cacheStats.missRate + '%', background: 'linear-gradient(90deg,#f97316,#fbbf24)'}"></i>
                 </div>
               </div>
               <div>
