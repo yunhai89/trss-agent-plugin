@@ -68,7 +68,7 @@ export class OpenAIProvider extends Provider {
   /** 实际发起 create（流式/非流式），供 chat 的 temperature 自适应重试复用 */
   async _create(body, { signal, stream, onDelta, onReasoning }) {
     if (stream) {
-      const s = await this.client.chat.completions.create({ ...body, signal })
+      const s = await this.client.chat.completions.create(body, { signal }) // signal 走 opts 第二参（曾 {...body, signal} 并入请求体）
       // 流式 live 旁路：剥掉内联 <think> 推理块，避免中途播报(onDelta)把思考泄漏给用户
       const stripper = onDelta ? createThinkStripper() : null
       for await (const part of s) {
@@ -78,7 +78,7 @@ export class OpenAIProvider extends Provider {
       }
       return this._resultFromStream(s)
     }
-    const res = await this.client.chat.completions.create({ ...body, signal })
+    const res = await this.client.chat.completions.create(body, { signal })
     return this._resultFromResponse(res)
   }
 

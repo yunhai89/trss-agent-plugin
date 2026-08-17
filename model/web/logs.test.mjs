@@ -68,6 +68,60 @@ await test('aggregateStats：缓存命中 token 按日聚合（DeepSeek/OpenAI/A
   ok(t.input === 5000 + 1000 + 600 + 900 && t.output === 300 + 100 + 60 + 90, 'input/output 取多轮累加值（顶层级，不再低估多轮 run）')
 })
 
+await test('aggregateStats：未观测≠0命中——混合日志观测命中率 80% 而非 40%', async () => {
+  const { aggregateStats } = await import('./logs.js')
+  const TMP2 = fs.mkdtempSync(path.join(os.tmpdir(), 'weblogs-obs-'))
+  const iso = new Date().toISOString()
+  const mkRun = (usage) => JSON.stringify({ level: 'info', time: iso, event: 'run_end', usage }) + '\n'
+  fs.writeFileSync(path.join(TMP2, '960179589-3891977697-1-' + fmt(new Date()) + '110000.log'),
+    // 旧链路 2 条：input=1000 无任何缓存字段（未观测）
+    mkRun({ input: 1000, output: 100, raw: { prompt_tokens: 1000, completion_tokens: 100 } })
+    + mkRun({ input: 1000, output: 100, raw: { prompt_tokens: 1000, completion_tokens: 100 } })
+    // 新链路 3 条：DeepSeek hit/miss
+    + mkRun({ input: 1000, output: 50, cacheRead: 800, uncached: 200, cacheObserved: true, raw: { prompt_tokens: 1000, prompt_cache_hit_tokens: 800, prompt_cache_miss_tokens: 200 } })
+    + mkRun({ input: 1000, output: 50, cacheRead: 800, uncached: 200, cacheObserved: true, raw: { prompt_tokens: 1000, prompt_cache_hit_tokens: 800, prompt_cache_miss_tokens: 200 } })
+    + mkRun({ input: 1000, output: 50, cacheRead: 800, uncached: 200, cacheObserved: true, raw: { prompt_tokens: 1000, prompt_cache_hit_tokens: 800, prompt_cache_miss_tokens: 200 } }))
+  const r = aggregateStats(TMP2, {})
+  eq(r.observedInput, 3000, 'observedInput 只含报告了缓存的请求（3×1000）')
+  eq(r.totalCacheRead, 2400, 'cacheRead=2400')
+  ok(Math.abs(r.tokenHitRate - 0.8) < 1e-9, `Token 观测命中率=2400/3000=80%（实际 ${r.tokenHitRate}；旧实现 2400/5000=48% 把未观测当 0 命中）`)
+  eq(r.observedRequests, 3, 'observedRequests=3')
+  eq(r.hitRequests, 3, 'hitRequests=3（三条都 read>0）')
+  ok(Math.abs(r.requestHitRate - 1) < 1e-9, '请求命中率=3/3=100%')
+  eq(r.unobservedRequests, 2, '未观测旧请求单独计数=2')
+  // 旧日志兜底路径：raw 里有 hit 字段也算观测
+  ok(r.firstObservedAt != null, '暴露 firstObservedAt（「自本次部署后」窗口锚点）')
+  fs.rmSync(TMP2, { recursive: true, force: true })
+})
+
+await test('aggregateStats：cold/warm 分层 + raw 兜底提取', async () => {
+  const { aggregateStats } = await import('./logs.js')
+  const TMP3 = fs.mkdtempSync(path.join(os.tmpdir(), 'weblogs-cw-'))
+  const t0 = new Date()
+  const mk = (time, usage) => JSON.stringify({ level: 'info', time: time.toISOString(), event: 'run_end', usage }) + '\n'
+  // 单文件 3 个 run_end（同会话）：第一条=cold（read=0），后两条=warm（read>0）
+  fs.writeFileSync(path.join(TMP3, '960179589-1111111111-1-' + fmt(new Date()) + '120000.log'),
+    mk(new Date(t0.getTime() - 60000), { input: 500, output: 10, cacheRead: 0, uncached: 500, cacheObserved: true, raw: { prompt_tokens: 500 } })
+    + mk(t0, { input: 500, output: 10, cacheRead: 400, uncached: 100, cacheObserved: true, raw: { prompt_tokens: 500, prompt_cache_hit_tokens: 400 } })
+    + mk(new Date(t0.getTime() + 60000), { input: 500, output: 10, cacheRead: 450, uncached: 50, cacheObserved: true, raw: { prompt_tokens: 500, prompt_cache_hit_tokens: 450 } }))
+  const r = aggregateStats(TMP3, {})
+  fs.rmSync(TMP3, { recursive: true, force: true })
+  ok(r.warmObserved >= 2 && r.warmHit >= 2, `warm 观测/命中分层（warm=${r.warmObserved}/${r.warmHit}）`)
+  ok(r.coldObserved >= 1, '每文件首个 run_end 记 cold')
+  ok(r.warmRequestHitRate == null || r.warmRequestHitRate <= 1, '比率不越界')
+})
+
+await test('aggregateStats：旧日志 raw 兜底（无顶层 cache 字段时从 raw 提取并标观测）', async () => {
+  const { aggregateStats } = await import('./logs.js')
+  const TMP4 = fs.mkdtempSync(path.join(os.tmpdir(), 'weblogs-raw-'))
+  const iso = new Date().toISOString()
+  fs.writeFileSync(path.join(TMP4, '960179589-2222222222-1-' + fmt(new Date()) + '130000.log'),
+    JSON.stringify({ level: 'info', time: iso, event: 'run_end', usage: { input: 200, output: 20, raw: { prompt_tokens: 200, prompt_cache_hit_tokens: 120, prompt_cache_miss_tokens: 80 } } }) + '\n')
+  const r = aggregateStats(TMP4, {})
+  fs.rmSync(TMP4, { recursive: true, force: true })
+  ok(r.observedInput >= 200 && r.totalCacheRead >= 120, `raw 兜底计入观测（observed=${r.observedInput}, read=${r.totalCacheRead}）`)
+})
+
 await test('readLogFile：路径穿越防护', async () => {
   eq(readLogFile(TMP, '../' + path.basename(TMP) + '/x.log'), [], '拒绝目录穿越')
   eq(readLogFile(TMP, 'not-exist.log'), [], '不存在返回空')

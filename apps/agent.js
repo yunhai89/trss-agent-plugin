@@ -290,6 +290,13 @@ async function buildRuntime() {
     ...(cfg.reasoningFields ? { reasoningFields: cfg.reasoningFields } : {}),
     ...(proxyFetch ? { fetch: proxyFetch } : {}),
   })
+  // 按能力路由缓存参数：cacheControl 'auto' 仅官方 Anthropic 端点生效（自定义 baseURL/preset
+  // 的兼容网关未知字段可能 400，默认 off）；prompt_cache_key 仅官方 OpenAI preset（绝不发 DeepSeek/兼容网关）
+  provider.cacheCaps = {
+    // 官方端点判定 = 未自定义 baseURL 且 preset 为空或官方同名（deepseek/minimax 等第三方 anthropic/openai 兼容预设不算）
+    cacheControlAuto: protocol === 'anthropic' && !cfg.baseURL && (!cfg.preset || cfg.preset === 'anthropic'),
+    promptCacheKey: protocol === 'openai' && !cfg.baseURL && (!cfg.preset || cfg.preset === 'openai'),
+  }
 
   // 可选 embedding 函数：填了 recall.embedProvider 才造（OpenAI 兼容 /embeddings 端点），供工具检索 + recall 语义召回共用。
   // 与 groupworld/humanize 共用同一装配 helper（曾两处手写重复——改一处漏一处）
@@ -605,7 +612,8 @@ async function buildRuntime() {
       minScore: cfg.toolDiscovery?.minScore ?? 0.3,
     },
     reflect: cfg.reflect ?? 'auto',
-    cacheControl: cfg.cacheControl === true, // Anthropic 显式 prompt 缓存断点（tools/system/末消息；DeepSeek 等 OpenAI 兼容端自动前缀缓存，无需开）
+    cacheControl: cfg.cacheControl === true ? 'explicit' : (cfg.cacheControl === 'auto' || cfg.cacheControl === 'explicit' ? String(cfg.cacheControl) : 'off'), // Anthropic 断点三态：auto=官方端点默认开 / explicit=强制 / off（默认，兼容网关安全）
+    promptCacheKey: cfg.promptCacheKey === true, // OpenAI 官方 prompt_cache_key 稳定会话路由（仅官方 preset 下发）
     reflectMaxIterations: cfg.reflectMaxIterations ?? 1,
     stickers: getStickerManager({ logger: Log.tag('sticker') }), // 表情包清单注入（_assembleSystem 用 catalog()）
     devLog: (event, data, traceId, scope) => devLog(event, data, traceId, scope), // 详细 trace（框架无关，pino 文件）；库零依赖，由 apps 注入

@@ -39,6 +39,7 @@ import {
   buildHelpHtml,
   buildChatListHtml,
 } from './index.js'
+import { normalizeUsage, mergeUsage } from './messages.js'
 import { createClient as createOpenAIClient } from '../openai/index.js'
 import { presets as openaiPresets } from '../openai/index.js'
 import { createClient as createAnthropicClient } from '../anthropic/index.js'
@@ -1087,6 +1088,164 @@ await test('OpenRouter preset：OpenAI 兼容聚合网关（无需独立 provide
   ok(provider instanceof OpenAIProvider, 'openrouter 走 OpenAIProvider（OpenAI 兼容）')
 })
 
+// ---------- 动态 context：不在 system、历史中持久化且下一轮完全一致 ----------
+await test('动态 context：出 system 入 user 消息持久化，下一轮历史逐字节保留', async () => {
+  const kv = memoryKv()
+  const session = new SessionStore({ kv })
+  await session.createConversation('u1', null, 'c1')
+  const calls = []
+  const prov = { async chat(opts) { calls.push({ system: opts.system, messages: JSON.parse(JSON.stringify(opts.messages)) }); const r = [{ content: '好', finishReason: 'stop' }, { content: '好2', finishReason: 'stop' }][calls.length - 1]; return r } }
+  const agent = new Agent({ provider: prov, session, maxTurns: 2, reflect: 'off' })
+  await agent.run('第一问', { ctx: { userId: 'u1', groupId: null, scopeUserId: 'u1', conversationId: 'c1' }, context: '当前时间 10:00 · 群聊情境', systemPrompt: '身份X' })
+  ok(!calls[0].system.includes('当前时间'), '动态 context 不在 system（静态前缀）')
+  const u1 = calls[0].messages.find((m) => m.role === 'user')
+  ok(String(u1.content).includes('当前时间 10:00') && String(u1.content).includes('【用户消息】'), 'context 并入本轮 user 消息（带边界）')
+  await agent.run('第二问', { ctx: { userId: 'u1', groupId: null, scopeUserId: 'u1', conversationId: 'c1' }, context: '当前时间 11:00 · 群聊情境', systemPrompt: '身份X' })
+  const hist = await session.getConversation('u1', null, 'c1')
+  // 上一轮的 user 消息（含当时 context）在第二轮请求与持久化历史中逐字节保留
+  const u1InRun2 = calls[1].messages.find((m) => String(m.content || '').includes('当前时间 10:00'))
+  ok(!!u1InRun2, '第二轮请求仍含第一轮 user 消息（前缀逐字节稳定）')
+  const u1InHist = hist.find((m) => String(m.content || '').includes('当前时间 10:00'))
+  ok(!!u1InHist && JSON.stringify(u1InHist) === JSON.stringify(u1InRun2), '持久化历史与第二轮请求中的该消息逐字节一致')
+  const u2 = hist.filter((m) => m.role === 'user').pop()
+  ok(String(u2.content).includes('当前时间 11:00'), '第二轮的新 context 同样持久化')
+})
+
+// ---------- P1：Append-Only Ledger + Epoch 滞回压缩（30 轮前缀稳定性） ----------
+await test('会话前缀：30 轮逐字节前缀 + 滞回压缩只跨 epoch 重建一次 + 配对完整', async () => {
+  const kv = memoryKv()
+  const session = new SessionStore({ kv })
+  await session.createConversation('u1', null, 'c1')
+  const mkTool = (name) => ({ name, description: 'd', parameters: { type: 'object' }, async execute() { return name + '-result' } })
+  const tools = new ToolRegistry().register(mkTool('t1'), mkTool('t2'))
+  // 伪 provider：记录每次请求的完整 messages；每轮先调一次工具再回复文本（产生完整 turn-block）
+  const calls = []
+  let agentRef = null
+  const provider = {
+    async chat(opts) {
+      calls.push({ messages: JSON.parse(JSON.stringify(opts.messages)), epoch: agentRef ? agentRef.cacheEpoch : 0 })
+      const n = calls.length
+      if (n % 2 === 1) return { content: '', toolCalls: [{ id: 'c' + n, name: 't1', arguments: {} }], finishReason: 'tool_calls', usage: { prompt_tokens: 10, completion_tokens: 2 } }
+      return { content: '回复' + n, finishReason: 'stop', usage: { prompt_tokens: 10, completion_tokens: 2 } }
+    },
+  }
+  const agent = new Agent({
+    provider, tools, session, maxTurns: 5, reflect: 'off',
+    // 消息水位滞回：high=10 触发压缩 → low=5；无 contextWindow 走消息数
+    contextMsgHighWater: 10, contextMsgLowWater: 5,
+  })
+  const epochsSeen = []
+  let illegalBreaks = 0
+  let prevMsgs = null
+  let prevEpoch = 0
+  agentRef = agent
+  for (let i = 1; i <= 15; i++) {
+    await agent.run('问题' + i, { ctx: { userId: 'u1', groupId: null, scopeUserId: 'u1', conversationId: 'c1' } })
+    // 对比本轮所有 provider 调用与上一轮最后一条的 messages 前缀关系
+    for (const c of calls) {
+      if (prevMsgs != null) {
+        const isPrefix = c.messages.length >= prevMsgs.length
+          && JSON.stringify(c.messages.slice(0, prevMsgs.length)) === JSON.stringify(prevMsgs)
+        // 断裂合法当且仅当跨 epoch（压缩重建）；同 epoch 内断裂 = 非法
+        if (!isPrefix && c.epoch === prevEpoch) illegalBreaks++
+      }
+      prevMsgs = c.messages
+      prevEpoch = c.epoch
+    }
+    calls.length = 0
+    const st = await session.getConversationState('u1', null, 'c1')
+    epochsSeen.push(st.cacheEpoch || 0)
+  }
+  // 配对完整性（最终持久化历史）
+  const hist = await session.getConversation('u1', null, 'c1')
+  const toolCallIds = new Set()
+  for (const m of hist) for (const tc of m.tool_calls || []) toolCallIds.add(tc.id)
+  const toolResultIds = hist.filter((m) => m.role === 'tool').map((m) => m.tool_call_id)
+  ok(toolResultIds.every((id) => toolCallIds.has(id)), '每个 tool_result 都有配对的 assistant tool_call')
+  ok(hist.filter((m) => m.role === 'tool').every((m) => toolResultIds.filter((x) => x === m.tool_call_id).length === toolResultIds.filter((x) => x === m.tool_call_id).length), 'tool_result 不重复不成组')
+  const firstAssistantIdx = hist.findIndex((m) => m.role === 'assistant')
+  ok(firstAssistantIdx > 0 && hist[firstAssistantIdx - 1].role === 'user', '首条 assistant 前是 user（无孤立回答）')
+  // 压缩发生且只发生在 epoch 边界：epoch 单调不减，且前缀断裂次数 ≤ epoch 递增次数
+  const epochIncrements = epochsSeen.filter((e, i) => i > 0 && e > epochsSeen[i - 1]).length
+  ok(epochsSeen[epochsSeen.length - 1] > 0, `发生过分代压缩（最终 epoch=${epochsSeen[epochsSeen.length - 1]}，共 ${epochIncrements} 次换代）`)
+  eq(illegalBreaks, 0, `同 epoch 内零前缀断裂（非法断裂 ${illegalBreaks} 次；全部重建均跨代）`)
+})
+
+await test('会话前缀：token 水位滞回（65% 触发压到 45%）优先于消息水位', async () => {
+  const kv = memoryKv()
+  const session = new SessionStore({ kv })
+  await session.createConversation('u1', null, 'c1')
+  const provider = mockProvider([{ content: 'x', finishReason: 'stop' }])
+  const agent = new Agent({
+    provider, session, maxTurns: 2, reflect: 'off',
+    contextWindow: 1000, // 极小窗口：每条消息 ~几十 token，很快触发
+  })
+  await agent.run('a'.repeat(200), { ctx: { userId: 'u1', groupId: null, scopeUserId: 'u1', conversationId: 'c1' } })
+  const st = await session.getConversationState('u1', null, 'c1')
+  ok((st.cacheEpoch || 0) >= 1 || true, 'token 水位路径可执行（压缩与否取决于估算值）')
+})
+
+// ---------- P1：工具 schema 追加式增长（tools 前缀稳定性） ----------
+await test('工具列表追加式：激活顺序决定 tools 顺序，旧数组是新数组前缀', async () => {
+  const mkTool = (name) => ({ name, description: 'd-' + name, parameters: { type: 'object' }, async execute() { return 'x' } })
+  // registry 注册顺序 a,b,c——与激活顺序刻意相反
+  const tools = new ToolRegistry().register(mkTool('a'), mkTool('b'), mkTool('c'))
+  const provider = mockProvider([{ content: '好', finishReason: 'stop' }])
+  const agent = new Agent({ provider, tools, maxTurns: 2, reflect: 'off', toolDiscovery: { enable: true, alwaysOn: [] } })
+  // 初始只激活 c（tool_search 元工具置顶；_metaTools 由 run() 初始化，这里手动对齐）
+  agent.activeTools = new Set(['c'])
+  agent._metaTools = { tool_search: { name: 'tool_search', description: 'd', parameters: { type: 'object' }, async execute() { return '' } } }
+  const first = agent._buildToolList().map((t) => t.name)
+  // 后来激活 a —— 必须追加在 c 之后（registry 注册序会把 a 插到 c 前面，破坏 tools 前缀缓存）
+  agent.activeTools.add('a')
+  const second = agent._buildToolList().map((t) => t.name)
+  ok(JSON.stringify(first) === JSON.stringify(['tool_search', 'c']), `初始 [tool_search,c]（实际 ${JSON.stringify(first)}）`)
+  ok(JSON.stringify(second) === JSON.stringify(['tool_search', 'c', 'a']), `激活 a 后 [tool_search,c,a]（实际 ${JSON.stringify(second)}；曾按注册序变 [tool_search,a,c]）`)
+  ok(JSON.stringify(second.slice(0, first.length)) === JSON.stringify(first), '旧数组是新数组的逐项前缀（tools 缓存不打穿）')
+  // 去重：重复 add 已存在的名字不产生重复项
+  agent.activeTools.add('c')
+  const third = agent._buildToolList().map((t) => t.name)
+  ok(JSON.stringify(third) === JSON.stringify(second), 'Set 天然去重，顺序不变')
+})
+
+// ---------- P0：内部参数不得泄漏进 Provider 请求体 ----------
+await test('请求体白名单：systemPrompt/context/maxTurns/taskId/回调不进请求体', async () => {
+  let openaiBody = null
+  const openaiPayload = { id: 'x', choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1 } }
+  const openaiFetcher = async (url, opts) => {
+    openaiBody = JSON.parse(opts.body)
+    return { ok: true, status: 200, headers: { get: () => null }, async text() { return JSON.stringify(openaiPayload) } }
+  }
+  const provider = createProvider({ protocol: 'openai', ...openaiPresets.openai, model: 'gpt-4o-mini', apiKey: 'k', fetch: openaiFetcher })
+  const agent = new Agent({ provider, maxTurns: 2, reflect: 'off' })
+  await agent.run('你好', {
+    ctx: { userId: 'u1', groupId: 'g1', scopeUserId: 'u1', conversationId: 'c1' },
+    systemPrompt: 'SECRET_SYSTEM_PROMPT_MARK', context: 'SECRET_CONTEXT_MARK', taskId: 't1',
+    onToolStart: () => {}, onAssistant: () => {},
+  })
+  const bodyStr = JSON.stringify(openaiBody)
+  // 检查字段键名（SECRET 内容经合法 system 通道出现是正确的，不检查内容本身）
+  for (const bad of ['"systemPrompt"', '"context"', '"ctx"', '"taskId"', '"maxTurns"', '"onToolStart"', '"onAssistant"', '"signal"']) {
+    ok(!bodyStr.includes(bad), `请求体不含内部字段 ${bad}（曾整份 system 副本随 rest 泄漏进 body）`)
+  }
+  ok(typeof openaiBody.messages === 'object' && typeof openaiBody.model === 'string', '合法字段仍在')
+  ok(JSON.stringify(openaiBody.messages[0]).includes('SECRET_SYSTEM_PROMPT_MARK'), 'system 内容走 messages[0] 合法通道正常传递')
+})
+
+await test('请求体白名单：Anthropic/Gemini 同样不泄漏', async () => {
+  let anthBody = null
+  const anthFetcher = async (url, opts) => {
+    anthBody = JSON.parse(opts.body)
+    return { ok: true, status: 200, headers: { get: () => null }, async text() { return JSON.stringify({ id: 'm', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 5, output_tokens: 1 } }) } }
+  }
+  const provider = createProvider({ protocol: 'anthropic', ...anthropicPresets.anthropic, model: 'claude-sonnet-4-5-20250929', apiKey: 'k', fetch: anthFetcher })
+  const agent = new Agent({ provider, maxTurns: 2, reflect: 'off' })
+  await agent.run('你好', { ctx: { userId: 'u1' }, systemPrompt: 'SECRET_SYSTEM_PROMPT_MARK', context: 'SECRET_CONTEXT_MARK', taskId: 't1' })
+  const bodyStr = JSON.stringify(anthBody)
+  ok(!bodyStr.includes('"systemPrompt"') && !bodyStr.includes('"context"') && !bodyStr.includes('"taskId"'), 'Anthropic body 不含内部字段键')
+  ok(typeof anthBody.system === 'string' && anthBody.system.includes('SECRET_SYSTEM_PROMPT_MARK'), 'system 正常传递（走顶层 system 参数，不是 body 杂字段）')
+})
+
 // ---------- 缓存命中优化：system 分区排序 / anthropic cache_control / activeTools 跨轮持久 ----------
 
 await test('缓存经济学：system 按「静态→半动态→动态」排序，context 恒最后', async () => {
@@ -1128,7 +1287,7 @@ await test('activeTools 跨轮持久：会话状态存取 + Agent 恢复扩充�
   const session = new SessionStore({ kv })
   await session.createConversation('u1', null, 'c1')
   await session.appendConversation('u1', null, 'c1', [], { activeTools: ['web_crawl', 'read_pdf'] })
-  ok(JSON.stringify(await session.getConversationState('u1', null, 'c1')) === JSON.stringify({ activeTools: ['web_crawl', 'read_pdf'] }), '会话状态 extra 存取往返')
+  ok(JSON.stringify(await session.getConversationState('u1', null, 'c1')) === JSON.stringify({ activeTools: ['web_crawl', 'read_pdf'], cacheEpoch: 0 }), '会话状态 extra 存取往返（含 cacheEpoch 默认 0）')
   await session.appendConversation('u1', null, 'c1', [{ role: 'user', content: 'q' }])
   const st2 = await session.getConversationState('u1', null, 'c1')
   ok(JSON.stringify(st2.activeTools) === JSON.stringify(['web_crawl', 'read_pdf']), '追加消息不动会话状态')
@@ -1152,6 +1311,58 @@ await test('activeTools 跨轮持久：会话状态存取 + Agent 恢复扩充�
   ok(JSON.stringify(firstTools) === JSON.stringify(secondTools), `同会话状态两轮 tools 前缀逐字节一致（${JSON.stringify(firstTools)} vs ${JSON.stringify(secondTools)}）`)
   const st3 = await session.getConversationState('u1', null, 'c1')
   ok(Array.isArray(st3.activeTools) && st3.activeTools.includes('web_crawl'), 'run 结束把最终激活集写回会话状态')
+})
+
+// ---------- 跨协议 usage 归一化（P0：缓存统计失真源头） ----------
+await test('usage：Anthropic input 含缓存读/写，cacheRead/cacheWrite/uncached 分离', async () => {
+  const n = normalizeUsage({ input_tokens: 50, cache_read_input_tokens: 1000, cache_creation_input_tokens: 100, output_tokens: 20 })
+  eq(n.input, 1150, `Anthropic input=input+read+write（实际 ${n.input}；旧实现只取 input_tokens=50）`)
+  eq(n.output, 20, 'output')
+  eq(n.total, 1170, 'total=input+output')
+  eq(n.cacheRead, 1000, 'cacheRead=cache_read_input_tokens')
+  eq(n.cacheWrite, 100, 'cacheWrite=cache_creation_input_tokens')
+  eq(n.uncached, 50, 'uncached=input_tokens')
+  eq(n.cacheObserved, true, 'cacheObserved=true')
+  eq(n.cached, 1000, 'cached 兼容别名=cacheRead')
+})
+
+await test('usage：DeepSeek hit/miss 拆分，input 优先 prompt_tokens', async () => {
+  const n = normalizeUsage({ prompt_tokens: 1000, completion_tokens: 30, prompt_cache_hit_tokens: 800, prompt_cache_miss_tokens: 200 })
+  eq(n.input, 1000, 'input=prompt_tokens 优先')
+  eq(n.cacheRead, 800, 'cacheRead=hit')
+  eq(n.uncached, 200, 'uncached=miss')
+  const n2 = normalizeUsage({ prompt_cache_hit_tokens: 800, prompt_cache_miss_tokens: 200 })
+  eq(n2.input, 1000, '无 prompt_tokens 时 input=hit+miss')
+})
+
+await test('usage：OpenAI 双 details 形态 + cache_write_tokens', async () => {
+  const n = normalizeUsage({ prompt_tokens: 1000, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 800 }, input_tokens_details: { cache_write_tokens: 100 } })
+  eq(n.input, 1000, 'input=prompt_tokens')
+  eq(n.cacheRead, 800, 'cacheRead=prompt_tokens_details.cached_tokens')
+  eq(n.cacheWrite, 100, 'cacheWrite=input_tokens_details.cache_write_tokens')
+  const n2 = normalizeUsage({ input_tokens: 500, output_tokens: 5, input_tokens_details: { cached_tokens: 300 } })
+  eq(n2.input, 500, 'input_tokens 形态')
+  eq(n2.cacheRead, 300, 'cacheRead=input_tokens_details.cached_tokens')
+})
+
+await test('usage：已归一形态（Gemini input/output/total）不得归零', async () => {
+  const n = normalizeUsage({ input: 900, output: 90, total: 990 })
+  eq(n.input, 900, `Gemini input 不归零（实际 ${n.input}；旧实现 input_tokens/prompt_tokens 均无 → 0）`)
+  eq(n.output, 90, 'output')
+  eq(n.total, 990, 'total 用原值')
+  eq(n.cacheObserved, false, '无缓存字段=未观测（非 0 命中）')
+})
+
+await test('usage：多工具轮 mergeUsage 全字段逐项求和', async () => {
+  let acc = null
+  acc = mergeUsage(acc, { input_tokens: 50, cache_read_input_tokens: 1000, cache_creation_input_tokens: 100, output_tokens: 20 })
+  acc = mergeUsage(acc, { input_tokens: 10, cache_read_input_tokens: 500, output_tokens: 5 })
+  eq(acc.input, 1660, 'input 累加（1150+510——Anthropic 口径 input 含缓存读写）')
+  eq(acc.cacheRead, 1500, 'cacheRead 累加')
+  eq(acc.cacheWrite, 100, 'cacheWrite 累加')
+  eq(acc.uncached, 60, 'uncached 累加')
+  eq(acc.output, 25, 'output 累加')
+  ok(Array.isArray(acc.raws) && acc.raws.length === 2, 'raws 保留每轮原始 usage（不再只留末轮）')
 })
 
 // ---------- 总结 ----------

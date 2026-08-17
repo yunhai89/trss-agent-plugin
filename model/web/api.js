@@ -283,10 +283,25 @@ router.get('/tevo/health', asyncHandler(async (req, res) => {
 // GET /api/overview —— 概览聚合（60s 缓存）
 let _overviewCache = null
 router.get('/overview', asyncHandler(async (req, res) => {
-  if (_overviewCache && Date.now() - _overviewCache.at < 60000) return ok(res, _overviewCache.data)
+  // 时间窗（1h/24h/7d/new=自新链路部署后/all）——「new」以 firstObservedAt 为锚，
+  // 旧版本日志（无缓存字段）不进窗口，避免稀释新链路的命中率。
+  // 窗口参数参与缓存键（60s 聚合缓存按窗口分桶）。
+  const win = String(req.query.window || '7d')
+  const r0 = aggregateStats(Config.path.logs, { since: 0, topK: 5 })
+  let since
+  if (win === '1h') since = Date.now() - 3600e3
+  else if (win === '24h') since = Date.now() - 24 * 3600e3
+  else if (win === 'new') since = r0.firstObservedAt != null ? r0.firstObservedAt - 1 : 0
+  else if (win === 'all') since = 0
+  else since = Date.now() - 7 * 86400000
+  if (_overviewCache && _overviewCache.win === win && Date.now() - _overviewCache.at < 60000) return ok(res, _overviewCache.data)
   const r = await getRuntime().catch(() => null)
-  const since = Date.now() - 7 * 86400000
-  const { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached } = aggregateStats(Config.path.logs, { since, topK: 5 })
+  const stats = since === 0 ? r0 : aggregateStats(Config.path.logs, { since, topK: 5 })
+  const {
+    tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached,
+    totalCacheRead, totalCacheWrite, observedInput, observedRequests, hitRequests, unobservedRequests,
+    tokenHitRate, requestHitRate, warmObserved, warmHit, coldObserved, warmRequestHitRate, firstObservedAt,
+  } = stats
   // perceptions（kv.scan）
   const perceptions = []
   if (r?.kv) {
@@ -315,8 +330,12 @@ router.get('/overview', asyncHandler(async (req, res) => {
     scopes: fs.existsSync(Config.path.memories) ? fs.readdirSync(Config.path.memories).length : 0,
     conversations,
   }
-  const data = { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached, perceptions, counts }
-  _overviewCache = { at: Date.now(), data }
+  const data = {
+    tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached, perceptions, counts,
+    // 缓存统计（观测口径）：未观测 ≠ 0 命中；cold/warm 分层；比率 null=无观测数据（前端显示「暂无」）
+    cache: { totalCacheRead, totalCacheWrite, observedInput, observedRequests, hitRequests, unobservedRequests, tokenHitRate, requestHitRate, warmObserved, warmHit, coldObserved, warmRequestHitRate, firstObservedAt },
+  }
+  _overviewCache = { at: Date.now(), win, data }
   return ok(res, data)
 }))
 

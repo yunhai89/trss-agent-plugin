@@ -85,9 +85,10 @@
     async loadSchedule() { MOCK.schedules = await api.get('/schedule') },
     async loadConfirm() { MOCK.confirms = await api.get('/confirm') },
     async loadSuggestions(scopeId, status) { MOCK.suggestions = await api.get('/suggestions', { scopeId, status }) },
-    async loadOverview() {
-      const d = await api.get('/overview')
+    async loadOverview(query = {}) {
+      const d = await api.get('/overview', query)
       MOCK.tokenTrend = d.tokenTrend; MOCK.requestTrend = d.requestTrend; MOCK.toolTop = d.toolTop
+      MOCK.cache = d.cache || null
       MOCK.perceptions = d.perceptions
       MOCK.totalRequests = d.totalRequests || 0; MOCK.totalToolCalls = d.totalToolCalls || 0; MOCK.totalTokens = d.totalTokens || 0
       if (d.counts) MOCK.counts = d.counts

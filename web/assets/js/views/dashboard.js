@@ -97,18 +97,33 @@
 
       const perceptions = computed(() => M.perceptions || [])
       const totalTokens = computed(() => (M.tokenTrend || []).reduce((s, d) => s + d.input + d.output, 0))
-      /* 缓存统计（独立卡，不挤在 Token 消耗趋势里）。口径 = 一整个完整 Agent 流的用量：
-       * run_end.usage 是 Agent 全部工具轮 + 反思/收尾调用的累计（normalizeUsage/mergeUsage），
-       * cached 同源累加——不是单次请求的末轮值 */
+      /* 缓存统计（独立卡）。口径 = 一整个完整 Agent 流累计（后端 normalizeUsage/mergeUsage），
+       * 观测分母：未观测旧日志不进命中率；cold/warm 分层（warm 命中率才是改造真实效果） */
+      const win = Vue.ref('7d')
       const cacheStats = computed(() => {
+        const c = M.cache || null
+        if (c) {
+          const pct = (v) => (v == null ? null : Math.max(0, Math.min(100, v * 100)))
+          return {
+            input: c.observedInput || 0, output: 0, cached: c.totalCacheRead || 0,
+            cacheWrite: c.totalCacheWrite || 0, miss: Math.max(0, (c.observedInput || 0) - (c.totalCacheRead || 0)),
+            hitRate: pct(c.tokenHitRate), requestHitRate: pct(c.requestHitRate), warmHitRate: pct(c.warmRequestHitRate),
+            unobserved: c.unobservedRequests || 0, observedReq: c.observedRequests || 0,
+            warmObserved: c.warmObserved || 0, warmHit: c.warmHit || 0, coldObserved: c.coldObserved || 0,
+            hasData: (c.observedRequests || 0) > 0, hasRequestRate: c.requestHitRate != null,
+          }
+        }
+        // 旧后端 fallback（无 /overview.cache 字段）
         const t = M.tokenTrend || []
         const input = t.reduce((s, d) => s + (d.input || 0), 0)
-        const output = t.reduce((s, d) => s + (d.output || 0), 0)
         const cached = t.reduce((s, d) => s + (d.cached || 0), 0)
-        const miss = Math.max(0, input - cached)
         const hitRate = input > 0 ? (cached / input) * 100 : 0
-        return { input, output, cached, miss, hitRate, missRate: input > 0 ? 100 - hitRate : 0, hasData: input > 0 }
+        return { input, output: 0, cached, cacheWrite: 0, miss: Math.max(0, input - cached), hitRate, missRate: input > 0 ? 100 - hitRate : 0, hasData: input > 0, hasRequestRate: false, unobserved: 0 }
       })
+      const setWin = async (w) => {
+        win.value = w
+        try { await window.store.loadOverview({ window: w }) } catch { /* 忽略 */ }
+      }
 
       /* 惰性加载:概览聚合 + 配置(开关速览/统计卡用);失败静默(各页自有 load) */
       onMounted(async () => {
@@ -116,7 +131,7 @@
         try { await window.store.loadConfig() } catch { /* 忽略 */ }
       })
 
-      return { stats, chart, reqChart, toolTop, toolMax, switches, perceptions, totalTokens, cacheStats, fmt, M }
+      return { stats, chart, reqChart, toolTop, toolMax, switches, perceptions, totalTokens, cacheStats, win, setWin, fmt, M }
     },
     template: `
     <div>
@@ -250,10 +265,18 @@
           <div class="row-b wrap g10">
             <div class="ct">
               <span class="ct-ico" style="background:linear-gradient(135deg,#f59e0b,#f43f5e)"><v-icon name="zap"/></span>
-              <div><div class="ct-t">Token 缓存统计</div><div class="ct-s">完整 Agent 流累计用量（全部工具轮+反思）· 近 7 日</div></div>
+              <div><div class="ct-t">Token 缓存统计</div><div class="ct-s">观测口径：未观测旧日志不进命中率 · cold/warm 分层</div></div>
             </div>
-            <span v-if="cacheStats.hasData" class="pill p-honey" style="font-size:11px">输入命中率 {{ cacheStats.hitRate.toFixed(1) }}%</span>
-            <span v-else class="pill" style="font-size:11px">暂无数据</span>
+            <div class="row g6" style="font-size:11px">
+              <button v-for="w in ['1h','24h','7d','new','all']" :key="w" class="btn" :class="win===w?'b-pri':'b-line'" style="padding:3px 9px;font-size:11px" @click="setWin(w)">{{ w==='new'?'部署后':(w==='all'?'全部':w) }}</button>
+            </div>
+          </div>
+          <div v-if="cacheStats.hasData" class="row g10 wrap" style="margin-top:12px;font-size:11.5px">
+            <span class="pill p-honey">请求命中率 {{ cacheStats.requestHitRate != null ? cacheStats.requestHitRate.toFixed(1) + '%' : '暂无' }}</span>
+            <span class="pill p-mint">Token 命中率 {{ cacheStats.hitRate != null ? cacheStats.hitRate.toFixed(1) + '%' : '暂无' }}</span>
+            <span v-if="cacheStats.warmHitRate != null" class="pill p-sky">warm 命中率 {{ cacheStats.warmHitRate.toFixed(1) }}%（{{ cacheStats.warmHit }}/{{ cacheStats.warmObserved }}）</span>
+            <span class="pill">cold {{ cacheStats.coldObserved }}</span>
+            <span v-if="cacheStats.unobserved > 0" class="pill" style="opacity:.75">未观测旧日志 {{ cacheStats.unobserved }} 条（不进分母）</span>
           </div>
           <template v-if="cacheStats.hasData">
             <div class="mt16" style="display:flex;flex-direction:column;gap:14px">
@@ -263,8 +286,9 @@
                   <span class="num" style="font-weight:700">{{ fmt.num(cacheStats.input) }}</span>
                 </div>
                 <div class="row g6" style="margin-bottom:6px;font-size:11px">
-                  <span style="color:#f59e0b">命中 {{ fmt.num(cacheStats.cached) }}（{{ cacheStats.hitRate.toFixed(1) }}%）</span>
-                  <span style="color:#f43f5e">未命中 {{ fmt.num(cacheStats.miss) }}（{{ cacheStats.missRate.toFixed(1) }}%）</span>
+                  <span style="color:#f59e0b">缓存读取 {{ fmt.num(cacheStats.cached) }}（{{ cacheStats.hitRate != null ? cacheStats.hitRate.toFixed(1) : '?' }}%）</span>
+                  <span style="color:#f43f5e">未缓存输入 {{ fmt.num(cacheStats.miss) }}</span>
+                  <span v-if="cacheStats.cacheWrite > 0" style="color:#a78bfa">缓存写入 {{ fmt.num(cacheStats.cacheWrite) }}</span>
                 </div>
                 <div style="display:flex;height:10px;border-radius:6px;overflow:hidden;background:var(--line)">
                   <i :style="{width: cacheStats.hitRate + '%', background: 'linear-gradient(90deg,#f59e0b,#fbbf24)', transition: 'width .8s var(--eo)'}"></i>
@@ -277,7 +301,7 @@
                   <span class="num" style="font-weight:700">{{ fmt.num(cacheStats.output) }}</span>
                 </div>
                 <div class="meter"><i :style="{width: '100%', background: 'linear-gradient(90deg,#2dd4bf,#14b8a6)'}"></i></div>
-                <div style="font-size:11px;color:var(--ink3);margin-top:5px">输出生成不走前缀缓存，按全价计</div>
+                <div style="font-size:11px;color:var(--ink3);margin-top:5px">输出生成不走前缀缓存，按全价计；缓存写入为 Anthropic cache_creation / OpenAI cache_write</div>
               </div>
               <div class="row-b" style="font-size:12px;padding-top:10px;border-top:1px dashed var(--line)">
                 <span style="color:var(--ink3)">合计</span>

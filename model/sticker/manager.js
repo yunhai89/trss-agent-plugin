@@ -102,8 +102,17 @@ export class StickerManager {
   /** prompt 注入块；未启用/无清单返回空串 */
   catalog() {
     if (!this.enabled()) return ''
-    return buildCatalog(this.getIndex(), { listTopN: this.cfg.listTopN ?? 30 })
+    // 按 index 版本缓存 catalog 文本：system 前缀不因 usageCount 写盘（mtime 变）逐轮改写。
+    // 刷新时机 = index 结构性变更（install/update/discover/目录启停置脏 _catalogVersion）。
+    if (this._catalogCache && this._catalogCacheVersion === this._catalogVersion) return this._catalogCache
+    const text = buildCatalog(this.getIndex(), { listTopN: this.cfg.listTopN ?? 30 })
+    this._catalogCache = text
+    this._catalogCacheVersion = this._catalogVersion
+    return text
   }
+
+  /** index 结构性变更时调用（install/update/discover/syncImages）——usageCount 节流写盘不算 */
+  bumpCatalogVersion() { this._catalogVersion = (this._catalogVersion || 0) + 1 }
 
   // ───────────────────────── 自动发现（MaiBot 式） ─────────────────────────
 
@@ -141,12 +150,13 @@ export class StickerManager {
     }
     // 入 index（去重双保险）+ 超限淘汰
     let next = addDiscoveredEntry(index, { name: judged.name, file: fileRel, desc: judged.desc, tags: judged.tags, hash, source: 'discovered' })
+    this.bumpCatalogVersion()
     if (next.dup) return { status: 'dup', hash }
     const cap = Math.max(1, Number(maxDiscovered ?? this.cfg.maxDiscovered ?? 200))
     const ev = evictDiscoveredToCap(next.index, cap)
     for (const f of ev.removedFiles) { try { fs.unlinkSync(f) } catch { /* noop */ } }
     this._indexCache = ev.index
-    try { saveIndex(ev.index) } catch (e) { this.logger('warn', '[sticker] discover 写盘失败', e?.message || e) }
+    try { saveIndex(ev.index); this.bumpCatalogVersion() } catch (e) { this.logger('warn', '[sticker] discover 写盘失败', e?.message || e) }
     this.logger('mark', `[sticker] 自动发现+入库：${next.name}（${judged.tags.join('/') || '无标签'}）${judged.noVision ? ' [无视觉模型，未打标]' : ''}`)
     return { status: 'added', name: next.name, tags: judged.tags, desc: judged.desc, hash }
   }

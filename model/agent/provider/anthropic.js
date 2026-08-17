@@ -170,7 +170,7 @@ export class AnthropicProvider extends Provider {
     if (stream) body.stream = true
 
     if (stream) {
-      const s = await this.client.messages.create({ ...body, signal })
+      const s = await this.client.messages.create(body, { signal }) // signal 走 opts 第二参（曾 {...body, signal} 并入请求体）
       // 流式 live 旁路：剥掉内联 <think>，避免中途播报(onDelta)泄漏思考
       const stripper = onDelta ? createThinkStripper() : null
       for await (const ev of s) {
@@ -180,7 +180,7 @@ export class AnthropicProvider extends Provider {
       return resultFromStream(s)
     }
 
-    const res = await this.client.messages.create({ ...body, signal })
+    const res = await this.client.messages.create(body, { signal })
     return resultFromResponse(res)
   }
 }

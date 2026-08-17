@@ -10,7 +10,7 @@
  */
 
 export class SessionStore {
-  constructor({ kv, prefix = 'Yz:agent:sess:', window = 20, ttl = 86400 } = {}) {
+  constructor({ kv, prefix = 'Yz:agent:sess:', window = 400, ttl = 86400 } = {}) { // window=绝对安全上限（曾 20 每轮滑窗 bust 缓存）
     if (!kv) throw new Error('SessionStore 需要 kv')
     this.kv = kv
     this.prefix = prefix
@@ -53,7 +53,10 @@ export class SessionStore {
     if (!msgs || !msgs.length) return this.get(k)
     const cur = await this.get(k)
     const next = [...cur, ...msgs]
-    const trimmed = trimKeepFirst(next, this.window)
+    // Append-Only Ledger：不再每条滑窗（曾 window=20 每轮删最旧块 → messages 前缀逐轮变化，
+    // DeepSeek 等按整段前缀缓存全灭）。压缩职责移交 Agent 的高低水位滞回（cacheEpoch 分代）；
+    // window 仅作绝对安全上限（防无 Agent 压缩路径的 KV 无界膨胀），默认放大到 400。
+    const trimmed = next.length > this.window ? trimKeepFirst(next, this.window) : next
     this._cache.set(k, trimmed)
     await this.kv.set(k, { messages: trimmed, updatedAt: Date.now() }, this.ttl)
     return trimmed
@@ -62,6 +65,15 @@ export class SessionStore {
   async clear(k) {
     this._cache.delete(k)
     await this.kv.del(k)
+  }
+
+  /** 整体覆写会话消息（Agent 压缩代际用：追加式 ledger 在跨 epoch 压缩后全量落盘，
+   *  不能再走 append——压缩已改写中段，slice(sessStart) 起点错位会持久化出错切分段） */
+  async set(k, msgs) {
+    const arr = Array.isArray(msgs) ? msgs : []
+    this._cache.set(k, arr)
+    await this.kv.set(k, { messages: arr, updatedAt: Date.now() }, this.ttl)
+    return arr
   }
 
   async listAll() {
@@ -195,7 +207,8 @@ export class SessionStore {
     const k = this.convKey(userId, groupId, String(convId))
     const c = (await this.kv.get(k)) || { id: String(convId), title: `对话 ${convId}`, messages: [], createdAt: Date.now() }
     const next = [...(c.messages || []), ...msgs]
-    const trimmed = trimKeepFirst(next, this.window)
+    // 同上：append-only；Agent 滞回压缩负责水位（cacheEpoch 持久化在 extra）
+    const trimmed = next.length > this.window ? trimKeepFirst(next, this.window) : next
     c.messages = trimmed
     c.updatedAt = Date.now()
     // extra：会话级非消息状态（如 toolDiscovery 的 activeTools——跨轮恢复保 tools 前缀稳定，缓存不 bust）
@@ -204,10 +217,24 @@ export class SessionStore {
     return trimmed
   }
 
-  /** 读会话级状态（不含 messages）。Agent.run 恢复 activeTools 用；旧对话无该字段返回空。 */
+  /** 读会话级状态（不含 messages）。Agent.run 恢复 activeTools/cacheEpoch 用；旧对话无该字段返回空。 */
   async getConversationState(userId, groupId, convId) {
     const c = await this.kv.get(this.convKey(userId, groupId, String(convId)))
-    return { activeTools: c && Array.isArray(c.activeTools) ? c.activeTools : null }
+    return {
+      activeTools: c && Array.isArray(c.activeTools) ? c.activeTools : null,
+      cacheEpoch: c && Number.isFinite(Number(c.cacheEpoch)) ? Number(c.cacheEpoch) : 0,
+    }
+  }
+
+  /** 整体覆写对话消息（同 append 的 extra 语义）；Agent 跨 epoch 压缩后全量落盘用 */
+  async setConversation(userId, groupId, convId, messages, extra = {}) {
+    const k = this.convKey(userId, groupId, String(convId))
+    const c = (await this.kv.get(k)) || { id: String(convId), title: `对话 ${convId}`, messages: [], createdAt: Date.now() }
+    c.messages = Array.isArray(messages) ? messages : []
+    c.updatedAt = Date.now()
+    for (const [ek, ev] of Object.entries(extra || {})) if (ev !== undefined) c[ek] = ev
+    await this.kv.set(k, c)
+    return c.messages
   }
 
   async deleteConversation(userId, groupId, convId) {

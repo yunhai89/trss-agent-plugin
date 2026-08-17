@@ -22,6 +22,14 @@ import { TEMPLATES, SERVICE_DIRECTIVE, REFLECTION_DIRECTIVE, buildToolCatalogSec
 
 const DEFAULT_IDENTITY = TEMPLATES.agent.system
 
+/** 稳定短 hash（前缀指纹用——devLog 只记 hash 不重复写 prompt 原文） */
+function shortHash(str) {
+  let h1 = 0x811c9dc5, h2 = 0x01000193
+  const s = String(str || '')
+  for (let i = 0; i < s.length; i++) { h1 = ((h1 ^ s.charCodeAt(i)) * 16777619) >>> 0; h2 = ((h2 + s.charCodeAt(i) * 31) >>> 0) }
+  return (h1.toString(36) + h2.toString(36)).slice(0, 12)
+}
+
 /** 按需发现默认常驻工具（不经过搜索；config.toolDiscovery.alwaysOn 留空时兜底）。tool_search 始终由元工具注入。 */
 const DEFAULT_ALWAYS_ON = ['tool_search', 'clarify', 'memory_search', 'web_search', 'kb_search', 'skill', 'get_chat_history', 'reminder_set']
 
@@ -128,6 +136,13 @@ export class Agent {
 
     this.estimateTokens = config.estimateTokens || null
     this.contextPressureThreshold = config.contextPressureThreshold ?? null
+    // 高低水位滞回压缩（Append-Only Ledger 的分代压缩）：token 水位优先（contextWindow 的
+    // 65% 触发 → 压到 45%），无 contextWindow 用消息数水位（默认 30→18）。压缩 = 整 turn-block
+    // 丢弃 + cacheEpoch++（跨代才允许前缀重建；未超 highWater 只追加不改写——曾 window=20
+    // 每轮滑窗，DeepSeek 等整段前缀缓存逐轮全灭）
+    this.contextMsgHighWater = config.contextMsgHighWater ?? 30
+    this.contextMsgLowWater = config.contextMsgLowWater ?? 18
+    this.cacheEpoch = 0
     // 上下文管理（解决长对话膨胀 / token 溢出）
     this.maxToolResultChars = config.maxToolResultChars ?? 4000 // 单条工具结果字符上限，超长截断
     this.keepReasoning = config.keepReasoning === true // 默认 false：不把 reasoning 回灌历史，省 context
@@ -153,7 +168,11 @@ export class Agent {
     this.shortCircuitTools = config.shortCircuitTools || ['clarify']
     // 自我反思/自纠：最终回复交付前自检，发现实质问题则回环修正。off=关 | auto=仅多轮/用工具时(默认) | always=每次都反思
     this.reflect = config.reflect ?? 'auto'
-    this.cacheControl = config.cacheControl === true // Anthropic 显式 prompt 缓存断点（openai 兼容端为自动前缀缓存，无需开启）
+    // Anthropic 显式断点：'auto'（官方端点默认开）| 'explicit'（显式 true，兼容旧配置）| 'off'。
+    // 第三方兼容网关默认 off（未知字段可能 400）；auto 的官方判定由 apps 装配层写入 provider.cacheCaps。
+    this.cacheControl = config.cacheControl === true ? 'explicit' : (config.cacheControl === 'auto' ? 'auto' : (config.cacheControl === 'explicit' ? 'explicit' : 'off'))
+    // OpenAI 官方 prompt_cache_key（稳定会话路由键；仅 provider.cacheCaps.promptCacheKey=true 时下发，绝不发给 DeepSeek/兼容网关）
+    this.promptCacheKey = config.promptCacheKey === true
     this.reflectMaxIterations = config.reflectMaxIterations ?? 1
 
     // 回退 provider 列表（每条 {provider, model}，独立 baseURL/apiKey/protocol，可跨厂商）；主模型失败时依次尝试
@@ -228,6 +247,7 @@ export class Agent {
       try { this.messages = await this.session.get(sessKey) } catch { this.messages = [] }
     }
     const sessStart = this.messages.length
+    let compactedThisRun = false // 本 run 发生过滞回压缩 → 持久化走全量覆写（slice(sessStart) 会错位）
 
     // 清理历史中的空 assistant 消息（之前 bug 可能产生），给占位避免 API 报 "content or tool_calls must be set"
     this.messages = this.messages.map((m) => {
@@ -283,6 +303,7 @@ export class Agent {
           if (Array.isArray(st?.activeTools)) {
             for (const n of st.activeTools) if (this.tools.has?.(n) && !this.activeTools.has(n)) this.activeTools.add(n)
           }
+          if (Number.isFinite(Number(st?.cacheEpoch))) this.cacheEpoch = Number(st.cacheEpoch)
         } catch { /* 状态缺失按新对话处理 */ }
       }
     } else {
@@ -300,16 +321,16 @@ export class Agent {
     while (turns < this.maxTurns) {
       if (signal?.aborted) throw new Error('aborted')
 
-      const { system, breakdown } = this._assembleSystem(memories, systemPromptOverride, context, scopeId)
+      const { system, breakdown, prefixFp = null, cacheBreakReason = null } = this._assembleSystem(memories, systemPromptOverride, context, scopeId)
 
-      if (this.contextPressureThreshold) {
-        const est = this._estimateHistory(system)
-        if (est > this.contextPressureThreshold) {
-          // 实际压缩历史：保留首条 user 意图 + 近期若干条，安全丢弃中段整轮
-          const dropped = this._compactMessages(Math.floor(this.contextPressureThreshold * 0.6))
-          if (dropped) this.logger('mark', `上下文压力(est=${est}>${this.contextPressureThreshold})：压缩历史，丢弃 ${dropped} 条中段消息`)
-          cb.onContextPressure?.({ estimate: est, threshold: this.contextPressureThreshold, dropped, messages: this.messages })
-        }
+      // 高低水位滞回：未超 highWater 只追加（前缀逐字节稳定）；超了才一次压到 lowWater + epoch++
+      const pressure = this._hysteresisPressure(system)
+      if (pressure) {
+        compactedThisRun = true
+        const { est, high, dropped, epoch } = pressure
+        this.logger('mark', `[epoch] 上下文压力(est=${est}>${high})：滞回压缩至低水位，丢弃 ${dropped} 条整块消息，cacheEpoch ${epoch - 1}→${epoch}`)
+        this.devLog?.('cache_compact', { est, high, low: this._lowWaterMetric(system).value, dropped, cacheEpoch: epoch, msgsAfter: this.messages.length }, taskId, ctx?.devScope)
+        cb.onContextPressure?.({ estimate: est, threshold: high, dropped, cacheEpoch: epoch, messages: this.messages })
       }
 
       const toolList = this._buildToolList() // 每轮重算：tool_search 命中后 activeTools 扩充，下轮须重新合成
@@ -326,7 +347,8 @@ export class Agent {
         tools: toolList.length ? toolList : undefined, tool_choice: this.toolChoice,
         temperature: this.temperature, max_tokens: this.maxTokens, thinking: this.thinking,
         signal, stream: wantStream, onDelta: __delta, onReasoning: cb.onReasoning,
-        ...(this.cacheControl ? { cacheControl: true } : {}),
+        ...(this._cacheControlFor(prov) ? { cacheControl: true } : {}),
+        ...this._promptCacheKeyFor(prov),
         ...this._extraRunOpts(opts),
       })
       const __tries = [{ provider: this.provider, model: this.model }, ...this.fallbackProviders]
@@ -352,6 +374,7 @@ export class Agent {
       this.logger('debug', `turn ${turns}`, 'model=', this.model, 'finish=', result.finishReason, 'contentLen=', (result.content || '').length, 'toolCalls=', result.toolCalls?.length || 0, 'reasoning=', !!result.reasoning, 'usage=', fmtUsage(result.usage), `ms=${__ms}`)
       this.devLog?.('turn', {
         turn: turns, finish: result.finishReason, contentLen: (result.content || '').length,
+        cacheEpoch: this.cacheEpoch, ...(cacheBreakReason ? { cacheBreakReason } : {}), ...(turns === 1 ? { prefixFp } : {}),
         content: result.content || '', reasoning: !!result.reasoning,
         toolCalls: (result.toolCalls || []).map((tc) => ({ name: tc.name, arguments: tc.arguments })),
         usage: result.usage || null, ms: __ms, toolsSent: toolList.length, breakdown, ...(discoveryOn ? { activeTotal: this.activeTools.size } : {}),
@@ -479,13 +502,19 @@ export class Agent {
 
     // 持久化 session + 异步抽取记忆（按 scopeUserId 归属）
     // 反思草稿已 pop、反馈走 system 不进 messages，历史天然干净（无需额外过滤）
-    const persistMsgs = this.messages.slice(sessStart)
+    // 持久化：普通轮次 append 增量；发生压缩的轮次全量覆写（压缩改写了中段，slice(sessStart)
+    // 起点已错位——曾持久化出错切分段，重启后历史缺块且顺序错乱，Ledger 模式下暴露）
+    const extra = { cacheEpoch: this.cacheEpoch, ...(discoveryOn && this.activeTools ? { activeTools: [...this.activeTools] } : {}) }
     if (useConv) {
-      // 连同本轮最终工具激活集一起持久（下轮恢复，保 tools 前缀稳定 → 缓存不 bust）
-      const extra = discoveryOn && this.activeTools ? { activeTools: [...this.activeTools] } : {}
-      try { await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, persistMsgs, extra) } catch (e) { this.logger('warn', 'conversation 持久化失败', e) }
+      try {
+        if (compactedThisRun) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
+        else await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages.slice(sessStart), extra)
+      } catch (e) { this.logger('warn', 'conversation 持久化失败', e) }
     } else if (sessKey) {
-      try { await this.session.append(sessKey, persistMsgs) } catch (e) { this.logger('warn', 'session 持久化失败', e) }
+      try {
+        if (compactedThisRun) await this.session.set(sessKey, this.messages)
+        else await this.session.append(sessKey, this.messages.slice(sessStart))
+      } catch (e) { this.logger('warn', 'session 持久化失败', e) }
     }
     if (this.recall && ctx) {
       const snapshot = this.messages.slice()
@@ -574,6 +603,26 @@ export class Agent {
       recalledMemory: '', memorySnapshot, skills: skillsSection, sticker: stickerSection,
       conversationTokens: this._estimateMessagesTokens(),
     }, this.estimateTokens)
+    // 前缀指纹（P2 版本化）：只记 hash 不重复写 prompt 原文；与上次比对，变化即记 cacheBreakReason
+    const fp = {
+      systemHash: shortHash(identity + SERVICE_DIRECTIVE),
+      toolHash: shortHash(toolCatalog),
+      memoryVersion: shortHash(memorySnapshot),
+      stickerVersion: shortHash(stickerSection),
+      guardHash: shortHash(guardHardening),
+      skillsHash: shortHash(skillsSection),
+    }
+    let cacheBreakReason = null
+    if (this._lastPrefixFp) {
+      if (fp.systemHash !== this._lastPrefixFp.systemHash) cacheBreakReason = 'system_identity'
+      else if (fp.toolHash !== this._lastPrefixFp.toolHash) cacheBreakReason = 'tool_schema'
+      else if (fp.memoryVersion !== this._lastPrefixFp.memoryVersion) cacheBreakReason = 'memory_snapshot'
+      else if (fp.stickerVersion !== this._lastPrefixFp.stickerVersion) cacheBreakReason = 'sticker_catalog'
+      else if (fp.guardHash !== this._lastPrefixFp.guardHash) cacheBreakReason = 'guard_rules'
+      else if (fp.skillsHash !== this._lastPrefixFp.skillsHash) cacheBreakReason = 'skills_catalog'
+    }
+    this._lastPrefixFp = fp
+
     // 反思反馈拼入 system（非 messages）：让模型视为系统自检指令而非用户输入（审计 §3.7 根治）
     let reflectHint = ''
     if (this._pendingReflect) {
@@ -583,18 +632,32 @@ export class Agent {
 ` + this._pendingReflect
       this._pendingReflect = null // 用一次即清（仅指导紧接的下一次生成）
     }
-    return { system: reflectHint ? system + reflectHint : system, breakdown }
+    return { system: reflectHint ? system + reflectHint : system, breakdown, prefixFp: fp, cacheBreakReason }
   }
 
   /**
    * 合成本轮下发的工具列表：全量模式→全部；按需模式→ per-instance 元工具 ∪ registry.match(activeTools)。
    * 每轮调用（tool_search 可能在上一轮扩充 activeTools）。
    */
+  /**
+   * 合成本轮下发的工具列表：**追加式增长**（tools 是请求最前缀，乱序 = 缓存全灭）。
+   * 元工具固定置顶 + 严格按 activeTools 的 Set 插入序逐个 get（后激活的追加在尾）+ name 去重。
+   * 曾用 registry.match 按注册序输出——后激活的工具插到旧工具之前，tools 前缀每变一次全断。
+   */
   _buildToolList() {
     if (!this.tools) return []
     if (!this.activeTools) return this.tools.list()
-    const matched = this.tools.match({ names: [...this.activeTools] })
-    return [...Object.values(this._metaTools), ...matched]
+    const out = []
+    const seen = new Set()
+    for (const t of Object.values(this._metaTools || {})) {
+      if (t && !seen.has(t.name)) { out.push(t); seen.add(t.name) }
+    }
+    for (const name of this.activeTools) {
+      if (seen.has(name)) continue
+      const t = this.tools.get(name)
+      if (t) { out.push(t); seen.add(name) }
+    }
+    return out
   }
 
   _estimateHistory(system) {
@@ -630,35 +693,98 @@ export class Agent {
    * @param {number} maxTokens 目标 messages token 上限
    * @returns {number} 实际丢弃的消息数
    */
-  _compactMessages(maxTokens) {
+  /**
+   * 滞回水位：token 优先（contextWindow 65%/45%），否则消息数（contextMsgHighWater/LowWater）。
+   * 返回 null=未超 highWater（只追加）；否则执行压缩（整 turn-block 丢弃 + epoch++）并返回摘要。
+   * turn-block = 一条普通 user 起始 + 直到下一条普通 user 之前的全部 assistant/tool_call/tool_result
+   * ——块级丢弃保证不留下孤立回答/孤儿 tool_result/被拆开的并行结果；messages[0]（首条意图）恒保留。
+   */
+  _lowWaterMetric(_system) {
+    if (this.contextWindow) return { kind: 'token', value: Math.floor(this.contextWindow * 0.45) }
+    return { kind: 'count', value: this.contextMsgLowWater }
+  }
+
+  _hysteresisPressure(system) {
+    const useToken = !!this.contextWindow
+    const est = useToken ? this._estimateHistory(system) : this.messages.length
+    const high = useToken ? Math.floor(this.contextWindow * 0.65) : this.contextMsgHighWater
+    if (est <= high) return null
+    const lowMetric = this._lowWaterMetric(system)
+    const dropped = this._compactToLow(lowMetric)
+    if (!dropped) return null
+    this.cacheEpoch++
+    return { est, high, dropped, epoch: this.cacheEpoch }
+  }
+
+  /** 压缩到低水位：按 turn-block 从旧到新丢（跳过 messages[0] 首条意图），直到达标或无可丢 */
+  _compactToLow({ kind, value }) {
     const minKeep = Math.max(this.contextKeepRecent, 2)
     if (this.messages.length <= minKeep + 1) return 0
-    let dropped = 0
-    let guard = 0
-    // cutStart=1：始终保留 messages[0]（首条 user 意图）
-    while (this._estimateMessagesTokens() > maxTokens && this.messages.length > minKeep + 1 && guard++ < 1000) {
-      let cutStart = 1
-      // 尾部保留 minKeep 条
-      const maxCutEnd = this.messages.length - minKeep
-      if (cutStart >= maxCutEnd) break
-      // 从 cutStart 丢一块：assistant(tool_calls)+其 tool 结果 / 单条 user 或 assistant
-      const block = [this.messages[cutStart]]
-      if (this.messages[cutStart].tool_calls) {
-        let j = cutStart + 1
-        while (j < this.messages.length && this.messages[j].role === 'tool') { block.push(this.messages[j]); j++ }
+    // 分块：index 0（首条意图）独立保留；从 index 1 起按 user 边界分 turn-block
+    const blocks = []
+    let i = 1
+    while (i < this.messages.length) {
+      const start = i
+      if (this.messages[i].role === 'user') {
+        i++
+        while (i < this.messages.length && this.messages[i].role !== 'user') i++
+      } else {
+        // 首意图之后的孤儿头（理论不出现，防御）：assistant/tool 连串并入下一块前的独立块
+        while (i < this.messages.length && this.messages[i].role !== 'user') i++
       }
-      // 块不能侵入尾部保留区
-      if (cutStart + block.length > maxCutEnd) break
-      this.messages.splice(cutStart, block.length)
-      dropped += block.length
+      blocks.push(this.messages.slice(start, i))
+    }
+    let dropped = 0
+    const estOver = () => (kind === 'token'
+      ? this._estimateMessagesTokens() > value
+      : this.messages.length > value)
+    // 尾部保底：token 水位保 contextKeepRecent 条；消息水位保低水位与 2 中的较大值减一
+    // （消息模式下 minKeep=8 会压不进 low=5，曾导致压缩空转、每轮反复触发）
+    const floorKeep = kind === 'token' ? minKeep + 1 : Math.max(2, value)
+    let bi = 0
+    while (estOver() && bi < blocks.length && this.messages.length - blocks[bi].length >= floorKeep) {
+      this.messages.splice(1, blocks[bi].length) // 始终从 index 1 丢（index 0 是首条意图）
+      dropped += blocks[bi].length
+      bi++
     }
     return dropped
   }
 
+  /** @deprecated 旧签名兼容（部分调用方/测试引用）；内部转滞回语义 */
+  _compactMessages(maxTokens) {
+    return this._compactToLow({ kind: 'token', value: maxTokens })
+  }
+
+  /** Anthropic 断点是否生效：off 恒关；explicit 恒开；auto 看 provider.cacheCaps.cacheControlAuto（官方端点） */
+  _cacheControlFor(_prov) {
+    if (this.cacheControl === 'off') return false
+    if (this.cacheControl === 'explicit') return true
+    // auto：官方 Anthropic 端点默认开（apps 装配层标记），第三方兼容网关关
+    return !!this.provider?.cacheCaps?.cacheControlAuto
+  }
+
+  /** OpenAI 官方 prompt_cache_key：仅显式开启 + provider 声明支持（不发 DeepSeek/兼容网关）。
+   *  键含 model/conversationId/epoch/工具指纹——工具集或换代即换键，避免旧路由污染 */
+  _promptCacheKeyFor(_prov) {
+    if (!this.promptCacheKey) return {}
+    if (!this.provider?.cacheCaps?.promptCacheKey) return {}
+    const conv = this._curConvId || 'none'
+    const toolFp = shortHash(this._buildToolList().map((t) => t.name).join(','))
+    return { prompt_cache_key: shortHash(`${this.model || ''}|${conv}|e${this.cacheEpoch}|${toolFp}`) }
+  }
+
+  /**
+   * Provider 参数白名单（默认拒绝）：只有这里列出的字段才允许透传给 provider.chat。
+   * 曾用「排除列表」——systemPrompt（完整 system 副本）/context/maxTurns 等随 rest
+   * 泄漏进请求体：多付一倍 token、部分严格端点直接拒收未知字段。新增 provider 参数
+   * 必须显式登记到这里。
+   */
   _extraRunOpts(opts) {
-    const reserved = new Set(['signal', 'onDelta', 'onReasoning', 'onToolStart', 'onToolEnd', 'onAssistant', 'onContextPressure', 'onApprove', 'onBeforeTool', 'onMasterAutoApprove', 'taskId', 'stream', 'ctx'])
+    const ALLOWED = ['model', 'system', 'tools', 'tool_choice', 'temperature', 'max_tokens',
+      'thinking', 'top_p', 'top_k', 'stop_sequences', 'cacheControl', 'prompt_cache_key',
+      'response_format', 'user', 'metadata', 'service_tier', 'reasoning_effort', 'seed', 'logprobs', 'top_logprobs']
     const out = {}
-    for (const k of Object.keys(opts)) if (!reserved.has(k)) out[k] = opts[k]
+    for (const k of ALLOWED) if (opts[k] !== undefined) out[k] = opts[k]
     return out
   }
 

@@ -7,6 +7,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { normalizeUsage } from '../agent/messages.js'
 
 /**
  * 解析 devLog 文本（含多个缩进 JSON 对象）→ LogEvent[]。
@@ -137,36 +138,67 @@ export function queryLogFiles(dir, { from, to, event, q, limit = 10 } = {}) {
  * 仅扫文件名日期 >= since 的文件，避免全扫。
  */
 export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
-  const dayMap = {} // day → { input, output, requests }
+  const dayMap = {} // day → { input, output, cacheRead, cacheWrite, uncached, observedInput, requests, observedRequests }
   const toolMap = {}
   let totalRequests = 0
   let totalToolCalls = 0
   let totalTokens = 0
-  let totalCached = 0
+  // 缓存口径：**未观测 ≠ 0 命中**。旧链路日志无缓存字段，不能进命中率分母（曾把
+  // 2400/3000 的真实命中率稀释成 2400/5000）。分层聚合：
+  //   observedInput/observedRequests 只统计报告了缓存字段的请求；hitRequests = 其中 read>0
+  let totalCacheRead = 0
+  let totalCacheWrite = 0
+  let observedInput = 0
+  let observedRequests = 0
+  let hitRequests = 0
+  let unobservedRequests = 0
+  let firstObservedAt = null
+  // cold/warm 分层：同会话（=同日志文件）首个 run_end 是 cold start（缓存必然未热），
+  // 与后续 warm 请求分开统计——warm 命中率才是缓存改造的真实效果
+  let coldObserved = 0
+  let warmObserved = 0
+  let warmHit = 0
+  const clamp01 = (v) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0))
   for (const f of listLogFiles(dir)) {
     if (f.ts < since) continue
+    let firstRunEndInFile = true
     for (const e of readLogFile(dir, f.file)) {
       if (!e || !e.time) continue
       const day = String(e.time).slice(5, 10) // ISO → MM-DD
       if (e.event === 'run_end') {
         totalRequests++
-        ;(dayMap[day] ||= { input: 0, output: 0, cached: 0, requests: 0 }).requests++
+        const isCold = firstRunEndInFile
+        firstRunEndInFile = false
+        ;(dayMap[day] ||= { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, uncached: 0, observedInput: 0, cached: 0, requests: 0, observedRequests: 0 }).requests++
         if (e.usage) {
-          // 顶层 input/output 是 Agent 多轮累加值（normalizeUsage 产物，比 raw 的末轮值准）；
-          // raw 兜底兼容极旧日志（无顶层字段的 provider 直通 usage）
-          const u = e.usage.raw || e.usage
-          const din = e.usage.input ?? u.input ?? u.input_tokens ?? u.prompt_tokens ?? 0
-          const dout = e.usage.output ?? u.output ?? u.output_tokens ?? u.completion_tokens ?? 0
-          // 缓存命中：优先用 Agent 多轮累加的 usage.cached（normalizeUsage 已按
-          // DeepSeek/OpenAI/Anthropic 三种字段归一）；旧日志无该字段时从 raw 提取末轮值兜底
-          const dcache = e.usage.cached ?? u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? u.cache_read_input_tokens ?? 0
+          // 统一走 normalizeUsage 跨协议归一（顶层已是 Agent 多轮累加值；旧日志从 raw 兜底）
+          const n = normalizeUsage(e.usage)
+          const din = n.input
+          const dout = n.output
           if (din || dout) {
             dayMap[day].input += din
             dayMap[day].output += dout
-            dayMap[day].cached += dcache
             totalTokens += din + dout
-            totalCached += dcache
           }
+          if (n.cacheObserved) {
+            observedRequests++
+            if (isCold) coldObserved++
+            else { warmObserved++; if (n.cacheRead > 0) warmHit++ }
+            if (n.cacheRead > 0) hitRequests++
+            if (din) { observedInput += din; dayMap[day].observedInput += din }
+            totalCacheRead += n.cacheRead
+            totalCacheWrite += n.cacheWrite
+            dayMap[day].cacheRead += n.cacheRead
+            dayMap[day].cacheWrite += n.cacheWrite
+            dayMap[day].uncached += n.uncached
+            dayMap[day].cached += n.cacheRead
+            const t = Date.parse(e.time)
+            if (Number.isFinite(t) && (firstObservedAt == null || t < firstObservedAt)) firstObservedAt = t
+          } else {
+            unobservedRequests++
+          }
+        } else {
+          unobservedRequests++
         }
       }
       if (e.event === 'tool' && e.name) {
@@ -176,11 +208,21 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
     }
   }
   const days = Object.keys(dayMap).sort((a, b) => (a < b ? -1 : 1))
-  const tokenTrend = days.map((day) => ({ day, input: dayMap[day].input, output: dayMap[day].output, cached: dayMap[day].cached }))
+  const tokenTrend = days.map((day) => ({ day, input: dayMap[day].input, output: dayMap[day].output, cached: dayMap[day].cacheRead, cacheRead: dayMap[day].cacheRead, cacheWrite: dayMap[day].cacheWrite, uncached: dayMap[day].uncached, observedInput: dayMap[day].observedInput }))
   const requestTrend = days.map((day) => ({ day, count: dayMap[day].requests }))
   const toolTop = Object.entries(toolMap)
     .sort((a, b) => b[1] - a[1])
     .slice(0, topK)
     .map(([name, count]) => ({ name, count }))
-  return { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached }
+  return {
+    tokenTrend, requestTrend, toolTop,
+    totalRequests, totalToolCalls, totalTokens,
+    totalCached: totalCacheRead, // 兼容别名
+    totalCacheRead, totalCacheWrite, observedInput, observedRequests, hitRequests, unobservedRequests,
+    tokenHitRate: observedInput > 0 ? clamp01(totalCacheRead / observedInput) : null,
+    requestHitRate: observedRequests > 0 ? clamp01(hitRequests / observedRequests) : null,
+    warmObserved, warmHit, coldObserved,
+    warmRequestHitRate: warmObserved > 0 ? clamp01(warmHit / warmObserved) : null,
+    firstObservedAt,
+  }
 }
