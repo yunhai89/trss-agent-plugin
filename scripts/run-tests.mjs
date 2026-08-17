@@ -15,7 +15,9 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
-const SKIP_DIRS = new Set(['node_modules', '.git', 'data', 'temp', 'resources', 'web', 'out'])
+// 注意不含 'web'：按目录名跳过会误伤 model/web/*.test.mjs（logs/humanize-save 两个测试文件
+// 曾因此从未被发现——顶层 web/ 是前端静态资源，无 test.mjs/*.test.mjs，无需跳过）
+const SKIP_DIRS = new Set(['node_modules', '.git', 'data', 'temp', 'resources', 'out'])
 // 这些是人工/网络入口或模块装载钩子，不是可直接执行的离线测试。
 const SKIP_STRESS_FILES = new Set(['real-llm.mjs', 'run-real.mjs', 'e2e-fullchain.mjs', 'hooks.mjs'])
 

@@ -40,7 +40,10 @@ export function parseDevLog(text) {
   return events
 }
 
-const FILE_RE = /^(.+?)-(\d+)-(\d+)-(\d{14})\.log$/
+// 文件名 = <groupId>-<userId>-<序号>-<YYYYMMDDHHmmss>.log。userId 不保证纯数字
+// （生产实测存在 `private-unknown-0-...`：私聊监听态/无用户上下文的会话）——曾用 (\d+) 匹配
+// 导致这类文件 ts=0：排序沉底 + 日期筛选恒 miss（筛「今天」提示无结果的根因）。
+const FILE_RE = /^(.+?)-([^-]+)-(\d+)-(\d{14})\.log$/
 
 function tsFromName(tsStr) {
   // YYYYMMDDHHmmss → ms
@@ -98,13 +101,25 @@ export function queryLogFiles(dir, { from, to, event, q, limit = 10 } = {}) {
   let files = listLogFiles(dir) // 已按 ts 倒序（最新在前）
   const fromTs = parseDateDay(from, false)
   const toTs = parseDateDay(to, true)
-  if (fromTs != null) files = files.filter((f) => f.ts >= fromTs)
-  if (toTs != null) files = files.filter((f) => f.ts <= toTs)
   const ev = String(event || '').trim()
   const kw = String(q || '').trim().toLowerCase()
-  if (ev || kw) {
+  // 日期筛选语义：文件名日期（会话创建日）**或任一事件时间**落入范围即命中。
+  // 会话文件名日期=创建日，长对话持续数日（生产实测：13 号创建的会话活跃到 17 号）——
+  // 只按文件名筛会把「今天聊过的会话」全部漏掉（曾筛当天恒提示无结果的根因之二）。
+  if (fromTs != null || toTs != null || ev || kw) {
     files = files.filter((f) => {
+      const nameHit = (fromTs == null || f.ts >= fromTs) && (toTs == null || f.ts <= toTs)
+      if (nameHit && !ev && !kw) return true
+      // 文件名不命中日期（或还有 event/q 条件）→ 扫事件内容
       const events = readLogFile(dir, f.file)
+      if (!nameHit) {
+        const tsOf = (t) => Date.parse(String(t || ''))
+        const timeHit = events.some((e) => {
+          const t = tsOf(e.time)
+          return Number.isFinite(t) && (fromTs == null || t >= fromTs) && (toTs == null || t <= toTs)
+        })
+        if (!timeHit) return false
+      }
       if (ev && !events.some((e) => e.event === ev)) return false
       if (kw && !JSON.stringify(events).toLowerCase().includes(kw)) return false
       return true
@@ -127,6 +142,7 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
   let totalRequests = 0
   let totalToolCalls = 0
   let totalTokens = 0
+  let totalCached = 0
   for (const f of listLogFiles(dir)) {
     if (f.ts < since) continue
     for (const e of readLogFile(dir, f.file)) {
@@ -134,15 +150,22 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
       const day = String(e.time).slice(5, 10) // ISO → MM-DD
       if (e.event === 'run_end') {
         totalRequests++
-        ;(dayMap[day] ||= { input: 0, output: 0, requests: 0 }).requests++
+        ;(dayMap[day] ||= { input: 0, output: 0, cached: 0, requests: 0 }).requests++
         if (e.usage) {
+          // 顶层 input/output 是 Agent 多轮累加值（normalizeUsage 产物，比 raw 的末轮值准）；
+          // raw 兜底兼容极旧日志（无顶层字段的 provider 直通 usage）
           const u = e.usage.raw || e.usage
-          const din = u.input ?? u.input_tokens ?? u.prompt_tokens ?? 0
-          const dout = u.output ?? u.output_tokens ?? u.completion_tokens ?? 0
+          const din = e.usage.input ?? u.input ?? u.input_tokens ?? u.prompt_tokens ?? 0
+          const dout = e.usage.output ?? u.output ?? u.output_tokens ?? u.completion_tokens ?? 0
+          // 缓存命中：优先用 Agent 多轮累加的 usage.cached（normalizeUsage 已按
+          // DeepSeek/OpenAI/Anthropic 三种字段归一）；旧日志无该字段时从 raw 提取末轮值兜底
+          const dcache = e.usage.cached ?? u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? u.cache_read_input_tokens ?? 0
           if (din || dout) {
             dayMap[day].input += din
             dayMap[day].output += dout
+            dayMap[day].cached += dcache
             totalTokens += din + dout
+            totalCached += dcache
           }
         }
       }
@@ -153,11 +176,11 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
     }
   }
   const days = Object.keys(dayMap).sort((a, b) => (a < b ? -1 : 1))
-  const tokenTrend = days.map((day) => ({ day, input: dayMap[day].input, output: dayMap[day].output }))
+  const tokenTrend = days.map((day) => ({ day, input: dayMap[day].input, output: dayMap[day].output, cached: dayMap[day].cached }))
   const requestTrend = days.map((day) => ({ day, count: dayMap[day].requests }))
   const toolTop = Object.entries(toolMap)
     .sort((a, b) => b[1] - a[1])
     .slice(0, topK)
     .map(([name, count]) => ({ name, count }))
-  return { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens }
+  return { tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached }
 }

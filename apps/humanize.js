@@ -140,7 +140,15 @@ async function buildHumanize() {
         cfg: () => Config.get().agent?.selfState || {},
         botId: botSelfIdsAll(rt)[0] || 'bot',
         botNames: H.resolvePersonaIdentity(cfgFn(), { botNickname: botNickname() }).identityNames,
-        trace: { record: (event, data = {}) => { try { devLog(event, data, null, 'selfstate').catch(() => {}) } catch { /* noop */ } } },
+        // SS trace 同样写伪人独立目录（按日 ss-*.log；曾字符串 scope → private-unknown-0 落主目录）
+        trace: { record: (event, data = {}) => {
+          try {
+            const d = new Date()
+            const p = (n) => String(n).padStart(2, '0')
+            const day = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+            devLog(event, data, null, null, { dir: Config.path.humanizeLogs, filename: `ss-${day}.log` }).catch(() => {})
+          } catch { /* noop */ }
+        } },
         dataDir: Config.path.data + '/groupworld',
         embedFn, embedModel,
       })

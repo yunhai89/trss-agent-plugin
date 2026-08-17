@@ -58,6 +58,13 @@ export default async function devLog(event, data = {}, traceId = null, scope = n
   if (_failed) return
   if (cfg().enable === false) return
   const c = cfg()
+  // 防御：scope 契约是 {gid,uid,convId,createdAt} 对象。传字符串（历史误用，如 'groupworld'）
+  // 会被解构成全 undefined → 产出 private-unknown-0-*.log 落进主 agents 目录污染 web 时间线。
+  // 现在显式拒绝并留痕，调用方应改传 opts {dir, filename}。
+  if (typeof scope === 'string') {
+    if (!devLog._warnedStrScope) { devLog._warnedStrScope = true; console.warn('[agents-dev] devLog 收到字符串 scope（应为对象或 null，请改用 opts {dir,filename}）——按无 scope 处理') }
+    scope = null
+  }
   const dir = opts.dir ? path.resolve(opts.dir) : (c.dir ? path.resolve(c.dir) : Config.path.logs)
   const filename = opts.filename || (scope ? devLogFilename(scope) : 'dev-fallback.log')
   const filepath = path.join(dir, filename)

@@ -67,7 +67,10 @@ export function normalizeUsage(u) {
   if (!u || typeof u !== 'object') return null
   const input = u.input_tokens ?? u.prompt_tokens ?? 0
   const output = u.output_tokens ?? u.completion_tokens ?? 0
-  return { input, output, total: input + output, raw: u }
+  // 缓存命中 token（多协议字段归一：DeepSeek prompt_cache_hit_tokens / OpenAI
+  // prompt_tokens_details.cached_tokens / Anthropic cache_read_input_tokens）
+  const cached = u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? u.cache_read_input_tokens ?? 0
+  return { input, output, total: input + output, cached, raw: u }
 }
 
 /** 累计多轮 usage */
@@ -79,6 +82,7 @@ export function mergeUsage(acc, u) {
     input: acc.input + n.input,
     output: acc.output + n.output,
     total: acc.total + n.total,
+    cached: (acc.cached || 0) + (n.cached || 0),
     raw: n.raw,
   }
 }

@@ -67,7 +67,7 @@ export async function getGroupWorld() {
   return _gwPromise
 }
 
-/** 极简 trace：groupId 哈希后写默认 data/logs（web 可见）。 */
+/** 极简 trace：groupId 哈希后写伪人独立日志目录（data/humanize-logs/gw-<日>.log，与主 agents 日志分离）。 */
 function makeTrace() {
   const hash = (gid) => 'g_' + createHash('sha256').update(String(gid || '')).digest('hex').slice(0, 10)
   return {
@@ -76,7 +76,12 @@ function makeTrace() {
         const { groupId, ...rest } = data
         const rec = { ...rest }
         if (groupId != null) rec.groupIdHash = hash(groupId)
-        devLog(event, rec, null, 'groupworld').catch(() => {})
+        // 伪人链路日志独立目录（曾把字符串当 scope 传 → devLogFilename 解构全空
+        // → private-unknown-0-*.log 落进主 agents 目录，污染 web 日志时间线 + 日期筛选）
+        const d = new Date()
+        const p2 = (n) => String(n).padStart(2, '0')
+        const day = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}`
+        devLog(event, rec, null, null, { dir: Config.path.humanizeLogs, filename: `gw-${day}.log` }).catch(() => {})
       } catch { /* noop */ }
     },
   }
