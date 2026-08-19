@@ -52,19 +52,29 @@ if [ -n "$PIP_INDEX_URL" ]; then echo "    使用镜像：$PIP_INDEX_URL"; fi
 "$VENV_PY" -m pip install --upgrade crawl4ai ${PIP_EXTRA_ARGS:-}
 
 echo "[4/6] crawl4ai-setup（安装 Playwright Chromium；可用 PLAYWRIGHT_DOWNLOAD_HOST 走镜像）"
-# Chromium ~184MB 走 cdn.playwright.dev，国内/受限网络常停滞——失败自动用 npmmirror 镜像重试一次
-install_browser() {
-  if "$VENV_PY" -m crawl4ai.setup >/dev/null 2>&1; then return 0; fi
-  if command -v "$VENV_DIR/bin/crawl4ai-setup" >/dev/null 2>&1 && "$VENV_DIR/bin/crawl4ai-setup"; then return 0; fi
-  "$VENV_PY" -m playwright install chromium
+# 前置：浏览器已可用（全局缓存 ~/.cache/ms-playwright 已有匹配版本）则直接跳过下载——
+# 重装/升级场景下 playwright 可能因安装标记缺失重下 184MB 且默认源易停滞
+smoke_url_test() {
+  echo '{"url":"https://example.com","timeout_s":30,"max_chars":500}' \
+    | "$VENV_PY" "$PLUGIN_ROOT/python/crawl4ai_fetch.py" >/dev/null 2>&1
 }
-if ! install_browser; then
-  echo "    默认源失败，改用 npmmirror 镜像重试 Chromium 下载…"
-  PLAYWRIGHT_DOWNLOAD_HOST="${PLAYWRIGHT_DOWNLOAD_HOST:-https://cdn.npmmirror.com/binaries/playwright}" \
-    "$VENV_PY" -m playwright install chromium || {
-    echo "错误：Chromium 安装失败。手动重试：PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright $VENV_PY -m playwright install chromium" >&2
-    exit 1
+if smoke_url_test; then
+  echo "    Chromium 已可用（全局缓存命中），跳过下载"
+else
+  # Chromium ~184MB 走 cdn.playwright.dev，国内/受限网络常停滞——失败自动用 npmmirror 镜像重试一次
+  install_browser() {
+    if "$VENV_PY" -m crawl4ai.setup >/dev/null 2>&1; then return 0; fi
+    if command -v "$VENV_DIR/bin/crawl4ai-setup" >/dev/null 2>&1 && "$VENV_DIR/bin/crawl4ai-setup"; then return 0; fi
+    "$VENV_PY" -m playwright install chromium
   }
+  if ! install_browser; then
+    echo "    默认源失败，改用 npmmirror 镜像重试 Chromium 下载…"
+    PLAYWRIGHT_DOWNLOAD_HOST="${PLAYWRIGHT_DOWNLOAD_HOST:-https://cdn.npmmirror.com/binaries/playwright}" \
+      "$VENV_PY" -m playwright install chromium || {
+      echo "错误：Chromium 安装失败。手动重试：PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright $VENV_PY -m playwright install chromium" >&2
+      exit 1
+    }
+  fi
 fi
 
 echo "[5/6] 验证 import + 版本"
