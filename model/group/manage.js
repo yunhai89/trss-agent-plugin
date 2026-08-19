@@ -1,6 +1,7 @@
 /**
  * 群聊管理工具（内置）—— 写类，category 高（system/group_manage）。
- * RBAC：system 默认仅 master，group_manage 默认群管以上；危险动作走 confirm 审批。
+ * RBAC：system 默认仅 master，group_manage 默认群管以上；群管工具（meta.groupAdminSkip）对
+ * 群管理/群主免审批直接执行——权限来自群本身；其余场景按类别走 deny/confirm。
  * 安全：禁止对 bot 自身与操作者本人执行踢出/禁言。
  */
 
@@ -26,9 +27,9 @@ function safeTarget(ctx, userId) {
 
 export const groupKickTool = defineTool({
   name: 'group_kick',
-  description: '将成员踢出群（需群主/管理员且机器人有权限）。慎用，会通知主人审批。',
+  description: '将成员踢出群（需群主/管理员且机器人有权限；群管理/群主调用直接执行，普通成员不可用）。慎用。',
   category: 'system',
-  meta: { interactive: true },
+  meta: { interactive: true, groupAdminSkip: true },
   parameters: param.object({
     userId: param.str('目标 QQ 号'),
     rejectAddRequest: param.bool('是否拒绝此人再次加群（默认 false）'),
@@ -49,7 +50,7 @@ export const groupMuteTool = defineTool({
   name: 'group_mute',
   description: '禁言成员指定秒数（0=解除禁言）。上限 30 天。慎用。',
   category: 'system',
-  meta: { interactive: true },
+  meta: { interactive: true, groupAdminSkip: true },
   parameters: param.object({
     userId: param.str('目标 QQ 号'),
     duration: param.int('禁言秒数（0=解除，上限 2592000）', { min: 0 }),
@@ -71,7 +72,7 @@ export const groupMuteAllTool = defineTool({
   name: 'group_mute_all',
   description: '全体禁言开关（true=开启全体禁言，false=关闭）。慎用。',
   category: 'system',
-  meta: { interactive: true },
+  meta: { interactive: true, groupAdminSkip: true },
   parameters: param.object({
     enable: param.bool('true=全体禁言，false=解除'),
     groupId: param.str('群号（可选）'),
@@ -89,6 +90,7 @@ export const groupSetCardTool = defineTool({
   name: 'group_set_card',
   description: '设置群成员的群名片（昵称）。空字符串清除。',
   category: 'group_manage',
+  meta: { groupAdminSkip: true },
   parameters: param.object({
     userId: param.str('目标 QQ 号'),
     card: param.str('群名片内容'),
@@ -107,6 +109,7 @@ export const groupSetTitleTool = defineTool({
   name: 'group_set_title',
   description: '设置群成员的头衔。空字符串清除。',
   category: 'group_manage',
+  meta: { groupAdminSkip: true },
   parameters: param.object({
     userId: param.str('目标 QQ 号'),
     title: param.str('头衔内容'),
@@ -125,7 +128,7 @@ export const groupSetAdminTool = defineTool({
   name: 'group_set_admin',
   description: '设置/取消群管理员。慎用。',
   category: 'system',
-  meta: { interactive: true },
+  meta: { interactive: true, groupAdminSkip: true },
   parameters: param.object({
     userId: param.str('目标 QQ 号'),
     enable: param.bool('true=设为管理员，false=取消'),
@@ -146,7 +149,7 @@ export const groupSetNameTool = defineTool({
   name: 'group_set_name',
   description: '修改群名。慎用。',
   category: 'system',
-  meta: { interactive: true },
+  meta: { interactive: true, groupAdminSkip: true },
   parameters: param.object({
     name: param.str('新群名'),
     groupId: param.str('群号（可选）'),

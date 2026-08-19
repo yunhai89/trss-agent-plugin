@@ -18,6 +18,10 @@ export function categoryMinRole(cat) {
   return CATEGORY_MIN[cat] ?? 99 // 未知类别按最高（需 master）
 }
 
+/** 群管工具判定：group_manage 类别 或 显式 meta.groupAdminSkip 标记（群管动作里 category=system
+ *  的高危工具如 kick/mute——群管理/群主在群内本就持有这些 QQ 权限，调用免主人审批直接执行） */
+const isGroupAdminTool = (tool) => tool?.category === 'group_manage' || tool?.meta?.groupAdminSkip === true
+
 /**
  * @returns {{ decision:'allow'|'deny'|'confirm', reason:string }}
  */
@@ -26,7 +30,7 @@ export function decide(ctx, tool) {
   const cat = tool?.category
   const minRank = categoryMinRole(cat)
 
-  if (cat === 'group_manage' && ctx?.isGroup && ctx?.isGroupAdmin && ctx?.groupAdminSkip !== false) {
+  if (isGroupAdminTool(tool) && ctx?.isGroup && ctx?.isGroupAdmin && ctx?.groupAdminSkip !== false) {
     return { decision: 'allow', reason: 'group_manager_auto' }
   }
   if (rank < minRank) {
@@ -68,7 +72,7 @@ export function createPolicy({ categoryMin, groupAdminSkip = true, masterSelfSki
     const cat = tool?.category
     const minRank = cat in min ? min[cat] : 99 // 未知类别按最高（需 master）
 
-    if (cat === 'group_manage' && ctx?.isGroup && ctx?.isGroupAdmin && groupAdminSkip) {
+    if (isGroupAdminTool(tool) && ctx?.isGroup && ctx?.isGroupAdmin && groupAdminSkip) {
       return { decision: 'allow', reason: 'group_manager_auto' }
     }
     if (rank < minRank) {
