@@ -56,7 +56,7 @@ const LIST_CSS = `
 /**
  * 帮助图：sections = [{ title, commands:[{cmd, desc}] }]
  */
-const SECTION_ICON = { '触发对话':'💬', '对话管理':'🗂️', '记忆 / 提醒':'⏰', '知识库':'📚', '定时任务':'🗓️', '人设':'🎭', '深度研究':'🔍', '表情包':'😀', '主人指令':'👑', '在线自进化（主人）':'🧬', '群聊小世界':'🌐' }
+const SECTION_ICON = { '触发对话':'💬', '对话管理':'🗂️', '示意图':'📊', '记忆 / 提醒':'⏰', '知识库':'📚', '定时任务':'🗓️', '人设':'🎭', '深度研究':'🔍', '表情包':'😀', '主人指令':'👑', '在线自进化（主人）':'🧬', '群聊小世界':'🌐' }
 
 export function buildHelpHtml({ title = 'agents-plugin 帮助', subtitle = '', sections = [] } = {}) {
   const body = sections

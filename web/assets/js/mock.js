@@ -87,6 +87,17 @@
     },
     sticker: { enable: true, repo: 'https://github.com/example/stickers', gitProxy: '', maxPerReply: 2, cooldown: 60, sendRate: 1 },
     calc: { enable: true, python: 'python3', timeout: 30 },
+    diagram: {
+      enable: true, renderer: 'kroki', fallbackRenderer: 'none', defaultTheme: 'paper-blue', defaultFormat: 'png',
+      timeoutMs: 15000, targetWidth: 1600, maxNodes: 50, maxEdges: 100, maxWidth: 2000, maxHeight: 5000,
+      maxPixels: 10000000, maxOutputBytes: 8388608, tempTtlMinutes: 30,
+      kroki: {
+        enabled: true, endpoint: 'http://127.0.0.1:8000', deploymentMode: 'self-hosted-only', allowPublicEndpoint: false,
+        allowedDiagramTypes: ['d2'], connectTimeoutMs: 2000, requestTimeoutMs: 12000, maxSourceBytes: 131072,
+        maxResponseBytes: 4194304, maxConcurrency: 2, circuitBreaker: { enabled: true, failureThreshold: 3, cooldownMs: 30000 },
+        d2: { layout: 'elk' }, imageTag: '',
+      },
+    },
     document: { soffice: 'soffice' },
     stt: { enable: false, apiBase: 'https://api.openai.com/v1', apiKey: '', model: 'whisper-1', language: 'zh' },
     terminal: {

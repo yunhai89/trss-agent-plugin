@@ -1,0 +1,24 @@
+Noto Sans CJK（resources/fonts/NotoSansCJK-Regular.ttc）许可说明
+=================================================================
+
+该字体文件来自 Google & Adobe 的 Noto CJK 项目（https://github.com/notofonts/noto-cjk），
+以 SIL Open Font License 1.1 授权，允许随软件再分发与商用。
+
+版权声明（Copyright Notice）：
+  Copyright 2014-2023 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+  Copyright 2014-2023 Google (https://www.google.com/), with Reserved Font Name 'Noto'.
+
+SIL Open Font License 1.1 条款要点：
+  1. 字体文件可作为独立作品原样分发，也可与其他作品捆绑分发；
+  2. 允许修改、再创作并在满足改名要求的条件下分发衍生版本
+     （不得使用 Reserved Font Name，除非获得书面授权）；
+  3. 分发时必须附带本许可协议副本；
+  4. 使用字体渲染产生的文档/图片不受本许可约束。
+
+完整许可文本见：https://openfontlicense.org/open-font-license-official-text/
+或 Noto CJK 仓库内的 Sans/LICENSE 文件。
+
+本插件用途：diagram 示意图渲染（@resvg/resvg-js 显式加载，保证中文/Emoji
+在任何宿主环境稳定渲染，不依赖操作系统安装字体）。若删除本文件，插件会
+回退到系统 Noto CJK 字体路径；两者皆缺失时 diagram_render 返回 font_missing
+结构化错误（绝不静默输出 □□ 方框）。

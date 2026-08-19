@@ -65,6 +65,7 @@
 | 🔁 回退模型 | 主模型失败自动依次尝试 `fallbackModels`（同 provider） | ✅ 稳定 |
 | 📂 日志分文件 | 按会话分文件 + 图片底部会话/对话id + `#上报错误` 打包发主人 | ✅ 稳定 |
 | 🔍 统一搜索 | Tavily/Exa/Perplexity/Brave → SearXNG → DDG 兜底 | ✅ 稳定 |
+| 📊 示意图生成 | 流程图/架构图/时序图/状态图/ER/思维导图：LLM 语义结构 → 自托管 Kroki D2 → 高清 PNG（文字/连线精确，非文生图） | ✅ 稳定 |
 | 📚 深度研究 | `#研究` 五阶段管线（规划→检索→综合→引用→评估） | 🧪 早期 |
 | 🧬 工具进化 | LLM 生成候选 → AST/沙箱验证 → 审批上线（版本化 / 可回滚 / 安全闸） | 🧪 早期 |
 
@@ -287,6 +288,66 @@ search:
   searxng:   { url: "" }     # 如 http://localhost:8080
   ddg: true                  # 本地 DDG 兜底（默认开）
 ```
+
+### `agent.diagram` —— 示意图生成（diagram_render）
+
+> Agent 对话里说「画一下 XX 的流程图/架构图/时序图」即可生图。**不用文生图模型**——文字、连线、层级精确可靠：
+> LLM 只提交语义结构（节点/连线/分组/时序消息），插件确定性编译为 D2，由**自托管 Kroki** 容器渲染 SVG，
+> 经安全检查后用 resvg 转高清 PNG（默认宽 1600、2x 清晰度、内置中文字体）随回复发送。
+>
+> - **支持图类型**：flowchart / architecture（容器分组）/ sequence / state / class / er / mindmap
+> - **主题**：paper-blue（默认）/ soft-pastel / technical / midnight（深色）/ sketch（手绘，仅 D2）
+> - **安全边界**：LLM 不能提交 SVG/HTML/坐标/路径；默认禁用公共 Kroki（用户内容不出内网）；SVG 输出按不可信内容检查（拒脚本/外链/实体）；临时文件只写 `data/diagram/`（内容哈希命名 + TTL 清理）
+> - **容错**：Kroki 不可用 → 连接超时/熔断/结构化失败（可配本地 `beautiful-mermaid` 回退），绝不挂死 Agent 或让用户无回复
+
+**部署 Kroki 容器**（默认引擎依赖，一次性）：
+
+```bash
+docker compose -f docs/deploy/kroki-compose.yaml up -d
+# 然后保持 agent.diagram.kroki.endpoint: http://127.0.0.1:8000
+```
+
+```yaml
+diagram:
+  enable: true
+  renderer: kroki                    # 自托管 Kroki 渲染 D2
+  fallbackRenderer: none             # Kroki 失败的本地回退：none | beautiful-mermaid
+  defaultTheme: paper-blue           # paper-blue | soft-pastel | technical | midnight | sketch
+  defaultFormat: png                 # png | svg（svg 以可编辑源文件发送）
+  timeoutMs: 15000                   # 渲染总预算（编译+HTTP+栅格化）
+  targetWidth: 1600                  # 输出宽度（px）
+  maxNodes: 50                       # 规模上限（连线 2 倍；超出拒绝渲染并提示模型）
+  tempTtlMinutes: 30                 # 临时图保留时长
+  kroki:
+    endpoint: "http://127.0.0.1:8000"
+    allowPublicEndpoint: false       # ⚠️ true=允许 kroki.io 公共服务（图内容将发第三方，强制 HTTPS）
+    connectTimeoutMs: 2000           # 连接/响应头超时
+    requestTimeoutMs: 12000          # 单请求总超时（覆盖响应体读取全程）
+    maxResponseBytes: 4194304        # SVG 响应上限（流式字节计数）
+    maxConcurrency: 2
+    circuitBreaker: { enabled: true, failureThreshold: 3, cooldownMs: 30000 }
+    d2: { layout: elk }              # dagre | elk（sequence 固定 dagre）
+    imageTag: ""                     # 部署镜像版本声明（进缓存 key；升级镜像后更新）
+```
+
+**使用示例**：
+
+```text
+你：用图画一下这个插件的工作流程
+Bot：（流程图图片）用户消息 → Yunzai → Agent Loop → 工具调用 → 渲染回复
+你：画个时序图看看工具调用过程
+Bot：（时序图图片）用户/Agent/工具 三方消息序列
+```
+
+**常见排查**：
+
+| 症状 | 原因与处理 |
+| --- | --- |
+| 回复「渲染服务不可用」 | Kroki 容器未启动/endpoint 配错：`docker compose -f docs/deploy/kroki-compose.yaml up -d`；或配置 `fallbackRenderer: beautiful-mermaid` 本地回退 |
+| 连续失败每次都要等很久才回 | 熔断器生效中（连续 3 次失败短路 30s），检查容器 `docker logs agents-kroki` |
+| 图太大被拒（output_too_large） | 减少 nodes/edges 数量，或调低 `targetWidth` |
+| 中文显示为方框 | 理论不会发生（内置字体）；若手动删除了 `resources/fonts/`，恢复该文件或保留系统 Noto CJK |
+| 中文流程图正常但主题色不对 | Kroki 镜像版本的 D2 主题编号差异：更新 `kroki.imageTag` 并调整 `model/diagram/themes.js` 后重启 |
 
 ### `agent.research` —— 深度研究 🧪早期
 

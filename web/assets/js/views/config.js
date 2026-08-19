@@ -112,6 +112,11 @@
     researchPerm: [['master', '仅主人(防滥用)'], ['all', '所有人']],
     shMode: [['local', 'local 本地(Playwright+chromium,默认)'], ['cloud', 'cloud Browserbase 云']],
     crawlEngine: [['crawl4ai', 'crawl4ai 真浏览器(默认)'], ['fetch', 'fetch 纯 HTTP']],
+    dgRenderer: [['kroki', 'kroki 自托管容器(默认)']],
+    dgFallback: [['none', '无(结构化失败)'], ['beautiful-mermaid', '本地 beautiful-mermaid']],
+    dgTheme: [['paper-blue', '米白纸蓝'], ['soft-pastel', '柔和粉彩'], ['technical', '技术蓝灰'], ['midnight', '午夜深色'], ['sketch', '手绘素描(仅D2)']],
+    dgFormat: [['png', 'PNG 图片'], ['svg', 'SVG 源文件']],
+    dgLayout: [['elk', 'elk(复杂图,默认)'], ['dagre', 'dagre(轻量)']],
     shRegion: [['', '默认 us-west-2'], ['us-east-1', 'us-east-1'], ['eu-central-1', 'eu-central-1'], ['ap-southeast-1', 'ap-southeast-1']],
   }
 
@@ -171,6 +176,20 @@
         if (!form.kb) form.kb = {}
         if (!form.kb.crawl) form.kb.crawl = {}
         if (form.kb.crawl.engine == null) form.kb.crawl.engine = 'crawl4ai'
+        // diagram 示意图兜底（旧配置无此块防 v-model 报错）
+        if (!form.diagram) form.diagram = {}
+        if (!form.diagram.kroki) form.diagram.kroki = {}
+        if (form.diagram.enable == null) form.diagram.enable = true
+        if (form.diagram.renderer == null) form.diagram.renderer = 'kroki'
+        if (form.diagram.fallbackRenderer == null) form.diagram.fallbackRenderer = 'none'
+        if (form.diagram.defaultTheme == null) form.diagram.defaultTheme = 'paper-blue'
+        if (form.diagram.defaultFormat == null) form.diagram.defaultFormat = 'png'
+        if (form.diagram.kroki.endpoint == null) form.diagram.kroki.endpoint = 'http://127.0.0.1:8000'
+        if (form.diagram.kroki.allowPublicEndpoint == null) form.diagram.kroki.allowPublicEndpoint = false
+        if (!form.diagram.kroki.circuitBreaker) form.diagram.kroki.circuitBreaker = {}
+        if (form.diagram.kroki.circuitBreaker.enabled == null) form.diagram.kroki.circuitBreaker.enabled = true
+        if (!form.diagram.kroki.d2) form.diagram.kroki.d2 = {}
+        if (form.diagram.kroki.d2.layout == null) form.diagram.kroki.d2.layout = 'elk'
         if (!form.terminal) form.terminal = {}
         if (form.terminal.skipConfirm == null) form.terminal.skipConfirm = false
         if (!form.download) form.download = {}
@@ -1189,6 +1208,66 @@
                 </cfg-row>
                 <cfg-row name="会话空闲超时(毫秒)">
                   <input type="number" class="inp" style="width:130px" min="60000" step="60000" v-model.number="form.stagehand.idleTimeoutMs">
+                </cfg-row>
+              </div>
+            </div>
+
+            <div class="full" style="margin-top:4px;padding-top:12px;border-top:1px dashed var(--line2)">
+              <div class="mut" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="image"/> 示意图生成（diagram_render · 流程图/架构图/时序图）</div>
+              <div class="cf-grid">
+                <cfg-row name="启用示意图工具" desc="画流程图/架构图/时序图/状态图等，随回复发图">
+                  <v-switch v-model="form.diagram.enable"/>
+                </cfg-row>
+                <cfg-row name="渲染引擎" desc="自托管 Kroki 容器渲染 D2（部署见 docs/deploy/kroki-compose.yaml）">
+                  <select class="sel" style="width:230px" v-model="form.diagram.renderer"><option v-for="o in OPT.dgRenderer" :value="o[0]">{{ o[1] }}</option></select>
+                </cfg-row>
+                <cfg-row name="失败回退" desc="Kroki 不可用时的本地回退引擎">
+                  <select class="sel" style="width:230px" v-model="form.diagram.fallbackRenderer"><option v-for="o in OPT.dgFallback" :value="o[0]">{{ o[1] }}</option></select>
+                </cfg-row>
+                <cfg-row name="默认主题">
+                  <select class="sel" style="width:160px" v-model="form.diagram.defaultTheme"><option v-for="o in OPT.dgTheme" :value="o[0]">{{ o[1] }}</option></select>
+                </cfg-row>
+                <cfg-row name="默认格式">
+                  <select class="sel" style="width:150px" v-model="form.diagram.defaultFormat"><option v-for="o in OPT.dgFormat" :value="o[0]">{{ o[1] }}</option></select>
+                </cfg-row>
+                <cfg-row name="Kroki endpoint" desc="自托管地址（docker service 名/127.0.0.1/内网 IP）">
+                  <input class="inp mono" style="width:220px" v-model="form.diagram.kroki.endpoint" placeholder="http://127.0.0.1:8000">
+                </cfg-row>
+                <cfg-row name="D2 布局" desc="sequence 固定 dagre；分组/ER/架构走此项">
+                  <select class="sel" style="width:160px" v-model="form.diagram.kroki.d2.layout"><option v-for="o in OPT.dgLayout" :value="o[0]">{{ o[1] }}</option></select>
+                </cfg-row>
+                <cfg-row name="连接/响应头超时(ms)">
+                  <input type="number" class="inp" style="width:100px" min="500" step="500" v-model.number="form.diagram.kroki.connectTimeoutMs">
+                </cfg-row>
+                <cfg-row name="单请求总超时(ms)" desc="覆盖响应体读取全程">
+                  <input type="number" class="inp" style="width:100px" min="1000" step="1000" v-model.number="form.diagram.kroki.requestTimeoutMs">
+                </cfg-row>
+                <cfg-row name="渲染并发上限">
+                  <input type="number" class="inp" style="width:80px" min="1" max="8" v-model.number="form.diagram.kroki.maxConcurrency">
+                </cfg-row>
+                <cfg-row name="SVG 响应上限(B)" desc="流式字节计数，超限即断">
+                  <input type="number" class="inp" style="width:110px" min="65536" step="65536" v-model.number="form.diagram.kroki.maxResponseBytes">
+                </cfg-row>
+                <cfg-row name="失败熔断" desc="连续 3 次失败后短路 30s（防宕机期反复等满超时）">
+                  <v-switch v-model="form.diagram.kroki.circuitBreaker.enabled"/>
+                </cfg-row>
+                <cfg-row name="Kroki 镜像版本声明" desc="部署的镜像 tag（进缓存 key；升级镜像后更新使旧缓存失效）">
+                  <input class="inp mono" style="width:140px" v-model="form.diagram.kroki.imageTag" placeholder="如 0.6.4">
+                </cfg-row>
+                <cfg-row name="渲染总预算(ms)" desc="编译+HTTP+栅格化全程">
+                  <input type="number" class="inp" style="width:100px" min="3000" step="1000" v-model.number="form.diagram.timeoutMs">
+                </cfg-row>
+                <cfg-row name="输出宽度(px)" desc="默认 1600（2x 清晰度）">
+                  <input type="number" class="inp" style="width:90px" min="800" step="100" v-model.number="form.diagram.targetWidth">
+                </cfg-row>
+                <cfg-row name="节点数上限" desc="spec 规模限制（连线 2 倍）">
+                  <input type="number" class="inp" style="width:80px" min="5" max="50" v-model.number="form.diagram.maxNodes">
+                </cfg-row>
+                <cfg-row name="临时文件保留(分)" desc="data/diagram/ TTL 清理">
+                  <input type="number" class="inp" style="width:90px" min="5" v-model.number="form.diagram.tempTtlMinutes">
+                </cfg-row>
+                <cfg-row class="full" danger name="允许公共 Kroki" desc="⚠️ 开启后图中标题/节点/架构信息将发送到第三方渲染服务（强制 HTTPS）；默认关闭且不作为静默回退">
+                  <v-switch v-model="form.diagram.kroki.allowPublicEndpoint"/>
                 </cfg-row>
               </div>
             </div>

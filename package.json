@@ -19,12 +19,14 @@
     "test": "node scripts/run-tests.mjs"
   },
   "dependencies": {
+    "@browserbasehq/stagehand": "^4.0.0",
     "@google/genai": "^2.15.0",
     "@ibaraki-douji/pixivts": "^3.2.0",
     "@napi-rs/canvas": "^1.0.2",
     "@node-rs/jieba": "^2.0.1",
-    "@browserbasehq/stagehand": "^4.0.0",
+    "@resvg/resvg-js": "^2.6.2",
     "ajv": "^8.17.1",
+    "beautiful-mermaid": "^1.1.3",
     "cheerio": "^1.2.0",
     "exceljs": "^4.4.0",
     "fluent-ffmpeg": "^2.1.3",

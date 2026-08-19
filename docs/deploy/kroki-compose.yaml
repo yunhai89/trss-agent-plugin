@@ -1,0 +1,51 @@
+# 自托管 Kroki 渲染服务（diagram_render 默认引擎的依赖）
+# 用法：docker compose -f docs/deploy/kroki-compose.yaml up -d
+# 然后在 Web 配置中心「示意图生成」或 config.yaml 里保持 endpoint: http://127.0.0.1:8000
+# （compose 将端口发布到 127.0.0.1:8000，仅本机可访问；若与机器人同宿主机，endpoint 填 http://127.0.0.1:8000）
+#
+# 安全要点（与插件侧防线配套，缺一不可）：
+#   - 镜像固定版本 tag（禁 latest；升级后务必更新 agent.diagram.kroki.imageTag 使缓存失效）
+#   - KROKI_SAFE_MODE=SECURE：禁用文件包含等危险特性
+#   - 内部渲染超时 10s/15s < 插件侧 requestTimeoutMs 12s/总预算 15s（插件先超时，Kroki 不会挂住 Agent）
+#   - 只绑定 127.0.0.1，不发布公网；容器内只读根文件系统 + 限额资源 + 临时目录 tmpfs
+#   - 不注入任何机器人/LLM/数据库密钥；无出站网络需求（D2 纯本地渲染）
+services:
+  kroki:
+    # 镜像锚定 digest（禁 latest，可复现）。yuzutech/kroki 是 Docker Hub 官方发布名
+    # （ghcr.io/kroki-io/kroki 同源，但国内环境 Docker Hub 经 registry-mirror 更易拉取）。
+    # 升级：docker pull yuzutech/kroki:latest 后用新 digest 替换下行，并同步更新 agent.diagram.kroki.imageTag 使缓存失效。
+    # 国内拉取加速/代理重试见 scripts/install-kroki.sh（其加速路径会写本目录 .env 覆盖 KROKI_IMAGE）。
+    image: ${KROKI_IMAGE:-yuzutech/kroki@sha256:6980bfb218b48b74ea14b888d9c7e8c032d1cb6325f3292277abdf62483abd9d}
+    container_name: agents-kroki
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      KROKI_SAFE_MODE: "SECURE"        # 最高安全模式
+      KROKI_COMMAND_TIMEOUT: "10s"     # 内部单命令超时（< 插件 requestTimeoutMs）
+      KROKI_CONVERT_TIMEOUT: "15s"     # 内部转换总超时（< 插件 timeoutMs 总预算）
+      # D2 内置在 Kroki单体镜像中，无需独立 d2 容器
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777       # 部分渲染器需要可写 /tmp；限额并隔离
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "2" }
+
+# 说明：
+# 1. 镜像来源：Docker Hub `yuzutech/kroki`（2026-08 仍在发布；ghcr.io/kroki-io/kroki 同源备用）。
+#    国内服务器经 daemon registry-mirror（docker.1ms.run 等）即可拉取。
+# 2. Kroki 停止/重启不影响机器人进程：插件侧有连接超时 + 熔断 + 结构化失败 + 可选本地回退
+#    （agent.diagram.fallbackRenderer: beautiful-mermaid）。
+# 3. 不要将该端口暴露到公网；如需远程访问，走反向代理 + 鉴权 + 内网/防火墙白名单。

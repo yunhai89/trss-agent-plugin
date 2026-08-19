@@ -49,6 +49,8 @@
     ss_maint: { name: 'SS 维护', icon: 'refresh', color: 'var(--mint)', bg: 'var(--mint-bg)' },
     ss_project: { name: 'SS 投影', icon: 'play', color: 'var(--sky)', bg: 'var(--sky-bg)' },
     ss_privacy: { name: 'SS 控制', icon: 'shield', color: 'var(--rose)', bg: 'var(--rose-bg)' },
+    // —— 示意图 diagram_render 事件（data.event 区分 validate/render/compile/fallback/svg/send/kroki 子阶段） ——
+    diagram: { name: '示意图', icon: 'image', color: 'var(--vio)', bg: 'var(--vio-bg)' },
   }
   /* 未知 event 兜底：后端新增 event 类型时不再让 EV[e.event].color 崩掉整页 */
   const EV_FALLBACK = { name: '其他', icon: 'info', color: 'var(--ink3)', bg: 'var(--honey-bg)' }

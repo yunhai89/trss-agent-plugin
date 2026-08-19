@@ -226,6 +226,43 @@ agent:
     enable: true            # Python 精确计算工具（数学/统计/大数等，沙箱执行，避免模型心算出错）
     python: "python3"       # python 可执行文件（容器内路径不同可改，如 /usr/sbin/python3）
     timeout: 10             # 单次计算超时（秒，防死循环）
+  diagram:
+    # 示意图生成（diagram_render 工具）：LLM 提交语义 DiagramSpec → 确定性 D2 编译 → 自托管 Kroki 渲染
+    # → SVG 安全检查 → resvg 高清 PNG → 随回复发送。默认禁用公共 Kroki（用户内容不得外发第三方）。
+    # 部署见 docs/deploy/kroki-compose.yaml；未部署 Kroki 时工具返回结构化失败，不影响对话。
+    enable: true
+    renderer: kroki                  # kroki（自托管容器渲染 D2，推荐）
+    fallbackRenderer: none           # Kroki 失败时的本地回退：none | beautiful-mermaid（零 DOM 本地渲染，需已装依赖）
+    defaultTheme: paper-blue         # paper-blue | soft-pastel | technical | midnight | sketch（sketch 仅 D2）
+    defaultFormat: png               # png | svg（svg 以可编辑源文件发送）
+    timeoutMs: 15000                 # 单次渲染总预算（编译+HTTP+栅格化）
+    targetWidth: 1600                # 默认输出宽度（px，2x 清晰度）
+    maxNodes: 50                     # spec 数量上限（节点/连线/分组/参与者/消息各自独立上限）
+    maxEdges: 100
+    maxWidth: 2000                   # 输出尺寸钳制
+    maxHeight: 5000
+    maxPixels: 10000000
+    maxOutputBytes: 8388608          # 单图字节上限（超限自动降采样，仍超则 output_too_large）
+    tempTtlMinutes: 30               # data/diagram/ 临时文件保留时长（定时清理只删本目录 dg-* 文件）
+    kroki:
+      enabled: true
+      endpoint: "http://127.0.0.1:8000"  # 自托管 Kroki 地址（docker service 名/127.0.0.1/内网 IP）
+      deploymentMode: self-hosted-only
+      allowPublicEndpoint: false     # ⚠️ true=允许 kroki.io 公共服务（图中文字将发往第三方）；且强制 HTTPS
+      allowedDiagramTypes:           # Kroki 图类型白名单（模型不可指定；新增类型需配套确定性编译器+安全测试）
+        - d2
+      connectTimeoutMs: 2000         # 连接/响应头超时
+      requestTimeoutMs: 12000        # 单请求总超时（覆盖响应体读取全程）
+      maxSourceBytes: 131072         # 编译后 DSL 大小上限
+      maxResponseBytes: 4194304      # SVG 响应上限（流式字节计数）
+      maxConcurrency: 2              # 渲染并发上限
+      circuitBreaker:                # 连续失败熔断（防止 Kroki 宕机时每次调用都等满超时）
+        enabled: true
+        failureThreshold: 3
+        cooldownMs: 30000
+      d2:
+        layout: elk                  # dagre | elk（sequence 用固定 dagre，复杂分组/ER 用 elk）
+      imageTag: ""                   # 部署的 Kroki 镜像版本声明（进缓存 key；升级镜像后必须更新使旧缓存失效）
   document:
     soffice: "soffice"      # LibreOffice 可执行名/路径（file_to_pdf 转任意文件；容器装 libreoffice 后填，如 /usr/bin/soffice）
   stt:
