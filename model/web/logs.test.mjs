@@ -122,6 +122,33 @@ await test('aggregateStats：旧日志 raw 兜底（无顶层 cache 字段时从
   ok(r.observedInput >= 200 && r.totalCacheRead >= 120, `raw 兜底计入观测（observed=${r.observedInput}, read=${r.totalCacheRead}）`)
 })
 
+await test('aggregateStats：observedOutput 观测口径输出（缓存卡「输出 tokens」数据源）', async () => {
+  const { aggregateStats, buildCachePayload } = await import('./logs.js')
+  const TMP5 = fs.mkdtempSync(path.join(os.tmpdir(), 'weblogs-out-'))
+  const iso = new Date().toISOString()
+  const mkRun = (usage) => JSON.stringify({ level: 'info', time: iso, event: 'run_end', usage }) + '\n'
+  // 2 条未观测（output=100）+ 3 条观测（output=50）：缓存卡合计口径 = observedInput + observedOutput，
+  // 输出必须同观测口径——否则「合计」混入未观测请求的输出、与输入分母不一致
+  fs.writeFileSync(path.join(TMP5, '960179589-3333333333-1-' + fmt(new Date()) + '140000.log'),
+    mkRun({ input: 1000, output: 100, raw: { prompt_tokens: 1000, completion_tokens: 100 } })
+    + mkRun({ input: 1000, output: 100, raw: { prompt_tokens: 1000, completion_tokens: 100 } })
+    + mkRun({ input: 1000, output: 50, cacheRead: 800, uncached: 200, cacheObserved: true, raw: { prompt_tokens: 1000, prompt_cache_hit_tokens: 800 } })
+    + mkRun({ input: 1000, output: 50, cacheRead: 800, uncached: 200, cacheObserved: true, raw: { prompt_tokens: 1000, prompt_cache_hit_tokens: 800 } })
+    + mkRun({ input: 1000, output: 50, cacheRead: 800, uncached: 200, cacheObserved: true, raw: { prompt_tokens: 1000, prompt_cache_hit_tokens: 800 } }))
+  const r = aggregateStats(TMP5, {})
+  fs.rmSync(TMP5, { recursive: true, force: true })
+  eq(r.observedOutput, 150, `observedOutput=3×50=150（只统计报告了缓存的请求；实际 ${r.observedOutput}）`)
+  ok(r.observedOutput !== r.tokenTrend.reduce((s, d) => s + d.output, 0), `与全量 trend output（=350）区分口径`)
+  ok(r.observedInput + r.observedOutput === 3150, `合计 input+output 同口径（3000+150；实际 ${r.observedInput + (r.observedOutput || 0)}）`)
+  // API 层载荷：buildCachePayload 必须透传 observedOutput（曾 api.js 手写解构白名单漏掉 → 前端恒 0）
+  const payload = buildCachePayload(r)
+  eq(payload.observedOutput, 150, 'buildCachePayload 透传 observedOutput')
+  eq(payload.observedInput, 3000, 'buildCachePayload 透传 observedInput')
+  for (const k of ['totalCacheRead', 'totalCacheWrite', 'observedRequests', 'hitRequests', 'unobservedRequests', 'tokenHitRate', 'requestHitRate', 'warmObserved', 'warmHit', 'coldObserved', 'warmRequestHitRate', 'firstObservedAt']) {
+    ok(k in payload, `payload 含字段 ${k}（前端 cacheStats 全字段接线）`)
+  }
+})
+
 await test('readLogFile：路径穿越防护', async () => {
   eq(readLogFile(TMP, '../' + path.basename(TMP) + '/x.log'), [], '拒绝目录穿越')
   eq(readLogFile(TMP, 'not-exist.log'), [], '不存在返回空')

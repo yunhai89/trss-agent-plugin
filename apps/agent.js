@@ -40,6 +40,8 @@ import { detectCapabilities } from '../model/llm/capabilities.js'
 import { buildEmbed } from '../model/llm/embed-wiring.js'
 import { KnowledgeStore, makeKbSearchTool } from '../model/agent/knowledge.js'
 import { webCrawlTool } from '../model/crawl/index.js' // web_crawl：抓取网页正文（常驻）
+import { CompactionArchive } from '../model/agent/compact/archive.js' // 无损压缩：原文内容寻址归档
+import { makeContextRecallTool } from '../model/agent/compact/recall.js' // context_recall：取回归档原文
 import { groupInfoTools, groupManageTools, groupHistoryTools, groupNoticeTools, groupFileTools, aiVoiceTools, forwardTools } from '../model/group/index.js'
 import { miyousheTools } from '../model/miyoushe/index.js'
 import { pixivTools } from '../model/pixiv/index.js'
@@ -51,6 +53,7 @@ import { getStickerManager } from '../model/sticker/manager.js'
 import { redactSecrets } from '../model/agent/redact.js'
 import { randomUUID } from 'node:crypto'
 import devLog from '../utils/DevLog.js'
+import { ReplySender, createRunQueues } from '../model/agent/reply-sender.js'
 import { SkillRegistry, loadSkillPack, makeSkillTool } from '../model/skill/index.js'
 import { PromptRegistry, PromptTemplate, regressionGate, evolveTemplate, TEMPLATES } from '../model/prompt/index.js'
 import { TraceStore } from '../model/evolution/trace.js'
@@ -169,10 +172,12 @@ function extractArgHint(args, name) {
 /**
  * 构造进度反馈回调集合。
  * @param {object} e Yunzai 事件
- * @param {object} opts { progress, recall, shortCircuitTools }
+ * @param {object} opts { progress, recall, shortCircuitTools, replyQueue }
+ *   replyQueue：受控串行发送队列（长任务稳定性审计 P0-5）——进度消息经它发送，
+ *   rejection 归一为 outcome 记日志，绝不产生 unhandledRejection。
  */
 function makeReplyStream(e, {
-  progress = true, recall = 3, shortCircuitTools = ['clarify'],
+  progress = true, recall = 3, shortCircuitTools = ['clarify'], replyQueue = null,
 } = {}) {
   if (!progress) return {}
   let lastAt = 0
@@ -197,7 +202,7 @@ function makeReplyStream(e, {
       const label = PROGRESS_LABELS[name] || `🔧 调用 ${name}`
       const hint = extractArgHint(tc?.arguments, name)
       const msg = hint ? `${label}：${hint}` : `${label}…`
-      try { e.reply(msg, false, { recallMsg: recall }) } catch { /* noop */ }
+      replyQueue?.enqueue({ msg, quote: false, opts: { recallMsg: recall } }, { tag: 'progress' })
     },
   }
 }
@@ -223,6 +228,9 @@ let _runtimeFailed = null  // buildRuntime 失败原因缓存；非 null 则 get
 let _initErrLogged = false // 初始化失败日志限首（防每条消息重复打 ERRO）
 const _initFailNotified = new Set() // 已提示过"初始化失败"的用户(每用户仅提示一次，防刷屏)；runtime 重建时清
 const _clearPending = new Map() // userId → 确认清空的时间戳（2 步确认）
+// 每会话运行队列（长任务稳定性审计 P1）：同 conversation 串行（防读改写互覆历史/过期回复乱序），
+// 跨 conversation 并发。队列本身框架无关（model/agent/reply-sender.js），可离线测试。
+const convRunQueues = createRunQueues()
 
 function getKv() {
   if (typeof globalThis !== 'undefined' && globalThis.redis) return redisKv(globalThis.redis)
@@ -281,12 +289,16 @@ async function buildRuntime() {
   const presetMap = protocol === 'anthropic' ? anthropicPresets : openaiPresets
   const preset = cfg.preset ? presetMap[cfg.preset] : {}
   const proxyFetch = cfg.proxy ? await makeProxyFetch(cfg.proxy) : null
+  // provider 传输层日志（长任务稳定性审计 P1：重试含 attempt/原因/退避时长，曾是无声 no-op）；
+  // 经 clientOpts 透传到底层 Client 的 requestWithRetry(log)
+  const providerLog = Log.tag('provider')
   const provider = createProvider({
     protocol,
     ...preset,
     ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}),
     apiKey: cfg.apiKey,
     model: cfg.model,
+    log: providerLog,
     ...(cfg.reasoningFields ? { reasoningFields: cfg.reasoningFields } : {}),
     ...(proxyFetch ? { fetch: proxyFetch } : {}),
   })
@@ -315,6 +327,7 @@ async function buildRuntime() {
         protocol: fbp, ...fbPreset,
         ...(fb.baseURL ? { baseURL: fb.baseURL } : {}),
         apiKey: fb.apiKey, model: fb.model,
+        log: providerLog,
         ...(proxyFetch ? { fetch: proxyFetch } : {}),
       })
       fallbackProviders.push({ provider: fp, model: fb.model })
@@ -378,6 +391,16 @@ async function buildRuntime() {
   const enabledSearch = searchManager.availableProviders
   if (enabledSearch.length) Log.info('[search] 已启用搜索源：' + enabledSearch.join('、'))
 
+  // 无损上下文压缩（Hermes 可逆化）：原文归档按会话分目录落盘（sha256 内容寻址），
+  // context_recall 工具按 ref/query 恢复。compaction.enable:false 关闭归档与恢复工具
+  // （Agent 仍做台账压缩，只是原文不再可恢复——回滚杠杆）。
+  let compactArchive = null
+  if (cfg.compaction?.enable !== false) {
+    try {
+      compactArchive = new CompactionArchive({ dir: path.resolve(PLUGIN_ROOT, cfg.compaction?.archiveDir || 'data/context-archive') })
+    } catch (e) { Log.warn('[agent] 压缩归档初始化失败，降级为无归档压缩', e?.message || e) }
+  }
+
   const tools = new ToolRegistry({ logger: Log.tag('tool') })
     .register(...makeSearchTools(searchManager)) // web_search（多源）+ web_extract
     .register(...noteTools({ kv: K }))
@@ -385,6 +408,7 @@ async function buildRuntime() {
     .register(createMemoryTool(memory))
     .register(makeRecallTool(recall)) // memory_search：模型主动检索长期记忆
     .register(...makeMediaTools())
+  if (compactArchive) tools.register(makeContextRecallTool({ archiveFor: () => compactArchive })) // context_recall：取回压缩归档原文（常驻）
   // kb_search：知识库检索（默认开；cfg.kb.enable:false 关闭）
   if (cfg.kb?.enable !== false) tools.register(makeKbSearchTool(knowledge))
   // web_crawl：抓取网页正文（常驻；cfg.kb.crawlEnable:false 关闭）
@@ -600,8 +624,10 @@ async function buildRuntime() {
     temperature: regTemperature != null ? regTemperature : cfg.temperature,
     maxTokens: regMaxTokens != null ? regMaxTokens : (cfg.maxTokens || null), // 控制输出长度（消除 Anthropic 硬编码 4096 / OpenAI 不发）
     thinking: regThinking || cfg.thinking || null,
-    // 上下文管理：token 压力阈值（从 contextWindow 派生）、工具结果上限、是否回灌 reasoning
-    contextPressureThreshold: cfg.contextPressureThreshold ?? (cfg.contextWindow ? Math.floor(cfg.contextWindow * 0.8) : null),
+    // 上下文管理：contextWindow（token 高低水位压缩入口：65% 触发压到 45%；未配置走消息数水位）、
+    // 工具结果上限、是否回灌 reasoning。旧 contextPressureThreshold 已删除（从未被消费的死配置）。
+    contextWindow: cfg.contextWindow || null,
+    compactArchive, // 无损压缩归档（null=无归档压缩；见上方装配说明）
     maxToolResultChars: cfg.maxToolResultChars ?? 4000,
     keepReasoning: cfg.keepReasoning === true,
     // 工具按需发现：LLM 只常驻少数核心工具，其余经 tool_search 检索后动态注入（默认开；关则回退全量常驻）
@@ -774,9 +800,10 @@ function notifyMaster(e, id, info) {
   try {
     for (const mid of masters) {
       const bot = (typeof Bot !== 'undefined' && Bot) || null
-      bot?.pickFriend?.(mid)?.sendMsg?.(text)
+      // 异步发送必须挂 rejection 处理（同步 catch 捕获不了 Promise 拒绝 → unhandledRejection）
+      Promise.resolve(bot?.pickFriend?.(mid)?.sendMsg?.(text)).catch((err) => Log.warn('notifyMaster 私信发送失败', mid, err?.message || err))
     }
-    if (!masters.length && e.isGroup) e.reply('⚠️ 有动作待审批，但未配置 master 接收通知（agent.masters）')
+    if (!masters.length && e.isGroup) Promise.resolve(e.reply('⚠️ 有动作待审批，但未配置 master 接收通知（agent.masters）')).catch(() => {})
   } catch (err) {
     Log.warn('notifyMaster 失败', err?.message || err)
   }
@@ -990,6 +1017,18 @@ export class Chat extends plugin {
   }
 
   async _handleAgent(text) {
+    // traceId 先于一切可能失败的异步操作生成（长任务稳定性审计 P0-5：曾生成于 getActiveConversation
+    // 之后，该 await 裸露抛出时既无 trace 也无回复）。终态守卫保证每个 trigger 最终、且只落到
+    // reply_sent / reply_failed / cancelled / run_error 之一（离线一致性检查可复核）。
+    const traceId = randomUUID()
+    let devScope = null
+    let terminalFired = false
+    const terminal = (event, data = {}) => {
+      if (terminalFired) { Log.warn('[trace] 终态重复触发（已忽略）', event, traceId); return false }
+      terminalFired = true
+      devLog(event, data, traceId, devScope)
+      return true
+    }
     let rt
     try {
       rt = await getRuntime()
@@ -1004,12 +1043,20 @@ export class Chat extends plugin {
     }
     const cfg = Config.get().agent || {}
     const ctx = ctxOf(this.e)
-    ctx.conversationId = await rt.session.getActiveConversation(ctx.scopeUserId, ctx.groupId)
+    // 会话指针读取须有错误边界（此前裸 await 抛出 → 整条消息无响应、控制台无 trace）
+    try {
+      ctx.conversationId = await rt.session.getActiveConversation(ctx.scopeUserId, ctx.groupId)
+    } catch (e) {
+      Log.error('[chat] 读取活跃会话失败', e?.message || e)
+      terminal('run_error', { error: e?.message || String(e), at: 'getActiveConversation' })
+      try { await this.e.reply('⚠️ 读取会话信息失败，请稍后重试。') } catch { /* best effort */ }
+      return false
+    }
     // per-会话日志文件名所需信息；uid 用 scopeUserId 保证"同会话同文件"（群共享时为 __group__）
     let __convMeta = null
     try { __convMeta = await rt.session.getConversationMeta(ctx.scopeUserId, ctx.groupId, ctx.conversationId) } catch { /* noop */ }
     ctx.devScope = { gid: ctx.groupId || 'private', uid: ctx.scopeUserId, convId: ctx.conversationId, createdAt: __convMeta?.createdAt || Date.now() }
-    const traceId = randomUUID() // 串联整条链路的 dev trace id（与 Agent taskId 一致）
+    devScope = ctx.devScope
     devLog('trigger', {
       user: ctx.userId, gid: ctx.groupId, isGroup: ctx.isGroup, scopeUserId: ctx.scopeUserId, scopeId: ctx.scopeId, conv: ctx.conversationId,
       text: text || '',              // 用户提问原文（意图来源；trace 不截断，全文记录）
@@ -1105,7 +1152,12 @@ export class Chat extends plugin {
       // 纯媒体无文字：注入默认指令（问题4）；既无文字又无媒体：提示而非空跑
       const effText = text || (files.length ? '（我发了一张图片/文件给你，请查看并告诉我内容，或按需处理）' : '')
       if (!effText) {
-        await this.e.reply('未识别到文字或图片/文件内容（引用的图片可能获取失败），请重新发送或补充说明。')
+        try {
+          await this.e.reply('未识别到文字或图片/文件内容（引用的图片可能获取失败），请重新发送或补充说明。')
+          terminal('reply_sent', { mode: 'text', stopReason: 'no_input', earlyReturn: true })
+        } catch (re) {
+          terminal('reply_failed', { mode: 'text', stopReason: 'no_input', earlyReturn: true, error: re?.message || String(re) })
+        }
         return true
       }
       const content = media.buildContent(effText)
@@ -1169,9 +1221,29 @@ export class Chat extends plugin {
     Log.mark('[chat]', `user=${ctx.userId} gid=${ctx.groupId || '-'} conv=${ctx.conversationId} model=${cfg.model} persona=${personaId || 'default'} vision=${caps.vision ? 'on' : 'off'} thinking=${cfg.thinking ? 'on' : 'off'}${context ? ` ctx=${String(context).length}字` : ''}`)
     const wantProgress = cfg.progress !== false
     const wantStream = cfg.stream === true // 逐字流式默认关（适配器差异大）；进度反馈默认开
-    await this.e.reply('思考中…') // 触发确认：进入 agents 即回复，不受 progress 配置影响（让用户知道触发成功）
-    const rs = makeReplyStream(this.e, { progress: wantProgress, recall: cfg.progressRecall ?? 3, shortCircuitTools: ['clarify'] })
+
+    // —— 受控串行发送队列（P0-5）：思考中/进度/旁白/最终回复全部经它发送 ——
+    // 取代 `try { e.reply(...) } catch {}`（同步 catch 捕获不了适配器 Promise 的 rejection，
+    // 会变 unhandledRejection 静默消失）；enqueue 永不 reject，失败归一为 outcome 记日志。
+    const replyQueue = new ReplySender({
+      send: (p) => {
+        const args = [p.msg]
+        if (p.quote !== undefined) args.push(p.quote)
+        if (p.opts !== undefined) args.push(p.opts)
+        return this.e.reply(...args)
+      },
+      onSendError: (err, _p, tag) => Log.warn(`[reply:${tag}] 消息发送失败`, err?.message || err),
+    })
+    const safeReply = (msg, quote, opts) => replyQueue.enqueue({ msg, quote, opts })
+    safeReply('思考中…') // best effort：发送失败只记日志，绝不阻塞 Agent 执行
+    const rs = makeReplyStream(this.e, { progress: wantProgress, recall: cfg.progressRecall ?? 3, shortCircuitTools: ['clarify'], replyQueue })
+
+    // —— 每会话 single-flight（P1）：同 conversation 排队串行（防读改写互覆历史、过期回复乱序），
+    // 不同 conversation 互不影响。Agent run + 最终发送整体在队列内，保证回复顺序与任务顺序一致。
+    const convKey = `${ctx.groupId || 'private'}|${ctx.scopeUserId}|${ctx.conversationId}`
+    if (convRunQueues.depth(convKey) > 0) safeReply('⏳ 上一条还在处理中，你的消息已排队，完成后自动继续…')
     try {
+      await convRunQueues.run(convKey, async () => {
       // 喂给模型的首条 user 输入（追"AI 实际看到什么"：附件正文/文件名有没有进上下文、走纯文本还是多模态块、模型能力如何）
       const __inputText = typeof input === 'string' ? input
         : Array.isArray(input?.content) ? input.content.filter((b) => b && b.type === 'text').map((b) => b.text || '').join('\n')
@@ -1193,10 +1265,11 @@ export class Chat extends plugin {
         taskId: traceId, // 串联 dev trace：Agent 内 run_start/turn/tool/.../run_end 用同一 id
         stream: wantStream,
         ...(rs.onToolStart ? { onToolStart: rs.onToolStart } : {}),
-        // OpenClaw 式中途播报：模型在调工具时附带的中途文本（思路/进展）实时转发给用户，不丢弃
+        // OpenClaw 式中途播报：模型在调工具时附带的中途文本（思路/进展）实时转发给用户，不丢弃。
+        // 经受控发送队列（P0-5）：rejection 记日志，不产生 unhandledRejection，也不阻塞 Agent。
         onAssistant: (res) => {
           if (res?.toolCalls?.length && res?.content && cfg.reply?.narrate !== false) {
-            try { this.e.reply(redactSecrets(res.content)) } catch { /* noop */ }
+            safeReply(redactSecrets(res.content))
           }
         },
       })
@@ -1213,7 +1286,10 @@ export class Chat extends plugin {
       // 群聊回复艾特发言人（agent.reply.atSender，默认开；私聊不艾特）
       const atSender = (ctx.isGroup && cfg.reply?.atSender !== false && ctx.userId && typeof segment !== 'undefined') ? segment.at(ctx.userId) : null
       // 回复渲染：默认图片（markdown→图片，失败退文本）；replyMode 已在上方 run 前计算
+      // 发送经受控队列；delivered 依据队列 outcome（适配器返回值/retcode/rejection），不再"执行过 await 即成功"。
       let delivered = false
+      let finalOutcome = null
+      devLog('send_start', { mode: replyMode, replyLen: (body || '').length, stopReason, turns }, traceId, ctx.devScope)
       if (replyMode === 'image' && body) {
         try {
           // 拆 sticker：正文剥标记（无图，applyImage 空 map）+ 图独立成气泡（stickerImgs）
@@ -1248,13 +1324,14 @@ export class Chat extends plugin {
           },
         })
           if (img) {
-            await this.e.reply(atSender ? [atSender, img] : img); delivered = true
+            finalOutcome = await replyQueue.enqueue({ msg: atSender ? [atSender, img] : img }, { tag: 'final' })
+            delivered = !!finalOutcome.ok
             // 多样性硬闸在图片模式同样要推进（曾只在文本模式 noteSent → recent-3 去重在默认图片回复下永不更新，防线失效）
-            try { if (acceptMap?.size) rt.sticker?.noteSent?.([...acceptMap.keys()]) } catch { /* noop */ }
+            try { if (delivered && acceptMap?.size) rt.sticker?.noteSent?.([...acceptMap.keys()]) } catch { /* noop */ }
             // 图片模式下链接单独发（图内无法复制）：单链接文本直发；多链接打包一条合并转发防刷屏
             const __links = [...new Set((body.match(/https?:\/\/[^\s<>"')]+/g) || []).map((s) => s.replace(/[.,;:!?)]+$/, '')))]
             if (__links.length === 1) {
-              try { await this.e.reply(__links[0]) } catch { /* noop */ }
+              await safeReply(__links[0])
             } else if (__links.length > 1) {
               // 多链接 → 合并转发卡片（Yunzai makeForwardMsg：e.group/friend/Bot.makeForwardMsg([{message},...]) → forward segment → reply）
               try {
@@ -1263,11 +1340,11 @@ export class Chat extends plugin {
                 if (this.e.isGroup && this.e.group?.makeForwardMsg) fwd = await this.e.group.makeForwardMsg(fwdMsg)
                 else if (this.e.friend?.makeForwardMsg) fwd = await this.e.friend.makeForwardMsg(fwdMsg)
                 else if (typeof Bot !== 'undefined' && Bot.makeForwardMsg) fwd = await Bot.makeForwardMsg(fwdMsg)
-                if (fwd) await this.e.reply(fwd)
+                if (fwd) await safeReply(fwd)
                 else throw new Error('forward unavailable')
               } catch {
                 // 适配器不支持合并转发 → 降级一条文本
-                try { await this.e.reply(__links.join('\n')) } catch { /* noop */ }
+                await safeReply(__links.join('\n'))
               }
             }
           }
@@ -1277,34 +1354,53 @@ export class Chat extends plugin {
         // 文本模式（或图片渲染失败）：正文先发（剥除所有表情包标记，不在正文内联）；
         // 表情包作为主内容之后的【独立消息】依次发送（不与文字混排在同一条）。
         const cleanBody = acceptMap ? rt.sticker.applyText(body, new Map()).replace(/[\s\n]+$/, '') : (body || '(无回复)')
-        try {
-          const txt = `${cleanBody}${suffix ? `\n${suffix}` : ''}`
-          await this.e.reply(atSender ? [atSender, txt] : txt)
-          delivered = true
-          // 表情包：主内容发完后，作为独立消息依次发送
-          if (acceptMap && acceptMap.size && typeof segment !== 'undefined') {
-            for (const abs of acceptMap.values()) {
-              try { await this.e.reply(segment.image(abs)) } catch (e) { Log.warn('[render] 表情包单独发送失败', e?.message || e) }
-            }
-            rt.sticker?.noteSent?.([...acceptMap.keys()])
+        const txt = `${cleanBody}${suffix ? `\n${suffix}` : ''}`
+        finalOutcome = await replyQueue.enqueue({ msg: atSender ? [atSender, txt] : txt }, { tag: 'final' })
+        delivered = !!finalOutcome.ok
+        if (!delivered) Log.warn('[render] 文本回复发送失败', finalOutcome.error)
+        // 表情包：主内容发完后，作为独立消息依次发送
+        if (delivered && acceptMap && acceptMap.size && typeof segment !== 'undefined') {
+          for (const abs of acceptMap.values()) {
+            const st = await safeReply(segment.image(abs))
+            if (!st.ok) Log.warn('[render] 表情包单独发送失败', st.error)
           }
-        } catch (e) { Log.warn('[render] 文本回复发送失败', e?.message || e) }
+          rt.sticker?.noteSent?.([...acceptMap.keys()])
+        }
       } else if (suffix) {
-        await this.e.reply(suffix) // 图片已发，max_turns 提示作附注
+        await safeReply(suffix) // 图片已发，max_turns 提示作附注
+      }
+      // —— 终态（P1）：reply_sent / reply_failed 必居其一；失败不伪装为正常结束 ——
+      if (delivered) {
+        const ret = finalOutcome?.ret
+        terminal('reply_sent', {
+          mode: replyMode, stopReason, turns, replyLen: (body || '').length,
+          msgRet: ret == null ? null : (typeof ret === 'object' ? { retcode: ret.retcode ?? null } : String(ret).slice(0, 40)),
+        })
+      } else {
+        Log.error('[chat] 最终回复发送失败', finalOutcome?.error || 'unknown')
+        terminal('reply_failed', { mode: replyMode, stopReason, turns, replyLen: (body || '').length, error: finalOutcome?.error || 'send rejected' })
+        await safeReply('⚠️ 回复已生成但发送失败，请稍后重发消息触发重试。') // best-effort 降级提示（不改变 reply_failed 终态）
       }
       // 记录群内最近活跃时间，供 perception 判断"久未发言补课"
       if (ctx.isGroup && ctx.groupId && rt.kv) {
         rt.kv.set(`perception:last_active:${ctx.groupId}`, { at: Date.now() }).catch(() => {})
       }
       devLog('reply', { mode: replyMode, delivered, replyLen: (body || '').length, body: body || '', turns, stopReason }, traceId, ctx.devScope)
+      })
     } catch (e) {
+      if (/aborted/i.test(String(e?.message || e))) {
+        // 用户主动取消：不再发送过期结果（P0-4）
+        Log.warn('[chat] 任务已取消', traceId)
+        terminal('cancelled', { error: String(e?.message || e) })
+        return true
+      }
       Log.error('[chat] agent 失败', e?.message || e)
-      devLog('error', { error: e?.message || String(e), stack: e?.stack || null, input: (text || '').slice(0, 200), model: cfg.model, turns: 'unknown' }, traceId, ctx?.devScope)
-      await this.e.reply([
-        redactSecrets(`⚠️ 处理时出错：${e?.message || e}`),
+      terminal('run_error', { error: e?.message || String(e), stack: e?.stack || null, input: (text || '').slice(0, 200), model: cfg.model, turns: 'unknown' })
+      await safeReply(redactSecrets([
+        `⚠️ 处理时出错：${e?.message || e}`,
         '如反复出错，请发送 #上报错误 <问题描述> 上报（自动打包会话日志给开发者）；',
         '或加入官方 QQ 群 960179589 @群主 并附上日志反馈。',
-      ].join('\n'))
+      ].join('\n')))
     }
     return true
   }

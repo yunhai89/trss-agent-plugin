@@ -54,6 +54,28 @@ export function devLogFilename({ gid, uid, convId, createdAt } = {}) {
  * @param {object|null} scope {gid,uid,convId,createdAt} —— 决定写哪个会话文件；缺则 dev-fallback.log
  * @param {object} [opts] { dir?:string, filename?:string } —— 覆盖目录/文件名（如伪人日志写独立目录、按日文件）
  */
+/** 应至少 warn 的异常停止原因（预算耗尽/循环停滞等——曾显示 info，控制台"看起来没报错"） */
+const WARN_STOP_REASONS = new Set(['token_budget', 'time_budget', 'duplicate_action', 'no_progress', 'consecutive_failures', 'max_turns', 'blocked'])
+/** 硬失败事件（error 级） */
+const ERROR_EVENTS = new Set(['run_error', 'reply_failed'])
+
+/**
+ * 日志级别推导（长任务稳定性审计 P1：失败不再伪装 info）。
+ * 优先级：显式 data.level > ERROR_EVENTS > 失败形态（ok/success=false、errorClass、error、error 事件、
+ * 异常 stopReason、provider retry 耗尽）> info。调用方可传 data.level 覆盖。
+ */
+function inferLevel(event, data) {
+  const d = data || {}
+  if (d.level && typeof d.level === 'string') return d.level
+  if (ERROR_EVENTS.has(event)) return 'error'
+  if (d.ok === false || d.success === false || d.errorClass) return 'warn'
+  if (event === 'error') return 'error'
+  if (d.error || d.resolveError) return 'warn'
+  if (d.stopReason && WARN_STOP_REASONS.has(d.stopReason)) return 'warn'
+  if (event === 'provider_retry' && d.exhausted) return 'error'
+  return 'info'
+}
+
 export default async function devLog(event, data = {}, traceId = null, scope = null, opts = {}) {
   if (_failed) return
   if (cfg().enable === false) return
@@ -68,9 +90,8 @@ export default async function devLog(event, data = {}, traceId = null, scope = n
   const dir = opts.dir ? path.resolve(opts.dir) : (c.dir ? path.resolve(c.dir) : Config.path.logs)
   const filename = opts.filename || (scope ? devLogFilename(scope) : 'dev-fallback.log')
   const filepath = path.join(dir, filename)
-  const isError = data && (data.status === 'error' || data.error || data.resolveError || data.stopReason === 'blocked' || data.stopReason === 'max_turns')
   const obj = {
-    level: isError ? 'warn' : 'info',
+    level: inferLevel(event, data),
     time: new Date().toISOString(),
     event,
     traceId,

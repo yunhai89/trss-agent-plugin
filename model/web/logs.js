@@ -149,6 +149,8 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
   let totalCacheRead = 0
   let totalCacheWrite = 0
   let observedInput = 0
+  let observedOutput = 0 // 观测口径输出（缓存卡「输出 tokens」数据源：只统计报告了缓存字段的请求，
+  // 与 observedInput 同分母——曾只有 trend 的全量 output，缓存卡前端拿不到观测口径输出而恒显 0）
   let observedRequests = 0
   let hitRequests = 0
   let unobservedRequests = 0
@@ -186,6 +188,7 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
             else { warmObserved++; if (n.cacheRead > 0) warmHit++ }
             if (n.cacheRead > 0) hitRequests++
             if (din) { observedInput += din; dayMap[day].observedInput += din }
+            if (dout) observedOutput += dout
             totalCacheRead += n.cacheRead
             totalCacheWrite += n.cacheWrite
             dayMap[day].cacheRead += n.cacheRead
@@ -218,11 +221,36 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
     tokenTrend, requestTrend, toolTop,
     totalRequests, totalToolCalls, totalTokens,
     totalCached: totalCacheRead, // 兼容别名
-    totalCacheRead, totalCacheWrite, observedInput, observedRequests, hitRequests, unobservedRequests,
+    totalCacheRead, totalCacheWrite, observedInput, observedOutput, observedRequests, hitRequests, unobservedRequests,
     tokenHitRate: observedInput > 0 ? clamp01(totalCacheRead / observedInput) : null,
     requestHitRate: observedRequests > 0 ? clamp01(hitRequests / observedRequests) : null,
     warmObserved, warmHit, coldObserved,
     warmRequestHitRate: warmObserved > 0 ? clamp01(warmHit / warmObserved) : null,
     firstObservedAt,
+  }
+}
+
+/**
+ * /api/overview 的 cache 载荷组装（纯函数，供 api.js 调用；测试可直接断言）。
+ * 字段白名单在此单一维护——曾因 api.js 手写解构白名单漏掉 observedOutput，
+ * 聚合层的输出 token 到达不了前端（缓存卡「输出 tokens」恒 0 的第二处接线断点）。
+ * 新增字段必须同时对照 web/assets/js/views/dashboard.js 的 cacheStats computed。
+ */
+export function buildCachePayload(stats) {
+  return {
+    totalCacheRead: stats.totalCacheRead || 0,
+    totalCacheWrite: stats.totalCacheWrite || 0,
+    observedInput: stats.observedInput || 0,
+    observedOutput: stats.observedOutput || 0,
+    observedRequests: stats.observedRequests || 0,
+    hitRequests: stats.hitRequests || 0,
+    unobservedRequests: stats.unobservedRequests || 0,
+    tokenHitRate: stats.tokenHitRate ?? null,
+    requestHitRate: stats.requestHitRate ?? null,
+    warmObserved: stats.warmObserved || 0,
+    warmHit: stats.warmHit || 0,
+    coldObserved: stats.coldObserved || 0,
+    warmRequestHitRate: stats.warmRequestHitRate ?? null,
+    firstObservedAt: stats.firstObservedAt ?? null,
   }
 }

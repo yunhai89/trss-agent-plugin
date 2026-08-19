@@ -18,6 +18,7 @@ import { makeToolSearchTool } from './tools/tool_search.js'
 import { stringifyArgs, estimateMessages, mergeUsage } from './messages.js'
 import { tokenBreakdown, toolResultFields } from './trace/events.js'
 import { LoopGovernor } from './loop-governor.js'
+import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 
 const DEFAULT_IDENTITY = TEMPLATES.agent.system
@@ -31,7 +32,7 @@ function shortHash(str) {
 }
 
 /** 按需发现默认常驻工具（不经过搜索；config.toolDiscovery.alwaysOn 留空时兜底）。tool_search 始终由元工具注入。 */
-const DEFAULT_ALWAYS_ON = ['tool_search', 'clarify', 'memory_search', 'web_search', 'kb_search', 'skill', 'get_chat_history', 'reminder_set']
+const DEFAULT_ALWAYS_ON = ['tool_search', 'clarify', 'memory_search', 'web_search', 'kb_search', 'skill', 'get_chat_history', 'reminder_set', 'context_recall'] // context_recall 常驻：压缩档案消息直接引用它恢复原文，不能等 tool_search
 
 /** 紧凑用量日志：兼容 per-turn(prompt/completion_tokens) 与 mergeUsage(input/output/total) 两种形态 */
 function fmtUsage(u) {
@@ -112,10 +113,20 @@ function truncateJson(value, max) {
  *  注：以 JSON 字段注入（而非追加文本），保证 tool 结果仍可被 JSON.parse。 */
 const TOOL_FAIL_HINT = '这是工具返回的真实失败原因——请据此如实回复用户（勿臆测/编造其它原因）；若给出可重试方向（缺参数/权限不足/网络不可达/需先查 id）则换方式重试或指导用户；若反复失败无法解决，引导用户发送 #上报错误 <问题描述> 上报（命令会自动打包本次会话日志给开发者）。'
 
-/** LoopGovernor 触发的停止原因集合（这些 + max_turns 耗尽时，若无最终回复则强制收尾） */
+/** 异常停止原因集合（命中且尚无最终答案时必须进一次无工具 finalizer；不以"有没有旁白"为条件） */
 const GOVERNOR_STOP = new Set(['max_turns', 'duplicate_action', 'consecutive_failures', 'no_progress', 'time_budget', 'token_budget'])
 /** 强制收尾指令：让模型据已完成工具结果交付进展，不再调工具（审计 §2.1：预算耗尽不返回空串） */
 const GOVERNOR_WRAP_DIRECTIVE = '任务尚未完成。请根据上方已完成的工具调用与结果，向用户简要交付：①已完成的进展；②遇到的问题或失败原因；③建议的下一步。直接给出文字回复，不要再调用工具。'
+
+/** 异常停止 → 用户可读原因（确定性兜底用；finalizer 失败时由代码生成，绝不返回空串/旁白） */
+const STOP_REASON_CN = {
+  max_turns: '已达到本轮工具调用次数上限',
+  token_budget: '本次任务的 token 预算已用完',
+  time_budget: '本次任务的时间预算已用完',
+  duplicate_action: '检测到工具在重复执行相同操作，已停止以避免空转',
+  no_progress: '连续多步工具调用没有产生新结果，已停止',
+  consecutive_failures: '工具连续失败多次，已停止重试',
+}
 
 export class Agent {
   constructor(config = {}) {
@@ -135,7 +146,10 @@ export class Agent {
     this.toolChoice = config.tool_choice ?? config.toolChoice ?? null
 
     this.estimateTokens = config.estimateTokens || null
-    this.contextPressureThreshold = config.contextPressureThreshold ?? null
+    // 上下文窗口（token）：合法正整数时启用 token 高低水位滞回压缩（65% 触发 → 压到 45%），
+    // 未配置回退消息条数水位（contextMsgHighWater→LowWater）。
+    // 旧 contextPressureThreshold 已删除：从未被任何路径消费的死配置（曾与 contextWindow 两套互不生效）。
+    this.contextWindow = (Number.isFinite(Number(config.contextWindow)) && Number(config.contextWindow) > 0) ? Number(config.contextWindow) : null
     // 高低水位滞回压缩（Append-Only Ledger 的分代压缩）：token 水位优先（contextWindow 的
     // 65% 触发 → 压到 45%），无 contextWindow 用消息数水位（默认 30→18）。压缩 = 整 turn-block
     // 丢弃 + cacheEpoch++（跨代才允许前缀重建；未超 highWater 只追加不改写——曾 window=20
@@ -143,6 +157,11 @@ export class Agent {
     this.contextMsgHighWater = config.contextMsgHighWater ?? 30
     this.contextMsgLowWater = config.contextMsgLowWater ?? 18
     this.cacheEpoch = 0
+    // 无损压缩（Hermes ContextCompressor 可逆化）：compactArchive 注入后压缩 = 原文整块归档
+    // （sha256 内容寻址）+ 窗口内结构化台账 + context_recall 恢复；未注入降级为纯台账压缩。
+    // compactLedger 跨 run 恢复（会话级 extra），多次压缩走 merge 防漂移。
+    this.compactArchive = config.compactArchive || null
+    this._compactLedger = null
     // 上下文管理（解决长对话膨胀 / token 溢出）
     this.maxToolResultChars = config.maxToolResultChars ?? 4000 // 单条工具结果字符上限，超长截断
     this.keepReasoning = config.keepReasoning === true // 默认 false：不把 reasoning 回灌历史，省 context
@@ -189,6 +208,95 @@ export class Agent {
     this._curDevScope = null
     this.messages = []
     this._pendingReflect = null // 反思反馈暂存：下轮拼入 system（非 messages），防被模型当用户话（审计 §3.7）
+  }
+
+  /**
+   * 确定性收尾兜底（finalizer 失败/空输出时由代码生成）：
+   * 已完成步骤 + 最近一次工具结果 + 停止原因 + 用户如何继续。绝不引用中间旁白。
+   */
+  _deterministicWrapUp(stopReason) {
+    const toolNames = []
+    let toolCallCount = 0
+    let lastTool = null
+    for (const m of this.messages) {
+      if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+        for (const tc of m.tool_calls) {
+          toolCallCount++
+          const n = tc?.function?.name || tc?.name
+          if (n && !toolNames.includes(n)) toolNames.push(n)
+        }
+      }
+      if (m.role === 'tool') lastTool = m
+    }
+    let lastResult = '（无）'
+    if (lastTool) {
+      try {
+        const o = JSON.parse(lastTool.content)
+        lastResult = o?.error ? `失败：${String(o.error).slice(0, 120)}` : String(lastTool.content).slice(0, 120)
+      } catch { lastResult = String(lastTool.content || '').slice(0, 120) }
+    }
+    const reason = STOP_REASON_CN[stopReason] || '任务异常终止'
+    return [
+      `⏸️ 这轮任务先停一下：${reason}。`,
+      `已完成：共 ${toolCallCount} 次工具调用${toolNames.length ? `（${toolNames.join('、')}）` : ''}。`,
+      `最近一次工具结果：${lastResult}`,
+      '如需继续，请直接回复「继续」，我会接着当前进度往下做；也可以告诉我换个方向。',
+    ].join('\n')
+  }
+
+  /**
+   * 无工具 finalizer：异常停止（预算/停滞/max_turns）后的一次收尾调用。
+   * - tools:undefined + tool_choice:'none'，绝不执行新工具；
+   * - 独立宽限窗（finalizeGraceMs）：只受用户取消约束，不受工作预算/时间预算约束；
+   * - 输出追加为最终 assistant 消息后返回（调用方随后才持久化 session → run().content === 历史末条 assistant）；
+   * - 失败/空输出 → _deterministicWrapUp 代码兜底（同样入历史），绝不返回空串或中间旁白。
+   * @returns {{ text: string, via: 'llm' | 'fallback' }}
+   */
+  async _finalize({ stopReason, memories, systemPromptOverride, context, scopeId, userSignal, taskId, ctx }) {
+    this.logger('mark', `[finalize] 异常停止（${stopReason}），进入无工具收尾`)
+    this.devLog?.('finalize_start', { reason: stopReason }, taskId, ctx?.devScope)
+    const finCtl = new AbortController()
+    const onUserAbort = () => finCtl.abort({ kind: 'user' })
+    if (userSignal) {
+      if (userSignal.aborted) throw new Error('aborted')
+      userSignal.addEventListener('abort', onUserAbort, { once: true })
+    }
+    const graceMs = this.governor?.finalizeGraceMs ?? 45_000
+    const finTimer = setTimeout(() => finCtl.abort({ kind: 'finalize_timeout' }), graceMs)
+    try {
+      const wrapSys = this._assembleSystem(memories, systemPromptOverride, context, scopeId).system
+      const wrap = await this.provider.chat({
+        model: this.model,
+        messages: [...this.messages, { role: 'user', content: GOVERNOR_WRAP_DIRECTIVE }],
+        system: wrapSys,
+        tools: undefined,
+        tool_choice: 'none',
+        temperature: this.temperature,
+        max_tokens: Math.min(this.maxTokens ?? 1024, 1024), // 收尾只需简短总结，防吞掉预留
+        thinking: this.thinking,
+        signal: finCtl.signal,
+        stream: false,
+      })
+      const text = (wrap?.content || '').trim()
+      if (!text) throw new Error('finalizer 空输出')
+      if (wrap?.toolCalls?.length) throw new Error('finalizer 返回了 tool_calls（带工具调用的内容永远不能作为最终答案）')
+      if (wrap.usage) {
+        this.governor?.noteUsage(wrap.usage, { scope: 'finalize' })
+        this.devLog?.('finalize_end', { ok: true, via: 'llm', contentLen: text.length, usage: wrap.usage, graceMs }, taskId, ctx?.devScope)
+        return { text, via: 'llm', usage: wrap.usage }
+      }
+      this.devLog?.('finalize_end', { ok: true, via: 'llm', contentLen: text.length, graceMs }, taskId, ctx?.devScope)
+      return { text, via: 'llm', usage: null }
+    } catch (e) {
+      if (userSignal?.aborted) throw new Error('aborted') // 用户取消：不再交付过期结果
+      const fb = this._deterministicWrapUp(stopReason)
+      this.logger('warn', '[finalize] 收尾调用失败，使用代码生成的确定性兜底', e?.message || e)
+      this.devLog?.('finalize_end', { ok: false, via: 'fallback', error: e?.message || String(e), contentLen: fb.length, graceMs }, taskId, ctx?.devScope)
+      return { text: fb, via: 'fallback', usage: null }
+    } finally {
+      clearTimeout(finTimer)
+      if (userSignal) userSignal.removeEventListener('abort', onUserAbort)
+    }
   }
 
   setHistory(messages) { this.messages = messages ? messages.map((m) => ({ ...m })) : [] }
@@ -284,12 +392,29 @@ export class Agent {
     let usage = null
     let turns = 0
     let stopReason = null
-    let lastContent = ''
+    // ── 最终答案状态机（长任务稳定性审计 P0-1：单一 lastContent 曾同时表示旁白/被否决草稿/最终答案）──
+    // narrationContent：带 toolCalls 轮次的中间播报——只允许作为进度消息（onAssistant 转发），永远不能成为最终答案；
+    // 候选草稿：无工具轮生成、等待 reflection 验收——revise=true 时随 messages.pop() 彻底失效，不进入任何可返回变量；
+    // finalContent：已通过 reflection（或异常收尾 finalizer）的可交付最终答案；恒等于持久化历史末条 assistant。
+    let narrationContent = null
+    let finalContent = null
+    let finalizedVia = null // 'llm' | 'fallback'（finalizer 交付方式；null=正常路径产出）
     let usedTools = false      // 本轮是否调用过工具（auto 门控：仅非平凡任务触发反思，纯闲聊零延迟）
     let reflectIter = 0        // 已触发的反思回环次数（reflectMaxIterations 封顶，防无限循环）
     // 工具按需发现：按 enable 初始化激活集 + per-instance 元工具（同 run 内激活持续）
     const td = this.toolDiscovery
     const discoveryOn = !!(td?.enable && this.tools)
+    // 会话级状态恢复（activeTools/cacheEpoch/compactLedger）。曾整体放在 discoveryOn 分支内——
+    // toolDiscovery 关闭时 cacheEpoch/压缩台账不恢复：epoch 每次冷启动归零（prompt_cache_key 换键）
+    // 且台账丢失导致多次压缩无法 merge（防漂移链断裂）。压缩/换代与 discovery 无关，恢复提到分支外。
+    if (useConv && typeof this.session.getConversationState === 'function') {
+      try {
+        const st = await this.session.getConversationState(scopeUserId, ctx.groupId, ctx.conversationId)
+        if (Number.isFinite(Number(st?.cacheEpoch))) this.cacheEpoch = Number(st.cacheEpoch)
+        if (st?.compactLedger && typeof st.compactLedger === 'object') this._compactLedger = st.compactLedger
+        if (discoveryOn && Array.isArray(st?.activeTools)) this._pendingRestoreTools = st.activeTools
+      } catch { /* 状态缺失按新对话处理 */ }
+    }
     if (discoveryOn) {
       this.activeTools = new Set(td.alwaysOn?.length ? td.alwaysOn : DEFAULT_ALWAYS_ON)
       this._metaTools = { tool_search: makeToolSearchTool(this.tools, this, td) }
@@ -297,14 +422,9 @@ export class Agent {
       // 若每轮重置回 alwaysOn，上一轮 tool_search 扩充过的对话本轮 tools 缩水 → 前缀在
       // tools 处断裂，system+messages 全部 cache miss；且历史中的 tool_use 工具不在列表
       // 可能被严格端点拒收。恢复顺序=上轮最终顺序（Set 保插入序），前缀逐字节一致。
-      if (useConv && typeof this.session.getConversationState === 'function') {
-        try {
-          const st = await this.session.getConversationState(scopeUserId, ctx.groupId, ctx.conversationId)
-          if (Array.isArray(st?.activeTools)) {
-            for (const n of st.activeTools) if (this.tools.has?.(n) && !this.activeTools.has(n)) this.activeTools.add(n)
-          }
-          if (Number.isFinite(Number(st?.cacheEpoch))) this.cacheEpoch = Number(st.cacheEpoch)
-        } catch { /* 状态缺失按新对话处理 */ }
+      if (this._pendingRestoreTools) {
+        for (const n of this._pendingRestoreTools) if (this.tools.has?.(n) && !this.activeTools.has(n)) this.activeTools.add(n)
+        this._pendingRestoreTools = null
       }
     } else {
       this.activeTools = null
@@ -312,159 +432,234 @@ export class Agent {
     }
     this._curTaskId = taskId
     this._curDevScope = ctx?.devScope || null
+
+    // ── 任务级 deadline 与取消（长任务稳定性审计 P0-4）：用户取消 vs 工作预算耗尽严格分离 ──
+    // workSignal = 用户 signal ∨ 时间预算到点；在途模型调用与工具经它主动取消（不再只靠工具返回后的轮询）。
+    // 收尾（finalizer）用独立宽限窗（finalizeGraceMs），只受用户取消约束——预算耗尽仍要给用户真总结。
+    const workCtl = new AbortController()
+    const onUserAbort = () => workCtl.abort({ kind: 'user' })
+    if (signal) {
+      if (signal.aborted) throw new Error('aborted')
+      signal.addEventListener('abort', onUserAbort, { once: true })
+    }
+    const workSignal = workCtl.signal
+    let workTimer = null
+    if (this.governor?.timeBudgetMs) {
+      workTimer = setTimeout(() => {
+        workCtl.abort({ kind: 'time_budget' })
+        this.logger('warn', `[governor] 时间预算(${this.governor.timeBudgetMs}ms)到点，中止在途调用进入收尾`)
+        this.devLog?.('deadline', { budgetMs: this.governor.timeBudgetMs }, taskId, ctx?.devScope)
+      }, this.governor.timeBudgetMs)
+    }
+
     const __runStart = Date.now()
-    const __tools0 = this._buildToolList()
-    const __toolsTokensEst = estimateMessages(__tools0.map((t) => ({ content: JSON.stringify({ n: t.name, d: t.description, p: t.parameters }) })))
-    this.logger('mark', 'run start user=', ctx?.userId, 'gid=', ctx?.groupId, 'conv=', ctx?.conversationId, 'inputLen=', rawText.length, 'msgs=', this.messages.length, 'tools=', __tools0.length + (discoveryOn ? `/${this.tools.list().length} discovery=on` : ''), 'maxTurns=', this.maxTurns)
-    this.devLog?.('run_start', { user: ctx?.userId, gid: ctx?.groupId, conv: ctx?.conversationId, scopeUserId, scopeId, model: this.model, msgs: this.messages.length, tools: this.tools?.list?.().length || 0, discoveryOn, activeTools: this.activeTools ? [...this.activeTools] : null, toolsSent: __tools0.length, toolsTokensEst: __toolsTokensEst, maxTurns: this.maxTurns, inputLen: rawText.length }, taskId, ctx?.devScope)
+    try {
+      const __tools0 = this._buildToolList()
+      const __toolsTokensEst = estimateMessages(__tools0.map((t) => ({ content: JSON.stringify({ n: t.name, d: t.description, p: t.parameters }) })))
+      this.logger('mark', 'run start user=', ctx?.userId, 'gid=', ctx?.groupId, 'conv=', ctx?.conversationId, 'inputLen=', rawText.length, 'msgs=', this.messages.length, 'tools=', __tools0.length + (discoveryOn ? `/${this.tools.list().length} discovery=on` : ''), 'maxTurns=', this.maxTurns)
+      this.devLog?.('run_start', { user: ctx?.userId, gid: ctx?.groupId, conv: ctx?.conversationId, scopeUserId, scopeId, model: this.model, msgs: this.messages.length, tools: this.tools?.list?.().length || 0, discoveryOn, activeTools: this.activeTools ? [...this.activeTools] : null, toolsSent: __tools0.length, toolsTokensEst: __toolsTokensEst, maxTurns: this.maxTurns, inputLen: rawText.length }, taskId, ctx?.devScope)
 
-    while (turns < this.maxTurns) {
-      if (signal?.aborted) throw new Error('aborted')
+      while (turns < this.maxTurns) {
+        if (signal?.aborted) throw new Error('aborted')
 
-      const { system, breakdown, prefixFp = null, cacheBreakReason = null } = this._assembleSystem(memories, systemPromptOverride, context, scopeId)
-
-      // 高低水位滞回：未超 highWater 只追加（前缀逐字节稳定）；超了才一次压到 lowWater + epoch++
-      const pressure = this._hysteresisPressure(system)
-      if (pressure) {
-        compactedThisRun = true
-        const { est, high, dropped, epoch } = pressure
-        this.logger('mark', `[epoch] 上下文压力(est=${est}>${high})：滞回压缩至低水位，丢弃 ${dropped} 条整块消息，cacheEpoch ${epoch - 1}→${epoch}`)
-        this.devLog?.('cache_compact', { est, high, low: this._lowWaterMetric(system).value, dropped, cacheEpoch: epoch, msgsAfter: this.messages.length }, taskId, ctx?.devScope)
-        cb.onContextPressure?.({ estimate: est, threshold: high, dropped, cacheEpoch: epoch, messages: this.messages })
-      }
-
-      const toolList = this._buildToolList() // 每轮重算：tool_search 命中后 activeTools 扩充，下轮须重新合成
-      const __toolListTokens = estimateMessages(toolList.map((t) => ({ content: JSON.stringify({ n: t.name, d: t.description, p: t.parameters }) })))
-      breakdown.tools += __toolListTokens; breakdown.total = (breakdown.total || 0) + __toolListTokens
-      const __t0 = Date.now()
-      // 流式增量守卫：本轮已有增量内容送达用户（onDelta 播报/逐字输出）后，
-      // 若 provider 中途失败，换 fallback 重跑会把同样的半截内容再发一遍——直接抛出，宁断不重。
-      let __emitted = false
-      const __delta = cb.onDelta ? (...a) => { __emitted = true; return cb.onDelta(...a) } : undefined
-      // 主模型失败时依次尝试回退 provider（各自独立 baseURL/apiKey/protocol，可跨厂商）
-      const __chatWith = (prov, m) => prov.chat({
-        model: m, messages: this.messages, system,
-        tools: toolList.length ? toolList : undefined, tool_choice: this.toolChoice,
-        temperature: this.temperature, max_tokens: this.maxTokens, thinking: this.thinking,
-        signal, stream: wantStream, onDelta: __delta, onReasoning: cb.onReasoning,
-        ...(this._cacheControlFor(prov) ? { cacheControl: true } : {}),
-        ...this._promptCacheKeyFor(prov),
-        ...this._extraRunOpts(opts),
-      })
-      const __tries = [{ provider: this.provider, model: this.model }, ...this.fallbackProviders]
-      let result, lastErr
-      for (const t of __tries) {
-        try { result = await __chatWith(t.provider, t.model); break }
-        catch (e) {
-          lastErr = e
-          if (__emitted) {
-            this.logger('warn', `[fallback] 模型 ${t.model} 流式中途失败且已输出部分内容，不切换 provider（防重复输出）`, e?.message || e)
-            throw e
-          }
-          if (__tries.length > 1) this.logger('warn', `[fallback] 模型 ${t.model} 失败，尝试下一个`, e?.message || e)
-        }
-      }
-      if (!result) throw lastErr
-      const __ms = Date.now() - __t0
-      if (result.usage) {
-        usage = mergeUsage(usage, result.usage)
-        this.governor?.noteUsage(result.usage) // token 预算接线（此前 noteUsage 从未被调用，tokenBudget 恒不触发）
-      }
-      turns++
-      this.logger('debug', `turn ${turns}`, 'model=', this.model, 'finish=', result.finishReason, 'contentLen=', (result.content || '').length, 'toolCalls=', result.toolCalls?.length || 0, 'reasoning=', !!result.reasoning, 'usage=', fmtUsage(result.usage), `ms=${__ms}`)
-      this.devLog?.('turn', {
-        turn: turns, finish: result.finishReason, contentLen: (result.content || '').length,
-        cacheEpoch: this.cacheEpoch, ...(cacheBreakReason ? { cacheBreakReason } : {}), ...(turns === 1 ? { prefixFp } : {}),
-        content: result.content || '', reasoning: !!result.reasoning,
-        toolCalls: (result.toolCalls || []).map((tc) => ({ name: tc.name, arguments: tc.arguments })),
-        usage: result.usage || null, ms: __ms, toolsSent: toolList.length, breakdown, ...(discoveryOn ? { activeTotal: this.activeTools.size } : {}),
-      }, taskId, ctx?.devScope)
-
-      // 诊断（文档 §9.2/§12）：finishReason 表明要调工具，却没解析到 tool_calls
-      // → 工具调用结构丢失，循环将误判为"纯文本最终回复"而中断（工具不执行、无后续）。
-      // 记下原始结构，便于定位是否通道用了非标准 tool_call 格式。
-      if (!result.toolCalls?.length && result.finishReason && /tool|function/i.test(result.finishReason)) {
-        this.logger('warn', `[adapter] finish_reason=${result.finishReason} 但未解析到 tool_calls（工具循环将中断，疑似通道非标准格式）rawKeys=[${Object.keys(result.rawMessage || {}).join(',')}]`)
-        this.devLog?.('adapter_warn', { kind: 'finish_reason_without_tool_calls', finishReason: result.finishReason, contentLen: (result.content || '').length, rawKeys: Object.keys(result.rawMessage || {}) }, taskId, ctx?.devScope)
-      }
-
-      // 防 API 报错："assistant message content or tool_calls must be set"
-      // deepseek 等模型偶尔返回空 content + 无 tool_calls（如纯 thinking 无正文），
-      // 空消息被追加到历史后，下次 run 读历史时 API 拒绝。给占位避免。
-      const __emptyAssistant = !result.content && !result.toolCalls?.length
-      const assistantMsg = {
-        role: 'assistant',
-        content: result.content || (__emptyAssistant ? '(模型本轮未输出正文)' : null),
-        // 默认不回灌 reasoning（keepReasoning=false），避免隐藏 token 持续吃 context
-        ...((this.keepReasoning && result.reasoning) ? { reasoning: result.reasoning } : {}),
-      }
-      if (result.toolCalls?.length) {
-        assistantMsg.tool_calls = result.toolCalls.map((tc) => ({
-          id: tc.id, type: 'function', function: { name: tc.name, arguments: stringifyArgs(tc.arguments) },
-        }))
-      }
-      this.messages.push(assistantMsg)
-      cb.onAssistant?.(result, assistantMsg)
-      lastContent = result.content || lastContent
-
-      if (!result.toolCalls?.length) {
-        // 反思门：交付前自检，发现实质问题则回环修正（自我纠正）
-        if (reflectIter < this.reflectMaxIterations && this._shouldReflect(usedTools, turns)) {
-          const verdict = await this._reflect({ system, signal }).catch((e) => {
-            this.logger('warn', '[reflect] 自检异常，跳过（直接交付）', e?.message || e)
-            return null
-          })
-          reflectIter++
-          if (verdict?.usage) usage = mergeUsage(usage, verdict.usage)
-          this.devLog?.('reflect', { revise: !!verdict?.revise, feedback: verdict?.feedback || null, iter: reflectIter }, taskId, ctx?.devScope)
-          if (verdict?.revise) {
-            this.logger('mark', `[reflect] 自检发现需修正：${verdict.feedback || ''}——回环重做`)
-            // 反馈走 system 而非 messages（审计 §3.7 根治）：role:'user' 的反馈会被模型当成用户说的话，
-            // 导致最终回复"你说的对…"。改为：弹起草稿 assistant（重新生成而非续写）+ 反馈存 _pendingReflect，
-            // 下一轮 _assembleSystem 拼进 system（系统指令，模型不当用户话），用后即清。
-            this.messages.pop() // 移除刚 push 的草稿 assistant
-            this._pendingReflect = verdict.feedback || '草拟回复存在未达标之处'
-            continue
-          }
-          this.logger('debug', '[reflect] 自检通过，照常交付')
-        }
-        stopReason = result.finishReason || 'end_turn'
-        break
-      }
-
-      // 执行工具
-      const execCtx = new ExecutionContext({ agent: this, taskId, messages: this.messages, signal, logger: this.logger, props: { ctx } })
-      const toolResults = await this._executeToolCalls(result.toolCalls, execCtx, cb, ctx)
-      usedTools = true
-      for (const trm of toolResults) this.messages.push(trm)
-
-      // clarify 短路：指定工具的结果作为最终回复
-      const sc = toolResults.find((tr) => this.shortCircuitTools.includes(tr.name))
-      if (sc) {
-        let q = sc.content
-        try { const o = JSON.parse(q); if (o && o.clarify) q = o.clarify } catch { /* keep raw */ }
-        lastContent = String(q)
-        this.messages.push({ role: 'assistant', content: lastContent })
-        stopReason = 'clarify'
-        break
-      }
-
-      // LoopGovernor：上报本轮工具调用 + 检测循环停滞（审计 §2.1）。命中则终止，留给下方收尾交付
-      if (this.governor) {
-        for (let i = 0; i < result.toolCalls.length; i++) {
-          const tc = result.toolCalls[i]
-          const trm = toolResults[i]
-          const ok = !!trm && !isToolError(trm.content)
-          this.governor.noteToolCall(tc.name, tc.arguments, ok, undefined, resultSignature(trm?.content))
-        }
-        const g = this.governor.shouldStop()
-        if (g.stop) {
-          stopReason = g.reason
-          this.logger('mark', `[governor] 循环终止：${g.reason}`, JSON.stringify(this.governor.snapshot()))
-          this.devLog?.('governor_stop', { reason: g.reason, ...this.governor.snapshot() }, taskId, ctx?.devScope)
+        // 预检（调模型前，长任务稳定性审计 P0-2）：时间已超，或「已用 + 预计下一轮上下文占用」超 token 预算
+        // → 不再启动一轮注定超支的调用，直接进收尾（为 finalizer 保留空间）。
+        const pre = this.governor?.precheck()
+        if (pre?.stop) {
+          stopReason = pre.reason
+          this.logger('warn', `[governor] 预检停止：${pre.reason}`, JSON.stringify(this.governor.snapshot()))
+          this.devLog?.('governor_stop', { reason: pre.reason, phase: 'precheck', ...this.governor.snapshot() }, taskId, ctx?.devScope)
           break
         }
+
+        const { system, breakdown, prefixFp = null, cacheBreakReason = null } = this._assembleSystem(memories, systemPromptOverride, context, scopeId)
+
+        // 高低水位滞回：未超 highWater 只追加（前缀逐字节稳定）；超了才一次压到 lowWater + epoch++
+        const pressure = await this._hysteresisPressure(system, { scopeUserId, groupId: ctx?.groupId, conversationId: ctx?.conversationId })
+        if (pressure) {
+          compactedThisRun = true
+          const { est, high, dropped, pruned = 0, epoch, archived = 0 } = pressure
+          this.logger('mark', `[epoch] 上下文压力(est=${est}>${high})：无损压缩至低水位——归档 ${dropped} 条消息（另修剪 ${pruned} 条长工具结果，archive_refs=${archived}），cacheEpoch ${epoch - 1}→${epoch}`)
+          this.devLog?.('cache_compact', { est, high, low: this._lowWaterMetric(system).value, dropped, pruned, archived, cacheEpoch: epoch, msgsAfter: this.messages.length, ledger: this._compactLedger ? { facts: this._compactLedger.facts?.length || 0, archiveRefs: this._compactLedger.archive_refs?.length || 0, compactions: this._compactLedger.stats?.compactions || 0 } : null }, taskId, ctx?.devScope)
+          cb.onContextPressure?.({ estimate: est, threshold: high, dropped, pruned, archived, cacheEpoch: epoch, messages: this.messages })
+        }
+
+        const toolList = this._buildToolList() // 每轮重算：tool_search 命中后 activeTools 扩充，下轮须重新合成
+        const __toolListTokens = estimateMessages(toolList.map((t) => ({ content: JSON.stringify({ n: t.name, d: t.description, p: t.parameters }) })))
+        breakdown.tools += __toolListTokens; breakdown.total = (breakdown.total || 0) + __toolListTokens
+        const __t0 = Date.now()
+        // 流式增量守卫：本轮已有增量内容送达用户（onDelta 播报/逐字输出）后，
+        // 若 provider 中途失败，换 fallback 重跑会把同样的半截内容再发一遍——直接抛出，宁断不重。
+        let __emitted = false
+        const __delta = cb.onDelta ? (...a) => { __emitted = true; return cb.onDelta(...a) } : undefined
+        // 主模型失败时依次尝试回退 provider（各自独立 baseURL/apiKey/protocol，可跨厂商）
+        const __chatWith = (prov, m) => prov.chat({
+          model: m, messages: this.messages, system,
+          tools: toolList.length ? toolList : undefined, tool_choice: this.toolChoice,
+          temperature: this.temperature, max_tokens: this.maxTokens, thinking: this.thinking,
+          signal: workSignal, stream: wantStream, onDelta: __delta, onReasoning: cb.onReasoning,
+          ...(this._cacheControlFor(prov) ? { cacheControl: true } : {}),
+          ...this._promptCacheKeyFor(prov),
+          ...this._extraRunOpts(opts),
+        })
+        const __tries = [{ provider: this.provider, model: this.model }, ...this.fallbackProviders]
+        let result, lastErr
+        for (let ti = 0; ti < __tries.length; ti++) {
+          const t = __tries[ti]
+          this.devLog?.('provider_attempt', { model: t.model, attempt: ti + 1, isFallback: ti > 0 }, taskId, ctx?.devScope)
+          try { result = await __chatWith(t.provider, t.model); break }
+          catch (e) {
+            lastErr = e
+            if (__emitted) {
+              this.logger('warn', `[fallback] 模型 ${t.model} 流式中途失败且已输出部分内容，不切换 provider（防重复输出）`, e?.message || e)
+              throw e
+            }
+            if (ti < __tries.length - 1) {
+              this.logger('warn', `[fallback] 模型 ${t.model} 失败，切换下一回退`, e?.message || e)
+              this.devLog?.('provider_retry', { failedModel: t.model, attempt: ti + 1, nextModel: __tries[ti + 1].model, error: e?.message || String(e) }, taskId, ctx?.devScope)
+            }
+          }
+        }
+        if (!result) throw lastErr
+        const __ms = Date.now() - __t0
+        if (result.usage) {
+          usage = mergeUsage(usage, result.usage)
+          this.governor?.noteUsage(result.usage, { scope: 'work' }) // 统一口径：主轮 usage 入工作预算
+        }
+        turns++
+        this.logger('debug', `turn ${turns}`, 'model=', this.model, 'finish=', result.finishReason, 'contentLen=', (result.content || '').length, 'toolCalls=', result.toolCalls?.length || 0, 'reasoning=', !!result.reasoning, 'usage=', fmtUsage(result.usage), `ms=${__ms}`)
+        this.devLog?.('turn', {
+          turn: turns, finish: result.finishReason, contentLen: (result.content || '').length,
+          cacheEpoch: this.cacheEpoch, ...(cacheBreakReason ? { cacheBreakReason } : {}), ...(turns === 1 ? { prefixFp } : {}),
+          content: result.content || '', reasoning: !!result.reasoning,
+          toolCalls: (result.toolCalls || []).map((tc) => ({ name: tc.name, arguments: tc.arguments })),
+          usage: result.usage || null, ms: __ms, toolsSent: toolList.length, breakdown, ...(discoveryOn ? { activeTotal: this.activeTools.size } : {}),
+        }, taskId, ctx?.devScope)
+
+        // 诊断（文档 §9.2/§12）：finishReason 表明要调工具，却没解析到 tool_calls
+        // → 工具调用结构丢失，循环将误判为"纯文本最终回复"而中断（工具不执行、无后续）。
+        // 记下原始结构，便于定位是否通道用了非标准 tool_call 格式。
+        if (!result.toolCalls?.length && result.finishReason && /tool|function/i.test(result.finishReason)) {
+          this.logger('warn', `[adapter] finish_reason=${result.finishReason} 但未解析到 tool_calls（工具循环将中断，疑似通道非标准格式）rawKeys=[${Object.keys(result.rawMessage || {}).join(',')}]`)
+          this.devLog?.('adapter_warn', { kind: 'finish_reason_without_tool_calls', finishReason: result.finishReason, contentLen: (result.content || '').length, rawKeys: Object.keys(result.rawMessage || {}) }, taskId, ctx?.devScope)
+        }
+
+        // 防 API 报错："assistant message content or tool_calls must be set"
+        // deepseek 等模型偶尔返回空 content + 无 tool_calls（如纯 thinking 无正文），
+        // 空消息被追加到历史后，下次 run 读历史时 API 拒绝。给占位避免。
+        const __emptyAssistant = !result.content && !result.toolCalls?.length
+        const assistantMsg = {
+          role: 'assistant',
+          content: result.content || (__emptyAssistant ? '(模型本轮未输出正文)' : null),
+          // 默认不回灌 reasoning（keepReasoning=false），避免隐藏 token 持续吃 context
+          ...((this.keepReasoning && result.reasoning) ? { reasoning: result.reasoning } : {}),
+        }
+        if (result.toolCalls?.length) {
+          assistantMsg.tool_calls = result.toolCalls.map((tc) => ({
+            id: tc.id, type: 'function', function: { name: tc.name, arguments: stringifyArgs(tc.arguments) },
+          }))
+        }
+        this.messages.push(assistantMsg)
+        cb.onAssistant?.(result, assistantMsg)
+
+        if (!result.toolCalls?.length) {
+          // 反思门：交付前自检，发现实质问题则回环修正（自我纠正）
+          if (reflectIter < this.reflectMaxIterations && this._shouldReflect(usedTools, turns)) {
+            const verdict = await this._reflect({ system, signal: workSignal }).catch((e) => {
+              this.logger('warn', '[reflect] 自检异常，跳过（直接交付）', e?.message || e)
+              return null
+            })
+            reflectIter++
+            if (verdict?.usage) {
+              usage = mergeUsage(usage, verdict.usage)
+              this.governor?.noteUsage(verdict.usage, { scope: 'work' }) // 统一口径：反思 usage 也入账（曾 88k vs 102k 分裂）
+            }
+            this.devLog?.('reflect', { revise: !!verdict?.revise, feedback: verdict?.feedback || null, iter: reflectIter }, taskId, ctx?.devScope)
+            if (verdict?.revise) {
+              this.logger('mark', `[reflect] 自检发现需修正：${verdict.feedback || ''}——回环重做`)
+              // 反馈走 system 而非 messages（审计 §3.7 根治）：role:'user' 的反馈会被模型当成用户说的话，
+              // 导致最终回复"你说的对…"。改为：弹起草稿 assistant（重新生成而非续写）+ 反馈存 _pendingReflect，
+              // 下一轮 _assembleSystem 拼进 system（系统指令，模型不当用户话），用后即清。
+              // 候选草稿随 pop 彻底失效——状态机中不存在任何残留旧候选的返回路径。
+              this.messages.pop() // 移除刚 push 的草稿 assistant
+              this._pendingReflect = verdict.feedback || '草拟回复存在未达标之处'
+              continue
+            }
+            this.logger('debug', '[reflect] 自检通过，照常交付')
+          }
+          finalContent = result.content || '' // 反思通过（或未启用）→ 最终答案（该 assistant 消息已在 messages 中）
+          stopReason = result.finishReason || 'end_turn'
+          break
+        }
+
+        // 带 toolCalls 的轮次：content 只是工具调用旁白（进度播报），永远不能成为最终答案
+        narrationContent = result.content || narrationContent
+
+        // 执行工具前预检（长任务稳定性审计 P0-2：长工具不能只靠返回后轮询）：
+        // 时间预算已耗尽 → 不再执行，合成"未执行"结果保证 tool_call/tool_result 配对完整，随后进收尾。
+        {
+          const preTool = this.governor?.precheck()
+          if (preTool?.stop && preTool.reason === 'time_budget') {
+            for (const tc of result.toolCalls) {
+              this.messages.push({ role: 'tool', tool_call_id: tc.id, name: tc.name, content: stringifyArgs({ error: '时间预算耗尽，本轮工具未执行' }) })
+            }
+            stopReason = preTool.reason
+            this.logger('warn', `[governor] 工具执行前预检停止：${preTool.reason}`)
+            this.devLog?.('governor_stop', { reason: preTool.reason, phase: 'pre_tool', ...this.governor.snapshot() }, taskId, ctx?.devScope)
+            break
+          }
+        }
+
+        // 执行工具
+        const execCtx = new ExecutionContext({ agent: this, taskId, messages: this.messages, signal: workSignal, logger: this.logger, props: { ctx } })
+        const toolResults = await this._executeToolCalls(result.toolCalls, execCtx, cb, ctx)
+        usedTools = true
+        for (const trm of toolResults) this.messages.push(trm)
+
+        // clarify 短路：指定工具的结果作为最终回复
+        const sc = toolResults.find((tr) => this.shortCircuitTools.includes(tr.name))
+        if (sc) {
+          let q = sc.content
+          try { const o = JSON.parse(q); if (o && o.clarify) q = o.clarify } catch { /* keep raw */ }
+          finalContent = String(q)
+          this.messages.push({ role: 'assistant', content: finalContent })
+          stopReason = 'clarify'
+          break
+        }
+
+        // LoopGovernor：上报本轮工具调用 + 检测循环停滞（审计 §2.1）。命中则终止，留给下方收尾交付
+        if (this.governor) {
+          for (let i = 0; i < result.toolCalls.length; i++) {
+            const tc = result.toolCalls[i]
+            const trm = toolResults[i]
+            const ok = !!trm && !isToolError(trm.content)
+            this.governor.noteToolCall(tc.name, tc.arguments, ok, undefined, resultSignature(trm?.content))
+          }
+          const g = this.governor.shouldStop()
+          if (g.stop) {
+            stopReason = g.reason
+            this.logger('mark', `[governor] 循环终止：${g.reason}`, JSON.stringify(this.governor.snapshot()))
+            this.devLog?.('governor_stop', { reason: g.reason, phase: 'post_turn', ...this.governor.snapshot() }, taskId, ctx?.devScope)
+            break
+          }
+        }
       }
+    } catch (e) {
+      // 取消分类（长任务稳定性审计 P0-4）：
+      //  - 用户主动取消 → 上抛（apps 记 cancelled 终态，不再发送过期结果）；
+      //  - 工作时间预算到点（在途模型/工具被 workSignal 中止）→ 转为 time_budget 停止，进收尾；
+      //  - 其余异常原样上抛（run_error）。
+      if (signal?.aborted) {
+        this.devLog?.('cancel', { at: 'loop', error: e?.message || String(e) }, taskId, ctx?.devScope)
+        throw new Error('aborted')
+      }
+      if (workSignal.aborted) {
+        stopReason = 'time_budget'
+        this.logger('warn', '[governor] 在途调用被时间预算中止，进入收尾')
+      } else throw e
+    } finally {
+      if (workTimer) clearTimeout(workTimer) // 工作计时到点即清——收尾走独立宽限窗
+      if (signal) signal.removeEventListener('abort', onUserAbort)
     }
 
     if (!stopReason) {
@@ -472,39 +667,25 @@ export class Agent {
       this.logger('warn', `Agent 达到 maxTurns(${this.maxTurns})，提前结束`)
     }
 
-    // 强制收尾：governor 终止 / max_turns 耗尽 且未产出最终回复时，做一次"不带工具"的收尾调用，
-    // 让模型据已完成工具结果向用户交付进展（而非返回空串）。审计 §2.1。
-    if (this.governor && !lastContent && GOVERNOR_STOP.has(stopReason)) {
-      try {
-        const wrapSys = this._assembleSystem(memories, systemPromptOverride, context, scopeId).system
-        const wrap = await this.provider.chat({
-          model: this.model,
-          messages: [...this.messages, { role: 'user', content: GOVERNOR_WRAP_DIRECTIVE }],
-          system: wrapSys,
-          tools: undefined,
-          tool_choice: 'none',
-          temperature: this.temperature,
-          max_tokens: this.maxTokens,
-          thinking: this.thinking,
-          signal,
-          stream: false,
-        })
-        if (wrap?.content) {
-          lastContent = wrap.content
-          if (wrap.usage) usage = mergeUsage(usage, wrap.usage)
-          this.logger('mark', `[governor] 强制收尾（${stopReason}）：让模型总结已完成进展`)
-          this.devLog?.('governor_wrap', { reason: stopReason, contentLen: lastContent.length, usage: wrap.usage || null }, taskId, ctx?.devScope)
-        }
-      } catch (e) {
-        this.logger('warn', '[governor] 收尾调用失败（交付空回复）', e?.message || e)
-      }
+    // ── 异常停止强制收尾（长任务稳定性审计 P0-1）──
+    // token/time_budget、duplicate_action、no_progress、consecutive_failures、max_turns 等异常停止，
+    // 且尚未产出通过 reflection 的最终答案时，必须进一次无工具 finalizer（不以"有没有工具旁白"为条件）。
+    // finalizer 输出追加为最终 assistant 消息后再持久化 → run().content 恒等于持久化历史末条 assistant。
+    // 正常通过 reflection 的最终答案已在 messages 中（finalContent 非空 → 跳过，不重复追加）。
+    if (finalContent == null && GOVERNOR_STOP.has(stopReason)) {
+      const fin = await this._finalize({ stopReason, memories, systemPromptOverride, context, scopeId, userSignal: signal, taskId, ctx })
+      finalContent = fin.text
+      finalizedVia = fin.via
+      if (fin.usage) usage = mergeUsage(usage, fin.usage)
+      this.messages.push({ role: 'assistant', content: finalContent })
+      this.logger('mark', `[finalize] 收尾完成（via=${fin.via}, reason=${stopReason}）`)
     }
 
     // 持久化 session + 异步抽取记忆（按 scopeUserId 归属）
     // 反思草稿已 pop、反馈走 system 不进 messages，历史天然干净（无需额外过滤）
     // 持久化：普通轮次 append 增量；发生压缩的轮次全量覆写（压缩改写了中段，slice(sessStart)
     // 起点已错位——曾持久化出错切分段，重启后历史缺块且顺序错乱，Ledger 模式下暴露）
-    const extra = { cacheEpoch: this.cacheEpoch, ...(discoveryOn && this.activeTools ? { activeTools: [...this.activeTools] } : {}) }
+    const extra = { cacheEpoch: this.cacheEpoch, ...(this._compactLedger ? { compactLedger: this._compactLedger } : {}), ...(discoveryOn && this.activeTools ? { activeTools: [...this.activeTools] } : {}) }
     if (useConv) {
       try {
         if (compactedThisRun) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
@@ -533,9 +714,14 @@ export class Agent {
       })
     }
 
-    this.logger('mark', 'run end turns=', turns, 'stop=', stopReason, 'usage=', fmtUsage(usage), 'replyLen=', (lastContent || '').length, `totalMs=${Date.now() - __runStart}`)
-    this.devLog?.('run_end', { turns, stopReason, usage, replyLen: (lastContent || '').length, totalMs: Date.now() - __runStart, usedTools }, taskId, ctx?.devScope)
-    return { content: lastContent, messages: this.messages, usage, turns, taskId, stopReason }
+    this.logger('mark', 'run end turns=', turns, 'stop=', stopReason, 'usage=', fmtUsage(usage), 'replyLen=', (finalContent || '').length, `totalMs=${Date.now() - __runStart}`)
+    this.devLog?.('run_end', {
+      turns, stopReason, usage, replyLen: (finalContent || '').length, totalMs: Date.now() - __runStart, usedTools,
+      finalized: finalizedVia, hadNarration: narrationContent != null,
+      // 统一口径（曾有 governor 88k / run_end 102k 分裂）：governor 全量记账快照随 run_end 落盘对账
+      ...(this.governor ? { governor: this.governor.snapshot() } : {}),
+    }, taskId, ctx?.devScope)
+    return { content: finalContent || '', messages: this.messages, usage, turns, taskId, stopReason, ...(finalizedVia ? { finalized: finalizedVia } : {}) }
   }
 
   _inputText(input) {
@@ -686,73 +872,54 @@ export class Agent {
   }
 
   /**
-   * 压缩历史到 maxTokens 以下：保留首条 user 意图 + 尾部 contextKeepRecent 条，
-   * 在"安全边界"丢弃中段整轮对话。
-   * 安全边界：从 cutStart 起丢一块——若该块是带 tool_calls 的 assistant，连带其后所有
-   * tool 结果一起丢，保证不会留下孤立的 tool_result（其触发 assistant 已被移除）。
-   * @param {number} maxTokens 目标 messages token 上限
-   * @returns {number} 实际丢弃的消息数
-   */
-  /**
    * 滞回水位：token 优先（contextWindow 65%/45%），否则消息数（contextMsgHighWater/LowWater）。
-   * 返回 null=未超 highWater（只追加）；否则执行压缩（整 turn-block 丢弃 + epoch++）并返回摘要。
+   * 返回 null=未超 highWater（只追加）；否则执行压缩并返回摘要。
+   * 压缩为无损四阶段（compact/index.js）：被移出的原文整块归档（sha256 内容寻址、
+   * context_recall 可恢复）+ 窗口内留结构化台账消息；跨代（epoch++）才允许前缀重建。
    * turn-block = 一条普通 user 起始 + 直到下一条普通 user 之前的全部 assistant/tool_call/tool_result
-   * ——块级丢弃保证不留下孤立回答/孤儿 tool_result/被拆开的并行结果；messages[0]（首条意图）恒保留。
+   * ——块级移动保证原子束不撕裂；messages[0]（首条意图）恒保留。
    */
   _lowWaterMetric(_system) {
     if (this.contextWindow) return { kind: 'token', value: Math.floor(this.contextWindow * 0.45) }
     return { kind: 'count', value: this.contextMsgLowWater }
   }
 
-  _hysteresisPressure(system) {
+  async _hysteresisPressure(system, ctxMeta = null) {
     const useToken = !!this.contextWindow
     const est = useToken ? this._estimateHistory(system) : this.messages.length
     const high = useToken ? Math.floor(this.contextWindow * 0.65) : this.contextMsgHighWater
     if (est <= high) return null
+    // 滞回防抖：floor（尾部保底）+ 台账消息的极限落地可能仍高于 highWater——没有新增量
+    // 就不再空转重试（防同 run 逐轮 epoch++，前缀缓存逐轮全灭）。
+    if (this._lastCompactMsgsEst != null) {
+      const nowMsgs = useToken ? this._estimateMessagesTokens() : this.messages.length
+      const margin = Math.max(50, Math.floor((useToken ? this.contextWindow : this.contextMsgHighWater) * 0.05))
+      if (nowMsgs < this._lastCompactMsgsEst + margin) return null
+    }
     const lowMetric = this._lowWaterMetric(system)
-    const dropped = this._compactToLow(lowMetric)
-    if (!dropped) return null
+    const convKey = ctxMeta ? `${ctxMeta.scopeUserId || 'u'}:${ctxMeta.groupId || 'p'}:${ctxMeta.conversationId || 'unknown'}` : 'unknown'
+    const r = await compactMessages(this.messages, {
+      kind: lowMetric.kind, value: lowMetric.value,
+      archive: this.compactArchive, convKey, epoch: this.cacheEpoch + 1,
+      estimateTokens: this.estimateTokens,
+      minKeep: Math.max(this.contextKeepRecent, 2),
+      prevLedger: this._compactLedger,
+    })
+    if (!r.dropped && !r.pruned) return null
+    this.messages = r.messages
+    this._compactLedger = r.ledger
+    this._lastCompactMsgsEst = useToken ? this._estimateMessagesTokens() : this.messages.length
     this.cacheEpoch++
-    return { est, high, dropped, epoch: this.cacheEpoch }
-  }
-
-  /** 压缩到低水位：按 turn-block 从旧到新丢（跳过 messages[0] 首条意图），直到达标或无可丢 */
-  _compactToLow({ kind, value }) {
-    const minKeep = Math.max(this.contextKeepRecent, 2)
-    if (this.messages.length <= minKeep + 1) return 0
-    // 分块：index 0（首条意图）独立保留；从 index 1 起按 user 边界分 turn-block
-    const blocks = []
-    let i = 1
-    while (i < this.messages.length) {
-      const start = i
-      if (this.messages[i].role === 'user') {
-        i++
-        while (i < this.messages.length && this.messages[i].role !== 'user') i++
-      } else {
-        // 首意图之后的孤儿头（理论不出现，防御）：assistant/tool 连串并入下一块前的独立块
-        while (i < this.messages.length && this.messages[i].role !== 'user') i++
-      }
-      blocks.push(this.messages.slice(start, i))
-    }
-    let dropped = 0
-    const estOver = () => (kind === 'token'
-      ? this._estimateMessagesTokens() > value
-      : this.messages.length > value)
-    // 尾部保底：token 水位保 contextKeepRecent 条；消息水位保低水位与 2 中的较大值减一
-    // （消息模式下 minKeep=8 会压不进 low=5，曾导致压缩空转、每轮反复触发）
-    const floorKeep = kind === 'token' ? minKeep + 1 : Math.max(2, value)
-    let bi = 0
-    while (estOver() && bi < blocks.length && this.messages.length - blocks[bi].length >= floorKeep) {
-      this.messages.splice(1, blocks[bi].length) // 始终从 index 1 丢（index 0 是首条意图）
-      dropped += blocks[bi].length
-      bi++
-    }
-    return dropped
+    return { est, high, dropped: r.dropped, pruned: r.pruned, epoch: this.cacheEpoch, archived: (r.ledger?.archive_refs || []).length }
   }
 
   /** @deprecated 旧签名兼容（部分调用方/测试引用）；内部转滞回语义 */
-  _compactMessages(maxTokens) {
-    return this._compactToLow({ kind: 'token', value: maxTokens })
+  async _compactMessages(maxTokens) {
+    const r = await compactMessages(this.messages, { kind: 'token', value: maxTokens, estimateTokens: this.estimateTokens, minKeep: Math.max(this.contextKeepRecent, 2), prevLedger: this._compactLedger })
+    if (!r.dropped && !r.pruned) return 0
+    this.messages = r.messages
+    this._compactLedger = r.ledger
+    return r.dropped
   }
 
   /** Anthropic 断点是否生效：off 恒关；explicit 恒开；auto 看 provider.cacheCaps.cacheControlAuto（官方端点） */
@@ -864,8 +1031,14 @@ export class Agent {
       if (intercepted != null) {
         content = typeof intercepted === 'string' ? intercepted : stringifyArgs(intercepted)
       } else {
+        // 合并上下文（长任务稳定性审计 P0-4）：生产路径 ctx 存在时曾把 ExecutionContext 整个替换掉，
+        // 工具永远拿不到 run 级取消信号。改为在原 ctx 基础上合并 execCtx 的 signal/taskId，
+        // 旧字段（e/bot/userId/terminal/...）原样保留，abort 时协作工具可主动中止。
+        const toolCtx = ctx
+          ? Object.assign({}, ctx, { signal: execCtx.signal, taskId: execCtx.taskId, executionContext: execCtx })
+          : execCtx
         try {
-          const raw = await tool.execute(tc.arguments ?? {}, ctx || execCtx)
+          const raw = await tool.execute(tc.arguments ?? {}, toolCtx)
           content = typeof raw === 'string' ? raw : stringifyArgs(raw)
         } catch (e) {
           // 错误日志已由 AOP 切面打印；这里归一为 {error} 结果供模型下一轮重试

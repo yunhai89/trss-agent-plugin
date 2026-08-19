@@ -33,3 +33,13 @@ Screenshot_*.png
 
 # 临时排查截图不入库
 图*.jpg
+
+# crawl4ai 运行时 venv（scripts/install-crawl4ai.sh 创建，数百 MB 不入库）
+.crawl4ai-venv/
+
+# 无损压缩原文归档（运行时数据，不入库）
+data/context-archive/
+
+# Python 编译缓存
+__pycache__/
+*.pyc

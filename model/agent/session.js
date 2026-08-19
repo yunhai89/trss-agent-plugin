@@ -17,6 +17,19 @@ export class SessionStore {
     this.window = window
     this.ttl = ttl
     this._cache = new Map()
+    this._locks = new Map() // key -> 队尾 Promise（每键写锁：append/set 为读改写，须串行防丢失更新）
+  }
+
+  /**
+   * 每键互斥（长任务稳定性审计 P1）：append/appendConversation 是「读→改→写」，
+   * 同键并发会互相覆盖丢消息（redis 等 JSON 序列化 KV 下尤其如此——memoryKv 的共享引用会掩盖竞态）。
+   * 同键排队串行；不同键并发；fn 的返回值/异常原样传播。
+   */
+  _withLock(key, fn) {
+    const prev = this._locks.get(key) || Promise.resolve()
+    const run = prev.then(fn, fn) // 前序无论成败都继续（错误由本次调用方处理）
+    this._locks.set(key, run.then(() => {}, () => {}))
+    return run
   }
 
   // —— group:user 会话（原有）——
@@ -51,15 +64,17 @@ export class SessionStore {
 
   async append(k, msgs) {
     if (!msgs || !msgs.length) return this.get(k)
-    const cur = await this.get(k)
-    const next = [...cur, ...msgs]
-    // Append-Only Ledger：不再每条滑窗（曾 window=20 每轮删最旧块 → messages 前缀逐轮变化，
-    // DeepSeek 等按整段前缀缓存全灭）。压缩职责移交 Agent 的高低水位滞回（cacheEpoch 分代）；
-    // window 仅作绝对安全上限（防无 Agent 压缩路径的 KV 无界膨胀），默认放大到 400。
-    const trimmed = next.length > this.window ? trimKeepFirst(next, this.window) : next
-    this._cache.set(k, trimmed)
-    await this.kv.set(k, { messages: trimmed, updatedAt: Date.now() }, this.ttl)
-    return trimmed
+    return this._withLock(k, async () => {
+      const cur = await this.get(k)
+      const next = [...cur, ...msgs]
+      // Append-Only Ledger：不再每条滑窗（曾 window=20 每轮删最旧块 → messages 前缀逐轮变化，
+      // DeepSeek 等按整段前缀缓存全灭）。压缩职责移交 Agent 的高低水位滞回（cacheEpoch 分代）；
+      // window 仅作绝对安全上限（防无 Agent 压缩路径的 KV 无界膨胀），默认放大到 400。
+      const trimmed = next.length > this.window ? trimKeepFirst(next, this.window) : next
+      this._cache.set(k, trimmed)
+      await this.kv.set(k, { messages: trimmed, updatedAt: Date.now() }, this.ttl)
+      return trimmed
+    })
   }
 
   async clear(k) {
@@ -70,10 +85,12 @@ export class SessionStore {
   /** 整体覆写会话消息（Agent 压缩代际用：追加式 ledger 在跨 epoch 压缩后全量落盘，
    *  不能再走 append——压缩已改写中段，slice(sessStart) 起点错位会持久化出错切分段） */
   async set(k, msgs) {
-    const arr = Array.isArray(msgs) ? msgs : []
-    this._cache.set(k, arr)
-    await this.kv.set(k, { messages: arr, updatedAt: Date.now() }, this.ttl)
-    return arr
+    return this._withLock(k, async () => {
+      const arr = Array.isArray(msgs) ? msgs : []
+      this._cache.set(k, arr)
+      await this.kv.set(k, { messages: arr, updatedAt: Date.now() }, this.ttl)
+      return arr
+    })
   }
 
   async listAll() {
@@ -205,36 +222,42 @@ export class SessionStore {
 
   async appendConversation(userId, groupId, convId, msgs, extra = {}) {
     const k = this.convKey(userId, groupId, String(convId))
-    const c = (await this.kv.get(k)) || { id: String(convId), title: `对话 ${convId}`, messages: [], createdAt: Date.now() }
-    const next = [...(c.messages || []), ...msgs]
-    // 同上：append-only；Agent 滞回压缩负责水位（cacheEpoch 持久化在 extra）
-    const trimmed = next.length > this.window ? trimKeepFirst(next, this.window) : next
-    c.messages = trimmed
-    c.updatedAt = Date.now()
-    // extra：会话级非消息状态（如 toolDiscovery 的 activeTools——跨轮恢复保 tools 前缀稳定，缓存不 bust）
-    for (const [ek, ev] of Object.entries(extra || {})) if (ev !== undefined) c[ek] = ev
-    await this.kv.set(k, c)
-    return trimmed
+    return this._withLock(k, async () => {
+      const c = (await this.kv.get(k)) || { id: String(convId), title: `对话 ${convId}`, messages: [], createdAt: Date.now() }
+      const next = [...(c.messages || []), ...msgs]
+      // 同上：append-only；Agent 滞回压缩负责水位（cacheEpoch 持久化在 extra）
+      const trimmed = next.length > this.window ? trimKeepFirst(next, this.window) : next
+      c.messages = trimmed
+      c.updatedAt = Date.now()
+      // extra：会话级非消息状态（如 toolDiscovery 的 activeTools——跨轮恢复保 tools 前缀稳定，缓存不 bust）
+      for (const [ek, ev] of Object.entries(extra || {})) if (ev !== undefined) c[ek] = ev
+      await this.kv.set(k, c)
+      return trimmed
+    })
   }
 
-  /** 读会话级状态（不含 messages）。Agent.run 恢复 activeTools/cacheEpoch 用；旧对话无该字段返回空。 */
+  /** 读会话级状态（不含 messages）。Agent.run 恢复 activeTools/cacheEpoch/compactLedger 用；
+   *  旧对话无该字段返回空；compactLedger 未设置时不产出该键（保持旧形状兼容既有消费方）。 */
   async getConversationState(userId, groupId, convId) {
     const c = await this.kv.get(this.convKey(userId, groupId, String(convId)))
     return {
       activeTools: c && Array.isArray(c.activeTools) ? c.activeTools : null,
       cacheEpoch: c && Number.isFinite(Number(c.cacheEpoch)) ? Number(c.cacheEpoch) : 0,
+      ...(c && c.compactLedger && typeof c.compactLedger === 'object' ? { compactLedger: c.compactLedger } : {}),
     }
   }
 
   /** 整体覆写对话消息（同 append 的 extra 语义）；Agent 跨 epoch 压缩后全量落盘用 */
   async setConversation(userId, groupId, convId, messages, extra = {}) {
     const k = this.convKey(userId, groupId, String(convId))
-    const c = (await this.kv.get(k)) || { id: String(convId), title: `对话 ${convId}`, messages: [], createdAt: Date.now() }
-    c.messages = Array.isArray(messages) ? messages : []
-    c.updatedAt = Date.now()
-    for (const [ek, ev] of Object.entries(extra || {})) if (ev !== undefined) c[ek] = ev
-    await this.kv.set(k, c)
-    return c.messages
+    return this._withLock(k, async () => {
+      const c = (await this.kv.get(k)) || { id: String(convId), title: `对话 ${convId}`, messages: [], createdAt: Date.now() }
+      c.messages = Array.isArray(messages) ? messages : []
+      c.updatedAt = Date.now()
+      for (const [ek, ev] of Object.entries(extra || {})) if (ev !== undefined) c[ek] = ev
+      await this.kv.set(k, c)
+      return c.messages
+    })
   }
 
   async deleteConversation(userId, groupId, convId) {

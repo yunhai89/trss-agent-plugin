@@ -114,10 +114,11 @@
         const c = M.cache || null
         if (c) {
           const pct = (v) => (v == null ? null : Math.max(0, Math.min(100, v * 100)))
+          const hitRate = pct(c.tokenHitRate)
           return {
-            input: c.observedInput || 0, output: 0, cached: c.totalCacheRead || 0,
+            input: c.observedInput || 0, output: c.observedOutput || 0, cached: c.totalCacheRead || 0,
             cacheWrite: c.totalCacheWrite || 0, miss: Math.max(0, (c.observedInput || 0) - (c.totalCacheRead || 0)),
-            hitRate: pct(c.tokenHitRate), requestHitRate: pct(c.requestHitRate), warmHitRate: pct(c.warmRequestHitRate),
+            hitRate, missRate: hitRate == null ? 0 : 100 - hitRate, requestHitRate: pct(c.requestHitRate), warmHitRate: pct(c.warmRequestHitRate),
             unobserved: c.unobservedRequests || 0, observedReq: c.observedRequests || 0,
             warmObserved: c.warmObserved || 0, warmHit: c.warmHit || 0, coldObserved: c.coldObserved || 0,
             hasData: (c.observedRequests || 0) > 0, hasRequestRate: c.requestHitRate != null,
@@ -126,9 +127,10 @@
         // 旧后端 fallback（无 /overview.cache 字段）
         const t = M.tokenTrend || []
         const input = t.reduce((s, d) => s + (d.input || 0), 0)
+        const output = t.reduce((s, d) => s + (d.output || 0), 0)
         const cached = t.reduce((s, d) => s + (d.cached || 0), 0)
         const hitRate = input > 0 ? (cached / input) * 100 : 0
-        return { input, output: 0, cached, cacheWrite: 0, miss: Math.max(0, input - cached), hitRate, missRate: input > 0 ? 100 - hitRate : 0, hasData: input > 0, hasRequestRate: false, unobserved: 0 }
+        return { input, output, cached, cacheWrite: 0, miss: Math.max(0, input - cached), hitRate, missRate: input > 0 ? 100 - hitRate : 0, hasData: input > 0, hasRequestRate: false, unobserved: 0 }
       })
       const setWin = async (w) => {
         win.value = w
@@ -189,10 +191,10 @@
             <div class="row g14" style="font-size:12px">
               <span class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:#6366f1"></i>输入</span>
               <span class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:#2dd4bf"></i>输出</span>
-              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:transparent;border:2px dashed #2563eb"></i>命中·输入</span>
-              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:transparent;border:2px dashed #38bdf8"></i>命中·输出</span>
-              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:transparent;border:2px dotted #f97316"></i>未命中·输入</span>
-              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:transparent;border:2px dotted #eab308"></i>未命中·输出</span>
+              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:#2563eb"></i>命中·输入</span>
+              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:#38bdf8"></i>命中·输出</span>
+              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:#f97316"></i>未命中·输入</span>
+              <span v-if="chart.hasCached" class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:#eab308"></i>未命中·输出</span>
             </div>
           </div>
           <svg v-if="chart.lineIn" :viewBox="'0 0 ' + chart.W + ' ' + chart.H" style="width:100%;margin-top:14px;display:block">
@@ -223,8 +225,8 @@
               <circle :cx="chart.dots[0].x" :cy="chart.dots[0].yOut" r="3.5" fill="#2dd4bf"/>
               <circle v-if="chart.dots[0].yHitIn != null" :cx="chart.dots[0].x" :cy="chart.dots[0].yHitIn" r="3.5" fill="none" stroke="#2563eb" stroke-width="2.6"/>
               <circle v-if="chart.dots[0].yHitOut != null" :cx="chart.dots[0].x" :cy="chart.dots[0].yHitOut" r="3" fill="none" stroke="#38bdf8" stroke-width="1.8"/>
-              <rect v-if="chart.dots[0].yMissIn != null" :x="chart.dots[0].x - 3.2" :y="chart.dots[0].yMissIn - 3.2" width="6.4" height="6.4" fill="none" stroke="#f97316" stroke-width="2.6"/>
-              <rect v-if="chart.dots[0].yMissOut != null" :x="chart.dots[0].x - 2.8" :y="chart.dots[0].yMissOut - 2.8" width="5.6" height="5.6" fill="none" stroke="#eab308" stroke-width="1.8"/>
+              <circle v-if="chart.dots[0].yMissIn != null" :cx="chart.dots[0].x" :cy="chart.dots[0].yMissIn" r="3.5" fill="none" stroke="#f97316" stroke-width="2.6"/>
+              <circle v-if="chart.dots[0].yMissOut != null" :cx="chart.dots[0].x" :cy="chart.dots[0].yMissOut" r="3" fill="none" stroke="#eab308" stroke-width="1.8"/>
             </template>
           </svg>
           <div v-if="chart.lineIn" class="row-b" style="padding:0 8px;font-size:11px;color:var(--ink3)">
@@ -238,6 +240,8 @@
                 <th v-if="chart.hasCached" style="padding:6px 6px;color:#2563eb">命中·输入</th>
                 <th v-if="chart.hasCached" style="padding:6px 6px;color:#f97316">未命中·输入</th>
                 <th style="padding:6px 6px;color:#2dd4bf">输出</th>
+                <th v-if="chart.hasCached" style="padding:6px 6px;color:#38bdf8">命中·输出</th>
+                <th v-if="chart.hasCached" style="padding:6px 6px;color:#eab308">未命中·输出</th>
               </tr></thead>
               <tbody>
                 <tr v-for="r in chart.rows" :key="r.day" style="text-align:right;border-top:1px solid var(--line)">
@@ -246,6 +250,8 @@
                   <td v-if="chart.hasCached" style="padding:5px 6px">{{ fmt.num(r.cached) }}</td>
                   <td v-if="chart.hasCached" style="padding:5px 6px">{{ fmt.num(r.miss) }}</td>
                   <td style="padding:5px 6px">{{ fmt.num(r.output) }}</td>
+                  <td v-if="chart.hasCached" style="padding:5px 6px">{{ fmt.num(r.hitOut) }}</td>
+                  <td v-if="chart.hasCached" style="padding:5px 6px">{{ fmt.num(r.missOut) }}</td>
                 </tr>
               </tbody>
             </table>

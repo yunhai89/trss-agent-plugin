@@ -20,10 +20,12 @@ function trunc(s, max) {
 /**
  * 在主机上执行 shell 命令（无容器隔离）。
  * @param {string} command
- * @param {object} opts { cwd?(默认 Yunzai 根), timeout?(秒,默认60,上限600), maxOutput?(默认8000) }
- * @returns {Promise<{ok, exitCode, stdout, stderr, duration, signal?, timedOut?}>}
+ * @param {object} opts { cwd?(默认 Yunzai 根), timeout?(秒,默认60,上限600), maxOutput?(默认8000), signal?(AbortSignal) }
+ *   signal：任务级取消（长任务稳定性审计 P0-4）——abort 时杀整个进程组（shell 派生的子进程一并回收），
+ *   并保证 Promise 只 resolve 一次。
+ * @returns {Promise<{ok, exitCode, stdout, stderr, duration, signal?, timedOut?, aborted?}>}
  */
-export async function runShell(command, { cwd, timeout = 60, maxOutput = 8000 } = {}) {
+export async function runShell(command, { cwd, timeout = 60, maxOutput = 8000, signal } = {}) {
   const cmd = String(command || '')
   const seconds = Math.min(Math.max(1, Number(timeout) || 60), 600)
   const ms = seconds * 1000
@@ -31,13 +33,27 @@ export async function runShell(command, { cwd, timeout = 60, maxOutput = 8000 } 
   return new Promise((resolve) => {
     let stdout = '', stderr = ''
     let timer = null
+    let settled = false
+    let onAbort = null
     let proc
-    const finish = (r) => { if (timer) clearTimeout(timer); resolve(r) }
+    // 只结算一次：timeout/abort/error/close 可能竞争，先到者生效
+    const finish = (r) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      if (onAbort && signal) signal.removeEventListener('abort', onAbort)
+      resolve(r)
+    }
+    // 杀整个进程组（detached 使子进程成为组长，-pid 波及 shell 派生的所有子孙）；失败退化为杀主进程
+    const killTree = () => {
+      try { process.kill(-proc.pid, 'SIGKILL') } catch { try { proc.kill('SIGKILL') } catch { /* 已退出 */ } }
+    }
     try {
       proc = spawn(process.env.SHELL || '/bin/sh', ['-c', cmd], {
         cwd: cwd || undefined,
         env: process.env,
         stdio: ['ignore', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32', // 独立进程组：abort/超时可整组回收
       })
     } catch (e) {
       return finish({ ok: false, stderr: trunc(String(e), maxOutput), duration: Date.now() - t0 })
@@ -45,9 +61,18 @@ export async function runShell(command, { cwd, timeout = 60, maxOutput = 8000 } 
     proc.stdout?.on('data', (d) => { stdout += d.toString() })
     proc.stderr?.on('data', (d) => { stderr += d.toString() })
     timer = setTimeout(() => {
-      try { proc.kill('SIGKILL') } catch { /* noop */ }
+      killTree()
       finish({ ok: false, exitCode: null, signal: 'SIGKILL', stdout: trunc(stdout, maxOutput), stderr: trunc(stderr, maxOutput), duration: Date.now() - t0, timedOut: true })
     }, ms)
+    if (signal) {
+      onAbort = () => {
+        killTree()
+        // close 事件随后触发并 finish（带 aborted 标记的兜底结果，防 close 丢失）
+        finish({ ok: false, exitCode: null, signal: 'SIGKILL', stdout: trunc(stdout, maxOutput), stderr: trunc(stderr, maxOutput), duration: Date.now() - t0, aborted: true })
+      }
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    }
     proc.on('error', (e) => {
       finish({ ok: false, stderr: trunc(String(e?.message || e), maxOutput), duration: Date.now() - t0 })
     })
@@ -123,10 +148,11 @@ export function makeTerminalTool({ isMasterFn } = {}) {
         const approved = await approve({ command: cmd }, ctx)
         if (!approved) return { error: '未获主人批准或审批超时' }
       }
-      // ④ 主机执行
+      // ④ 主机执行（透传任务级取消信号：Agent run 的 deadline/用户 abort 可杀整组进程）
       const res = await runShell(cmd, {
         cwd: params.cwd || cfg.cwd || undefined,
         timeout: Math.min(Number(params.timeout) || cfg.maxTimeout || 60, cfg.maxTimeout || 600),
+        signal: ctx?.signal || null,
       })
       return { command: cmd, ...res }
     },

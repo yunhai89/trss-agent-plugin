@@ -727,7 +727,7 @@ await test('_compactMessages：保留首条意图 + 不孤立 tool 消息', asyn
   ]
   a.setHistory(msgs)
   const before = a.getHistory().length
-  const dropped = a._compactMessages(20) // 极小目标，强制大幅压缩
+  const dropped = await a._compactMessages(20) // 极小目标，强制大幅压缩
   const after = a.getHistory()
   ok(dropped > 0, `丢弃了 ${dropped} 条中段消息`)
   ok(after.length < before, '历史变短')
@@ -1175,14 +1175,40 @@ await test('会话前缀：token 水位滞回（65% 触发压到 45%）优先于
   const kv = memoryKv()
   const session = new SessionStore({ kv })
   await session.createConversation('u1', null, 'c1')
-  const provider = mockProvider([{ content: 'x', finishReason: 'stop' }])
+  const long = '这是用于撑大 token 估算的长内容。'.repeat(60) // ~960 字 ≈ 240 token
+  let turn = 0
+  const provider = {
+    async chat(opts) {
+      turn++
+      if (turn % 2 === 1) return { content: '旁白' + turn, toolCalls: [{ id: 'c' + turn, name: 't1', arguments: {} }], finishReason: 'tool_calls', usage: { prompt_tokens: 5, completion_tokens: 1 } }
+      return { content: '回复' + turn, finishReason: 'stop', usage: { prompt_tokens: 5, completion_tokens: 1 } }
+    },
+  }
+  const tools = new ToolRegistry().register({ name: 't1', description: 'd', parameters: { type: 'object' }, async execute() { return 'r' } })
   const agent = new Agent({
-    provider, session, maxTurns: 2, reflect: 'off',
-    contextWindow: 1000, // 极小窗口：每条消息 ~几十 token，很快触发
+    provider, tools, session, maxTurns: 5, reflect: 'off',
+    contextWindow: 1600, contextKeepRecent: 4,
   })
-  await agent.run('a'.repeat(200), { ctx: { userId: 'u1', groupId: null, scopeUserId: 'u1', conversationId: 'c1' } })
-  const st = await session.getConversationState('u1', null, 'c1')
-  ok((st.cacheEpoch || 0) >= 1 || true, 'token 水位路径可执行（压缩与否取决于估算值）')
+  const high = Math.floor(1600 * 0.65)
+  const postCompact = []
+  const epochs = []
+  // 5 轮 × 4 条消息 = 20 条，不触消息数水位（默认 30）——只有 contextWindow 的 token 路径会压缩
+  for (let i = 1; i <= 5; i++) {
+    await agent.run(`问题${i} ${long}`, {
+      ctx: { userId: 'u1', groupId: null, scopeUserId: 'u1', conversationId: 'c1' },
+      systemPrompt: '短身份',
+      onContextPressure: () => postCompact.push(agent._estimateMessagesTokens()),
+    })
+    epochs.push((await session.getConversationState('u1', null, 'c1')).cacheEpoch || 0)
+  }
+  ok(epochs[epochs.length - 1] >= 1, `token 水位压缩真实发生（最终 cacheEpoch=${epochs[epochs.length - 1]}）`)
+  ok(postCompact.length >= 1, `压缩回调触发（${postCompact.length} 次）`)
+  ok(postCompact.every((p) => p <= high), `每次压缩后 messages token ≤ 高水位 ${high}（实际 ${JSON.stringify(postCompact)}）`)
+  const hist = await session.getConversation('u1', null, 'c1')
+  ok(String(hist[0]?.content || '').includes('问题1'), '首条用户意图保留')
+  const callIds = new Set()
+  for (const m of hist) for (const tc of m.tool_calls || []) callIds.add(tc.id)
+  ok(hist.filter((m) => m.role === 'tool').every((m) => callIds.has(m.tool_call_id)), '压缩后 tool_call/tool_result 配对完整')
 })
 
 // ---------- P1：工具 schema 追加式增长（tools 前缀稳定性） ----------

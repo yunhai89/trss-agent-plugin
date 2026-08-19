@@ -16,7 +16,7 @@ import { getRuntime, fireReminder, makeFireDispatch } from '../../apps/agent.js'
 import { getGroupWorld } from '../../apps/groupworld.js'
 import { parseCron } from '../agent/schedule.js'
 import { redactConfig } from './redact.js'
-import { listLogFiles, readLogFile, aggregateStats, queryLogFiles } from './logs.js'
+import { listLogFiles, readLogFile, aggregateStats, queryLogFiles, buildCachePayload } from './logs.js'
 import { ok, fail, asyncHandler, CODE } from './response.js'
 import { listAllSuggestions, applySuggestion, removeSuggestion } from '../evolution/review.js'
 import { getStickerManager } from '../sticker/manager.js'
@@ -299,9 +299,10 @@ router.get('/overview', asyncHandler(async (req, res) => {
   const stats = since === 0 ? r0 : aggregateStats(Config.path.logs, { since, topK: 5 })
   const {
     tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached,
-    totalCacheRead, totalCacheWrite, observedInput, observedRequests, hitRequests, unobservedRequests,
-    tokenHitRate, requestHitRate, warmObserved, warmHit, coldObserved, warmRequestHitRate, firstObservedAt,
   } = stats
+  // cache 载荷经 buildCachePayload 统一组装（白名单单一维护——曾在此手写解构漏 observedOutput，
+  // 聚合层的输出 token 到达不了前端，缓存卡「输出 tokens」恒 0）
+  const cachePayload = buildCachePayload(stats)
   // perceptions（kv.scan）
   const perceptions = []
   if (r?.kv) {
@@ -333,7 +334,7 @@ router.get('/overview', asyncHandler(async (req, res) => {
   const data = {
     tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached, perceptions, counts,
     // 缓存统计（观测口径）：未观测 ≠ 0 命中；cold/warm 分层；比率 null=无观测数据（前端显示「暂无」）
-    cache: { totalCacheRead, totalCacheWrite, observedInput, observedRequests, hitRequests, unobservedRequests, tokenHitRate, requestHitRate, warmObserved, warmHit, coldObserved, warmRequestHitRate, firstObservedAt },
+    cache: cachePayload,
   }
   _overviewCache = { at: Date.now(), win, data }
   return ok(res, data)

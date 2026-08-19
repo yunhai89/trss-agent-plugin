@@ -6,17 +6,22 @@
  *   - openai 默认实现忽略 status；anthropic 自带 529 过载感知版。
  */
 
-/** 合并多个 AbortSignal：任一触发则合并 signal abort */
+/** 合并多个 AbortSignal：任一触发则合并 signal abort。返回的 ctl 带 cleanup()（移除 listener，防泄漏） */
 export function linkSignals(sources) {
   const ctl = new AbortController()
+  const cleanups = []
+  const onAbort = (s) => () => ctl.abort(s.reason)
   for (const s of sources) {
     if (!s) continue
     if (s.aborted) {
       ctl.abort(s.reason)
       break
     }
-    s.addEventListener('abort', () => ctl.abort(s.reason), { once: true })
+    const fn = onAbort(s)
+    s.addEventListener('abort', fn, { once: true })
+    cleanups.push(() => s.removeEventListener('abort', fn))
   }
+  ctl.cleanup = () => { for (const c of cleanups) { try { c() } catch { /* noop */ } } }
   return ctl
 }
 
@@ -118,8 +123,13 @@ export function createRequestWithRetry({ APIError, TimeoutError, ConnectionError
       const to = makeTimeout(timeout)
       const linked = linkSignals([to.signal, signal])
 
+      // timeout 覆盖全周期（长任务稳定性审计 P0-4）：建立连接 → 等待响应头 → 响应体读取（成功与错误两种）。
+      // 曾在 fetch() 刚返回响应头后就 clearTimeout——body 永不到达时请求悬挂且 signal 不 abort。
+      // 唯一例外：流式（stream=true）在 headers 到手后交还响应，空闲超时由 stream.js 的 idleMs 管理。
       let res = null
-      let fetchErr = null
+      let phaseErr = null
+      let text = null
+      let errBody = null
       try {
         res = await fetcher(url, {
           method,
@@ -127,25 +137,33 @@ export function createRequestWithRetry({ APIError, TimeoutError, ConnectionError
           body: body == null ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
           signal: linked.signal,
         })
+        if (res.ok) {
+          if (stream) return res
+          text = await res.text()
+        } else {
+          // 错误响应体同样受 timeout 管辖：text() 的 abort/超时必须向外抛（不吞），
+          // 只有 JSON 解析失败才降级为 null（保留"非 JSON 错误体"的原语义）
+          const t = await res.text()
+          if (t) { try { errBody = JSON.parse(t) } catch { errBody = null } }
+        }
       } catch (err) {
-        fetchErr = err
+        phaseErr = err
       } finally {
         to.clear()
+        linked.cleanup?.()
       }
 
-      if (fetchErr) {
-        if (fetchErr instanceof APIError) {
-          lastErr = fetchErr
+      if (phaseErr) {
+        if (phaseErr instanceof APIError) {
+          lastErr = phaseErr
         } else if (signal?.aborted) {
-          lastErr = new APIError({ message: 'Request aborted by caller', cause: fetchErr })
+          lastErr = new APIError({ message: 'Request aborted by caller', cause: phaseErr })
         } else if (to.signal?.aborted) {
-          lastErr = new TimeoutError(`Request timed out after ${timeout}ms`, { cause: fetchErr })
+          lastErr = new TimeoutError(`Request timed out after ${timeout}ms`, { cause: phaseErr })
         } else {
-          lastErr = new ConnectionError(fetchErr?.message || 'Network error', { cause: fetchErr })
+          lastErr = new ConnectionError(phaseErr?.message || 'Network error', { cause: phaseErr })
         }
       } else if (res.ok) {
-        if (stream) return res
-        const text = await res.text()
         let data = null
         if (text) {
           try {
@@ -156,13 +174,6 @@ export function createRequestWithRetry({ APIError, TimeoutError, ConnectionError
         }
         return { status: res.status, headers: res.headers, data }
       } else {
-        let errBody = null
-        try {
-          const t = await res.text()
-          errBody = t ? JSON.parse(t) : null
-        } catch {
-          errBody = null
-        }
         lastErr = buildAPIError(res.status, errBody, res.headers)
       }
 
@@ -185,6 +196,7 @@ export function createRequestWithRetry({ APIError, TimeoutError, ConnectionError
       attempt++
     }
 
+    log('error', `请求失败（${lastErr?.name ?? 'Error'}/${lastErr?.status ?? 'net'}），共 ${attempt + 1} 次尝试后放弃`)
     throw lastErr || new APIError({ message: 'Request failed' })
   }
 }

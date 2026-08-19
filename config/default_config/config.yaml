@@ -36,12 +36,18 @@ agent:
     maxSameAction: 2          # 同工具+相同参数连续允许次数（超出 → duplicate_action 终止，防 ping 死循环）
     maxConsecutiveFailures: 3 # 连续工具失败次数上限（超出 → consecutive_failures 终止）
     noProgressWindow: 4       # 连续 N 步无新事实 → no_progress 终止
-    timeBudgetMs: 300000       # 单次对话时间预算（毫秒，超出终止）
-    tokenBudget: 80000        # 单次对话 token 预算（超出终止）
+    timeBudgetMs: 300000       # 单次对话工作时间预算（毫秒，超出终止在途调用并进入收尾）
+    tokenBudget: 240000       # 单次对话累计工作 token 上限：每轮完整输入+输出累加（含缓存命中读）。
+                             # 语义明确化：调模型前按「已用+最近一次上下文占用」预检，不再启动注定超支的一轮；
+                             # 收尾总结调用独立预留（不占本预算）。默认 24 万 ≈ 15~18k/轮 × 12~15 轮长任务
+    finalizeGraceMs: 45000   # 收尾宽限：预算/时间耗尽后，收尾总结调用可用的独立时间窗（只受用户取消约束）
   temperature: 0.2  # 工具调用稳定性（建议 0.1~0.3；勿设 0 避免复读式回复）
   thinking:
   maxTokens:              # 单次回复最大 token（留空=厂商默认；Anthropic 默认 4096）
-  contextWindow:          # 模型上下文窗口 token 数（如 32000）；超 80% 自动压缩历史、保留首条意图
+  contextWindow:          # 模型上下文窗口 token 数（如 32000）；配置后启用 token 高低水位压缩（超 65% 压到 45%、保留首条意图、cacheEpoch 分代），未配置按消息条数水位（30→18）压缩
+  compaction:               # 无损上下文压缩（Hermes 四阶段可逆化）：被移出窗口的原文整块归档（sha256 校验），
+    enable: true            # 窗口内留结构化台账 + context_recall 工具按 ref/关键词恢复；false 关闭归档与恢复工具（回滚杠杆）
+    archiveDir: "data/context-archive"  # 压缩原文归档目录（按会话分目录，独立于会话数据生命周期）
   maxToolResultChars: 8000  # 单条工具结果字符上限（内容获取类工具可经 meta.resultCap 单独放宽到 12000）
   keepReasoning: false      # 是否把推理(reasoning_content)回灌历史（默认 false 省 context）
   stream: false             # 逐字流式输出（依赖适配器、不稳，默认关）
@@ -69,7 +75,10 @@ agent:
   kb:
     enable: true            # 知识库总开关（关则不注册 kb_search、不入库）
     crawlEnable: true       # 网页抓取开关（web_crawl 工具 + URL 入库/刷新；关则不注册 web_crawl）
-    crawlTimeout: 60        # 单页抓取超时秒（HTTP 抓取，慢站可调大）
+    crawl:
+      engine: crawl4ai      # 网页抓取引擎：crawl4ai（默认。真浏览器渲染，SPA/JS 动态页可抓；
+                            # 需先跑 scripts/install-crawl4ai.sh，未安装自动降级 fetch）| fetch（纯 HTTP+cheerio，零依赖）
+    crawlTimeout: 60        # 单页抓取超时秒（慢站可调大；crawl4ai 含浏览器启停另加 30s 余量）
     chunkSize: 500          # 文档分块字符数
     chunkOverlap: 50        # 分块重叠（保上下文连贯）
     topK: 5                 # kb_search 默认返回片段数

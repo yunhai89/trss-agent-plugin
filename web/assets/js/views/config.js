@@ -111,6 +111,7 @@
     degrade: [['describe', 'describe 转文字描述'], ['ignore', 'ignore 忽略']],
     researchPerm: [['master', '仅主人(防滥用)'], ['all', '所有人']],
     shMode: [['local', 'local 本地(Playwright+chromium,默认)'], ['cloud', 'cloud Browserbase 云']],
+    crawlEngine: [['crawl4ai', 'crawl4ai 真浏览器(默认)'], ['fetch', 'fetch 纯 HTTP']],
     shRegion: [['', '默认 us-west-2'], ['us-east-1', 'us-east-1'], ['eu-central-1', 'eu-central-1'], ['ap-southeast-1', 'ap-southeast-1']],
   }
 
@@ -164,6 +165,12 @@
         mcpServersToUi()
         // 兜底：确保各子对象存在（防旧 config 无此字段时 v-model 报错）
         if (!form.stagehand) form.stagehand = {}
+        // 无损压缩 + 网页抓取引擎兜底（旧 config 无此字段时 v-model 不报错）
+        if (!form.compaction) form.compaction = {}
+        if (form.compaction.enable == null) form.compaction.enable = true
+        if (!form.kb) form.kb = {}
+        if (!form.kb.crawl) form.kb.crawl = {}
+        if (form.kb.crawl.engine == null) form.kb.crawl.engine = 'crawl4ai'
         if (!form.terminal) form.terminal = {}
         if (form.terminal.skipConfirm == null) form.terminal.skipConfirm = false
         if (!form.download) form.download = {}
@@ -844,8 +851,11 @@
             <cfg-row name="时间预算(ms)" desc="单次对话超时(0=不限)">
               <input type="number" class="inp" style="width:120px" min="0" step="1000" v-model.number="form.loop.timeBudgetMs">
             </cfg-row>
-            <cfg-row name="token 预算" desc="单次对话 token 上限(0=不限)">
+            <cfg-row name="token 预算" desc="单次对话累计工作 token 上限(0=不限,收尾不占)">
               <input type="number" class="inp" style="width:120px" min="0" step="1000" v-model.number="form.loop.tokenBudget">
+            </cfg-row>
+            <cfg-row name="收尾宽限(ms)" desc="预算耗尽后收尾总结的独立时间窗">
+              <input type="number" class="inp" style="width:120px" min="1000" step="1000" v-model.number="form.loop.finalizeGraceMs">
             </cfg-row>
             <cfg-row name="深度思考" desc="模型先思考再作答(更慢更耗 token)">
               <v-switch v-model="thinkingOn"/>
@@ -856,8 +866,11 @@
             <cfg-row name="单次回复最大 token" desc="留空=厂商默认">
               <input type="number" class="inp" style="width:130px" min="1" v-model.number="form.maxTokens" placeholder="null">
             </cfg-row>
-            <cfg-row name="上下文窗口" desc="超 80% 自动压缩历史">
+            <cfg-row name="上下文窗口" desc="超 65% 压到 45%(滞回分代,缓存友好)">
               <input type="number" class="inp" style="width:130px" min="1000" v-model.number="form.contextWindow">
+            </cfg-row>
+            <cfg-row name="无损压缩" desc="原文归档+台账,context_recall 可恢复">
+              <v-switch v-model="form.compaction.enable"/>
             </cfg-row>
             <cfg-row name="工具结果字符上限" desc="超出截断,防爆 context">
               <input type="number" class="inp" style="width:130px" min="100" v-model.number="form.maxToolResultChars">
@@ -1091,6 +1104,10 @@
                   </div>
                 </div>
               </div>
+            </cfg-row>
+
+            <cfg-row name="网页抓取引擎" desc="crawl4ai 真浏览器渲染(未装自动降级 fetch)">
+              <select class="sel" style="width:150px" v-model="form.kb.crawl.engine"><option v-for="o in OPT.crawlEngine" :value="o[0]">{{ o[1] }}</option></select>
             </cfg-row>
 
             <cfg-row name="Tavily 搜索 Key" desc="任填一个搜索源即启用">
