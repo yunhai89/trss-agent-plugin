@@ -32,7 +32,7 @@ function shortHash(str) {
 }
 
 /** 按需发现默认常驻工具（不经过搜索；config.toolDiscovery.alwaysOn 留空时兜底）。tool_search 始终由元工具注入。 */
-const DEFAULT_ALWAYS_ON = ['tool_search', 'clarify', 'memory_search', 'web_search', 'kb_search', 'skill', 'get_chat_history', 'reminder_set', 'context_recall'] // context_recall 常驻：压缩档案消息直接引用它恢复原文，不能等 tool_search
+const DEFAULT_ALWAYS_ON = ['tool_search', 'clarify', 'memory_search', 'web_search', 'kb_search', 'skill', 'get_chat_history', 'reminder_set', 'context_recall', 'diagram_render'] // context_recall 常驻：压缩档案消息直接引用它恢复原文，不能等 tool_search；diagram_render 常驻：解释流程/架构时随时可用（不等 tool_search 检索）
 
 /** 紧凑用量日志：兼容 per-turn(prompt/completion_tokens) 与 mergeUsage(input/output/total) 两种形态 */
 function fmtUsage(u) {

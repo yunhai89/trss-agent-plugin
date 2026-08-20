@@ -142,13 +142,14 @@ agent:
     dir: "tools"
   toolDiscovery:
     enable: true              # 工具按需发现（默认开）：LLM 只常驻少数核心工具，其余经 tool_search 检索后动态注入。关则回退全量常驻
-    alwaysOn:                 # 常驻核心工具（不经过搜索，始终在下发 tools 数组）；留空用内置默认 6 个
+    alwaysOn:                 # 常驻核心工具（不经过搜索，始终在下发 tools 数组）；留空用内置默认
       - tool_search
       - clarify
       - memory_search
       - web_search
       - skill
       - get_chat_history
+      - diagram_render
       - spawn_subagent
       - check_subagent
       - extend_subagent
