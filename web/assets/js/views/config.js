@@ -274,6 +274,15 @@
         ? { id: 'main', name: '主厂商', protocol: form.protocol, preset: form.preset, baseURL: form.baseURL, apiKey: form.apiKey }
         : form.llmProviders.find((p) => p.id === id)
       const provName = (id) => id === 'main' ? '主厂商' : (form.llmProviders.find((p) => p.id === id)?.name || id || '?')
+      // mainOnly 判定基准：与主接入同端点（协议相同 + baseURL 归一相等）的附加厂商视同主厂商。
+      // 运行时主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）复用主 provider 端点调用，同端点模型完全可用；
+      // 只认 providerId==='main' 字符串会把用户重复登记的同端点厂商（如主接入 mimo + 附加厂商 mimo）全部误禁。
+      const _normUrl = (u) => String(u || '').trim().replace(/\/+$/, '').toLowerCase()
+      const provSameAsMain = (pid) => {
+        if (pid === 'main') return true
+        const p = form.llmProviders.find((x) => x && x.id === pid)
+        return !!p && String(p.protocol || 'openai') === String(form.protocol || 'openai') && _normUrl(p.baseURL) === _normUrl(form.baseURL) && !!_normUrl(form.baseURL)
+      }
       // 附加厂商：列表 + 查看/编辑弹窗（与模型列表同交互）；选预设/切协议自动填 baseURL
       const provModal = reactive({ show: false, mode: 'view', index: -1, draft: {} })
       const openProvView = (i) => { provModal.show = true; provModal.mode = 'view'; provModal.index = i; provModal.draft = JSON.parse(JSON.stringify(form.llmProviders[i] || {})) }
@@ -346,7 +355,7 @@
         for (const m of form.llmModels || []) {
           if (!m || !m.model) continue
           const k = m.model + '|' + (m.name || '') // 同 id 不同别名各自保留
-          if (!seen.has(k)) seen.set(k, { model: m.model, label: (m.name ? m.name + ' · ' : '') + m.model, fromRegistry: true, id: m.id, main: m.providerId === 'main', provName: m.providerId === 'main' ? '' : provName(m.providerId) })
+          if (!seen.has(k)) seen.set(k, { model: m.model, label: (m.name ? m.name + ' · ' : '') + m.model, fromRegistry: true, id: m.id, main: provSameAsMain(m.providerId), provName: provSameAsMain(m.providerId) ? '' : provName(m.providerId) })
         }
         for (const f of FEATURES) {
           const v = featureVal(f)
@@ -362,7 +371,7 @@
       const featureSel = (f) => {
         const v = featureVal(f)
         if (!v) return ''
-        const hit = form.llmModels.find((m) => m.model === v && (!f.mainOnly || m.providerId === 'main'))
+        const hit = form.llmModels.find((m) => m.model === v && (!f.mainOnly || provSameAsMain(m.providerId)))
         if (hit) return hit.id
         return knownModels.value.some((m) => m.model === v) ? 'raw:' + v : '__custom'
       }
@@ -374,7 +383,7 @@
         if (!m) return
         f.set(m.model)
         const prov = provById(m.providerId)
-        const isMain = m.providerId === 'main'
+        const isMain = provSameAsMain(m.providerId) // 同端点附加厂商视同主厂商（与 knownModels/featureSel 同基准）——避免对同端点条目做无谓同步与误导提示
         if (f.key === 'main' && !isMain && prov?.baseURL) {
           form.protocol = prov.protocol || form.protocol; form.preset = prov.preset || ''; form.baseURL = prov.baseURL; form.apiKey = prov.apiKey
           toast('已将该厂商接入信息同步为主厂商（基础 / 模型）', 'info')
@@ -596,7 +605,7 @@
         allTools, toolCats, toolsByCat, toggleAlwaysOn,
         // 厂商/模型注册表 + 功能分配
         delProvider, testProvider, testing, provById, provName, provModal, openProvView, openProvEdit, saveProv,
-        delModel, modelModal, openModelView, openModelEdit, saveModel, THK_ZH, knownModels, onProvPreset,
+        delModel, modelModal, openModelView, openModelEdit, saveModel, THK_ZH, knownModels, provSameAsMain, onProvPreset,
         FEATURES, featureVal, featureSel, onFeatureSel,
       }
     },
@@ -762,7 +771,7 @@
                   <div style="flex:1;min-width:220px">
                     <div class="row g6" style="align-items:center">
                       <b style="font-size:13px">{{ m.name || '（未命名）' }}</b>
-                      <span class="pill p-line" style="font-size:10px">{{ m.providerId === 'main' ? '主厂商' : provName(m.providerId) }}</span>
+                      <span class="pill p-line" style="font-size:10px">{{ provSameAsMain(m.providerId) ? '主厂商' : provName(m.providerId) }}</span>
                       <span v-if="m.thinking === 'on'" class="pill p-honey" style="font-size:10px">思考</span>
                       <span v-else-if="m.thinking === 'off'" class="pill p-rose" style="font-size:10px">禁思考</span>
                     </div>
