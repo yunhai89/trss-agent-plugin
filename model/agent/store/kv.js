@@ -16,7 +16,9 @@ export function memoryKv() {
       store.set(k, v)
       if (ttlSec && ttlSec > 0) {
         if (ttls.has(k)) clearTimeout(ttls.get(k))
-        const t = setTimeout(() => { store.delete(k); ttls.delete(k) }, ttlSec * 1000)
+        // setTimeout 延时是 32 位有符号整数（上限 ~24.8 天）：长 TTL（如用量统计的 90 天滚动窗口）
+        // 直接传会溢出为 1ms → 键立即被删。钳制到上限（超上限键常驻——仅测试/无 redis 回退路径受影响）
+        const t = setTimeout(() => { store.delete(k); ttls.delete(k) }, Math.min(ttlSec * 1000, 2 ** 31 - 1))
         t.unref?.() // 不阻止进程退出
         ttls.set(k, t)
       }

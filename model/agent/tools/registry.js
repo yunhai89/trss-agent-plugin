@@ -25,8 +25,9 @@ function brief(v, n = 160) {
 
 /** 软失败判定：工具以"不抛异常、返回错误对象/串"的方式报错。
  *  - 对象：含 error 字段 或 ok===false
- *  - 字符串：形如 {"error":...} 或 error: 前缀（被 stringify 过的结果） */
-function isErrorShape(r) {
+ *  - 字符串：形如 {"error":...} 或 error: 前缀（被 stringify 过的结果）
+ * 导出供 usage-stats 等统计方复用（判定语义与 AOP 日志一致，避免两处漂移） */
+export function isErrorShape(r) {
   if (r == null) return false
   if (typeof r === 'string') return /^\s*\{.*"error"\s*:/i.test(r) || /^error\b/i.test(r)
   if (typeof r === 'object' && !Array.isArray(r)) return r.error != null || r.ok === false

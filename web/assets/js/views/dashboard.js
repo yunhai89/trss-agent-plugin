@@ -30,11 +30,11 @@
           },
           {
             icon: 'zap', grad: 'var(--grad-rose)', label: '近 7 日请求', value: M.totalRequests || 0,
-            sub: '对话轮次 (run_end 聚合)', count: true,
+            sub: '对话完成数（日统计）', count: true,
           },
           {
             icon: 'tool', grad: 'var(--grad-vio)', label: '工具调用次数', value: M.totalToolCalls || 0,
-            sub: '近 7 日累计', count: true,
+            sub: '成功率 ' + (M.toolSuccessRate != null ? (M.toolSuccessRate * 100).toFixed(1) + '%' : '暂无'), count: true,
           },
         ]
       })
@@ -186,7 +186,7 @@
           <div class="row-b wrap g10">
             <div class="ct">
               <span class="ct-ico" style="background:var(--grad)"><v-icon name="zap"/></span>
-              <div><div class="ct-t">Token 消耗趋势</div><div class="ct-s">按 devLog run_end.usage 聚合 · 近 7 日</div></div>
+              <div><div class="ct-t">Token 消耗趋势</div><div class="ct-s">{{ M.statsSource === 'kv' ? '按 Redis 日统计聚合（本地时区）' : '按 devLog 聚合（过渡，产生对话后切 Redis）' }} · 近 7 日</div></div>
             </div>
             <div class="row g14" style="font-size:12px">
               <span class="row g6"><i style="width:10px;height:10px;border-radius:3px;background:#6366f1"></i>输入</span>
@@ -265,13 +265,19 @@
         <div class="card pad lift" style="--i:8">
           <div class="ct">
             <span class="ct-ico" style="background:var(--grad-vio)"><v-icon name="tool"/></span>
-            <div><div class="ct-t">工具调用 Top5</div><div class="ct-s">按 tool 事件计数 · 近 7 日</div></div>
+            <div><div class="ct-t">工具调用 Top5</div><div class="ct-s">{{ M.statsSource === 'kv' ? '按 Redis 日统计 · 含成功率' : '按日志计数（过渡）' }} · 近 7 日</div></div>
+          </div>
+          <div v-if="M.statsSource === 'kv'" class="row g6 wrap" style="margin-top:10px;font-size:11.5px">
+            <span class="pill p-sky">成功 {{ M.toolOk ?? 0 }}</span>
+            <span class="pill p-honey">失败 {{ M.toolFail ?? 0 }}</span>
+            <span class="pill p-sky">成功率 {{ M.toolSuccessRate != null ? (M.toolSuccessRate * 100).toFixed(1) + '%' : '暂无' }}</span>
+            <span class="pill p-honey">失败率 {{ M.toolFailRate != null ? (M.toolFailRate * 100).toFixed(1) + '%' : '暂无' }}</span>
           </div>
           <div v-if="toolTop.length" class="mt16" style="display:flex;flex-direction:column;gap:13px">
             <div v-for="(t, i) in toolTop" :key="t.name" :style="{'--i': i, animation: 'fadeUp .5s var(--eo) backwards', animationDelay: (i * 60) + 'ms'}">
               <div class="row-b" style="font-size:12.5px;margin-bottom:5px">
                 <span class="mono" style="font-weight:700">{{ t.name }}</span>
-                <span class="mut num">{{ t.count }} 次</span>
+                <span class="mut num">{{ t.count }} 次<template v-if="t.rate != null"> · <span :style="{color: t.rate >= 0.9 ? 'var(--sky,#2563eb)' : 'var(--honey,#d97706)'}">{{ (t.rate * 100).toFixed(0) }}%</span><span class="mut2">（{{ t.ok }}/{{ t.count }}）</span></template></span>
               </div>
               <div class="meter" :class="['', 'm-mint', 'm-honey', 'm-rose', ''][i]">
                 <i :style="{width: (t.count / toolMax * 100) + '%', transitionDelay: (i * 90 + 200) + 'ms'}"></i>

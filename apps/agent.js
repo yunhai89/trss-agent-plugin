@@ -72,6 +72,8 @@ import { transcribeMediaTool } from '../model/document/media_stt.js'
 import { DiagramService } from '../model/diagram/index.js'
 import { makeDiagramTool } from '../model/diagram/tool.js'
 import { makeDiagramDeliverer } from '../model/diagram/deliver.js'
+import { createUsageStats } from '../model/agent/store/usage-stats.js'
+import { normalizeUsage } from '../model/agent/messages.js'
 import { screenshot, renderReplyImage } from './render.js'
 import { REPLY_CSS } from '../model/render/theme.js'
 import { toFileSegment } from '../utils/SendFile.js'
@@ -348,6 +350,8 @@ async function buildRuntime() {
   const personaDir = Config.path.personas
   const personaStore = new PersonaStore({ dir: personaDir })
   const K = getKv()
+  // 用量统计采集器：对话/工具用量按本地日聚合写 KV（Web 端 overview 趋势主数据源，替代读日志的不稳定路径）
+  const usageStats = createUsageStats({ kv: K, logger: Log })
   const session = new SessionStore({ kv: K })
   // 记忆威胁扫描：写入前检测指令注入（复用入口 guard.checkInput）。threatScan 关闭则不扫
   const recallScanFn = cfg.memory?.threatScan === false ? null : (text) => {
@@ -712,7 +716,7 @@ async function buildRuntime() {
     } catch (e) { Log.warn('[multiagent] 子代理工具注册失败', e?.message || e) }
   }
 
-  return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram }
+  return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram }
 }
 
 const getRuntime = async () => {
@@ -748,6 +752,11 @@ function invalidateRuntime() {
   }
   if (_runtime?.diagram) {
     try { _runtime.diagram.stop() } catch { /* noop */ } // 停 diagram 临时目录 TTL 清理定时器（unref 过，防御性显式停）
+  }
+  if (_runtime?.usageStats) {
+    // 统计缓冲落 KV 后停采集器（2s 窗口内未 flush 的数据不丢）
+    try { _runtime.usageStats.flushNow().catch(() => {}) } catch { /* noop */ }
+    try { _runtime.usageStats.stop() } catch { /* noop */ }
   }
   _runtime = null
   _runtimePromise = null
@@ -1292,7 +1301,10 @@ export class Chat extends plugin {
         taskId: traceId, // 串联 dev trace：Agent 内 run_start/turn/tool/.../run_end 用同一 id
         stream: wantStream,
         ...(rs.onToolStart ? { onToolStart: rs.onToolStart } : {}),
-        onToolEnd: onDiagramToolEnd, // diagram_render 成功结果收集（应用层随最终回复发送）
+        onToolEnd: (tc, content) => {
+          onDiagramToolEnd(tc, content) // diagram_render 成功结果收集（应用层随最终回复发送）
+          try { rt.usageStats?.recordToolResult(tc?.name, content) } catch { /* 统计不阻塞对话 */ }
+        },
         // OpenClaw 式中途播报：模型在调工具时附带的中途文本（思路/进展）实时转发给用户，不丢弃。
         // 经受控发送队列（P0-5）：rejection 记日志，不产生 unhandledRejection，也不阻塞 Agent。
         onAssistant: (res) => {
@@ -1399,6 +1411,16 @@ export class Chat extends plugin {
       }
       // diagram 示意图：最终回复送达后发送（文本/图片两种回复模式都覆盖；取消路径不会执行到此处）
       await sendPendingDiagrams()
+      // —— 用量统计（KV 日聚合，Web 端 overview 趋势主数据源）：对话完成即记（含 reply_failed；
+      //    run_error/cancelled 在外层 catch 记 errors）。normalizeUsage 跨协议归一 ——
+      try {
+        const nu = normalizeUsage(usage) || {}
+        rt.usageStats?.recordRun({
+          inputTokens: nu.input || 0, outputTokens: nu.output || 0,
+          cacheRead: nu.cacheRead || 0, cacheWrite: nu.cacheWrite || 0, cacheObserved: !!nu.cacheObserved,
+          turns, model: cfg.model || '',
+        })
+      } catch { /* 统计失败不阻塞回复 */ }
       // —— 终态（P1）：reply_sent / reply_failed 必居其一；失败不伪装为正常结束 ——
       if (delivered) {
         const ret = finalOutcome?.ret
@@ -1418,6 +1440,8 @@ export class Chat extends plugin {
       devLog('reply', { mode: replyMode, delivered, replyLen: (body || '').length, body: body || '', turns, stopReason }, traceId, ctx.devScope)
       })
     } catch (e) {
+      // 用量统计：错误终态（cancelled/run_error）也计数（errors 维度；无 usage 可记）
+      try { rt.usageStats?.recordRun({ error: true }) } catch { /* noop */ }
       if (/aborted/i.test(String(e?.message || e))) {
         // 用户主动取消：不再发送过期结果（P0-4）
         Log.warn('[chat] 任务已取消', traceId)

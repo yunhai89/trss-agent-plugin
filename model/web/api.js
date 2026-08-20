@@ -17,6 +17,7 @@ import { getGroupWorld } from '../../apps/groupworld.js'
 import { parseCron } from '../agent/schedule.js'
 import { redactConfig } from './redact.js'
 import { listLogFiles, readLogFile, aggregateStats, queryLogFiles, buildCachePayload } from './logs.js'
+import { mergeTrend, summarizeKvDays } from '../agent/store/usage-stats.js'
 import { ok, fail, asyncHandler, CODE } from './response.js'
 import { listAllSuggestions, applySuggestion, removeSuggestion } from '../evolution/review.js'
 import { getStickerManager } from '../sticker/manager.js'
@@ -297,9 +298,25 @@ router.get('/overview', asyncHandler(async (req, res) => {
   if (_overviewCache && _overviewCache.win === win && Date.now() - _overviewCache.at < 60000) return ok(res, _overviewCache.data)
   const r = await getRuntime().catch(() => null)
   const stats = since === 0 ? r0 : aggregateStats(Config.path.logs, { since, topK: 5 })
-  const {
-    tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached,
-  } = stats
+  // ── KV 日统计（主数据源）：token 趋势/请求趋势/工具统计优先走 Redis 按日 JSON（替代读日志的不稳定聚合：
+  //    日志趋势的 day 取 UTC ISO——本地 0~8 点"今天"被归到 UTC 昨天，Web 端近几日时有时无的根因）。
+  //    日志侧仅保留 KV 首个有数据日之前的天（按日切换、无双算）；KV 无数据时全量回退日志（部署首日）。
+  //    缓存命中率卡（cold/warm 观测口径）仍走日志专项不动。
+  const dayWindow = win === '1h' || win === '24h' ? 2 : win === 'all' ? 30 : 7
+  let kvDays = []
+  try { kvDays = (await r?.usageStats?.readDays(dayWindow)) || [] } catch { kvDays = [] }
+  const merged = mergeTrend(stats.tokenTrend, stats.requestTrend, kvDays)
+  const kvSum = summarizeKvDays(kvDays)
+  const kvActive = merged.firstKvDay != null
+  const tokenTrend = merged.tokenTrend
+  const requestTrend = merged.requestTrend
+  const totalRequests = requestTrend.reduce((s, t) => s + (t.count || 0), 0)
+  const totalTokens = tokenTrend.reduce((s, t) => s + (t.input || 0) + (t.output || 0), 0)
+  // 工具口径：KV 有数据起以 KV 为准（含成功/失败/成功率；日志期无成败字段，不做跨源拼接避免双算）；
+  // KV 无数据时沿用日志 toolTop/总量（无成败维度，前端显示"暂无"）
+  const toolTop = kvActive ? kvSum.toolTop : stats.toolTop
+  const totalToolCalls = kvActive ? kvSum.totalToolCalls : stats.totalToolCalls
+  const totalCached = stats.totalCacheRead
   // cache 载荷经 buildCachePayload 统一组装（白名单单一维护——曾在此手写解构漏 observedOutput，
   // 聚合层的输出 token 到达不了前端，缓存卡「输出 tokens」恒 0）
   const cachePayload = buildCachePayload(stats)
@@ -333,6 +350,12 @@ router.get('/overview', asyncHandler(async (req, res) => {
   }
   const data = {
     tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached, perceptions, counts,
+    // 工具成功率（KV 日统计口径；null=尚无 KV 数据——如部署首日，前端显示「暂无」）
+    toolOk: kvActive ? kvSum.toolOk : null,
+    toolFail: kvActive ? kvSum.toolFail : null,
+    toolSuccessRate: kvActive ? kvSum.toolSuccessRate : null,
+    toolFailRate: kvActive ? kvSum.toolFailRate : null,
+    statsSource: kvActive ? 'kv' : 'log', // 趋势/工具数据源标记（前端副标题提示）
     // 缓存统计（观测口径）：未观测 ≠ 0 命中；cold/warm 分层；比率 null=无观测数据（前端显示「暂无」）
     cache: cachePayload,
   }
