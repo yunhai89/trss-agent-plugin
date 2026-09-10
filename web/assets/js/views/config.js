@@ -1455,7 +1455,6 @@
           <div v-if="dirty" class="savebar">
             <span class="dirty-dot"></span>
             <span style="font-weight:700;font-size:13px">有未保存的修改</span>
-            <span class="mut2" style="font-size:12px">Mock 环境:保存仅写入内存,刷新还原</span>
             <div style="margin-left:auto" class="row g10">
               <button class="btn b-line" @click="reset"><v-icon name="undo"/>放弃修改</button>
               <button class="btn b-pri" @click="save"><v-icon name="save"/>保存并热加载</button>

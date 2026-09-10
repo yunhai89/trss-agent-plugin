@@ -1264,7 +1264,7 @@ export class Chat extends plugin {
       onSendError: (err, _p, tag) => Log.warn(`[reply:${tag}] 消息发送失败`, err?.message || err),
     })
     const safeReply = (msg, quote, opts) => replyQueue.enqueue({ msg, quote, opts })
-    safeReply('思考中…') // best effort：发送失败只记日志，绝不阻塞 Agent 执行
+    if (cfg?.agent?.progress) safeReply('思考中…') // best effort：发送失败只记日志，绝不阻塞 Agent 执行
     const rs = makeReplyStream(this.e, { progress: wantProgress, recall: cfg.progressRecall ?? 3, shortCircuitTools: ['clarify'], replyQueue })
 
     // —— diagram 示意图交付（应用层发送，工具绝不直接 e.reply）——
