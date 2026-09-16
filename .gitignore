@@ -13,6 +13,13 @@ node_modules/
 # Claude Code 本地配置/技能（不入项目仓库；开发用技能放全局 ~/.claude/skills/）
 .claude/
 
+# AI 编码助手的本地上下文文件不入库（已被上方 *.md 覆盖，这里显式声明以防规则调整）
+AGENTS.md
+CLAUDE.md
+CODEBUDDY.md
+# AI 编码助手的本地技能路由/技能目录（与 .claude/ 同理，不入库）
+.codebuddy/
+
 # 临时检查脚本（下划线开头为 dev 专用，不入库；离线测试 test.mjs 入库以支持 CI，审计 §10）
 **/_*.mjs
 
