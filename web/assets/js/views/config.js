@@ -183,8 +183,10 @@
         if (form.diagram.kroki.circuitBreaker.enabled == null) form.diagram.kroki.circuitBreaker.enabled = true
         if (!form.diagram.kroki.d2) form.diagram.kroki.d2 = {}
         if (form.diagram.kroki.d2.layout == null) form.diagram.kroki.d2.layout = 'elk'
-        if (!form.terminal) form.terminal = {}
-        if (form.terminal.skipConfirm == null) form.terminal.skipConfirm = false
+        if (!form.sandbox) form.sandbox = {}
+        if (!form.sandbox.mode) form.sandbox.mode = 'off'
+        if (!form.sandbox.network) form.sandbox.network = {}
+        if (!Array.isArray(form.sandbox.network.allowOut)) form.sandbox.network.allowOut = []
         if (!form.download) form.download = {}
         if (!form.multiagent) form.multiagent = {}
         // 统一模型配置块兜底（recall/selfReview/vision 原有；humanize/groupWorld 为新纳入字段）
@@ -1152,7 +1154,7 @@
         <div :id="'cfg-ext'" class="card cf-sec" :class="{open: open.ext}">
           <div class="cf-sh" @click="open.ext = !open.ext">
             <span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="tool"/></span>
-            <div><div class="ct-t">多模态 / 工具 / 扩展</div><div class="ct-s">视觉、搜索、MCP、终端与各子系统</div></div>
+            <div><div class="ct-t">多模态 / 工具 / 扩展</div><div class="ct-s">视觉、搜索、MCP、E2B 沙箱与各子系统</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.ext"><div class="cf-grid">
@@ -1229,21 +1231,48 @@
             </cfg-row>
             <!-- MCP 服务端已拆到独立「MCP 服务」section -->
 
-            <div class="full subpanel sp-rose">
-              <div class="row g10 mb12" style="font-weight:800;color:var(--rose)"><v-icon name="warn"/>终端执行(高危)</div>
-              <div class="desc mb10" style="color:var(--rose)">主机直接执行 shell（无容器隔离）。仅 terminal 主人可用：发 <code>#agents设置主人</code>→控制台验证码→直接发码认领。每条命令需 <code>#确认</code>；黑名单硬拦。</div>
+            <div class="full subpanel sp-mint">
+              <div class="row g10 mb12" style="font-weight:800;color:var(--mint,#0ea5a0)"><v-icon name="tool"/>E2B 沙箱（终端执行）</div>
+              <div class="desc mb10">命令跑在独立 Firecracker microVM 内，宿主不再有 shell 执行面。仅 terminal 主人可用：发 <code>#agents设置主人</code>→控制台验证码→直接发码认领。沙箱化后<b>无 #确认 审批、无命令黑名单</b>；连不上 E2B 一律拒绝执行，绝不回退本机。</div>
               <div class="cf-grid">
-                <cfg-row name="启用 shell 执行" desc="真机任意命令执行，无法 100% 安全" danger>
-                  <v-switch v-model="form.terminal.enable"/>
+                <cfg-row name="执行面模式" desc="off=不注册终端工具；e2b=在沙箱内执行">
+                  <select class="sel" style="width:170px" v-model="form.sandbox.mode">
+                    <option value="off">off（关闭）</option>
+                    <option value="e2b">e2b（沙箱执行）</option>
+                  </select>
                 </cfg-row>
-                <cfg-row name="命令超时上限(秒)">
-                  <input type="number" class="inp" style="width:110px" min="1" max="3600" v-model.number="form.terminal.maxTimeout">
+                <cfg-row name="E2B API Key" desc="云或自托管团队 key（敏感：已接入脱敏）">
+                  <input class="inp mono" style="width:240px" v-model="form.sandbox.apiKey" placeholder="e2b_xxx">
                 </cfg-row>
-                <cfg-row class="full" name="命令黑名单" desc="灾难命令正则（即使已确认也硬拦；空=用默认 rm -rf / mkfs / dd of=/dev 等）">
-                  <tag-editor v-model="form.terminal.blocklist" placeholder="回车添加"/>
+                <cfg-row name="控制面地址" desc="自托管如 http://192.168.1.10:3000；云托管留空">
+                  <input class="inp mono" style="width:240px" v-model="form.sandbox.apiUrl" placeholder="留空=云默认">
                 </cfg-row>
-                <cfg-row class="full" name="主人命令免 #确认" desc="⚠️ 开=terminal 主人命令免审批直跑（黑名单仍硬拦）。真机任意命令执行，高危，默认关" danger>
-                  <v-switch v-model="form.terminal.skipConfirm"/>
+                <cfg-row name="沙箱域名" desc="自托管沙箱域名；云托管留空">
+                  <input class="inp mono" style="width:240px" v-model="form.sandbox.domain" placeholder="留空=云默认 e2b.app">
+                </cfg-row>
+                <cfg-row name="数据面地址" desc="自托管无通配 DNS 时填 client-proxy（如 http://host:3002）">
+                  <input class="inp mono" style="width:240px" v-model="form.sandbox.sandboxUrl" placeholder="留空=默认">
+                </cfg-row>
+                <cfg-row name="沙箱模板" desc="CPU/内存/预装依赖由模板承载">
+                  <input class="inp mono" style="width:170px" v-model="form.sandbox.template" placeholder="base">
+                </cfg-row>
+                <cfg-row name="单命令超时上限(秒)">
+                  <input type="number" class="inp" style="width:110px" min="1" max="3600" v-model.number="form.sandbox.maxTimeout">
+                </cfg-row>
+                <cfg-row name="并发沙箱上限" desc="超出进入等待队列，等待超时按配额失败">
+                  <input type="number" class="inp" style="width:110px" min="1" max="64" v-model.number="form.sandbox.maxSandboxes">
+                </cfg-row>
+                <cfg-row name="闲置回收(毫秒)" desc="会话沙箱空闲超时后销毁">
+                  <input type="number" class="inp" style="width:130px" min="10000" step="10000" v-model.number="form.sandbox.idleMs">
+                </cfg-row>
+                <cfg-row name="单会话命令数上限" desc="防空转把配额/账单打爆；0=不限">
+                  <input type="number" class="inp" style="width:110px" min="0" v-model.number="form.sandbox.maxCommandsPerSession">
+                </cfg-row>
+                <cfg-row class="full" name="出口白名单" desc="allowOut：默认只放行包管理器 + api.openai.com，其余一律拒绝（留空=拒绝全部出口）">
+                  <tag-editor v-model="form.sandbox.network.allowOut" mono placeholder="回车添加域名/CIDR"/>
+                </cfg-row>
+                <cfg-row class="full" name="命令审计日志" desc="每条命令记录会话键/退出码/命令前 200 字符（不含密钥）">
+                  <v-switch v-model="form.sandbox.audit"/>
                 </cfg-row>
               </div>
             </div>

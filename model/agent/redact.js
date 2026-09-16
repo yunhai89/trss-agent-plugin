@@ -30,6 +30,7 @@ function collectSecrets() {
   }
   push(cfg.apiKey)
   push(cfg.vision?.apiKey)
+  push(cfg.sandbox?.apiKey) // E2B（云/自托管）团队 key：与 LLM key 同等敏感，必须脱敏
   for (const k of ['tavily', 'exa', 'perplexity', 'brave']) push(cfg.search?.[k]?.apiKey)
   push(cfg.search?.searxng?.url && cfg.search.searxng.url.includes('@') ? cfg.search.searxng.url : '') // 带鉴权的 url
   // mcp servers 的 env 值（常含 API Key）

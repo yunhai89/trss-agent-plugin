@@ -57,7 +57,7 @@ export function supportGuoba() {
     pluginInfo: {
       name: 'agents-plugin',
       title: 'AI Agents 插件',
-      description: '多模型对话 · 工具调用 · 长期记忆 · 人设 · 多模态 · 深度研究 · MCP · 群管 · 终端',
+      description: '多模型对话 · 工具调用 · 长期记忆 · 人设 · 多模态 · 深度研究 · MCP · 群管 · 终端(E2B 沙箱)',
       author: ['云汐'],
       authorLink: ['https://github.com/'],
       link: 'https://github.com/',
@@ -196,17 +196,25 @@ export function supportGuoba() {
           componentProps: { placeholder: '{\n  "mcpServers": {\n    "xxx": { "command": "npx", "args": ["-y", "xxx"] }\n  }\n}', autosize: { minRows: 8, maxRows: 24 } },
         },
 
-        // —— ⚠️ 终端(高危) ——
-        { label: '⚠️ 终端执行(高危)', component: 'SOFT_GROUP_BEGIN' },
+        // —— E2B 沙箱（terminal 的唯一执行面）——
+        { label: 'E2B 沙箱（终端执行）', component: 'SOFT_GROUP_BEGIN' },
         {
-          field: 'agent.terminal.enable',
-          label: '启用终端(shell)执行【高危】',
-          helpMessage: '高危工具！真机任意命令执行，无容器隔离，比沙盒危险得多。仅 terminal 主人可用 + 每条命令 #确认 + 黑名单硬拦。',
-          bottomHelpMessage: '⚠️ 高危：shell 在主机直接执行任意命令（无容器隔离）。仅 terminal 主人可用（验证码认领，不读框架配置：发 #agents设置主人 → 控制台查看验证码 → 直接发验证码认领，类似 Yunzai #设置主人）。每条命令需主人 #确认；灾难命令黑名单硬拦。开启即视为你知晓风险、自担后果，与开发者无关。默认关闭。',
-          component: 'Switch',
+          field: 'agent.sandbox.mode',
+          label: '执行面模式',
+          helpMessage: 'off=不注册终端工具（宿主无 shell 执行面）；e2b=命令在 E2B 微虚机内执行。',
+          bottomHelpMessage: '沙箱化后不再有 #确认 审批与命令黑名单：命令跑在独立 Firecracker microVM 里，网络出口按白名单收紧。连不上 E2B 时一律拒绝执行（绝不回退到本机）。仅 terminal 主人可用（#agents设置主人 → 控制台验证码 → 直接发码认领）。',
+          component: 'Select',
+          componentProps: { options: [{ label: 'off（关闭）', value: 'off' }, { label: 'e2b（沙箱执行）', value: 'e2b' }] },
         },
-        { field: 'agent.terminal.maxTimeout', label: '命令超时上限(秒)', component: 'InputNumber', componentProps: { min: 1, max: 3600 } },
-        { field: 'agent.terminal.blocklist', label: '黑名单正则(可选)', bottomHelpMessage: '灾难命令正则数组（空=用默认 rm -rf / mkfs / dd of=/dev/ / 关机重启 等）；即使已确认也硬拦', component: 'Input', componentProps: { placeholder: '留空=用默认黑名单' } },
+        { field: 'agent.sandbox.apiKey', label: 'E2B API Key', bottomHelpMessage: 'E2B 云或自托管团队的 key（敏感：已在回复脱敏中屏蔽）', component: 'Input', componentProps: { placeholder: 'e2b_xxx' } },
+        { field: 'agent.sandbox.apiUrl', label: '控制面地址(自托管)', bottomHelpMessage: '如 http://192.168.1.10:3000；云托管留空', component: 'Input', componentProps: { placeholder: '留空=云默认' } },
+        { field: 'agent.sandbox.domain', label: '沙箱域名(自托管)', bottomHelpMessage: '自托管沙箱域名；云托管留空', component: 'Input', componentProps: { placeholder: '留空=云默认 e2b.app' } },
+        { field: 'agent.sandbox.sandboxUrl', label: '数据面地址(自托管)', bottomHelpMessage: '无通配 DNS 时填 client-proxy 地址（如 http://<host>:3002）；留空=默认', component: 'Input', componentProps: { placeholder: '留空=默认' } },
+        { field: 'agent.sandbox.template', label: '沙箱模板', bottomHelpMessage: 'CPU/内存/预装依赖由模板承载（官方 base 起步）', component: 'Input', componentProps: { placeholder: 'base' } },
+        { field: 'agent.sandbox.maxTimeout', label: '单命令超时上限(秒)', component: 'InputNumber', componentProps: { min: 1, max: 3600 } },
+        { field: 'agent.sandbox.maxSandboxes', label: '并发沙箱上限', bottomHelpMessage: '超出进入等待队列；等待超时按配额失败', component: 'InputNumber', componentProps: { min: 1, max: 64 } },
+        { field: 'agent.sandbox.idleMs', label: '闲置回收(毫秒)', bottomHelpMessage: '会话沙箱空闲超时后销毁（默认 300000=5 分钟）', component: 'InputNumber', componentProps: { min: 10000, step: 10000 } },
+        { field: 'agent.sandbox.maxCommandsPerSession', label: '单会话命令数上限', bottomHelpMessage: '防长任务把配额/账单打爆；0=不限', component: 'InputNumber', componentProps: { min: 0 } },
 
         // —— Stagehand 浏览器自动化 ——
         { label: 'Stagehand 浏览器自动化', component: 'SOFT_GROUP_BEGIN' },

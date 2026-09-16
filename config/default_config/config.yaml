@@ -110,6 +110,7 @@ agent:
     maxRepairAttempts: 2                          # 候选生成失败自动修复上限（文档 §13）
     retrievalThreshold: 0.78                      # 检索接受阈值（§12.1，与去重阈值分开）
     deduplicationThreshold: 0.88                  # 去重阈值
+    runnerTimeoutMs: 5000                         # stable 工具单次调用超时（本地 fork 档与沙箱档共用）
     autoPromoteSideEffects: ["none"]              # 仅 none 副作用可自动晋升；read/write/message/delete 必人工审批
   systemPrompt:
   chatPermission: master
@@ -276,15 +277,44 @@ agent:
     apiKey: ""              # STT API Key（OpenAI/Groq/Azure 等）
     model: "whisper-1"     # 模型名
     language: ""            # 语言提示（如 zh/en，留空自动检测）
-  terminal:
-    # shell 命令在主机直接执行（无容器隔离）。仅 terminal 主人可用（验证码认领，自包含、不读框架配置）。
-    # 认领流程（类似 Yunzai #设置主人）：发 #agents设置主人 → 控制台打印验证码 → 直接发验证码认领。
-    # 安全闸：仅 terminal 主人 + 每条命令主人 #确认 + 黑名单(rm -rf 等)硬拦。
-    # ⚠️ 真机任意命令执行，比沙盒危险得多；enable: true 即表示你知晓风险、同意自担后果，与开发者无关。默认关闭。
-    enable: false
-    maxTimeout: 600
-    blocklist: []          # 灾难命令正则集（空=用默认 rm -rf / mkfs / dd of=/dev/ / 关机重启 等；即使已确认也硬拦）
-    skipConfirm: false     # ⚠️ true=terminal 主人命令免 #确认 直跑（黑名单仍硬拦）；真机任意命令执行，高危，默认 false
+  sandbox:                # E2B Firecracker 沙箱：terminal 工具的唯一执行面 + toolEvo 的隔离面
+    # 命令在独立 microVM 内执行，宿主**不再有任何 shell 执行面**（旧 agent.terminal 已废弃，可直接删除）。
+    # 仅 terminal 主人可用（验证码认领：#agents设置主人 → 控制台打印验证码 → 直接把码发到会话）；
+    # 沙箱化后不再有 #确认 审批与命令黑名单。
+    # mode: off 时 terminal 工具不注册（toolEvo 退回本地 fork 档）；连不上 E2B 一律拒绝执行，绝不回退本地。
+    mode: off            # off | e2b
+    apiKey: ""           # E2B 云或自托管团队 key（★敏感：已接入 redactSecrets 脱敏）
+    apiUrl: ""           # 自托管控制面，如 http://192.168.1.10:3000；留空=云默认 api.{domain}
+    domain: ""           # 自托管沙箱域名（{port}-{sandboxID}.{domain}）；留空=云默认 e2b.app
+    sandboxUrl: ""       # 自托管无通配 DNS 时填 client-proxy 地址（SDK 自动附路由头）；留空=默认
+    template: base       # 沙箱模板（CPU/内存/预装依赖由模板承载；插件侧只加硬超时与网络白名单）
+    maxTimeout: 600      # 单命令超时上限（秒）
+    defaultCwd: /home/user  # 沙箱内默认工作目录（宿主路径在沙箱内无意义）
+    idleMs: 300000       # 闲置回收：会话沙箱空闲超时（毫秒）
+    sandboxTtlMs: 600000 # 沙箱 TTL（毫秒）；命中租约且过半衰时自动续期
+    maxSandboxes: 4      # 全局并发沙箱上限（超出进入等待队列）
+    concurrencyWaitMs: 15000  # 等并发名额的最长时间（毫秒），超时按配额失败
+    maxCommandsPerSession: 50 # 单会话命令数上限（防长任务把配额/账单打爆；0=不限）
+    requestTimeoutMs: 60000   # SDK 单请求超时
+    retries: 1           # SDK 重试次数（云默认 3，降为 1 控延迟）
+    allowPublicTraffic: false # 沙箱公开 URL 也要求 token（默认收紧）
+    network:
+      allowInternet: false    # false=默认拒绝全部出口（allowOut 白名单仍放行）
+      denyOut: ["0.0.0.0/0"]  # 兜底拒绝（E2B 语义：allowOut 恒优先于 denyOut）
+      allowOut:               # 出口白名单：默认只放行包管理器 + OpenAI API（按需增删）
+        - pypi.org
+        - "*.pypi.org"
+        - files.pythonhosted.org
+        - registry.npmjs.org
+        - "*.npmjs.org"
+        - archive.ubuntu.com
+        - security.ubuntu.com
+        - ports.ubuntu.com
+        - deb.debian.org
+        - security.debian.org
+        - api.openai.com
+    audit: true          # 每条命令写审计日志（会话键/退出码/命令前 200 字符，不含密钥）
+    toolEvoVerifyTimeoutMs: 5000  # toolEvo 候选行为验证：单用例超时（沙箱模式）
   stagehand:
     # Stagehand 浏览器自动化（act/extract/observe 自然语言原语，LLM 把指令映射到页面元素）。
     # 仅框架主人可用（category:system）；act 写动作额外需 #确认。会话 per-scopeUserId 隔离 + 5min idle 自动关。
