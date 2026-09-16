@@ -15,8 +15,9 @@ registerHooks({
     }
     const r = nextResolve(specifier, context)
     const url = r?.url || ''
-    // 本仓库 apps/agent.js → 桩（getRuntime）
-    if (url === pathToFileURL(path.join(SRC, 'apps/agent.js')).href) {
+    // 本仓库 apps/agent.js → 桩（getRuntime）。E2E_REAL_AGENT=1 时例外：保留真实 apps/agent.js，
+    // 用于测"运行时装配失败"这类只在真实入口存在的路径（见 stress/e2e/agent-init-failure.mjs）。
+    if (url === pathToFileURL(path.join(SRC, 'apps/agent.js')).href && process.env.E2E_REAL_AGENT !== '1') {
       return { url: pathToFileURL(path.join(STUB, 'agent.js')).href, shortCircuit: true }
     }
     // 本仓库 utils/Config.js → 桩（内存配置 + 临时目录）

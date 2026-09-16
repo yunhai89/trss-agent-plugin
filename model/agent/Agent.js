@@ -114,12 +114,12 @@ function truncateJson(value, max) {
 const TOOL_FAIL_HINT = '这是工具返回的真实失败原因——请据此如实回复用户（勿臆测/编造其它原因）；若给出可重试方向（缺参数/权限不足/网络不可达/需先查 id）则换方式重试或指导用户；若反复失败无法解决，引导用户发送 #上报错误 <问题描述> 上报（命令会自动打包本次会话日志给开发者）。'
 
 /** 异常停止原因集合（命中且尚无最终答案时必须进一次无工具 finalizer；不以"有没有旁白"为条件） */
-const GOVERNOR_STOP = new Set(['max_turns', 'duplicate_action', 'consecutive_failures', 'no_progress', 'time_budget', 'token_budget'])
+export const GOVERNOR_STOP = new Set(['max_turns', 'duplicate_action', 'consecutive_failures', 'no_progress', 'time_budget', 'token_budget'])
 /** 强制收尾指令：让模型据已完成工具结果交付进展，不再调工具（审计 §2.1：预算耗尽不返回空串） */
 const GOVERNOR_WRAP_DIRECTIVE = '任务尚未完成。请根据上方已完成的工具调用与结果，向用户简要交付：①已完成的进展；②遇到的问题或失败原因；③建议的下一步。直接给出文字回复，不要再调用工具。'
 
 /** 异常停止 → 用户可读原因（确定性兜底用；finalizer 失败时由代码生成，绝不返回空串/旁白） */
-const STOP_REASON_CN = {
+export const STOP_REASON_CN = {
   max_turns: '已达到本轮工具调用次数上限',
   token_budget: '本次任务的 token 预算已用完',
   time_budget: '本次任务的时间预算已用完',

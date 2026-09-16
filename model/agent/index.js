@@ -15,7 +15,7 @@
  */
 
 import { Agent } from './Agent.js'
-export { Agent } from './Agent.js'
+export { Agent, STOP_REASON_CN, GOVERNOR_STOP } from './Agent.js'
 
 export { createProvider, Provider, mapToolChoice, toolsToList } from './provider/index.js'
 export { OpenAIProvider } from './provider/openai.js'

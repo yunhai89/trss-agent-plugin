@@ -7,6 +7,7 @@ import Config from '../utils/Config.js'
 import Log from '../utils/Log.js'
 import {
   Agent,
+  STOP_REASON_CN,
   createProvider,
   ToolRegistry,
   MemoryStore,
@@ -1062,17 +1063,32 @@ export class Chat extends plugin {
       devLog(event, data, traceId, devScope)
       return true
     }
+    // 正常路径的 trigger 事件在拿到会话后才发（带 conv/devScope）；装配或会话读取失败时它发不出来，
+    // 只发终态就成了"孤儿终态"（离线一致性检查判为不合法 trace）。失败路径补发最小 trigger，
+    // scope=null → 落 dev-fallback.log（此时确实还没有会话归属）。
+    const triggerOnFailure = (at) => {
+      const c = ctxOf(this.e)
+      devLog('trigger', {
+        user: c.userId, gid: c.groupId, isGroup: c.isGroup, scopeUserId: c.scopeUserId, scopeId: c.scopeId,
+        conv: null, text: text || '', inputLen: (text || '').length, at,
+      }, traceId, null)
+    }
     let rt
     try {
       rt = await getRuntime()
     } catch (e) {
-      // 运行时初始化失败（如 apiKey 未配置）：每个用户仅提示一次（避免群里刷屏），修复 config（热加载）后自动恢复
+      const msg = e?.message || '插件初始化失败'
+      // 终态守卫：装配失败也必须有终态，否则该 traceId 永久悬挂（离线一致性检查视为回复静默丢失），
+      // 且 Replying false 会让消息下沉给其它插件——用户看到的是"命令没人认领"而非失败原因（审计 A）。
+      triggerOnFailure('getRuntime')
+      terminal('run_error', { error: msg, at: 'getRuntime' })
+      // 每个用户仅提示一次（避免群里刷屏），修复 config（热加载）后自动恢复
       const _uid = String(this.e.user_id || '')
       if (_uid && !_initFailNotified.has(_uid)) {
         _initFailNotified.add(_uid)
-        try { await this.e.reply(`⚠️ ${e?.message || '插件初始化失败'}。修复后保存 config 即自动恢复。`) } catch { /* noop */ }
+        try { await this.e.reply(`⚠️ ${msg}。修复后保存 config 即自动恢复。`) } catch { /* noop */ }
       }
-      return false
+      return true // 已受理并给出失败提示（去重期除外），不再下沉给其它插件
     }
     const cfg = Config.get().agent || {}
     const ctx = ctxOf(this.e)
@@ -1081,6 +1097,7 @@ export class Chat extends plugin {
       ctx.conversationId = await rt.session.getActiveConversation(ctx.scopeUserId, ctx.groupId)
     } catch (e) {
       Log.error('[chat] 读取活跃会话失败', e?.message || e)
+      triggerOnFailure('getActiveConversation')
       terminal('run_error', { error: e?.message || String(e), at: 'getActiveConversation' })
       try { await this.e.reply('⚠️ 读取会话信息失败，请稍后重试。') } catch { /* best effort */ }
       return false
@@ -1324,7 +1341,9 @@ export class Chat extends plugin {
       Log.mark('[chat]', `reply turns=${turns} stop=${stopReason} usage=${u} replyLen=${(content || '').length}`)
       // 发送前脱敏：屏蔽 API Key / token 等敏感信息（agent.redactSecrets 默认开；异常不阻塞回复）
       const body = cfg.redactSecrets === false ? (content || '') : redactSecrets(content || '')
-      const suffix = stopReason === 'max_turns' ? '（已达工具调用上限）' : ''
+      // 异常停止必须以可见标记落到回复上：否则预算耗尽 / 空转 / 连续失败与普通回复外形完全一致
+      // （用户以为任务正常完成）。文案复用 Agent 的确定性兜底表，保持单一真源。
+      const suffix = STOP_REASON_CN[stopReason] ? `（${STOP_REASON_CN[stopReason]}）` : ''
       // 表情包：本轮一次性门控（决定带哪些图 + 记冷却/防连发/usage），图片/文本模式共用结果，避免双计
       const acceptMap = (rt.sticker && body) ? rt.sticker.decide(body, ctx) : null
       // 群聊回复艾特发言人（agent.reply.atSender，默认开；私聊不艾特）
@@ -1411,7 +1430,7 @@ export class Chat extends plugin {
           rt.sticker?.noteSent?.([...acceptMap.keys()])
         }
       } else if (suffix) {
-        await safeReply(suffix) // 图片已发，max_turns 提示作附注
+        await safeReply(suffix) // 图片已发，异常停止提示另发一条附注
       }
       // diagram 示意图：最终回复送达后发送（文本/图片两种回复模式都覆盖；取消路径不会执行到此处）
       await sendPendingDiagrams()

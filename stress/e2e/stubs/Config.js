@@ -4,9 +4,16 @@ export const __state = { config: { agent: {} } }
 export function __setConfig(c) { __state.config = c }
 
 const TMP = process.env.E2E_TMP || '/tmp/e2e-harness'
+const P = (...seg) => [TMP, ...seg].join('/')
 export default {
   get: () => __state.config,
   save: () => { throw new Error('E2E 桩不支持 Config.save') },
   onChange: () => () => {},
-  path: { data: TMP, humanizeLogs: TMP + '/humanize-logs' },
+  reload: () => false,
+  startWatch: () => {},
+  // path 契约与真实 Config 对齐（缺字段会让 import 期 path.join(undefined) 直接抛，如 model/sticker）
+  path: {
+    plugin: TMP, yunzai: TMP, defaultConfig: P('default_config'), userConfig: P('config.yaml'), legacyUserConfig: P('agents-plugin.yaml'),
+    data: TMP, temp: P('temp'), logs: P('logs'), humanizeLogs: P('humanize-logs'), memories: P('memories'), personas: P('personas'), evolution: P('evolution'),
+  },
 }

@@ -18,7 +18,7 @@
  *  14. trigger→终态一致性检查器（reply_sent/reply_failed/cancelled/run_error 唯一）
  *  15. 正常路径"旁白+工具"消息形态与持久化一致
  */
-import { Agent, ToolRegistry, memoryKv, SessionStore } from './index.js'
+import { Agent, ToolRegistry, memoryKv, SessionStore, STOP_REASON_CN, GOVERNOR_STOP } from './index.js'
 import { ReplySender, createRunQueues } from './reply-sender.js'
 import { requestWithRetry } from '../openai/transport.js'
 import { TimeoutError, createClient, presets as openaiPresets } from '../openai/index.js'
@@ -660,6 +660,25 @@ await test('正常多工具轮：旁白留在 assistant(tool_calls) 里，最终
   eq(res.messages[1].content, '先查第一步', '旁白保存在带 tool_calls 的 assistant 消息里（不丢失）')
   const hist = await session.getConversation('u1', null, '1')
   eq(hist[hist.length - 1].content, FINAL, '持久化末条 assistant=最终回复（与 run().content 一致）')
+})
+
+// ============================================================
+// 16. 异常停止必须对「用户可见」：每个 GOVERNOR_STOP 原因都有对应中文说明
+//     （apps 层据此给回复加后缀；缺失则该终止与普通回复外形完全一致＝失败冒充成功）
+// ============================================================
+await test('异常停止原因全部可解释，且正常终止不带标记', async () => {
+  ok(GOVERNOR_STOP.size >= 6, ` governors 异常停止集合非空（${GOVERNOR_STOP.size} 种）`)
+  const missing = [...GOVERNOR_STOP].filter((r) => !STOP_REASON_CN[r])
+  eq(missing, [], '每种异常停止都有用户可读原因（新增 governor reason 时必须同步 STOP_REASON_CN）')
+  const abnormal = ['max_turns', 'token_budget', 'time_budget', 'duplicate_action', 'no_progress', 'consecutive_failures']
+  for (const r of abnormal) {
+    ok(GOVERNOR_STOP.has(r), `${r} 属于异常停止（需明显标记）`)
+    ok(String(STOP_REASON_CN[r] || '').length > 4, `${r} 的用户可见文案非空：${STOP_REASON_CN[r]}`)
+  }
+  // 正常终止不能被误标成异常
+  for (const r of ['end_turn', 'stop', 'clarify', 'blocked', null, undefined]) {
+    ok(!STOP_REASON_CN[r], `${String(r)} 不是异常停止，不应带失败标记`)
+  }
 })
 
 // ---------- 总结 ----------

@@ -187,6 +187,22 @@ function repointLegacyMainModels(agent) {
   return dirty
 }
 
+let _danglingWarned = '' // 引用失效告警去重（配置每次 reload 都会归一，按 引用组合 只报一次）
+
+/**
+ * 引用失效告警：providerId/modelId 指向的条目不在注册表里（厂商或模型被删、id 手填错）。
+ * 此时故意不清空镜像字段（保留最后一次可用的接入信息，避免整插件失效），但必须留痕——
+ * 否则面板显示「未选择」而运行时仍在用旧端点，属于静默分叉。
+ */
+function warnDanglingBaseRef(agent) {
+  if (!agent.providerId) { _danglingWarned = ''; return }
+  if (resolveBaseModel(agent)) { _danglingWarned = ''; return }
+  const key = `${agent.providerId}/${agent.modelId || ''}`
+  if (_danglingWarned === key) return
+  _danglingWarned = key
+  Log.warn(`[config] 基础模型引用失效（agent.providerId=${agent.providerId} / agent.modelId=${agent.modelId || '空'}）：对应的厂商或模型条目不在配置中心里，运行时仍在用上一次解析出的接入信息。请重新选择厂商与模型。`)
+}
+
 /** 深合并后的归一步：迁移旧结构 → 修正哨兵引用 → 回填镜像。返回是否需要落盘 */
 function normalizeBaseModel(root) {
   const agent = root?.agent
@@ -194,6 +210,7 @@ function normalizeBaseModel(root) {
   let dirty = migrateBaseModel(agent)
   if (repointLegacyMainModels(agent)) dirty = true
   if (syncBaseModel(agent)) dirty = true
+  warnDanglingBaseRef(agent)
   return dirty
 }
 
