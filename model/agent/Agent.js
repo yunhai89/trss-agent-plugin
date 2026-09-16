@@ -355,6 +355,11 @@ export class Agent {
       try { this.messages = await this.session.get(sessKey) } catch { this.messages = [] }
     }
     const sessStart = this.messages.length
+    // prompt_cache_key 的会话标识（_promptCacheKeyFor 读取）：多对话模式用 群:用户:会话id，
+    // 群:用户 模式用 sessKey。此前从未赋值 → 不同会话算出同一个键，会话级路由隔离失效。
+    this._curConvId = useConv
+      ? `${ctx.groupId || 'p'}:${scopeUserId}:${ctx.conversationId}`
+      : (sessKey || null)
     let compactedThisRun = false // 本 run 发生过滞回压缩 → 持久化走全量覆写（slice(sessStart) 会错位）
 
     // 清理历史中的空 assistant 消息（之前 bug 可能产生），给占位避免 API 报 "content or tool_calls must be set"

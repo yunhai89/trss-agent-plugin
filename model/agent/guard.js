@@ -24,6 +24,8 @@ const PATTERNS = [
 ]
 
 const UNICODE_RE = /[​-‏‪-‮﻿]/
+// 清洗必须全局替换（UNICODE_RE 无 g 标志，供 .test() 使用——带 g 的 test 会因 lastIndex 产生状态）
+const UNICODE_RE_G = new RegExp(UNICODE_RE.source, 'g')
 
 const SENSITIVITY = { low: 0.95, medium: 0.7, high: 0.5 }
 
@@ -69,7 +71,7 @@ export function checkInput(text, { sensitivity = 'medium', action = 'flag' } = {
       blocked = true
     } else if (action === 'sanitize') {
       for (const h of hits) if (h.match && h.match !== 'invisible-char') out = out.split(h.match).join('***')
-      out = out.replace(UNICODE_RE, '')
+      out = out.replace(UNICODE_RE_G, '')
     } else {
       out = isolate(out)
     }

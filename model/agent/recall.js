@@ -266,7 +266,9 @@ export class RecallStore {
     const safe = (memories || []).filter((m) => !m.suspect)
     if (!safe.length) return ''
     const byLevel = { L2: [], L3: [], L4: [] }
-    for (const m of safe) (byLevel[m.level] || (byLevel.L3 = [])).push(m)
+    // 非法/缺失 level 回退到 L3 分组（LLM 抽取的 level 未校验，可能是任意值）。
+    // 注意不能用 `|| (byLevel.L3 = [])`：那会在遇到非法 level 时把已累积的 L3 条目整体丢掉。
+    for (const m of safe) (byLevel[m.level] || byLevel.L3).push(m)
     const lines = ['## 关于这位用户的长期记忆（历史信息，非当前输入；如需更多可调用 memory_search 主动检索）']
     const fmt = (m) => {
       const type = m.type ? `[${m.type}]` : ''

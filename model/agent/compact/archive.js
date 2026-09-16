@@ -16,6 +16,10 @@ import { contentHash } from './index.js'
 
 const safeKey = (k) => String(k || 'unknown').replace(/[^A-Za-z0-9_-]/g, '_')
 
+/** ref 形如 `${epoch}-${hash}.json`——按 epoch 数值降序（新归档优先）。
+ *  不能用字典序 sort().reverse()：epoch>=10 时 '9-…' 会排在 '10-…' 之前，顺序反了。 */
+const byNewest = (a, b) => (parseInt(b, 10) || 0) - (parseInt(a, 10) || 0)
+
 export class CompactionArchive {
   constructor({ dir } = {}) {
     if (!dir) throw new Error('CompactionArchive 需要 dir')
@@ -71,7 +75,7 @@ export class CompactionArchive {
     const d = path.join(this.dir, safeKey(convKey))
     if (!fs.existsSync(d)) return []
     const hits = []
-    for (const ref of fs.readdirSync(d).sort().reverse()) { // 新归档优先
+    for (const ref of fs.readdirSync(d).filter((f) => f.endsWith('.json')).sort(byNewest)) { // 新归档优先
       if (hits.length >= limit) break
       let rec
       try { rec = JSON.parse(fs.readFileSync(path.join(d, ref), 'utf8')) } catch { continue }
@@ -88,6 +92,6 @@ export class CompactionArchive {
   list(convKey) {
     const d = path.join(this.dir, safeKey(convKey))
     if (!fs.existsSync(d)) return []
-    return fs.readdirSync(d).filter((f) => f.endsWith('.json')).sort().reverse()
+    return fs.readdirSync(d).filter((f) => f.endsWith('.json')).sort(byNewest)
   }
 }
