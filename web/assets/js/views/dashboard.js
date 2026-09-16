@@ -101,7 +101,7 @@
           { name: '流式输出', on: cfg.stream },
           { name: '多模态', on: cfg.media?.enable },
           { name: '视觉子模型', on: cfg.vision?.enable },
-          { name: '终端(高危)', on: cfg.terminal?.enable, danger: true },
+          { name: '终端(E2B 沙箱)', on: cfg.sandbox?.mode === 'e2b', danger: true },
         ]
       })
 

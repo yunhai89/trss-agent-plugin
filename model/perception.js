@@ -87,10 +87,12 @@ function runtimeStatus(runtime, cfg) {
   }
 
   // 终端执行能力：以 terminal 工具是否注册为准（显式告知，避免模型误判"没有能力"）
+  // 执行面已是 E2B 沙箱：命令跑在隔离 microVM 内（宿主文件/进程不可见，出口按白名单收紧），
+  // 无逐条审批（旧的 #确认 与命令黑名单已随宿主执行路径一并移除）。
   if (names.includes('terminal')) {
-    lines.push('- 终端执行：✅已启用（工具名 `terminal`；可在主机执行 shell 命令，每条命令需主人 #确认，只读安全命令免审）')
+    lines.push('- 终端执行：✅已启用（工具名 `terminal`；命令在 E2B 沙箱内执行，与宿主隔离、默认只能访问白名单网络，仅 terminal 主人可用、无审批）')
   } else {
-    lines.push('- 终端执行：❌未启用（配置 agent.terminal.enable: true 后 #agents重载 开启；未启用则无法在主机执行命令/装软件）')
+    lines.push('- 终端执行：❌未启用（配置 agent.sandbox.mode: e2b 并填 apiKey 后 #agents重载 开启；未启用则无法执行命令/装软件）')
   }
 
   // 技能清单：列出可用 skill 名（与 system prompt 的 <available_skills> 目录双通道呼应）

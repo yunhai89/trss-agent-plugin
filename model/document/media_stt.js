@@ -17,7 +17,8 @@ function _trunc(s, max = 8000) {
   return t.length <= max ? t : t.slice(0, max) + `\n…[已截断，共 ${t.length} 字符]`
 }
 
-/** 主机执行 shell（ffmpeg 提取音频：操作主机文件，不走 terminal Docker 沙盒——容器无 ffmpeg 且看不到主机路径）。 */
+/** 主机执行 shell（ffmpeg 提取音频：必须操作主机文件，不走沙箱——沙箱内看不到主机路径也没有编解码器）。
+ *  注：这是**专用**执行器（固定 ffmpeg 调用），与 terminal 工具的执行面（E2B 沙箱）无关。 */
 function runShell(command, { cwd, timeout = 60, maxOutput = 8000 } = {}) {
   return new Promise((resolve) => {
     try {

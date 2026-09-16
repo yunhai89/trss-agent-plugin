@@ -46,8 +46,8 @@ function _trunc(s, max = 8000) {
 }
 
 /**
- * 主机执行 shell（表情包 git 操作专用）。操作主机仓库目录 paths.REPO_DIR，**不走 terminal Docker 沙盒**——
- * 沙盒容器无 git 且看不到主机目录，会误报"无 git"。返回 {ok,exitCode,stdout,stderr}（与 _spawnGit 同构）。
+ * 主机执行 shell（表情包 git 操作专用：操作主机仓库目录 paths.REPO_DIR，沙箱内看不到该目录）。
+ *  注：与 terminal 工具的执行面（E2B 沙箱）无关，这里是固定 git 调用。返回 {ok,exitCode,stdout,stderr}（与 _spawnGit 同构）。
  */
 function runShell(command, { cwd, timeout = 60, maxOutput = 8000 } = {}) {
   return new Promise((resolve) => {

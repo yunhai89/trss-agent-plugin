@@ -112,10 +112,18 @@
     },
     document: { soffice: 'soffice' },
     stt: { enable: false, apiBase: 'https://api.openai.com/v1', apiKey: '', model: 'whisper-1', language: 'zh' },
-    terminal: {
-      enable: false, maxTimeout: 120, image: 'archlinux:latest', network: 'none',
-      mounts: [], blocklist: ['rm -rf /', 'mkfs', ':(){ :|:& };:'],
-      allowlist: ['ls', 'cat', 'echo'],
+    sandbox: {
+      mode: 'e2b', apiKey: 'e2b_demo1234567890abcdef', apiUrl: '', domain: '', sandboxUrl: '',
+      template: 'base', maxTimeout: 600, defaultCwd: '/home/user',
+      idleMs: 300000, sandboxTtlMs: 600000, maxSandboxes: 4, concurrencyWaitMs: 15000,
+      maxCommandsPerSession: 50, requestTimeoutMs: 60000, retries: 1, allowPublicTraffic: false,
+      network: {
+        allowInternet: false,
+        denyOut: ['0.0.0.0/0'],
+        allowOut: ['pypi.org', '*.pypi.org', 'files.pythonhosted.org', 'registry.npmjs.org', 'archive.ubuntu.com', 'api.openai.com'],
+      },
+      audit: true,
+      toolEvoVerifyTimeoutMs: 5000,
     },
   }
 
@@ -269,7 +277,7 @@
 
   /* ---------- §3.5 审批门(纯内存) ---------- */
   const confirms = [
-    { id: 'a8f2', tool: 'terminal', args: { cmd: 'docker compose up -d --force-recreate' }, ctx: { user: '2854196310', gid: '960179589', reason: '重建容器应用新配置' }, createdAt: now - 90e3 },
+    { id: 'a8f2', tool: 'stagehand_act', args: { instruction: '在控制台把测试服的实例规格改成 2C4G' }, ctx: { user: '2854196310', gid: '960179589', reason: '按新配额调整实例' }, createdAt: now - 90e3 },
     { id: 'b31c', tool: 'send_like', args: { user_id: 1145141919, times: 10 }, ctx: { user: '1145141919', gid: '960179589', reason: '给群友点赞 10 次' }, createdAt: now - 40e3 },
   ]
 

@@ -4,9 +4,9 @@
 
 > A modular AI Agent runtime for TRSS-Yunzai — LLM · Tool Calling · Memory · MCP · and self-evolving tools.
 
-**基于 [TRSS-Yunzai](https://github.com/TimeRainStarSky/Yunzai) / [Miao-Yunzai](https://github.com/Le-niao/Yunzai-Bot) 的 AI Agent 插件框架** —— 不是普通插件，而是一套可演化的 Agent Runtime：多模型对话 · 工具调用 · 长期记忆 · 人设 · 多模态识图 · MCP · 群管 · 终端 · 图片渲染，外加**工具进化（Tool Evolution）**等差异化能力。
+**基于 [TRSS-Yunzai](https://github.com/TimeRainStarSky/Yunzai) / [Miao-Yunzai](https://github.com/Le-niao/Yunzai-Bot) 的 AI Agent 插件框架** —— 不是普通插件，而是一套可演化的 Agent Runtime：多模型对话 · 工具调用 · 长期记忆 · 人设 · 多模态识图 · MCP · 群管 · 终端(E2B 沙箱) · 图片渲染，外加**工具进化（Tool Evolution）**等差异化能力。
 
-一个插件打通：多模型对话 · 工具调用 · 长期记忆 · 人设 · 多模态识图 · MCP · 群管 · 终端 · 图片渲染
+一个插件打通：多模型对话 · 工具调用 · 长期记忆 · 人设 · 多模态识图 · MCP · 群管 · 终端(E2B 沙箱) · 图片渲染
 
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
@@ -24,7 +24,7 @@
 >
 > - 🎭 **表情包功能已恢复**：支持自动发现（群聊被动采集 → 视觉判定+打标 → 入库）+ 手动安装（manifest 驱动）+ LLM 自主引用 `[sticker:名称]`。配置 `agent.sticker` 开启。
 > - 🧪 **深度搜索 / 深度研究（`#研究`）为早期功能**：依赖联网检索 + 多轮子代理编排，受搜索源、模型能力、token 消耗影响，效果可能不稳定甚至不可用。
-> - ⚠️ **终端执行为高危能力**：默认关闭；开启 `agent.terminal.enable: true` 即视为自担风险（详见「安全声明」）。
+> - ⚠️ **终端执行为沙箱能力**：默认关闭；开启 `agent.sandbox.mode: e2b` + `apiKey`（命令在 E2B 微虚机内执行）即视为自担风险（详见「安全声明」）。
 > - ✅ **核心对话（多模型聊天 / 工具调用 / 记忆 / 人设 / 图片渲染 / MCP / 群管）稳定可用**，请以核心为主。
 
 ---
@@ -36,7 +36,7 @@
 - **双协议多模型**：OpenAI / Anthropic 兼容，一行配置接 DeepSeek / Kimi / MiMo / 通义 / 智谱 / Gemini；视觉子模型让无视觉的主模型也能识图。
 - **渐进式披露 + 结构化 prompt**：技能按需加载、工具目录速查、分层 system prompt（执行取向 / 服务准则 / 安全护栏），兼顾能力与上下文成本。
 - **文件即真相的记忆**：`MEMORY.md` / `USER.md` 人可读可编辑 + `memory_search` 主动召回，跨会话不失忆、不串档。
-- **安全纵深**：工具 RBAC + 主人审批 + allowlist 免审 + 黑名单硬拦 + 注入防御，高危动作不裸奔。
+- **安全纵深**：工具 RBAC + 主人审批 + 注入防御 + 高危执行面隔离（终端与工具进化代码跑在 E2B 沙箱，宿主无 shell 执行面），高危动作不裸奔。
 - **配置热加载 + 锅巴适配**：改配置即生效、免重启；锅巴 Web 面板可视化编辑。
 - **回复默认渲染成精美图片**：markdown → 浅色卡片图（标题 / 列表 / 代码高亮 / 表格 / 引用全支持），失败退文本。
 - **🧬 工具进化（Tool Evolution）**：Agent 经 LLM 生成新工具 → typescript AST 静态门 → 沙箱行为验证 → 主人审批上线，形成可验证 / 可回滚 / 权限不可自扩的工具生命周期（生成→验证→晋升→淘汰闭环）。
@@ -56,7 +56,7 @@
 | 🔌 MCP | 完整 MCP 客户端（stdio / HTTP）、多服务端、按工具 RBAC | ✅ 稳定 |
 | 👥 群聊工具 | 群信息 / 群管理 / 米游社搜索 | ✅ 稳定 |
 | 📥 媒体下载 | 基于 yt-dlp 的视频/音频下载（受约束，仅主人），支持 YouTube/B站/抖音等 1000+ 站点 | ✅ 稳定 |
-| 💻 终端执行 | **主机直接执行**（terminal 主人免确认可配 + 黑名单硬拦） | ⚠️ 高危可选 |
+| 💻 终端执行 | **E2B 沙箱执行**（Firecracker microVM；terminal 主人认领 + 出口白名单 + 命令数/并发上限） | ⚠️ 高危可选 |
 | 🌐 浏览器自动化 | **Stagehand**：goto/observe/extract/act 自然语言原语，本地或 Browserbase 云，会话跨调用保持 | 🧪 早期 |
 | 🎭 表情包 | 自动发现（群聊被动采集→视觉打标→入库）+ 手动安装 + LLM 自主引用 `[sticker:名称]` | ✅ 稳定 |
 | 🤖 伪人模式 | 群聊环境参与者：旁听→门控→Planner 决策→Replyer 自然回复（参照 MaiBot） | 🧪 早期 |
@@ -67,7 +67,7 @@
 | 🔍 统一搜索 | Tavily/Exa/Perplexity/Brave → SearXNG → DDG 兜底 | ✅ 稳定 |
 | 📊 示意图生成 | 流程图/架构图/时序图/状态图/ER/思维导图：LLM 语义结构 → 自托管 Kroki D2 → 高清 PNG（文字/连线精确，非文生图） | ✅ 稳定 |
 | 📚 深度研究 | `#研究` 五阶段管线（规划→检索→综合→引用→评估） | 🧪 早期 |
-| 🧬 工具进化 | LLM 生成候选 → AST/沙箱验证 → 审批上线（版本化 / 可回滚 / 安全闸） | 🧪 早期 |
+| 🧬 工具进化 | LLM 生成候选 → AST 门 + 隔离执行面验证 → 审批上线（版本化 / 可回滚 / 安全闸） | 🧪 早期 |
 
 ---
 
@@ -81,7 +81,7 @@
 #进化工具 <能力描述>
   → LLM 生成（json_schema 结构化）
   → typescript AST 静态门（禁 require / child_process / process.env / eval / 一切 import；危险候选不入库）
-  → 沙箱行为验证（node 隔离 + 测试断言 + 性能/超时门）
+  → 隔离行为验证（E2B 沙箱 / 本地子进程双档 + 测试断言 + 性能/超时门）
   → #采纳工具 <id>（master 审批）→ stable + 注入 → agent 经 tool_search 调用
   → 调用埋点 → 适应度 / 失败聚类 → #工具健康 检测 → #淘汰工具 下线
 ```
@@ -104,7 +104,7 @@
 - [🎮 指令](#-指令)
 - [🧩 扩展开发（工具 / 技能）](开发指南.md)
 - [🧠 记忆体系](#-记忆体系参考-openclaw文件即真相)
-- [💻 终端执行 + 审批](#-终端执行--审批allowlist-自动放行)
+- [💻 终端执行（E2B 沙箱）](#-终端执行e2b-沙箱--主人验证码认领)
 - [🎭 表情包](#-表情包llm-自主附带)
 - [🏗️ 架构](#️-架构)
 - [🔧 日志](#-日志与排查)
@@ -114,14 +114,17 @@
 
 ## ⚠️ 安全声明
 
-本插件提供**终端（shell）执行能力**，属于**高危工具**：
+本插件提供**终端（shell）执行能力**，命令跑在 **E2B 沙箱**（Firecracker microVM）里：
 
-- shell 在**主机直接执行**任意命令（无容器隔离）——读写/删除文件、安装软件、访问网络、调用系统权限。
-- terminal 仅「terminal 主人」可用：**不读 Yunzai 框架配置**，认领流程类似 Yunzai `#设置主人`——`#agents设置主人`（控制台打印验证码 + 进入监听）→ 直接发验证码认领，单主人（换人即重置）。每条命令需主人 `#确认`；灾难命令（`rm -rf /` 等）黑名单硬拦。**但任何防护都无法保证 100% 安全**——命令组合、解释器、环境差异等都可能绕过静态规则。
-- **终端默认关闭**（`agent.terminal.enable` 默认 `false`），需在配置里**单独手动开启**。
-- **开启 `agent.terminal.enable: true` 即表示你已知晓上述风险（含真机执行）、同意自行承担一切后果，与开发者无关。** 开发者会尽量保证安全性，但不作任何担保。
+- 命令在**独立微虚机内执行**：宿主文件/进程不可见，网络出口按 `agent.sandbox.network.allowOut` 白名单收紧（默认只放行包管理器与 `api.openai.com`）。
+- terminal 仅「terminal 主人」可用：**不读 Yunzai 框架配置**，认领流程类似 Yunzai `#设置主人`——`#agents设置主人`（控制台打印验证码 + 进入监听）→ 直接发验证码认领，单主人（换人即重置）。沙箱化后**不再有逐条 `#确认` 审批与命令黑名单**（破坏面已被 microVM 限制）；另有单会话命令数上限与并发上限兜底成本。
+- **终端默认关闭**（`agent.sandbox.mode` 默认 `off`，此时 terminal 工具**根本不注册**），需自行准备 E2B（自托管或云）并填 `apiKey` 后开启。
+- **连不上 E2B 时一律拒绝执行**（fail-closed），**绝不回退到主机执行**——本插件已删除宿主 shell 执行面。
+- **开启 `agent.sandbox.mode: e2b` 即表示你已知晓上述风险、同意自行承担一切后果，与开发者无关。** 沙箱逃逸类漏洞、配额/账单消耗、主人账号被盗导致的沙箱操作权，均需自行评估；开发者不作任何担保。
 
-> 如不接受该风险，请保持 `terminal.enable: false`（默认）。不启用终端时，本插件不涉及任何主机命令执行，无此风险。
+> 如不接受该风险，请保持 `agent.sandbox.mode: off`（默认）。此时本插件不涉及任何 shell 执行（含沙箱）。
+>
+> **升级注意**：旧配置 `agent.terminal.*`（`enable`/`maxTimeout`/`blocklist`/`skipConfirm`）已废弃。Config 的自愈机制只增不删，所以旧键会留在你的 `config/config.yaml` 里但**不再被读取**；启动时会打印一条迁移警告，请手工删除该段并改配 `agent.sandbox`。
 
 ---
 
@@ -223,7 +226,7 @@ agent:
 | `systemPrompt` | 空 | 默认身份 system prompt（留空用富默认身份；被人设覆盖时失效） |
 | `chatPermission` | `master` | `#ai` 命令权限：`master`/`admin`/`owner`/`all` |
 | `masters` | `[]` | 接收审批通知的 master QQ 号列表 |
-| `masterSkipConfirm` | `false` | ⚠️高危：主人发起的确认类工具（terminal 写命令等）免 `#确认` 直接执行（仅主人，控制台有日志不在聊天提示；denylist 仍硬拦） |
+| `masterSkipConfirm` | `false` | ⚠️高危：主人发起的确认类工具（stagehand act 等）免 `#确认` 直接执行（仅主人，控制台有日志不在聊天提示；denylist 仍硬拦）。注：terminal 已沙箱化，不走审批 |
 | `confirmTimeout` | `300` | 审批超时自动拒绝（秒） |
 | `guardAction` | `flag` | 注入防御动作：`block`(拦截)/`flag`(隔离标注)/`sanitize`(脱敏) |
 | `guardSensitivity` | `medium` | 防御灵敏度：`low`(0.95)/`medium`(0.7)/`high`(0.5) |
@@ -491,19 +494,41 @@ mcp:
 
 ---
 
-## 💻 终端执行 + 审批（主人验证码认领）
+## 💻 终端执行（E2B 沙箱 + 主人验证码认领）
 
-> **⚠️ 高危**：见上方「安全声明」。`terminal` 默认关闭，需 `agent.terminal.enable: true` **单独开启**；开启即视为你知晓风险并自担后果。
+> **⚠️ 高危**：见上方「安全声明」。`terminal` 默认不注册，需 `agent.sandbox.mode: e2b` + `apiKey` **单独开启**；开启即视为你知晓风险并自担后果。
 
-`terminal` 工具让 Agent 在**主机直接执行** shell 命令（无容器隔离，比沙盒危险得多）。安全模型（纵深防御）：
+`terminal` 工具让 Agent 在 **E2B 微虚机**里执行 shell 命令。宿主上**没有任何 shell 执行面**（旧主机执行路径已删除），拿不到沙箱就拒绝执行。
 
+**接入准备**（二选一，详见仓库内 `e2b-infra-nodejs-安全shell接入开发文档.md`）：
+- 自托管 Embed：按官方 Embed 指南部署带 KVM 的机器，`eval "$(docker compose exec ready cat /run/e2b/sdk.env)"` 拿到三变量 → 填入 `sandbox.apiKey / apiUrl / sandboxUrl`（无通配 DNS 时必须填 `sandboxUrl`，SDK 会自动附路由头）。
+- E2B 云：只填 `sandbox.apiKey`（注意：命令与文件会送往第三方）。
+
+**访问控制**：
 - **terminal 主人（自包含，不读框架配置）**：不沿用 Yunzai 的 `e.isMaster` / `agent.masters`。认领流程（类似 Yunzai `#设置主人`）：
   1. 任意人发 `#agents设置主人` → **控制台打印**一个验证码（只有服务器持有者能看到），并进入监听态。
   2. 服务器持有者**直接把验证码发到当前会话**（无需任何命令前缀）→ 校验通过即成为 terminal 主人。验证码错误可在超时前重发。
   - **单主人 + 验证码重置**：每次 `#agents设置主人` 生成新验证码并重置监听，新码被认领后**替换旧主人**（换人即重置）。持久化到插件 `data/terminal-master.json`，重启不丢。
-- **审批门**：terminal **每条命令都需主人 `#确认`**（不再有 allowlist 免审——真机执行没有「安全的只读命令」）。主人收到 DM（含命令预览 + 风险提示：⚠️写入/🌐网络/🔐提权/📦安装），`#确认 <id>` / `#拒绝 <id>`，超时自拒。
-- **黑名单**：灾难性命令（`rm -rf /` / `mkfs` / `dd of=/dev/` / 关机重启 等）即使已确认也**硬拦**。
-- 配置（`agent.terminal`）：`maxTimeout`（命令超时上限）、`blocklist`（追加灾难命令正则；空=用默认集）。
+- **无审批、无命令黑名单**：破坏性命令由 microVM 隔离承担（不再靠字符串规则）；主人身份是唯一访问门。
+- **成本闸**：`maxCommandsPerSession`（单会话命令数上限）、`maxTimeout`（单命令超时）、`maxSandboxes`（全局并发）+ 闲置回收，防长任务把配额/账单打爆。
+
+**关键配置（`agent.sandbox`）**：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `mode` | `off` | `off`=terminal 不注册（toolEvo 走本地 fork 档）\| `e2b`=沙箱执行 |
+| `apiKey` | 空 | E2B 云或自托管团队 key（★敏感，已接入回复脱敏） |
+| `apiUrl` / `domain` / `sandboxUrl` | 空 | 自托管控制面 / 沙箱域名 / 数据面（client-proxy）地址；云托管留空 |
+| `template` | `base` | 沙箱模板（CPU/内存/预装依赖由模板承载） |
+| `maxTimeout` | `600` | 单命令超时上限（秒） |
+| `defaultCwd` | `/home/user` | 沙箱内默认工作目录（宿主路径在沙箱内无意义） |
+| `idleMs` / `sandboxTtlMs` | `300000` / `600000` | 闲置回收阈值 / 沙箱 TTL（毫秒，命中时自动续期） |
+| `maxSandboxes` / `concurrencyWaitMs` | `4` / `15000` | 全局并发上限 / 等名额超时（超时按配额失败） |
+| `maxCommandsPerSession` | `50` | 单会话命令数上限（0=不限） |
+| `network.allowOut` / `denyOut` | 包管理器 + `api.openai.com` / 全拒绝 | 出口白名单（**allow 恒优先于 deny**）；留空白名单=完全断网 |
+| `audit` | `true` | 每条命令写审计日志（会话键/退出码/命令前 200 字符，不含密钥） |
+
+> 沙箱会话按「群 + 用户 + 会话」绑定：同一会话内文件与进程状态连续（可先装依赖再跑脚本）。群共享模式（`isolation: false`）下同群共用一个沙箱。
 
 ### 🔍 SearXNG（自建免费搜索后端）安装
 

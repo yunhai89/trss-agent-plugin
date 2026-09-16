@@ -30,7 +30,8 @@
         } catch (e) { toast(e.message, 'error') }
       }
 
-      const danger = (tool) => ['terminal', 'send_like'].includes(tool)
+      // 需二次确认的工具里风险最高的几个（terminal 已沙箱化、不再走审批队列）
+      const danger = (tool) => ['send_like', 'stagehand', 'stagehand_act'].includes(tool)
 
       /* 惰性加载:config(取 confirmTimeout)+ 队列;5s 轮询(后端管超时淘汰) */
       onMounted(async () => {
@@ -89,7 +90,7 @@
           </div>
         </div>
       </TransitionGroup>
-      <empty-state v-if="!items.length" icon="confirm" text="暂无待审批项" sub="高危工具(terminal 写命令等)发起时会出现在这里"/>
+      <empty-state v-if="!items.length" icon="confirm" text="暂无待审批项" sub="需二次确认的工具（如 stagehand act / 定时任务等）发起时会出现在这里；终端命令已改在 E2B 沙箱内直接执行，不走审批"/>
     </div>`,
   }
 })()
