@@ -153,17 +153,31 @@ cd ./plugins/agents-plugin && npm install      # 安装 markdown 渲染依赖（
 
 ## 🚀 快速开始
 
-编辑 `plugins/agents-plugin/config/config.yaml`，最少只需填两项：
+**推荐路径**：打开 Web 配置中心（主人私聊 `#agents登录` 取访问地址），在 **厂商配置** 添加厂商（接口地址 + Key）→ **模型列表** 在该厂商下添加模型 → **基础 / 模型** 选中这两个条目。保存即热加载。
+
+群里 **@机器人** 或发 **`#ai 你好`** 即可对话。
+
+基础模型是**引用式**的：config.yaml 里用 `providerId` + `modelId` 指向「厂商配置 / 模型列表」的条目，不再单独填接入参数。手写配置的等价写法：
 
 ```yaml
 agent:
-  protocol: openai        # 或 anthropic
-  preset: deepseek        # 厂商预设：openai/deepseek/gemini/dashscope/zhipu/moonshot/mimo/minimax（anthropic: anthropic/deepseek/mimo/minimax）
-  apiKey: "sk-xxx"        # 你的 API Key
-  model: "deepseek-chat"  # 模型 ID
+  llmProviders:                     # 厂商配置（协议/预设/地址/Key 都在这里）
+    - id: pmain
+      name: DeepSeek
+      protocol: openai              # 或 anthropic / gemini
+      preset: deepseek              # 厂商预设：openai/deepseek/gemini/dashscope/zhipu/moonshot/mimo/minimax 等
+      baseURL: ""
+      apiKey: "sk-xxx"              # ★必填
+  llmModels:                        # 模型列表（挂在某厂商下）
+    - id: mchat
+      name: 主力
+      providerId: pmain
+      model: "deepseek-chat"
+  providerId: pmain                 # ← 基础模型选哪个厂商
+  modelId: mchat                    # ← 基础模型选哪个模型
 ```
 
-群里 **@机器人** 或发 **`#ai 你好`** 即可对话。
+> 老配置（只有 `protocol`/`preset`/`baseURL`/`apiKey`/`model` 五个扁平字段）**首次加载会自动迁移**：按原接入信息生成一条厂商 + 一条模型条目，并让上面两个引用指向它们，无需手工重配。迁移后这五个字段变成只读镜像（由上层引用解析回填），手改会在下次加载被覆盖。
 
 ---
 
@@ -184,11 +198,12 @@ agent:
 | --- | --- | --- |
 | `trigger` | `at` | 触发模式：`at`(艾特) / `command`(触发词) / `both` |
 | `triggerCommand` | `#ai` | `trigger` 为 command/both 时的触发词 |
-| `protocol` | `openai` | `openai` / `anthropic`（均支持各兼容端点） |
-| `preset` | `deepseek` | 厂商预设（自动填 baseURL/headers/字段映射） |
-| `baseURL` | 空 | 自定义 baseURL，覆盖 preset |
-| `apiKey` | 空 | **必填** API Key |
-| `model` | `deepseek-chat` | 模型 ID |
+| `providerId` | 空 | **★必填** 基础模型选用哪个厂商条目（见下方 ↴ `llmProviders`） |
+| `modelId` | 空 | **★必填** 基础模型选用哪个模型条目（须挂在上述厂商下） |
+| `llmProviders` | `[]` | 厂商清单 `[{ id, name, protocol, preset, baseURL, apiKey }]`；没有“默认厂商”，被 `providerId` 选中的那个就是主接入 |
+| `llmModels` | `[]` | 模型清单 `[{ id, name, providerId, model, temperature, maxTokens, thinking, note }]`；`thinking/温度/maxTokens` 在被主对话链路使用时覆盖全局 |
+| `protocol` / `preset` / `baseURL` / `apiKey` / `model` | 镜像 | 上面引用的**解析结果**，加载时自动回填；勿手改，改厂商 Key / 换模型会自动跟随 |
+| `utilityModel` | 空 | 播报等旁路小模型 id（留空=沿用主模型） |
 | `reasoningFields` | `[]` | 推理字段归一化（如 `["reasoning_content"]`），preset 通常已带 |
 | `maxTurns` | `50` | 单次对话工具调用轮次预算 |
 | `temperature` | 空 | 采样温度 |

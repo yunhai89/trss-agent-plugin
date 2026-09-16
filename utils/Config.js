@@ -107,6 +107,96 @@ export function migrateLegacy() {
   }
 }
 
+/** 基础模型引用制：providerId/modelId → 扁平字段的镜像字段名（只读，随引用自动回填） */
+const BASE_MODEL_MIRROR = ['protocol', 'preset', 'baseURL', 'apiKey', 'model']
+
+/**
+ * 解析基础模型：把「厂商配置 + 模型列表」的引用条目解析成运行时接入参数。
+ * 单一真源是 agent.providerId / agent.modelId；返回 null 表示引用未完整生效（此时不要动镜像字段）。
+ */
+function resolveBaseModel(agent) {
+  if (!isPlainObj(agent) || !agent.providerId) return null
+  const prov = (Array.isArray(agent.llmProviders) ? agent.llmProviders : []).find((p) => p && p.id === agent.providerId)
+  const mod = (Array.isArray(agent.llmModels) ? agent.llmModels : []).find((m) => m && m.id === agent.modelId)
+  if (!prov || !mod || mod.providerId !== prov.id) return null
+  return {
+    protocol: String(prov.protocol || 'openai'),
+    preset: String(prov.preset || ''),
+    baseURL: String(prov.baseURL || ''),
+    apiKey: String(prov.apiKey || ''),
+    model: String(mod.model || ''),
+  }
+}
+
+/** 条目 id 生成（与 web 面板同前缀语义：p/m + 时间戳随机） */
+function genId(prefix) {
+  return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+}
+
+/**
+ * 一次性迁移：旧配置只有扁平的主接入字段（protocol/preset/baseURL/apiKey/model），
+ * 没有厂商/模型条目。把它们登记成「厂商配置」+「模型列表」各一条，并让引用指向它们，
+ * 使老用户升级后无需重配。已有 providerId 或从未配过 Key 时不触发。
+ */
+function migrateBaseModel(agent) {
+  if (!isPlainObj(agent) || agent.providerId || !agent.apiKey) return false
+  const providers = Array.isArray(agent.llmProviders) ? agent.llmProviders : []
+  const models = Array.isArray(agent.llmModels) ? agent.llmModels : []
+  const same = (a, b) => String(a || '').trim().replace(/\/+$/, '').toLowerCase() === String(b || '').trim().replace(/\/+$/, '').toLowerCase()
+  let prov = providers.find((p) => p && same(p.baseURL, agent.baseURL) && String(p.protocol || 'openai') === String(agent.protocol || 'openai'))
+  if (!prov) {
+    prov = {
+      id: genId('p'), name: agent.preset || '主接入',
+      protocol: String(agent.protocol || 'openai'), preset: String(agent.preset || ''),
+      baseURL: String(agent.baseURL || ''), apiKey: String(agent.apiKey || ''),
+    }
+    providers.push(prov)
+    agent.llmProviders = providers
+  }
+  let mod = models.find((m) => m && m.providerId === prov.id && String(m.model) === String(agent.model || ''))
+  if (!mod) {
+    mod = { id: genId('m'), name: '', providerId: prov.id, model: String(agent.model || ''), temperature: null, maxTokens: null, thinking: 'inherit', note: '' }
+    models.push(mod)
+    agent.llmModels = models
+  }
+  agent.providerId = prov.id
+  agent.modelId = mod.id
+  Log.mark(`[config] 已把旧的主接入配置迁移为厂商「${prov.name}」+ 模型条目（agent.providerId/modelId）`)
+  return true
+}
+
+/** 把引用解析结果回填到扁平镜像字段；返回是否发生了变化 */
+function syncBaseModel(agent) {
+  const resolved = resolveBaseModel(agent)
+  if (!resolved) return false
+  let changed = false
+  for (const k of BASE_MODEL_MIRROR) {
+    if (agent[k] !== resolved[k]) { agent[k] = resolved[k]; changed = true }
+  }
+  return changed
+}
+
+/** 旧 web 面板允许模型挂在内建的「主厂商」哨兵 providerId='main' 上；哨兵已删除，改指向真实厂商条目 */
+function repointLegacyMainModels(agent) {
+  if (!agent.providerId) return false
+  const models = Array.isArray(agent.llmModels) ? agent.llmModels : []
+  let dirty = false
+  for (const m of models) {
+    if (m && m.providerId === 'main') { m.providerId = agent.providerId; dirty = true }
+  }
+  return dirty
+}
+
+/** 深合并后的归一步：迁移旧结构 → 修正哨兵引用 → 回填镜像。返回是否需要落盘 */
+function normalizeBaseModel(root) {
+  const agent = root?.agent
+  if (!isPlainObj(agent)) return false
+  let dirty = migrateBaseModel(agent)
+  if (repointLegacyMainModels(agent)) dirty = true
+  if (syncBaseModel(agent)) dirty = true
+  return dirty
+}
+
 function load() {
   const def = readYamlDir(defaultDir)
   // 迁移旧配置（若插件内尚无配置且 Yunzai 根有旧文件）
@@ -115,6 +205,7 @@ function load() {
   if (!fs.existsSync(userConfigPath) && Object.keys(def).length) {
     try { writeUser(def) } catch (err) { Log.warn('写入默认配置失败', err) }
     _data = deepMerge(def, readUser())
+    persistBaseModel()
     return
   }
   const user = readUser()
@@ -126,15 +217,23 @@ function load() {
     try { writeUser(merged); Log.mark('[config] 已补全 config.yaml 中缺失的字段') } catch (e) { Log.warn('[config] 补全缺失字段失败', e?.message || e) }
   }
   _data = merged
+  persistBaseModel()
+}
+
+/** 基础模型引用归一步：迁移/镜像有变化才落盘（幂等，避免 fs.watch 自触发抖动） */
+function persistBaseModel() {
+  if (!normalizeBaseModel(_data)) return
+  try { writeUser(_data) } catch (e) { Log.warn('[config] 基础模型引用同步落盘失败', e?.message || e) }
 }
 
 /** 重新读取并合并；内容变化（或 force=true）才通知订阅者（去重，避免自发保存引发无谓重建） */
 function reload(force = false) {
   migrateLegacy() // 自愈：若 config.yaml 缺失但 legacy 在，先拾取
   const def = readYamlDir(defaultDir)
-  const next = deepMerge(def, readUser())
-  const changed = JSON.stringify(next) !== JSON.stringify(_data)
-  _data = next
+  const prev = JSON.stringify(_data)
+  _data = deepMerge(def, readUser())
+  persistBaseModel() // 引用→镜像归一（幂等；有变化才落盘）
+  const changed = JSON.stringify(_data) !== prev
   if (changed || force) {
     Log.mark('[config] 配置已热加载')
     for (const cb of _subscribers) { try { cb() } catch (e) { Log.warn('[config] 订阅回调出错', e?.message || e) } }
@@ -171,8 +270,9 @@ function startWatch() {
   }
 }
 
-/** 持久化当前配置到用户配置文件 */
+/** 持久化当前配置到用户配置文件（先做基础模型引用归一，保证磁盘上的镜像字段不滞后） */
 function save(data = _data) {
+  normalizeBaseModel(data)
   writeUser(data)
   _data = data
 }

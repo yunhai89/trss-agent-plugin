@@ -154,13 +154,6 @@
         opencode: { openai: 'https://opencode.ai/zen/v1', anthropic: 'https://opencode.ai/zen' },
         'opencode-go': { openai: 'https://opencode.ai/zen/go/v1', anthropic: 'https://opencode.ai/zen/go' },
       }
-      // preset 或 protocol 变化都重新联动 baseURL（OpenCode 在两种协议下 baseURL 不同）
-      watch(() => [form.preset, form.protocol], ([p]) => {
-        if (!dirtySuppressed && p && PRESET_URLS[p]) {
-          const u = PRESET_URLS[p]
-          form.baseURL = typeof u === 'string' ? u : (u[form.protocol] || u.openai)
-        }
-      })
 
       /* 同步 form 与快照(不触发 dirty) */
       const syncForm = (snap) => {
@@ -227,6 +220,9 @@
         // 厂商/模型注册表（数组整体提交）
         if (!Array.isArray(form.llmProviders)) form.llmProviders = []
         if (!Array.isArray(form.llmModels)) form.llmModels = []
+        // 基础模型引用（agent.providerId / agent.modelId）
+        if (form.providerId == null) form.providerId = ''
+        if (form.modelId == null) form.modelId = ''
         // multiagent.defaultTools 数组兜底（TagEditor 要求 modelValue 为 Array）
         const ma = form.multiagent
         if (ma && !Array.isArray(ma.defaultTools)) ma.defaultTools = ma.defaultTools == null ? [] : [ma.defaultTools]
@@ -268,20 +264,46 @@
       }
 
       /* 分区折叠 */
-      /* —— 厂商/模型注册表：厂商=端点(protocol/preset/baseURL/apiKey)，模型=绑厂商的条目；功能槽位引用模型 —— */
+      /* —— 厂商/模型注册表：厂商=端点(protocol/preset/baseURL/apiKey)，模型=挂厂商的条目；
+           基础模型 = 「厂商条目 + 该厂商下的模型条目」两个引用（agent.providerId / agent.modelId）。
+           没有默认厂商：所有厂商都在「厂商配置」里，基础模型指谁谁才是主接入 —— */
       const genId = (p) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
-      const provById = (id) => id === 'main'
-        ? { id: 'main', name: '主厂商', protocol: form.protocol, preset: form.preset, baseURL: form.baseURL, apiKey: form.apiKey }
-        : form.llmProviders.find((p) => p.id === id)
-      const provName = (id) => id === 'main' ? '主厂商' : (form.llmProviders.find((p) => p.id === id)?.name || id || '?')
-      // mainOnly 判定基准：与主接入同端点（协议相同 + baseURL 归一相等）的附加厂商视同主厂商。
-      // 运行时主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）复用主 provider 端点调用，同端点模型完全可用；
-      // 只认 providerId==='main' 字符串会把用户重复登记的同端点厂商（如主接入 mimo + 附加厂商 mimo）全部误禁。
+      const provById = (id) => form.llmProviders.find((p) => p.id === id)
+      const provName = (id) => form.llmProviders.find((p) => p.id === id)?.name || id || '?'
       const _normUrl = (u) => String(u || '').trim().replace(/\/+$/, '').toLowerCase()
+      // 主厂商 = 「基础 / 模型」选中的厂商条目。mainOnly 的判定基准仍是端点：
+      // 与主厂商同端点（协议相同 + baseURL 归一相等）的厂商视同主厂商——运行时主端点类功能
+      // （旁路/记忆/评审/子代理/伪人/群世界）复用主 provider 端点调用，同端点模型完全可用；
+      // 只认 providerId 字符串相等会把用户重复登记的同端点厂商（如主接入 mimo + 另一条目同地址 mimo）全部误禁。
+      const mainProv = computed(() => form.llmProviders.find((p) => p.id === form.providerId) || null)
+      const mainModels = computed(() => (form.llmModels || []).filter((m) => m && mainProv.value && m.providerId === mainProv.value.id))
+      const mainModel = computed(() => (form.llmModels || []).find((m) => m && m.id === form.modelId) || null)
       const provSameAsMain = (pid) => {
-        if (pid === 'main') return true
-        const p = form.llmProviders.find((x) => x && x.id === pid)
-        return !!p && String(p.protocol || 'openai') === String(form.protocol || 'openai') && _normUrl(p.baseURL) === _normUrl(form.baseURL) && !!_normUrl(form.baseURL)
+        const m = mainProv.value
+        if (!pid || !m) return true // 未选厂商时不施加端点约束
+        if (pid === m.id) return true
+        const p = provById(pid)
+        return !!p && String(p.protocol || 'openai') === String(m.protocol || 'openai') && _normUrl(p.baseURL) === _normUrl(m.baseURL) && !!_normUrl(m.baseURL)
+      }
+      // 基础模型联动：切厂商 → 自动落到该厂商首个模型；选模型 → 自动带上它所属厂商
+      const setBaseProvider = (pid) => {
+        form.providerId = pid
+        const list = (form.llmModels || []).filter((m) => m && m.providerId === pid)
+        if (!list.some((m) => m.id === form.modelId)) form.modelId = list[0]?.id || ''
+      }
+      const ensureModelEntry = (pid, modelId) => {
+        let m = (form.llmModels || []).find((x) => x && x.providerId === pid && x.model === modelId)
+        if (!m) {
+          m = { id: genId('m'), name: '', providerId: pid, model: modelId, temperature: null, maxTokens: null, thinking: 'inherit', note: '' }
+          form.llmModels.push(m)
+        }
+        return m
+      }
+      const setBaseModel = (mid) => {
+        const m = (form.llmModels || []).find((x) => x && x.id === mid)
+        if (!m) { form.modelId = ''; return }
+        if (m.providerId !== form.providerId) setBaseProvider(m.providerId)
+        form.modelId = mid
       }
       // 附加厂商：列表 + 查看/编辑弹窗（与模型列表同交互）；选预设/切协议自动填 baseURL
       const provModal = reactive({ show: false, mode: 'view', index: -1, draft: {} })
@@ -298,7 +320,12 @@
         else form.llmProviders.splice(provModal.index, 1, JSON.parse(JSON.stringify(d)))
         provModal.show = false
       }
-      const delProvider = (i) => form.llmProviders.splice(i, 1)
+      const delProvider = (i) => {
+        const p = form.llmProviders[i]
+        if (p?.id && p.id === form.providerId) { toast('该厂商正被「基础 / 模型」选用，请先把基础模型切到其它厂商', 'warn'); return }
+        if (p?.id && (form.llmModels || []).some((m) => m.providerId === p.id)) { toast(`「${p.name || p.baseURL}」下还有模型条目，请先删除或改挂其它厂商`, 'warn'); return }
+        form.llmProviders.splice(i, 1)
+      }
       const onProvPreset = (p) => {
         const u = PRESET_URLS[p.preset]
         if (u) p.baseURL = typeof u === 'string' ? u : (u[p.protocol] || u.openai)
@@ -318,7 +345,7 @@
       const openModelView = (i) => { modelModal.show = true; modelModal.mode = 'view'; modelModal.index = i; modelModal.draft = JSON.parse(JSON.stringify(form.llmModels[i] || {})) }
       const openModelEdit = (i) => {
         modelModal.show = true; modelModal.mode = 'edit'
-        if (i === -1) { modelModal.index = -1; modelModal.draft = { id: genId('m'), name: '', providerId: 'main', model: '', temperature: null, maxTokens: null, thinking: 'inherit', note: '' } }
+        if (i === -1) { modelModal.index = -1; modelModal.draft = { id: genId('m'), name: '', providerId: form.providerId || form.llmProviders[0]?.id || '', model: '', temperature: null, maxTokens: null, thinking: 'inherit', note: '' } }
         else { modelModal.index = i; modelModal.draft = JSON.parse(JSON.stringify(form.llmModels[i] || {})) }
         if (!modelModal.draft.thinking) modelModal.draft.thinking = 'inherit'
       }
@@ -329,12 +356,17 @@
         else form.llmModels.splice(modelModal.index, 1, JSON.parse(JSON.stringify(d)))
         modelModal.show = false
       }
-      const delModel = (i) => form.llmModels.splice(i, 1)
+      const delModel = (i) => {
+        const m = form.llmModels[i]
+        if (m?.id && m.id === form.modelId) { toast('该模型正被「基础 / 模型」选用，请先把基础模型切到其它模型', 'warn'); return }
+        form.llmModels.splice(i, 1)
+      }
 
       /* 功能分配：槽位 ← 注册表模型。writePath 主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）
-         与主 provider 同端点，只能选主厂商模型；视觉/Embedding/主模型选其它厂商时自动同步其端点。 */
+         复用主 provider 端点，只能选与「基础 / 模型」所选厂商同端点的模型；
+         视觉/Embedding 选其它厂商时自动同步其端点；主模型槽位直接写基础模型引用。 */
       const FEATURES = [
-        { key: 'main', label: '主模型', mainOnly: false, hint: '对话主力：推理/工具调用/复杂任务，建议用强模型', get: () => form.model, set: (v) => { form.model = v } },
+        { key: 'main', label: '主模型', mainOnly: false, hint: '对话主力：推理/工具调用/复杂任务，建议用强模型', get: () => mainModel.value?.model || '', set: (v) => { if (!v) form.modelId = '' } },
         { key: 'utility', label: '旁路小模型', mainOnly: true, hint: '高频小任务（意图识别/摘要），推荐便宜快速的小模型', get: () => form.utilityModel, set: (v) => { form.utilityModel = v } },
         { key: 'vision', label: '视觉模型', mainOnly: false, hint: '看图/多模态理解，必须选支持图片输入的模型', get: () => form.vision?.model || '', set: (v) => { if (!form.vision) form.vision = {}; form.vision.model = v } },
         { key: 'recall', label: '记忆抽取模型', mainOnly: true, hint: '短文本结构化抽取，小模型即可，量大省钱', get: () => form.recall?.model || '', set: (v) => { if (!form.recall) form.recall = {}; form.recall.model = v } },
@@ -381,13 +413,11 @@
         if (val.startsWith('raw:')) { f.set(val.slice(4)); return } // 已配置未入册的模型：直接写值
         const m = form.llmModels.find((x) => x.id === val)
         if (!m) return
-        f.set(m.model)
+        // 主模型槽位 = 基础模型引用：写 agent.providerId/modelId，不再把端点拷贝到主接入字段
+        if (f.key === 'main') { setBaseModel(m.id); return }
         const prov = provById(m.providerId)
-        const isMain = provSameAsMain(m.providerId) // 同端点附加厂商视同主厂商（与 knownModels/featureSel 同基准）——避免对同端点条目做无谓同步与误导提示
-        if (f.key === 'main' && !isMain && prov?.baseURL) {
-          form.protocol = prov.protocol || form.protocol; form.preset = prov.preset || ''; form.baseURL = prov.baseURL; form.apiKey = prov.apiKey
-          toast('已将该厂商接入信息同步为主厂商（基础 / 模型）', 'info')
-        }
+        f.set(m.model)
+        const isMain = provSameAsMain(m.providerId) // 同端点厂商视同主厂商（与 knownModels/featureSel 同基准）——避免对同端点条目做无谓同步与误导提示
         if (f.key === 'vision') {
           if (!form.vision) form.vision = {}
           if (!isMain && prov?.baseURL) { form.vision.protocol = prov.protocol || ''; form.vision.preset = prov.preset || ''; form.vision.baseURL = prov.baseURL; form.vision.apiKey = prov.apiKey }
@@ -589,7 +619,14 @@
         if (!q) return all.slice(0, 50)
         return all.filter((m) => (m.id || '').toLowerCase().includes(q) || (m.name || '').toLowerCase().includes(q)).slice(0, 50)
       })
-      const pickOrModel = (id) => { form.model = id; orSearch.value = ''; toast('已选 ' + id, 'success') }
+      // OpenRouter 选模型 → 落到「模型列表」（引用制：基础模型只能指向模型条目，不能直接写裸 id）
+      const pickOrModel = (id) => {
+        const pid = mainProv.value?.id
+        if (!pid) { toast('请先在上方「厂商」选定厂商', 'warn'); return }
+        setBaseModel(ensureModelEntry(pid, id).id)
+        orSearch.value = ''
+        toast('已选 ' + id, 'success')
+      }
       const orKey = ref(null)
       const loadOrKey = async () => {
         try { orKey.value = await window.api.get('/openrouter/key'); toast('余额已刷新', 'success') }
@@ -606,6 +643,7 @@
         // 厂商/模型注册表 + 功能分配
         delProvider, testProvider, testing, provById, provName, provModal, openProvView, openProvEdit, saveProv,
         delModel, modelModal, openModelView, openModelEdit, saveModel, THK_ZH, knownModels, provSameAsMain, onProvPreset,
+        mainProv, mainModels, mainModel, setBaseProvider, setBaseModel,
         FEATURES, featureVal, featureSel, onFeatureSel,
       }
     },
@@ -637,22 +675,35 @@
             </cfg-row>
 
             <div class="cf-sub"><v-icon name="link"/>主接入（对话主模型）</div>
-            <cfg-row name="协议" desc="API 兼容协议">
-              <select class="sel" style="width:170px" v-model="form.protocol"><option v-for="o in OPT.protocol" :value="o[0]">{{ o[1] }}</option></select>
+            <cfg-row full name="厂商" desc="从「厂商配置」选：协议 / 预设 / 接口地址 / Key 都由所选厂商决定（此处不再单独填）">
+              <div class="row g6">
+                <select class="sel" style="width:280px" :value="form.providerId" @change="setBaseProvider($event.target.value)">
+                  <option value="">（未选择）</option>
+                  <option v-for="p in form.llmProviders" :key="p.id" :value="p.id">{{ p.name || '（未命名）' }} · {{ p.baseURL || '未填地址' }}</option>
+                </select>
+                <button type="button" class="btn b-line b-sm" @click="jump('providers')"><v-icon name="edit"/>管理厂商</button>
+              </div>
             </cfg-row>
-            <cfg-row name="厂商预设" desc="自动填 baseURL / headers / 字段映射">
-              <select class="sel" style="width:170px" v-model="form.preset"><option v-for="o in OPT.preset" :value="o[0]">{{ o[1] }}</option></select>
+            <cfg-row full name="模型" desc="从「模型列表」选该厂商下的模型条目；条目的思考 / 温度 / maxTokens 随之生效">
+              <div class="row g6">
+                <select class="sel" style="width:280px" :value="form.modelId" @change="setBaseModel($event.target.value)" :disabled="!form.providerId">
+                  <option value="">{{ mainModels.length ? '（未选择）' : '（该厂商下还没有模型）' }}</option>
+                  <option v-for="m in mainModels" :key="m.id" :value="m.id">{{ m.name ? m.name + ' · ' : '' }}{{ m.model }}</option>
+                </select>
+                <button type="button" class="btn b-line b-sm" @click="jump('models')"><v-icon name="edit"/>管理模型</button>
+              </div>
             </cfg-row>
-            <cfg-row name="接口地址 baseURL" desc="OpenAI 兼容接口地址">
-              <input class="inp" style="width:260px" v-model="form.baseURL" placeholder="https://api.deepseek.com">
-            </cfg-row>
-            <cfg-row name="API Key" desc="主模型密钥(明文)">
-              <input class="inp mono" style="width:260px" v-model="form.apiKey" placeholder="sk-...">
-            </cfg-row>
-            <cfg-row full name="主模型 ID" desc="对话主模型；可手输，或点「拉取列表」按当前厂商拉取可用模型">
-              <model-picker v-model="form.model" :protocol="form.protocol" :base-url="form.baseURL" :api-key="form.apiKey" :preset="form.preset"/>
-            </cfg-row>
-            <div class="full" v-if="form.preset === 'openrouter'" style="margin-top:6px;padding:10px;border:1px dashed var(--line);border-radius:10px">
+            <div class="full" style="padding:10px 12px;border:1px dashed var(--line);border-radius:10px">
+              <div class="mut2" style="font-size:12px" v-if="mainProv">
+                <v-icon name="info"/> 当前生效：<b class="mono">{{ mainModel?.model || '（未选模型）' }}</b> ·
+                <span class="mono">{{ mainProv.protocol }}{{ mainProv.preset ? ' · ' + mainProv.preset : '' }}</span> ·
+                <span class="mono">{{ mainProv.baseURL || '(未填接口地址)' }}</span> ·
+                <span :style="mainProv.apiKey ? '' : 'color:var(--rose,#e5484d)'">{{ mainProv.apiKey ? 'Key 已填' : 'Key 未填' }}</span>
+                —— 改厂商 Key 或换模型后这里自动跟随。
+              </div>
+              <div class="mut2" style="font-size:12px" v-else><v-icon name="info"/> 未选择厂商：请先在<b>厂商配置</b>添加厂商（接口地址 + Key），再在<b>模型列表</b>挂上模型，然后回来选择。</div>
+            </div>
+            <div class="full" v-if="mainProv?.preset === 'openrouter'" style="margin-top:6px;padding:10px;border:1px dashed var(--line);border-radius:10px">
               <div class="row-b mb8">
                 <div style="font-weight:800;font-size:13px">🔍 OpenRouter 模型搜索</div>
                 <button class="btn b-soft b-sm" @click="loadOrModels">{{ orLoading ? '加载中…' : (orModels.length ? '已加载 '+orModels.length+' 个' : '加载模型目录') }}</button>
@@ -701,9 +752,8 @@
               </TransitionGroup>
             </div>
 
-            <!-- 各功能模型选择已拆分至 厂商配置 / 模型配置 两个分区 -->
             <div class="full" style="margin-top:6px;padding:10px 14px;border:1px dashed var(--line);border-radius:10px">
-              <div class="mut2" style="font-size:12px"><v-icon name="info"/> 多服务商与各功能模型选择已拆分至 <b>厂商配置</b>（服务商地址/Key）、<b>模型列表</b>（添加/管理模型）与 <b>功能分配</b>（各功能用哪个模型）三个分区。</div>
+              <div class="mut2" style="font-size:12px"><v-icon name="info"/> 主接入改为引用式：厂商在 <b>厂商配置</b> 维护，模型在 <b>模型列表</b> 挂到某厂商下，这里只负责「选哪个厂商 + 用哪个模型」；各功能用哪个模型在 <b>功能分配</b> 分区。</div>
             </div>
           </div></div>
         </div>
@@ -712,22 +762,16 @@
         <div :id="'cfg-providers'" class="card cf-sec" :class="{open: open.providers}">
           <div class="cf-sh" @click="open.providers = !open.providers">
             <span class="ct-ico" style="background:var(--grad-vio)"><v-icon name="tool"/></span>
-            <div><div class="ct-t">厂商配置（LLM 服务商）</div><div class="ct-s">主厂商在「基础 / 模型」编辑；此处维护附加服务商，模型在「模型配置」中绑定厂商</div></div>
+            <div><div class="ct-t">厂商配置（LLM 服务商）</div><div class="ct-s">全部厂商端点都在此维护；没有默认厂商 —— 「基础 / 模型」选中的那个才是主接入</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.providers"><div class="cf-grid">
-            <div class="full" style="padding:11px 14px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.42)">
-              <div class="row g10 wrap" style="align-items:center">
-                <span class="pill p-pri">主厂商</span>
-                <span class="mut mono" style="font-size:12px">{{ form.protocol }}{{ form.preset ? ' · ' + form.preset : '' }}</span>
-                <span class="mut2 mono ell" style="font-size:12px;flex:1;min-width:180px">{{ form.baseURL || '(未填接口地址)' }}</span>
-                <span class="pill" :class="form.apiKey ? 'p-mint' : 'p-line'" style="font-size:11px">{{ form.apiKey ? 'Key 已填' : 'Key 未填' }}</span>
-                <button type="button" class="btn b-line b-sm" @click="jump('basic')"><v-icon name="edit"/>前往「基础 / 模型」编辑</button>
-              </div>
+            <div class="full" style="padding:9px 12px;border:1px dashed var(--line);border-radius:10px">
+              <div class="mut2" style="font-size:12px"><v-icon name="info"/> 没有默认厂商：这里登记的就是全部可用厂商，未被「基础 / 模型」或任何功能选中的厂商不会被运行时加载。改 Key / 改地址后基础模型会自动跟随。</div>
             </div>
             <div class="full">
               <div class="row-b mb12">
-                <div style="font-weight:800;font-size:13px">附加厂商（{{ form.llmProviders.length }}）</div>
+                <div style="font-weight:800;font-size:13px">厂商列表（{{ form.llmProviders.length }}）</div>
                 <button class="btn b-soft b-sm" @click="openProvEdit(-1)"><v-icon name="plus"/>添加厂商</button>
               </div>
               <div style="display:flex;flex-direction:column;gap:8px">
@@ -737,6 +781,7 @@
                       <b style="font-size:13px">{{ p.name || '（未命名）' }}</b>
                       <span class="pill p-line" style="font-size:10px">{{ (OPT.protocol.find((o) => o[0] === p.protocol) || ['', p.protocol])[1] }}</span>
                       <span v-if="p.preset" class="pill p-honey" style="font-size:10px">{{ (OPT.preset.find((o) => o[0] === p.preset) || ['', p.preset])[1] }}</span>
+                      <span v-if="p.id === form.providerId" class="pill p-pri" style="font-size:10px">基础模型在用</span>
                     </div>
                     <div class="mono mut" style="font-size:12px;margin-top:2px">{{ p.baseURL || '(未填接口地址)' }}</div>
                   </div>
@@ -748,7 +793,7 @@
                   </div>
                 </div>
               </div>
-              <div v-if="!form.llmProviders.length" class="mut2" style="font-size:12px;padding:6px 2px">暂无附加厂商——只用主厂商可不添加；需要跨厂商模型（如视觉/Embedding 用别家）时在此添加。</div>
+              <div v-if="!form.llmProviders.length" class="mut2" style="font-size:12px;padding:6px 2px">暂无厂商——先在「添加厂商」登记接口地址与 Key（至少 1 个），然后到「基础 / 模型」选它作为主接入；需要跨厂商模型（如视觉/Embedding 用别家）时继续添加。</div>
             </div>
           </div></div>
         </div>
@@ -771,7 +816,8 @@
                   <div style="flex:1;min-width:220px">
                     <div class="row g6" style="align-items:center">
                       <b style="font-size:13px">{{ m.name || '（未命名）' }}</b>
-                      <span class="pill p-line" style="font-size:10px">{{ provSameAsMain(m.providerId) ? '主厂商' : provName(m.providerId) }}</span>
+                      <span class="pill p-line" style="font-size:10px">{{ provName(m.providerId) }}</span>
+                      <span v-if="m.id === form.modelId" class="pill p-pri" style="font-size:10px">基础模型</span>
                       <span v-if="m.thinking === 'on'" class="pill p-honey" style="font-size:10px">思考</span>
                       <span v-else-if="m.thinking === 'off'" class="pill p-rose" style="font-size:10px">禁思考</span>
                     </div>
@@ -785,7 +831,7 @@
                   </div>
                 </div>
               </div>
-              <div v-if="!form.llmModels.length" class="mut2" style="font-size:12px;padding:6px 2px">暂无模型——添加后可在「功能分配」分区一键选用。</div>
+              <div v-if="!form.llmModels.length" class="mut2" style="font-size:12px;padding:6px 2px">暂无模型——添加后可在「基础 / 模型」选作主模型，或在「功能分配」分区逐个功能选用。</div>
             </div>
           </div></div>
         </div>
@@ -799,9 +845,9 @@
           </div>
           <div class="cf-body" v-show="open.features"><div class="cf-grid">
             <div class="full" style="padding:10px 12px;border:1px dashed var(--line);border-radius:10px;margin-bottom:4px">
-              <div class="mut2" style="font-size:12px">从「模型列表」分区选择；留空=该功能默认回落（主模型/旁路小模型）。主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）只能用<b>主厂商</b>的模型；视觉 / Embedding / 主模型选其它厂商时会自动同步其接入信息。</div>
+              <div class="mut2" style="font-size:12px">从「模型列表」分区选择；留空=该功能默认回落。主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）只能用<b>与基础模型同端点厂商</b>的模型；视觉 / Embedding 选其它厂商时会自动同步其接入信息；<b>主模型</b>槽位等同于「基础 / 模型」的选择。</div>
             </div>
-            <cfg-row v-for="f in FEATURES" :key="f.key" :name="f.label" :desc="(f.hint ? f.hint + '；' : '') + (f.mainOnly ? '仅主厂商（与主接入同端点）' : '可选任意厂商（自动同步端点）')">
+            <cfg-row v-for="f in FEATURES" :key="f.key" :name="f.label" :desc="(f.hint ? f.hint + '；' : '') + (f.mainOnly ? '仅同端点厂商（与基础模型所选厂商一致）' : '可选任意厂商（自动同步端点）')">
               <div class="row g6">
                 <select class="sel" style="width:250px" :value="featureSel(f)" @change="onFeatureSel(f, $event.target.value)">
                   <option value="">（留空 = 默认回落）</option>
@@ -1399,7 +1445,7 @@
           <div class="row g6 wrap" style="align-items:center;margin-bottom:10px">
             <input class="inp" style="width:150px;font-weight:700" v-model="modelModal.draft.name" placeholder="别名（如 便宜小模型）" :disabled="modelModal.mode === 'view'">
             <select class="sel" style="width:170px" v-model="modelModal.draft.providerId" :disabled="modelModal.mode === 'view'">
-              <option value="main">主厂商</option>
+              <option value="">（未挂厂商）</option>
               <option v-for="p in form.llmProviders" :key="p.id" :value="p.id">{{ p.name || p.id }}</option>
             </select>
           </div>

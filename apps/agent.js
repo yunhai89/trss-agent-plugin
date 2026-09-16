@@ -288,7 +288,8 @@ async function makeProxyFetch(proxy) {
 
 async function buildRuntime() {
   const cfg = Config.get().agent || {}
-  if (!cfg.apiKey) throw new Error(`未配置 agent.apiKey：请编辑「${Config.path.userConfig}」填入 agent.apiKey（OpenAI 兼容接口密钥，如 DeepSeek/OpenAI/智谱/mimo）。该文件是插件自己的配置（首次启动已自动生成），不是 default_config。`)
+  // cfg.protocol/preset/baseURL/apiKey/model 是「基础模型引用」的解析镜像（由 Config 按 agent.providerId/modelId 回填）
+  if (!cfg.apiKey) throw new Error(`未选定可用的基础模型：请在 Web 配置中心「厂商配置」维护厂商（填 baseURL + API Key）、「模型列表」挂模型，再到「基础 / 模型」选中厂商与模型（等价于 config.yaml 的 agent.providerId / agent.modelId）。当前 agent.apiKey 为空——它是上面引用的解析结果，直接改它会在下次加载被覆盖。`)
 
   const protocol = cfg.protocol || 'openai'
   const presetMap = protocol === 'anthropic' ? anthropicPresets : openaiPresets
@@ -616,7 +617,10 @@ async function buildRuntime() {
 
   // 模型注册表参数覆盖：当前主模型在 agent.llmModels 有登记且显式指定 thinking/温度/maxTokens 时覆盖全局
   // （web「模型列表 → 编辑」弹窗设置的参数在此生效；仅对主对话链路，各旁路功能仍用自己的配置）
-  const regEntry = (cfg.llmModels || []).find((m) => m && String(m.model) === String(cfg.model))
+  // 按 modelId 定位优先（引用制真源）：同 model 字符串可能挂在多个厂商下，比对 model 字符串会串到别家条目
+  const regEntry = cfg.modelId
+    ? (cfg.llmModels || []).find((m) => m && m.id === cfg.modelId)
+    : (cfg.llmModels || []).find((m) => m && String(m.model) === String(cfg.model))
   const regThinking = regEntry?.thinking === 'on' ? { type: 'enabled' } : regEntry?.thinking === 'off' ? { type: 'disabled' } : null
   const regTemperature = Number.isFinite(Number(regEntry?.temperature)) ? Number(regEntry.temperature) : null
   const regMaxTokens = Number.isFinite(Number(regEntry?.maxTokens)) && Number(regEntry.maxTokens) > 0 ? Number(regEntry.maxTokens) : null

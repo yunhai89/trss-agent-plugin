@@ -33,21 +33,6 @@ const OPT = {
     { label: '开', value: true },
     { label: '关', value: false },
   ],
-  protocol: [
-    { label: 'OpenAI 兼容', value: 'openai' },
-    { label: 'Anthropic 兼容', value: 'anthropic' },
-  ],
-  preset: [
-    { label: 'DeepSeek', value: 'deepseek' },
-    { label: 'OpenAI', value: 'openai' },
-    { label: 'Gemini', value: 'gemini' },
-    { label: '通义(DashScope)', value: 'dashscope' },
-    { label: '智谱', value: 'zhipu' },
-    { label: 'Kimi(Moonshot)', value: 'moonshot' },
-    { label: '小米(MiMo)', value: 'mimo' },
-    { label: 'MiniMax(M3)', value: 'minimax' },
-    { label: 'Anthropic', value: 'anthropic' },
-  ],
   permission: [
     { label: '仅主人', value: 'master' },
     { label: '管理员', value: 'admin' },
@@ -101,11 +86,10 @@ export function supportGuoba() {
         { field: 'agent.webApi.publicUrl', label: '对外地址(可选)', bottomHelpMessage: '留空自动探测本机 LAN IP；填 http://1.2.3.4:6098 覆盖', component: 'Input', componentProps: { placeholder: '留空=自动探测' } },
 
         { label: '模型与对话', component: 'SOFT_GROUP_BEGIN' },
-        { field: 'agent.protocol', label: '协议', component: 'Select', componentProps: { options: OPT.protocol } },
-        { field: 'agent.preset', label: '厂商预设', bottomHelpMessage: '自动填 baseURL/headers/字段映射', component: 'Select', componentProps: { options: OPT.preset } },
-        { field: 'agent.baseURL', label: '自定义 baseURL', bottomHelpMessage: '覆盖 preset', component: 'Input' },
-        { field: 'agent.apiKey', label: 'API Key', component: 'Input', componentProps: { placeholder: 'sk-xxx' } },
-        { field: 'agent.model', label: '模型 ID', component: 'Input', componentProps: { placeholder: 'deepseek-chat' } },
+        // 基础模型改为引用制：锅巴无联动控件，此处只手填厂商条目 id / 模型条目 id；
+        // 厂商端点与模型条目请在 Web 配置中心（#agents登录 → 厂商配置 / 模型列表）维护。
+        { field: 'agent.providerId', label: '基础厂商 ID', bottomHelpMessage: '「厂商配置」里厂商条目的 id（含接口地址与 Key）；空=未选厂商', component: 'Input', componentProps: { placeholder: '如 pxxxx' } },
+        { field: 'agent.modelId', label: '基础模型 ID', bottomHelpMessage: '「模型列表」里模型条目的 id（须挂在上述厂商下）；空=未选模型', component: 'Input', componentProps: { placeholder: '如 mxxxx' } },
         { field: 'agent.utilityModel', label: '播报小模型(可选)', bottomHelpMessage: '进度播报等旁路任务用的小模型 id；留空=沿用主模型，填主 provider 支持的小模型可降本', component: 'Input', componentProps: { placeholder: '留空=主模型' } },
         { field: 'agent.fallbackModel', label: '回退模型ID(可选)', bottomHelpMessage: '主模型失败时回退到的模型，如 gpt-4o / claude-3-5-sonnet（需配下面的 URL+Key）', component: 'Input', componentProps: { placeholder: '留空=不回退' } },
         { field: 'agent.fallbackBaseURL', label: '回退模型URL', bottomHelpMessage: '回退模型的 baseURL', component: 'Input', componentProps: { placeholder: 'https://api.openai.com/v1' } },

@@ -12,6 +12,18 @@
     trigger: 'both',
     triggerCommand: '#ai',
     isolation: { enable: true },
+    // 基础模型 = 「厂商配置 + 模型列表」的引用；下面 protocol/preset/baseURL/apiKey/model 是解析镜像
+    providerId: 'pds',
+    modelId: 'mchat',
+    llmProviders: [
+      { id: 'pds', name: 'DeepSeek', protocol: 'openai', preset: 'deepseek', baseURL: 'https://api.deepseek.com', apiKey: 'sk-abc123def456a3f9' },
+      { id: 'pgpt', name: 'OpenAI', protocol: 'openai', preset: 'openai', baseURL: 'https://api.openai.com/v1', apiKey: '' },
+    ],
+    llmModels: [
+      { id: 'mchat', name: '主力', providerId: 'pds', model: 'deepseek-chat', temperature: null, maxTokens: null, thinking: 'inherit', note: '' },
+      { id: 'mutil', name: '便宜小模型', providerId: 'pds', model: 'deepseek-chat', temperature: 0.1, maxTokens: null, thinking: 'off', note: '旁路' },
+      { id: 'm4o', name: '', providerId: 'pgpt', model: 'gpt-4o-mini', temperature: null, maxTokens: null, thinking: 'inherit', note: '' },
+    ],
     protocol: 'openai',
     preset: 'deepseek',
     baseURL: 'https://api.deepseek.com',

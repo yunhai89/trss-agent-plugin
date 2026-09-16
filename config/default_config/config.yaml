@@ -6,16 +6,21 @@ agent:
   triggerCommand: "#ai"
   isolation:
     enable: true  # 多用户数据隔离（默认开）。true=每个群每个用户完全独立（会话/长期记忆/recall/群历史可见范围）；false=同群完全共享（群体型 bot，会话+记忆+群历史全群共用）。跨群始终隔离；私聊始终按用户。提醒/笔记/人设始终按用户。
+  # ── 基础模型：引用下方「厂商配置 / 模型列表」的条目，不在此单独设置 ──
+  providerId: ""      # 选中的厂商条目 id（Web 配置中心 → 厂商配置；运行时由此解析 protocol/preset/baseURL/apiKey）
+  modelId: ""         # 选中的模型条目 id（模型列表；须属于上面 providerId 指向的厂商）
+  # ↓ 以下 5 项是上面引用的解析结果（只读镜像，每次加载自动回填，勿手改；
+  #   它们是给老兼容读点用的快照，改厂商 Key / 改模型都会自动跟随）
   protocol: openai  # openai | anthropic | gemini（gemini=原生官方 @google/genai SDK + Interactions API，填 apiKey 即用，无需 baseURL/preset）
   preset: deepseek  # 厂商预设（openai/deepseek/gemini/dashscope/zhipu/moonshot/mimo/minimax/openrouter/opencode=按量 /opencode-go=月付订阅$5起）；gemini 原生协议时仅占位
   baseURL: ""
-  apiKey: ""               # ★必填：API Key（OpenAI/Anthropic 兼容或 Gemini 原生均填此）；留空则插件不初始化
+  apiKey: ""               # API Key（OpenAI/Anthropic 兼容或 Gemini 原生均填此）；★必填：留空则插件不初始化
   model: "deepseek-chat"
   utilityModel: ""  # 进度播报等旁路任务用的小模型 id（留空=沿用主模型；填主 provider 支持的小模型 id 可降本）
 
-  # ── 厂商/模型注册表（web 配置中心 → 厂商配置 / 模型配置 维护；为 UI 选择层，运行时仍读上方主接入与各功能字段）──
-  llmProviders: []  # [{ id, name, protocol, preset, baseURL, apiKey }] 附加 LLM 服务商（主厂商=上方 protocol/baseURL/apiKey）
-  llmModels: []     # [{ id, name, providerId('main'=主厂商), model, temperature, maxTokens, note }] 模型条目（web 功能分配下拉数据源）
+  # ── 厂商/模型注册表（web 配置中心 → 厂商配置 / 模型列表 两区维护；运行时经上面 providerId/modelId 引用）──
+  llmProviders: []  # [{ id, name, protocol, preset, baseURL, apiKey }] LLM 服务商端点（「厂商配置」区维护）
+  llmModels: []     # [{ id, name, providerId, model, temperature, maxTokens, note }] 模型条目（挂在某厂商下，「模型列表」区维护）
   # 回退模型：主模型失败时依次尝试。每条独立 baseURL/apiKey/protocol（可跨厂商）。
   # 多回退用数组（在此 yaml 配）：例：主 DeepSeek，回退 GPT
   #   fallbackModels:
