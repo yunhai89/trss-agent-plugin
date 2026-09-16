@@ -1,117 +1,193 @@
 /**
- * 终端能力离线自检 —— runShell（echo/node/超时/截断/退出码）+ terminal 工具（主人/黑名单/审批门）。
+ * 终端能力离线自检（沙箱执行面；桩 transport，无需 e2b / 联网 / 宿主进程）。
  * 运行：node model/terminal/test.mjs
  *
- * 现在直接在主机执行（无 docker）；CI/本机均跑。纯逻辑测试（黑名单/matchesAny）照常。
+ * 行为语义变更（有意，不是放松测试）：
+ *   - 旧宿主执行断言（echo/node/超时/pgrep 子进程）随宿主 spawn 路径一并删除
+ *   - 旧「黑名单拦截 / 自定义 blocklist / 审批拒 / 审批通过」四个断言删除：
+ *     沙箱化后无审批、无黑名单 —— 这里反向固化为「灾难命令会到达沙箱传输层」，
+ *     防止哪天有人把宿主黑名单逻辑又加回来造成"以为安全其实没隔离"
  */
-import { runShell, makeTerminalTool, DEFAULT_BLOCKLIST, matchesAny } from './index.js'
+import { makeTerminalTool } from './index.js'
+import { runSandboxShell } from '../sandbox/index.js'
+import { SandboxManager } from '../sandbox/manager.js'
+import { classify } from '../sandbox/errors.js'
 
 let passed = 0
 let failed = 0
 function ok(c, m) { if (c) { passed++; console.log('  ✓', m) } else { failed++; console.error('  ✗ FAIL', m) } }
+function eq(a, b, m) { const s = JSON.stringify(a) === JSON.stringify(b); ok(s, `${m}${s ? '' : `  (got ${JSON.stringify(a)}，期望 ${JSON.stringify(b)})`}`) }
 async function test(name, fn) { console.log(`\n[${name}]`); try { await fn() } catch (e) { failed++; console.error('  ✗ THROW', e?.message || e); console.error(e?.stack) } }
 
-// 主机执行探测：runShell 现在直接在主机跑；找不到 shell 才 skip（极少见）。
-const HOST_OK = await (async () => { try { const r = await runShell('echo ok'); return !!(r?.ok && r.stdout?.includes('ok')) } catch { return false } })()
-if (!HOST_OK) console.log('⊘ 主机 shell 不可用：跳过 runShell 相关测试')
-const skipShell = () => { if (!HOST_OK) { console.log('  ⊘ skip（无 shell）'); return true } return false }
+// ---------- 桩 transport（与 transport.js 同形状）----------
+function makeHandle({ exitCode = 0, stdout = '', stderr = '', waitError = null, hang = false } = {}) {
+  return { async wait() { if (hang) return new Promise(() => {}); if (waitError) throw waitError; return { exitCode, stdout, stderr } }, async kill() { return true } }
+}
+function stubTransport({ runImpl = null } = {}) {
+  const calls = { create: 0, run: 0, cmds: [] }
+  let seq = 0
+  return {
+    calls,
+    async init() { return this },
+    async ping() { return true },
+    async create() { calls.create++; return { id: `sbx-${++seq}`, raw: {} } },
+    async connect() { return { id: 'c', raw: {} } },
+    async run(h, cmd, opts) { calls.run++; calls.cmds.push(cmd); return runImpl ? runImpl(h, cmd, opts) : makeHandle({ exitCode: 0, stdout: 'ok' }) },
+    async write() {}, async writeMany() {},
+    async kill() { return true }, async setTimeout() {}, async list() { return [] }, async updateNetwork() {},
+  }
+}
+const mkBox = (t, over = {}) => new SandboxManager({ transport: t, idleMs: 60000, sandboxTtlMs: 600000, sweepIntervalMs: 100000, ...over })
 
-// ---------- 1. runShell：正常命令 ----------
-await test('runShell：echo / node 正常执行', async () => {
-  if (skipShell()) return
-  const r = await runShell('echo hello')
-  ok(r.ok && r.exitCode === 0, 'exitCode=0')
-  ok(r.stdout.includes('hello'), 'stdout 含 hello')
-  ok(typeof r.duration === 'number', '有 duration')
-  const r2 = await runShell('node -e "process.stdout.write(String(6*7))"')
-  ok(r2.stdout.includes('42'), 'node 计算 42')
+// ---------- 1. 非主人：直接拒，连沙箱都不碰 ----------
+await test('terminal：非主人直接拒（不创建沙箱、不执行命令）', async () => {
+  const t = stubTransport()
+  const box = mkBox(t)
+  try {
+    const tool = makeTerminalTool({ isMasterFn: () => false, manager: box })
+    const r = await tool.execute({ command: 'echo hi' }, { userId: '999', sandbox: {} })
+    ok(r.error && r.error.includes('主人'), '非主人被拒')
+    eq(t.calls.create, 0, '未创建沙箱')
+    eq(t.calls.run, 0, '未执行命令')
+  } finally { await box.shutdown() }
 })
 
-// ---------- 2. runShell：非零退出码 ----------
-await test('runShell：非零退出码不抛错，返回 exitCode', async () => {
-  if (skipShell()) return
-  const r = await runShell('node -e "process.exit(3)"')
-  ok(!r.ok, 'ok=false')
-  ok(r.exitCode === 3, 'exitCode=3')
-  ok(r.timedOut !== true, '非超时')
+// ---------- 2. 主人 + 沙箱执行：契约字段 ----------
+await test('terminal：主人执行 → 走沙箱并回显契约字段', async () => {
+  const t = stubTransport({ runImpl: () => makeHandle({ exitCode: 0, stdout: 'approved' }) })
+  const box = mkBox(t)
+  try {
+    const tool = makeTerminalTool({ isMasterFn: () => true, manager: box })
+    const r = await tool.execute({ command: 'echo approved' }, { userId: '1', sandbox: { audit: false } })
+    eq(r.command, 'echo approved', '回显命令')
+    eq(r.ok, true, 'ok:true')
+    eq(r.exitCode, 0, 'exitCode=0')
+    eq(r.stdout, 'approved', 'stdout 透传')
+    eq(t.calls.run, 1, '命令送达沙箱传输层')
+    ok(!!r.sandboxId, '返回 sandboxId（排障用，不含 token）')
+  } finally { await box.shutdown() }
 })
 
-// ---------- 3. runShell：超时 ----------
-await test('runShell：超时返回 timedOut', async () => {
-  if (skipShell()) return
-  const r = await runShell('node -e "setTimeout(()=>{},5000)"', { timeout: 1 })
-  ok(!r.ok, 'ok=false')
-  ok(r.timedOut === true, 'timedOut=true')
+// ---------- 3. 无审批、无黑名单（行为变更固化）----------
+await test('terminal：审批与黑名单已移除（灾难命令直达沙箱）', async () => {
+  const t = stubTransport()
+  const box = mkBox(t)
+  try {
+    const tool = makeTerminalTool({ isMasterFn: () => true, manager: box })
+    // 旧实现在这里有 #确认 审批；现在 approve 就算抛错也不应被调用
+    const r = await tool.execute({ command: 'rm -rf / --no-preserve-root' }, {
+      userId: '1',
+      sandbox: { audit: false, approve: async () => { throw new Error('approve 不应被调用') } },
+    })
+    ok(!r.error, '不再有"未获主人批准"这类拦截')
+    eq(t.calls.cmds, ['rm -rf / --no-preserve-root'], '灾难命令直接送达沙箱（隔离由 microVM 承担，不由字符串黑名单承担）')
+    eq(r.ok, true, '命令执行（沙箱返回 0）')
+  } finally { await box.shutdown() }
 })
 
-// ---------- 4. runShell：输出截断 ----------
-await test('runShell：超长输出截断', async () => {
-  if (skipShell()) return
-  const r = await runShell('node -e "process.stdout.write(\'x\'.repeat(5000))"', { maxOutput: 100 })
-  ok(r.stdout.length < 200, 'stdout 被截断')
-  ok(r.stdout.includes('已截断'), '含截断提示')
+// ---------- 4. 沙箱不可用 → fail-closed ----------
+await test('terminal：沙箱不可用时拒绝执行（不在本机跑）', async () => {
+  const tool = makeTerminalTool({ isMasterFn: () => true, manager: null })
+  const r = await tool.execute({ command: 'echo hi' }, { userId: '1', sandbox: { manager: null } })
+  ok(r.error && r.error.includes('沙箱不可用'), '返回失败而非执行')
+  eq(r.stdout, undefined, '没有 stdout（没有本地执行兜底）')
 })
 
-// ---------- 5. runShell：stderr 捕获 ----------
-await test('runShell：stderr 捕获', async () => {
-  if (skipShell()) return
-  const r = await runShell('node -e "process.stderr.write(\'errmark\')"')
-  ok(r.stderr.includes('errmark'), 'stderr 含 errmark')
+// ---------- 5. 成本闸：单会话命令数上限 ----------
+await test('terminal：单会话命令数超限 → 拒绝并提示', async () => {
+  const t = stubTransport()
+  const box = mkBox(t)
+  try {
+    const tool = makeTerminalTool({ isMasterFn: () => true, manager: box })
+    const ctx = { userId: '1', sandbox: { audit: false, manager: box, sessionKey: 'k', maxCommandsPerSession: 2 } }
+    const { makeCommandCounter } = await import('../sandbox/index.js')
+    ctx.sandbox.commands = makeCommandCounter(2)
+    await tool.execute({ command: 'echo 1' }, ctx)
+    await tool.execute({ command: 'echo 2' }, ctx)
+    const r3 = await tool.execute({ command: 'echo 3' }, ctx)
+    ok(r3.error && r3.error.includes('上限'), '第 3 条被成本闸拦下')
+    eq(t.calls.run, 2, '只跑了 2 条')
+  } finally { await box.shutdown() }
 })
 
-// ---------- 6. terminal 工具：非主人拒绝（不触发审批） ----------
-await test('terminal 工具：非主人直接拒（不触发审批）', async () => {
-  let approveCalled = false
-  const t = makeTerminalTool({ isMasterFn: () => false })
-  const r = await t.execute({ command: 'echo hi' }, { userId: '999', terminal: { approve: async () => { approveCalled = true; return true } } })
-  ok(r.error && r.error.includes('主人'), '非主人被拒')
-  ok(!approveCalled, '未触发审批（非主人提前返回）')
+// ---------- 6. 空命令 ----------
+await test('terminal：空命令直接拒', async () => {
+  const t = stubTransport()
+  const box = mkBox(t)
+  try {
+    const tool = makeTerminalTool({ isMasterFn: () => true, manager: box })
+    const r = await tool.execute({ command: '   ' }, { userId: '1', sandbox: { manager: box } })
+    eq(r.error, '空命令', '空命令报错')
+    eq(t.calls.run, 0, '未送达沙箱')
+  } finally { await box.shutdown() }
 })
 
-// ---------- 7. terminal 工具：黑名单拦截（即使主人 + 已审批）----------
-await test('terminal 工具：黑名单拦截 rm -rf /（在审批之前）', async () => {
-  let approveCalled = false
-  const t = makeTerminalTool({ isMasterFn: () => true })
-  const r = await t.execute({ command: 'rm -rf / --no-preserve-root' }, { userId: '1', terminal: { approve: async () => { approveCalled = true; return true } } })
-  ok(r.error && r.error.includes('安全策略'), '灾难命令被拦')
-  ok(!approveCalled, '黑名单在审批之前（未触发审批）')
-  const r2 = await t.execute({ command: 'mkfs.ext4 /dev/sda1' }, { userId: '1', terminal: { approve: async () => true } })
-  ok(r2.error && r2.error.includes('安全策略'), 'mkfs 被拦')
+// ---------- 7. 执行面 fail-closed（沙箱层）----------
+await test('runShell：基础设施故障 → 结构化失败且不冒充成功', async () => {
+  const t = stubTransport({ runImpl: () => { throw Object.assign(new Error('fetch failed'), { code: 'ENOTFOUND' }) } })
+  const box = mkBox(t)
+  try {
+    const r = await runSandboxShell(box, 'k', 'echo hi', {})
+    eq(r.ok, false, 'ok:false')
+    eq(r.exitCode, null, 'exitCode=null')
+    eq(r.sandboxError.kind, 'unreachable', 'kind=unreachable')
+    ok(String(r.stderr).includes('不可达'), 'stderr 给可读原因（不是原始网络栈）')
+  } finally { await box.shutdown() }
 })
 
-// ---------- 8. terminal 工具：主人 + 审批通过 + 安全命令 → 执行 ----------
-await test('terminal 工具：主人 + 审批通过执行', async () => {
-  if (skipShell()) return
-  const t = makeTerminalTool({ isMasterFn: () => true })
-  const r = await t.execute({ command: 'echo approved' }, { userId: '1', terminal: { approve: async () => true } })
-  ok(r.ok !== false && r.stdout?.includes('approved'), '主人审批通过后执行成功')
-  ok(r.command === 'echo approved', '回显命令')
+// ---------- 8. 业务退出码不当作基础设施故障 ----------
+await test('runShell：命令非零退出 → 业务语义（无 sandboxError）', async () => {
+  const t = stubTransport({ runImpl: () => makeHandle({ exitCode: 3, stdout: 'partial', stderr: 'failed' }) })
+  const box = mkBox(t)
+  try {
+    const r = await runSandboxShell(box, 'k', 'exit 3', {})
+    eq(r.ok, false, 'ok:false')
+    eq(r.exitCode, 3, 'exitCode=3')
+    eq(r.sandboxError, undefined, '不带 sandboxError（不是基础设施故障）')
+    eq(r.stdout, 'partial', 'stdout 保留')
+  } finally { await box.shutdown() }
 })
 
-// ---------- 9. terminal 工具：审批被拒 → 不执行 ----------
-await test('terminal 工具：主人但审批被拒 → 不执行', async () => {
-  const t = makeTerminalTool({ isMasterFn: () => true })
-  const r = await t.execute({ command: 'echo nope' }, { userId: '1', terminal: { approve: async () => false } })
-  ok(r.error && r.error.includes('未获主人批准'), '审批被拒返回错误')
-  ok(r.stdout === undefined, '未执行 shell（无 stdout）')
+// ---------- 9. 沙箱会话绑定（同会话连续）----------
+await test('runShell：同会话复用同一沙箱（文件/进程状态连续）', async () => {
+  const t = stubTransport({ runImpl: () => makeHandle({ exitCode: 0, stdout: 'ok' }) })
+  const box = mkBox(t)
+  try {
+    await runSandboxShell(box, 'conv:g:u:c', 'echo a', {})
+    await runSandboxShell(box, 'conv:g:u:c', 'echo b', {})
+    eq(t.calls.create, 1, '同一会话键只创建一次沙箱')
+    eq(t.calls.run, 2, '两条命令都在同一沙箱执行')
+    await runSandboxShell(box, 'conv:g:u:other', 'echo c', {})
+    eq(t.calls.create, 2, '不同会话才新建')
+  } finally { await box.shutdown() }
 })
 
-// ---------- 10. terminal 工具：自定义 blocklist ----------
-await test('terminal 工具：自定义 blocklist 生效', async () => {
-  const t = makeTerminalTool({ isMasterFn: () => true })
-  const r = await t.execute({ command: 'forbidden-cmd run' }, { userId: '1', terminal: { blocklist: ['forbidden-cmd'], approve: async () => true } })
-  ok(r.error && r.error.includes('安全策略'), '自定义黑名单拦截')
+// ---------- 10. abort 语义（不再依赖宿主进程组）----------
+await test('runShell：abort 立即结算并杀命令（桩句柄，无宿主子进程）', async () => {
+  const t = stubTransport({ runImpl: () => makeHandle({ hang: true }) })
+  const box = mkBox(t)
+  try {
+    const ac = new AbortController()
+    setTimeout(() => ac.abort(), 20)
+    const t0 = Date.now()
+    const r = await runSandboxShell(box, 'k', 'sleep 100', { timeout: 30, signal: ac.signal })
+    eq(r.aborted, true, 'aborted=true')
+    eq(r.exitCode, null, 'exitCode=null')
+    eq(r.signal, 'SIGKILL', 'signal=SIGKILL（与旧契约同名）')
+    ok(Date.now() - t0 < 1000, `快速结算（${Date.now() - t0}ms）`)
+  } finally { await box.shutdown() }
 })
 
-// ---------- 11. DEFAULT_BLOCKLIST 含关键灾难模式 ----------
-await test('DEFAULT_BLOCKLIST：覆盖灾难模式', async () => {
-  const joined = DEFAULT_BLOCKLIST.join('|')
-  ok(joined.includes('rm'), '含 rm')
-  ok(joined.includes('mkfs'), '含 mkfs')
-  ok(joined.includes('shutdown'), '含 shutdown')
-  ok(matchesAny('rm -rf /', DEFAULT_BLOCKLIST), 'rm -rf / 命中')
-  ok(matchesAny('dd if=/dev/zero of=/dev/sda', DEFAULT_BLOCKLIST), 'dd 写设备命中')
-  ok(!matchesAny('ls -la', DEFAULT_BLOCKLIST), 'ls 不命中黑名单')
+// ---------- 11. 语义常量不再导出（避免误解为仍有黑名单）----------
+await test('导出面：不再暴露黑名单/审批 API', async () => {
+  const mod = await import('./index.js')
+  eq(mod.DEFAULT_BLOCKLIST, undefined, 'DEFAULT_BLOCKLIST 已移除')
+  eq(mod.matchesAny, undefined, 'matchesAny 已移除')
+  eq(mod.requestTerminalApproval, undefined, 'requestTerminalApproval 已移除')
+  eq(mod.resolveApproval, undefined, 'resolveApproval 已移除')
+  eq(mod.listApprovals, undefined, 'listApprovals 已移除')
+  ok(typeof mod.makeTerminalTool === 'function', 'makeTerminalTool 保留')
+  ok(typeof mod.isMaster === 'function' && typeof mod.requestClaim === 'function', '主人认领 API 保留（唯一访问门）')
 })
 
 // ---------- 总结 ----------

@@ -1,159 +1,78 @@
 /**
- * 终端执行能力 —— 在主机上直接执行 shell 命令（即焚式调用，无容器隔离）。
+ * 终端执行能力 —— 命令在 E2B（Firecracker microVM）沙箱内执行。
  *
- * ⚠️ 高危：这是真机任意命令执行。安全模型（纵深防御，全部在代码层）：
- *   1. 主人限定：仅「terminal 主人」（验证码认领，自包含、不读框架配置）可用，其他人 execute 直接拒。
- *   2. 审批门：每条命令需主人在聊天里 #确认 才执行（无 allowlist 免审——真机执行没有「安全的只读命令」）。
- *   3. 黑名单：灾难命令（rm -rf / / mkfs / dd of=/dev/ / 关机重启 等）即使已确认也硬拦。
+ * 执行面**只有沙箱一个**：宿主 `spawn`/黑名单/审批已全部删除，`agent.sandbox.mode=off` 时
+ * 本工具根本不注册（apps/agent.js），所以不存在"配置写错就落到真机"的降级面。
  *
- * runShell 为纯执行函数（带超时、输出截断、退出码），terminal 工具在其上加安全门。
+ * 安全模型：
+ *   1. 主人限定：仅「terminal 主人」（验证码认领，自包含、不读框架配置）可用，其他人直接拒。
+ *   2. 无审批、无命令黑名单：破坏性命令被限制在 microVM 内（独立 VM/独立 FS/独立网络命名空间），
+ *      出口按 agent.sandbox.network.allowOut 白名单收紧（allow 优先于 deny）。
+ *   3. 成本闸：单会话命令数上限 + 单命令超时上限 + 全局并发上限（见 agent.sandbox.*）。
+ *   4. 失败一律 fail-closed：连不上 E2B / 未配置 → 返回结构化错误，**绝不回退到本机执行**。
  */
-import { spawn } from 'node:child_process'
-import { isMaster as isTerminalMaster, requestTerminalApproval } from './master.js'
-
-function trunc(s, max) {
-  const t = String(s == null ? '' : s)
-  if (t.length <= max) return t
-  return t.slice(0, max) + `\n…[已截断，共 ${t.length} 字符]`
-}
+import { isMaster as isTerminalMaster } from './master.js'
+import { runSandboxShell, sessionKeyOf } from '../sandbox/index.js'
+import Log from '../../utils/Log.js'
 
 /**
- * 在主机上执行 shell 命令（无容器隔离）。
- * @param {string} command
- * @param {object} opts { cwd?(默认 Yunzai 根), timeout?(秒,默认60,上限600), maxOutput?(默认8000), signal?(AbortSignal) }
- *   signal：任务级取消（长任务稳定性审计 P0-4）——abort 时杀整个进程组（shell 派生的子进程一并回收），
- *   并保证 Promise 只 resolve 一次。
- * @returns {Promise<{ok, exitCode, stdout, stderr, duration, signal?, timedOut?, aborted?}>}
- */
-export async function runShell(command, { cwd, timeout = 60, maxOutput = 8000, signal } = {}) {
-  const cmd = String(command || '')
-  const seconds = Math.min(Math.max(1, Number(timeout) || 60), 600)
-  const ms = seconds * 1000
-  const t0 = Date.now()
-  return new Promise((resolve) => {
-    let stdout = '', stderr = ''
-    let timer = null
-    let settled = false
-    let onAbort = null
-    let proc
-    // 只结算一次：timeout/abort/error/close 可能竞争，先到者生效
-    const finish = (r) => {
-      if (settled) return
-      settled = true
-      if (timer) clearTimeout(timer)
-      if (onAbort && signal) signal.removeEventListener('abort', onAbort)
-      resolve(r)
-    }
-    // 杀整个进程组（detached 使子进程成为组长，-pid 波及 shell 派生的所有子孙）；失败退化为杀主进程
-    const killTree = () => {
-      try { process.kill(-proc.pid, 'SIGKILL') } catch { try { proc.kill('SIGKILL') } catch { /* 已退出 */ } }
-    }
-    try {
-      proc = spawn(process.env.SHELL || '/bin/sh', ['-c', cmd], {
-        cwd: cwd || undefined,
-        env: process.env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: process.platform !== 'win32', // 独立进程组：abort/超时可整组回收
-      })
-    } catch (e) {
-      return finish({ ok: false, stderr: trunc(String(e), maxOutput), duration: Date.now() - t0 })
-    }
-    proc.stdout?.on('data', (d) => { stdout += d.toString() })
-    proc.stderr?.on('data', (d) => { stderr += d.toString() })
-    timer = setTimeout(() => {
-      killTree()
-      finish({ ok: false, exitCode: null, signal: 'SIGKILL', stdout: trunc(stdout, maxOutput), stderr: trunc(stderr, maxOutput), duration: Date.now() - t0, timedOut: true })
-    }, ms)
-    if (signal) {
-      onAbort = () => {
-        killTree()
-        // close 事件随后触发并 finish（带 aborted 标记的兜底结果，防 close 丢失）
-        finish({ ok: false, exitCode: null, signal: 'SIGKILL', stdout: trunc(stdout, maxOutput), stderr: trunc(stderr, maxOutput), duration: Date.now() - t0, aborted: true })
-      }
-      if (signal.aborted) onAbort()
-      else signal.addEventListener('abort', onAbort, { once: true })
-    }
-    proc.on('error', (e) => {
-      finish({ ok: false, stderr: trunc(String(e?.message || e), maxOutput), duration: Date.now() - t0 })
-    })
-    proc.on('close', (code) => finish({ ok: code === 0, exitCode: code, stdout: trunc(stdout, maxOutput), stderr: trunc(stderr, maxOutput), duration: Date.now() - t0 }))
-  })
-}
-
-/** 默认安全黑名单（即使主人确认也拦截）；config.terminal.blocklist 在此基础上**追加**
- *  （README 口径即追加——旧实现是整体覆盖，自定义后默认 9 条全失效，已修）。 */
-export const DEFAULT_BLOCKLIST = [
-  'rm\\s+(-[a-z]*r[a-z]*f|[a-z]*-r[a-z]*f)', // rm -rf / rm -fr / rm -rfv 等（拦任何 rm 带 r+f flags，不管目标路径/通配符）
-  'rm\\s+.*-rf', // 兜底：rm xxx -rf（flags 在后面）
-  'mkfs\\.?[a-z0-9]*\\s+/dev/', // 格式化设备
-  'dd\\s+.*of=/dev/', // dd 写设备
-  ':\\(\\)\\s*\\{.*\\}\\s*;\\s*:', // fork bomb
-  '(?:^|[;&|\\n(]\\s*)(?:shutdown|reboot|halt|poweroff)\\b', // 关机重启（须在命令位——`cat shutdown.log`/`echo rebooting` 不再误拦）
-  'chmod\\s+-R?\\s*000\\s+/', // 去除根权限
-  '>/dev/sda', // 直接写设备
-  'mv\\s+/.+\\s+/dev/null', // mv 到 /dev/null
-]
-
-/** 任一正则命中 → true */
-export function matchesAny(cmd, patterns) {
-  const list = Array.isArray(patterns) ? patterns : []
-  for (const re of list) {
-    try {
-      if (new RegExp(re).test(cmd)) return true
-    } catch { /* 无效正则跳过 */ }
-  }
-  return false
-}
-
-/**
- * terminal 工具（主机执行；仅 terminal 主人 + 每条命令 #确认 + 黑名单硬拦）。
- * ctx.terminal = { cwd?, maxTimeout?, blocklist?: string[], approve?(测试覆写) }
+ * terminal 工具（沙箱执行；仅 terminal 主人 + 无审批无黑名单 + 成本闸）。
+ * ctx.sandbox = { manager, defaultCwd?, maxTimeout?, maxOutput?, maxCommandsPerSession?, audit?, commands?, sessionKey? }
  *
- * 安全闸顺序：① 非主人拒（不触发审批，免打扰）→ ② 黑名单硬拦 → ③ 主人 #确认审批 → ④ 主机执行。
- * @param {object} [opt] { isMasterFn? } —— isMasterFn 测试注入；缺省用 master.js 的 isTerminalMaster
+ * @param {object} [opt] { isMasterFn?, manager? } —— 均可注入用于离线测试；缺省用 master.js / ctx.sandbox.manager
  */
-export function makeTerminalTool({ isMasterFn } = {}) {
+export function makeTerminalTool({ isMasterFn, manager = null } = {}) {
   const checkMaster = typeof isMasterFn === 'function' ? isMasterFn : isTerminalMaster
   return {
     name: 'terminal',
-    description: '在主机执行终端(shell)命令。仅 terminal 主人可用（#agents设置主人 认领）；每条命令默认需主人 #确认（config terminal.skipConfirm=true 时 terminal 主人免确认直跑，黑名单仍硬拦）；灾难性命令（rm -rf / 等）黑名单硬拦。用于系统管理：安装软件、文件操作、运行脚本、进程管理等。⚠️下载视频/媒体请用 web_download 工具（基于 yt-dlp，受约束），不要用 terminal 跑 curl/wget/yt-dlp。返回 exitCode/stdout/stderr。',
+    description: '在隔离的 Linux 沙箱（E2B 微虚机）里执行 shell 命令并返回 exitCode/stdout/stderr。'
+      + '沙箱与宿主完全隔离：宿主文件、宿主进程都不可见，默认工作目录 /home/user，网络仅放行包管理器与 api.openai.com。'
+      + '每个会话独占一个沙箱，文件与进程状态在会话内连续（多步任务可先安装/写文件再用）。'
+      + '仅 terminal 主人可用；无审批流程，命令直接执行。'
+      + '⚠️下载视频/媒体请用 web_download 工具（基于 yt-dlp，受约束），不要用 terminal 跑 curl/wget/yt-dlp。',
     category: 'query', // 放行 policy（access 控制在 execute 内，仅 terminal 主人通过）
     meta: {
-      interactive: true, // 主机命令不与其他工具并行（顺序执行）
+      interactive: true, // 沙箱命令不与其他工具并行（顺序执行，避免同一会话内互相干扰）
       dangerous: true,
     },
     parameters: {
       type: 'object',
       properties: {
         command: { type: 'string', description: '要执行的 shell 命令（支持管道 | 与重定向 >）' },
-        cwd: { type: 'string', description: '工作目录（可选，默认 Yunzai 根目录）' },
+        cwd: { type: 'string', description: '沙箱内工作目录（可选，默认 /home/user）' },
         timeout: { type: 'integer', description: '超时秒数（默认 60，上限由 maxTimeout 控制）' },
       },
       required: ['command'],
     },
     async execute(params = {}, ctx) {
-      const cfg = ctx?.terminal || {}
+      const cfg = ctx?.sandbox || {}
       const cmd = String(params.command || '').trim()
       if (!cmd) return { error: '空命令' }
-      // ① 仅 terminal 主人（自包含，不读框架 e.isMaster）
       if (!checkMaster(ctx?.userId)) {
         return { error: '仅 terminal 主人可用。请由服务器持有者发 #agents设置主人（控制台会打印验证码），再把验证码直接发到会话认领。' }
       }
-      // ② 黑名单（代码层，已确认也拦）：默认集 + 用户追加（README：blocklist 追加灾难命令正则）
-      const blocklist = [...DEFAULT_BLOCKLIST, ...(Array.isArray(cfg.blocklist) ? cfg.blocklist : [])]
-      if (matchesAny(cmd, blocklist)) return { error: '命令被安全策略拦截（黑名单）' }
-      // ③ 审批门：每条命令需主人 #确认；cfg.skipConfirm=true 时 terminal 主人免确认直跑（黑名单仍硬拦，高危）
-      if (cfg.skipConfirm !== true) {
-        const approve = typeof cfg.approve === 'function' ? cfg.approve : requestTerminalApproval
-        const approved = await approve({ command: cmd }, ctx)
-        if (!approved) return { error: '未获主人批准或审批超时' }
+      // 沙箱不可用（mode=off / 装配失败 / 未填 key）→ 直接拒绝，绝不落到宿主
+      const box = cfg.manager || manager
+      if (!box) {
+        return { error: '沙箱不可用，已拒绝执行：请在配置中心把 agent.sandbox.mode 设为 e2b 并填 apiKey（本机不再执行 shell 命令）。' }
       }
-      // ④ 主机执行（透传任务级取消信号：Agent run 的 deadline/用户 abort 可杀整组进程）
-      const res = await runShell(cmd, {
-        cwd: params.cwd || cfg.cwd || undefined,
-        timeout: Math.min(Number(params.timeout) || cfg.maxTimeout || 60, cfg.maxTimeout || 600),
+      const key = cfg.sessionKey || sessionKeyOf(ctx)
+      // 成本闸：单会话命令数上限（防长任务空转把配额/账单打爆）
+      if (cfg.commands?.hit?.(key)) {
+        return { error: `本会话命令数已达上限（${cfg.commands.limit} 条，agent.sandbox.maxCommandsPerSession）。可用 #新会话 开新会话，或调高该上限。` }
+      }
+      if (cfg.audit !== false) Log.mark('[terminal]', `key=${key} $ ${cmd.slice(0, 200)}`)
+
+      const res = await runSandboxShell(box, key, cmd, {
+        cwd: params.cwd || cfg.defaultCwd,
+        timeout: Math.min(Number(params.timeout) || 60, cfg.maxTimeout || 600),
+        maxTimeout: cfg.maxTimeout || 600,
+        maxOutput: cfg.maxOutput,
         signal: ctx?.signal || null,
       })
+      if (cfg.audit !== false && (res.timedOut || res.aborted || res.sandboxError || res.ok === false)) {
+        Log.mark('[terminal]', `key=${key} exit=${res.exitCode ?? 'null'}${res.timedOut ? ' timedOut' : ''}${res.aborted ? ' aborted' : ''}${res.sandboxError ? ` ${res.sandboxError.kind}` : ''}`)
+      }
       return { command: cmd, ...res }
     },
   }

@@ -48,7 +48,7 @@ let failFiles = 0
 const reSummary = /通过\s*(\d+)\s*[，,]\s*失败\s*(\d+)/
 
 // 需要先装 Yunzai 桩钩子才能跑的真实入口测试（其余 stress 文件是纯离线断言）
-const HOOKED_STRESS = new Set(['stress/e2e/run.mjs', 'stress/e2e/agent-init-failure.mjs'])
+const HOOKED_STRESS = new Set(['stress/e2e/run.mjs', 'stress/e2e/agent-init-failure.mjs', 'stress/e2e/agent-sandbox-wiring.mjs'])
 for (const t of tests) {
   const rel = t.replace(root, '')
   const args = HOOKED_STRESS.has(rel)

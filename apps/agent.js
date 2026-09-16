@@ -60,7 +60,8 @@ import { PromptRegistry, PromptTemplate, regressionGate, evolveTemplate, TEMPLAT
 import { TraceStore } from '../model/evolution/trace.js'
 import { SelfReviewer, listPendingSuggestions, removeSuggestion } from '../model/evolution/review.js'
 import { buildSituationalContext } from '../model/perception.js'
-import { makeTerminalTool, DEFAULT_BLOCKLIST, requestClaim, claim, getMaster as getTerminalMaster, isMaster as isTerminalMaster, resolveApproval as resolveTerminalApproval, listApprovals as listTerminalApprovals } from '../model/terminal/index.js'
+import { makeTerminalTool, requestClaim, claim, getMaster as getTerminalMaster, isMaster as isTerminalMaster } from '../model/terminal/index.js'
+import { createSandboxRuntime, sessionKeyOf } from '../model/sandbox/index.js'
 import { makeStagehand } from '../model/stagehand/index.js'
 import { makeDownloadTool } from '../model/download/index.js'
 import { makeSpawnSubagentTools, Semaphore } from '../model/multiagent/index.js'
@@ -410,6 +411,13 @@ async function buildRuntime() {
     } catch (e) { Log.warn('[agent] 压缩归档初始化失败，降级为无归档压缩', e?.message || e) }
   }
 
+  // ── E2B 沙箱运行时（terminal 的唯一执行面 + toolEvo 的隔离面）──
+  // 装配失败不抛穿：mode=off 或初始化失败都返回 manager:null，由工具层给 fail-closed 结果
+  const sandbox = await createSandboxRuntime(cfg.sandbox, { logger: Log.tag('sandbox') })
+  if (cfg.terminal?.enable === true && !sandbox.enabled) {
+    Log.warn('[migrate] agent.terminal 已废弃：终端执行改为 E2B 沙箱。请改用 agent.sandbox.mode=e2b + apiKey（当前 terminal 工具不会注册），并删除 config.yaml 里残留的 terminal 段')
+  }
+
   const tools = new ToolRegistry({ logger: Log.tag('tool') })
     .register(...makeSearchTools(searchManager)) // web_search（多源）+ web_extract
     .register(...noteTools({ kv: K }))
@@ -454,11 +462,17 @@ async function buildRuntime() {
   }
   if (loaded.packs.length) Log.info('[toolkit] 已加载工具包：', loaded.packs.map((p) => `${p.name}(${p.count})`).join(', '))
 
-  // 终端执行能力（高危，默认关；真机执行 + 仅验证码认领的 terminal 主人 + 每条命令 #确认 + 黑名单）
-  if (cfg.terminal?.enable) {
-    tools.register(makeTerminalTool())
-    const tm = getTerminalMaster()
-    Log.info(`[terminal] 已启用主机终端执行工具（仅 terminal 主人可用；当前主人：${tm || '未认领，发 #agents设置主人 认领'}）`)
+  // 终端执行能力（沙箱内核；mode=off 或沙箱不可用 → 本工具不注册，宿主无 shell 执行面）
+  if (sandbox.manager) {
+    try {
+      tools.register(makeTerminalTool({ manager: sandbox.manager }))
+      const tm = getTerminalMaster()
+      Log.info(`[terminal] 已启用沙箱终端执行工具（仅 terminal 主人可用；当前主人：${tm || '未认领，发 #agents设置主人 认领'}）`)
+    } catch (e) {
+      Log.warn('[terminal] 注册失败（本工具不可用，不影响其它功能）', e?.message || e)
+    }
+  } else if (sandbox.enabled) {
+    Log.warn(`[terminal] 沙箱未就绪，终端工具不注册（fail-closed）：${sandbox.error?.message || '未知原因'}`)
   }
 
   // 媒体下载（yt-dlp；受约束、仅框架主人；默认开。给 LLM 专用下载入口，避免它去抓 terminal 裸 shell）
@@ -591,16 +605,30 @@ async function buildRuntime() {
       await te.initDb({ dir: path.resolve(PLUGIN_ROOT, path.dirname(cfg.toolEvo?.dbPath || 'data/evolution/tevo.db')) })
       const toolEvoRegistry = new te.ToolEvoRegistry({ artifactsDir: path.resolve(PLUGIN_ROOT, cfg.toolEvo?.artifactsDir || 'data/evolution/tools') })
       tools.setInvocationSink(te.recordInvocation)
-      // 隔离 runner（审计 §4.2 / P0-1，F 阻断）：stable 工具在常驻 worker 子进程执行，不主进程 import，
-      // capability ctx 冻结 {now,log}，不暴露 e/bot/fetcher/process；env 不透传 apiKey 等敏感变量。
-      const runner = new te.RunnerClient({ logger: Log.tag('toolEvo'), timeoutMs: cfg.toolEvo?.runnerTimeoutMs || 5000 })
+      const artifactsDir = path.resolve(PLUGIN_ROOT, cfg.toolEvo?.artifactsDir || 'data/evolution/tools')
+      // 隔离 runner：stable 工具**不在主进程执行**。两档——沙箱可用时跑在 E2B microVM 内，
+      // 否则退回本地 fork worker（capability ctx 冻结 {now,log}，env 仅 PATH/HOME，不暴露 e/bot/fetcher）。
+      const runner = new te.RunnerClient({
+        logger: Log.tag('toolEvo'),
+        timeoutMs: cfg.toolEvo?.runnerTimeoutMs || 5000,
+        sandbox: sandbox.manager ? sandbox : null,
+        artifactsDir,
+      })
       const builtins = tools.list().filter((t) => !t.meta?.mcp).map((t) => ({
         name: t.name, description: t.description, parameters: t.parameters,
         sideEffects: t.meta?.sideEffects || ['none'], tags: ['builtin'],
       }))
       const seeded = await te.seedBuiltinTools(toolEvoRegistry, builtins).catch((e) => { Log.warn('[toolEvo] seed 失败', e?.message || e); return 0 })
       const synthesizer = new te.ToolSynthesizer({ provider, model: srCfg.model || cfg.utilityModel || cfg.model, maxRepairAttempts: cfg.toolEvo?.maxRepairAttempts ?? 2, logger: Log.tag('toolEvo') })
-      const engine = new te.EvolutionEngine({ synthesizer, registry: toolEvoRegistry, logger: Log.tag('toolEvo') })
+      // 候选行为验证同样双档：沙箱可用时在出口全关的一次性 microVM 里跑候选（跑的是不可信代码），
+      // 否则本地子进程 + AST 前置门。
+      const engine = new te.EvolutionEngine({
+        synthesizer,
+        registry: toolEvoRegistry,
+        logger: Log.tag('toolEvo'),
+        verifySession: sandbox.verifyManager ? (args) => te.createSandboxCandidateSession(sandbox.verifyManager, args) : null,
+        verifyTimeoutMs: cfg.sandbox?.toolEvoVerifyTimeoutMs || 3000,
+      })
       // 注入已 stable 的进化工具（经 runner 隔离执行；重启/热重载后自动恢复，供 agent tool_search 调用）
       let stableCount = 0
       try {
@@ -612,7 +640,7 @@ async function buildRuntime() {
         }
       } catch (e) { Log.warn('[toolEvo] stable 注入失败', e?.message || e) }
       toolEvo = { registry: toolEvoRegistry, engine, runner, closeDb: te.closeDb, flushNow: te.flushNow }
-      Log.info(`[toolEvo] 已初始化（内置 ${builtins.length} 个 · 本次 seed ${seeded}（已入库则跳过）· stable 进化 ${stableCount} 经隔离 runner）`)
+      Log.info(`[toolEvo] 已初始化（内置 ${builtins.length} 个 · 本次 seed ${seeded}（已入库则跳过）· stable 进化 ${stableCount} 经隔离执行面 ${runner.backend === 'sandbox' ? 'E2B 沙箱' : '本地 fork'}）`)
     } catch (e) { Log.warn('[toolEvo] 初始化失败（sqlite3 未装？）', e?.message || e) }
   }
 
@@ -721,7 +749,7 @@ async function buildRuntime() {
     } catch (e) { Log.warn('[multiagent] 子代理工具注册失败', e?.message || e) }
   }
 
-  return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram }
+  return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox }
 }
 
 const getRuntime = async () => {
@@ -762,6 +790,10 @@ function invalidateRuntime() {
     // 统计缓冲落 KV 后停采集器（2s 窗口内未 flush 的数据不丢）
     try { _runtime.usageStats.flushNow().catch(() => {}) } catch { /* noop */ }
     try { _runtime.usageStats.stop() } catch { /* noop */ }
+  }
+  // 沙箱必须最后关：toolEvo.runner 依赖 sandbox.transport，先关 transport 会让 runner 停止时操作已失效沙箱
+  if (_runtime?.sandbox?.manager) {
+    try { _runtime.sandbox.shutdown().catch(() => {}) } catch { /* noop */ }
   }
   _runtime = null
   _runtimePromise = null
@@ -819,18 +851,9 @@ function ctxOf(e) {
 
 function notifyMaster(e, id, info) {
   const masters = Config.get().agent?.masters || []
-  let detail = JSON.stringify(info.args || {}).slice(0, 120)
-  let risk = ''
-  if (info.tool === 'terminal' && info.args?.command) {
-    detail = `\n$ ${info.args.command}`.slice(0, 500)
-    // 风险特征提示（写入/网络/提权/删除/安装）
-    const c = info.args.command
-    if (/\b(rm|mv|chmod|chown|mkfs|dd|shutdown|reboot|halt)\b|>\s*/i.test(c)) risk = ' ⚠️写入/破坏'
-    else if (/\b(curl|wget|ssh|scp|rsync|git\s+push|git\s+clone)\b|https?:\/\//i.test(c)) risk = ' 🌐网络'
-    else if (/\bsudo\b|\bsu\b/i.test(c)) risk = ' 🔐提权'
-    else if (/\b(install|pip|npm|apt|yum|brew)\b/i.test(c)) risk = ' 📦安装'
-  }
-  const text = `待审批 #${id}：${info.tool}${risk} ${detail}\n回复「#确认 ${id}」或「#拒绝 ${id}」`
+  // 注：terminal 不再走审批（命令在 E2B 沙箱内执行），故这里没有 terminal 专用的风险特征分支
+  const detail = JSON.stringify(info.args || {}).slice(0, 120)
+  const text = `待审批 #${id}：${info.tool} ${detail}\n回复「#确认 ${id}」或「#拒绝 ${id}」`
   try {
     for (const mid of masters) {
       const bot = (typeof Bot !== 'undefined' && Bot) || null
@@ -1014,7 +1037,7 @@ export class Chat extends plugin {
         const r = claim(code, __uid)
         if (r.ok) {
           terminalClaimPending.delete(__uid) // 认领成功，退出监听
-          await this.e.reply(`✅ 认领成功！你（${r.userId}）已成为 terminal 主人。\n现在可让 AI 使用 terminal 工具在主机执行命令（每条命令仍需你 #确认，灾难命令黑名单硬拦）。`)
+          await this.e.reply(`✅ 认领成功！你（${r.userId}）已成为 terminal 主人。\n现在可让 AI 使用 terminal 工具在 E2B 沙箱内执行命令（与宿主隔离、出口按白名单放行、无审批）。若尚未配置沙箱（agent.sandbox.mode=e2b + apiKey），该工具不会注册。`)
         } else {
           // 验证码错误：保持监听，用户可在超时前继续重发（code 不变，无需重新 #agents设置主人）
           await this.e.reply(`❌ ${r.reason}，请直接重新发送验证码（控制台查看 ${Math.round((p.expires - Date.now()) / 1000)} 秒内有效）。`)
@@ -1147,13 +1170,15 @@ export class Chat extends plugin {
       },
       cancel: (id) => rt.schedule.cancel(id),
     }
-    // terminal 工具运行时配置（主机执行；黑名单/超时/工作目录 + 审批超时）
-    ctx.terminal = {
-      cwd: Config.path.yunzai,
-      maxTimeout: cfg.terminal?.maxTimeout || 600,
-      blocklist: cfg.terminal?.blocklist || DEFAULT_BLOCKLIST,
-      confirmTimeout: cfg.confirmTimeout || 300, // 主人 #确认 超时（秒），复用 agent.confirmTimeout
-      skipConfirm: cfg.terminal?.skipConfirm === true, // terminal 主人免 #确认 直跑（黑名单仍硬拦；高危）
+    // terminal 工具运行时配置（沙箱执行；无审批无黑名单，只有主人校验 + 成本闸）
+    ctx.sandbox = {
+      manager: rt.sandbox?.manager || null,
+      defaultCwd: cfg.sandbox?.defaultCwd || '/home/user',
+      maxTimeout: cfg.sandbox?.maxTimeout || 600,
+      maxCommandsPerSession: cfg.sandbox?.maxCommandsPerSession ?? 50,
+      audit: cfg.sandbox?.audit !== false,
+      commands: rt.sandbox?.commands || null,
+      sessionKey: sessionKeyOf(ctx),
     }
     // web_download 工具运行时配置（yt-dlp 下载；目录/大小/超时上限，单位 MB→字节）
     ctx.download = {
@@ -1963,13 +1988,13 @@ export class Chat extends plugin {
     return true
   }
 
-  // —— 审批 ——（框架主人 OR terminal 主人均可；双路由：框架 ConfirmStore + terminal 自包含）
+  // —— 审批 ——（框架 ConfirmStore：stagehand act / schedule 等需要二次确认的工具）
+  // 注：terminal 已沙箱化，不再走审批（无 #确认 / 无 terminal 自包含审批队列）。
   async approve() {
     const id = this.e.msg.match(/\d+/)?.[0]
     if (!this.e.isMaster && !isTerminalMaster(this.e.user_id)) return this.e.reply('无权限：仅主人可审批'), true
     const rt = await getRuntime()
     if (rt.confirm.resolve(id, true)) return this.e.reply(`已批准 #${id}`), true
-    if (resolveTerminalApproval(id, true)) return this.e.reply(`已批准 terminal #${id}`), true
     await this.e.reply(`未找到待审 #${id}`)
     return true
   }
@@ -1979,7 +2004,6 @@ export class Chat extends plugin {
     if (!this.e.isMaster && !isTerminalMaster(this.e.user_id)) return this.e.reply('无权限：仅主人可审批'), true
     const rt = await getRuntime()
     if (rt.confirm.resolve(id, false)) return this.e.reply(`已拒绝 #${id}`), true
-    if (resolveTerminalApproval(id, false)) return this.e.reply(`已拒绝 terminal #${id}`), true
     await this.e.reply(`未找到待审 #${id}`)
     return true
   }
@@ -1988,11 +2012,9 @@ export class Chat extends plugin {
     if (!this.e.isMaster && !isTerminalMaster(this.e.user_id)) return this.e.reply('无权限：仅主人可查看'), true
     const rt = await getRuntime()
     const list = rt.confirm.list()
-    const termList = listTerminalApprovals()
-    if (!list.length && !termList.length) return this.e.reply('当前无待审批'), true
+    if (!list.length) return this.e.reply('当前无待审批'), true
     const lines = []
     for (const p of list) lines.push(`#${p.id} ${p.tool} ${JSON.stringify(p.args || {}).slice(0, 80)}`)
-    for (const t of termList) lines.push(`#${t.id} 🖥️terminal $ ${String(t.info?.command || '').slice(0, 80)}`)
     await this.e.reply(lines.join('\n'))
     return true
   }
@@ -2003,7 +2025,7 @@ export class Chat extends plugin {
     const { ttlMs } = requestClaim()
     const uid = String(this.e.user_id)
     terminalClaimPending.set(uid, { at: Date.now(), expires: Date.now() + ttlMs })
-    await this.e.reply(`✅ terminal 主人认领验证码已打印到控制台（${Math.round(ttlMs / 1000)} 秒有效）。\n请在控制台查看验证码，然后直接把它发到这里完成认领（无需加任何命令前缀，${Math.round(ttlMs / 1000)} 秒内可重发）。认领成功即成为 terminal 主人（替换旧主人）。`)
+    await this.e.reply(`✅ terminal 主人认领验证码已打印到控制台（${Math.round(ttlMs / 1000)} 秒有效）。\n请在控制台查看验证码，然后直接把它发到这里完成认领（无需加任何命令前缀，${Math.round(ttlMs / 1000)} 秒内可重发）。认领成功即成为 terminal 主人（替换旧主人）。\n注：命令在 E2B 沙箱内执行，无需 #确认；需先在配置里设 agent.sandbox.mode=e2b 并填 apiKey。`)
     return true
   }
 

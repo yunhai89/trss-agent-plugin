@@ -13,6 +13,10 @@ registerHooks({
     if (/^(\.\.\/)+lib\/plugins\/plugin\.js$/.test(specifier) || /\/lib\/plugins\/plugin\.js$/.test(specifier)) {
       return { url: pathToFileURL(path.join(STUB, 'plugin.js')).href, shortCircuit: true }
     }
+    // 可选依赖（dev/CI 未安装）：node-schedule → 桩，让真实 buildRuntime 能在离线环境装配
+    if (specifier === 'node-schedule') {
+      return { url: pathToFileURL(path.join(STUB, 'node-schedule.js')).href, shortCircuit: true }
+    }
     const r = nextResolve(specifier, context)
     const url = r?.url || ''
     // 本仓库 apps/agent.js → 桩（getRuntime）。E2E_REAL_AGENT=1 时例外：保留真实 apps/agent.js，

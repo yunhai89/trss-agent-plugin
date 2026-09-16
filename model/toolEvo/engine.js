@@ -11,10 +11,13 @@ import { verifyStatic } from './verifier/static.js'
 import { verifyBehavior } from './verifier/behavior.js'
 
 export class EvolutionEngine {
-  constructor({ synthesizer, registry, logger = () => {} }) {
+  constructor({ synthesizer, registry, logger = () => {}, verifySession = null, verifyTimeoutMs = 3000 }) {
     this.synthesizer = synthesizer
     this.registry = registry
     this.logger = logger
+    // 候选行为验证的执行后端：null=本地子进程；函数=沙箱会话工厂（apps 在 sandbox.mode=e2b 时注入）
+    this.verifySession = verifySession
+    this.verifyTimeoutMs = Math.max(500, Number(verifyTimeoutMs) || 3000)
   }
 
   /**
@@ -58,8 +61,8 @@ export class EvolutionEngine {
         parentVersionId, generatorModel: this.synthesizer.model,
       })
       this.logger('mark', `[toolEvo] 候选注册 ${manifest.name}@${manifest.version} → draft，开始行为验证（沙箱跑 tests）`)
-      // 行为验证：跑候选 tests + 断言 + 性能/超时门（AST 已过，沙箱兜底运行时行为）
-      const bv = await verifyBehavior({ source, tests, timeoutMs: 3000 })
+      // 行为验证：跑候选 tests + 断言 + 性能/超时门（AST 已过，执行后端兜底运行时行为）
+      const bv = await verifyBehavior({ source, tests, timeoutMs: this.verifyTimeoutMs, createSession: this.verifySession })
       if (bv.passed) {
         await this.registry.setStatus(v.id, 'verified', { actor: 'engine', reason: `行为验证 ${bv.evidence.passed}/${bv.evidence.totalTests} 通过，avgMs=${bv.evidence.avgMs}` })
         this.logger('mark', `[toolEvo] ${manifest.name}@${manifest.version} → verified（${bv.evidence.passed}/${bv.evidence.totalTests} tests，avg ${bv.evidence.avgMs}ms）`)

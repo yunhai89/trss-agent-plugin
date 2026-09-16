@@ -1,21 +1,25 @@
 /**
- * 候选工具沙箱执行器（阶段2）。
+ * 候选工具执行器（阶段2）：**双档**执行后端。
  *
- * 安全模型（纵深）：
- *   1. 前置门：typescript AST 已禁 require/child_process/process.env/eval/动态 import/一切 import（verifier/static.js）
- *      → 候选是纯函数，无 import、不接触宿主环境；
- *   2. 执行隔离：node 子进程跑候选，超时 SIGKILL + stdout/stderr 截断（资源兜底，防死循环/大输出）。
+ *   本地档（默认 / agent.sandbox.mode=off）：node 子进程跑候选，临时目录 + 超时 SIGKILL + 输出截断。
+ *   沙箱档（agent.sandbox.mode=e2b）：候选在 E2B microVM 里跑，出口全关，跑完即毁。
  *
- * 第一版用 node 子进程（零 docker 镜像依赖，可靠）。若需更强隔离，可切 docker：
- *   runShell('node runner.mjs', { cwd:'/app', terminal:{ image:'node:20-alpine', network:'none', mounts:[`${bundleDir}:/app`] } })
- *   —— 候选已过 AST，子进程对"纯函数候选"足够；docker 是对完全不可信代码的加强，非必需。
+ * 安全模型（纵深，两档共用前置门）：
+ *   1. 前置门：typescript AST 已禁 require/child_process/process.env/eval/动态 import/一切 import
+ *      （verifier/static.js）→ 候选是纯函数，无 import、不接触宿主环境；
+ *   2. 执行隔离：本地档=子进程（零 docker 依赖、可靠）；沙箱档=microVM（真实边界，防 AST 绕过）；
+ *   3. 不向子进程/沙箱透传敏感 env（本地档仅 TOOL_INPUT_JSON + PATH/HOME；沙箱档连宿主 env 都不存在）。
  *
- * 不向子进程透传敏感 env（仅 TOOL_INPUT_JSON + 必要的 PATH）。
+ * 对外暴露「会话」形态（一个候选 = 一个会话，多个用例复用），避免每个用例重复上传/冷启动：
+ *   createLocalCandidateSession({ source, timeoutMs })  -> { run, close }
+ *   createSandboxCandidateSession(verifyManager, { source, timeoutMs, maxOutput }) -> { run, close }
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+
+import { openSandboxBundle } from '../sandbox/bundle.js'
 
 /** 测试驱动：动态 import 候选 index.js 的 run，跑 input，输出 JSON 结果 */
 const RUNNER = `
@@ -28,41 +32,85 @@ import('./index.js').then(async ({ run }) => {
 }).catch(e => process.stdout.write(JSON.stringify({ ok: false, error: '加载候选失败：' + (e?.message || e) })))
 `
 
-/**
- * 在隔离子进程跑一次候选。
- * @param {object} p { source, input, timeoutMs?, maxOutput? }
- * @returns {Promise<{ok, output?, error?, errorClass?, exitCode?, duration, timedOut?, stderr?}>}
- */
-export async function runCandidate({ source, input, timeoutMs = 3000, maxOutput = 8192 }) {
-  const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tevo-verify-'))
+/** 统一把「原始输出文本 + 退出码」折成结果对象（两档共用，保证文案一致） */
+function foldOutput(raw, { exitCode, duration, maxOutput, stderr }) {
+  if (raw.timedOut) return { ok: false, error: `执行超时(>${raw.timeoutMs}ms，疑似死循环)`, timedOut: true, duration, stderr: String(stderr || '').slice(0, 512) }
+  if (raw.spawnError) return { ok: false, error: '子进程启动失败：' + raw.spawnError, duration }
+  if (raw.sandboxError) return { ok: false, error: `沙箱执行失败(${raw.sandboxError.kind})：${String(raw.stderr || '').slice(0, 300)}`, duration, stderr: String(stderr || '').slice(0, 512) }
   try {
-    fs.writeFileSync(path.join(bundleDir, 'index.js'), String(source || ''))
-    fs.writeFileSync(path.join(bundleDir, 'runner.mjs'), RUNNER)
-    const r = await new Promise((resolve) => {
-      const env = { TOOL_INPUT_JSON: JSON.stringify(input ?? {}), PATH: process.env.PATH || '', HOME: process.env.HOME || '' }
-      const t0 = Date.now()
-      const proc = spawn(process.execPath, ['runner.mjs'], { cwd: bundleDir, env, stdio: ['ignore', 'pipe', 'pipe'] })
-      let stdout = '', stderr = ''
-      const timer = setTimeout(() => {
-        try { proc.kill('SIGKILL') } catch { /* noop */ }
-        resolve({ timedOut: true, stdout, stderr, duration: Date.now() - t0 })
-      }, Math.max(500, Number(timeoutMs) || 3000))
-      proc.stdout?.on('data', (d) => { stdout += d.toString() })
-      proc.stderr?.on('data', (d) => { stderr += d.toString() })
-      proc.on('error', (e) => { clearTimeout(timer); resolve({ spawnError: e.message, stdout, stderr, duration: Date.now() - t0 }) })
-      proc.on('close', (code) => { clearTimeout(timer); resolve({ exitCode: code, stdout, stderr, duration: Date.now() - t0 }) })
-    })
-    if (r.timedOut) return { ok: false, error: `执行超时(>${timeoutMs}ms，疑似死循环)`, timedOut: true, duration: r.duration, stderr: r.stderr.slice(0, 512) }
-    if (r.spawnError) return { ok: false, error: '子进程启动失败：' + r.spawnError, duration: r.duration }
-    try {
-      const out = JSON.parse(r.stdout.slice(0, maxOutput))
-      return { ok: !!out.ok, output: out.output, error: out.error, errorClass: out.errorClass, exitCode: r.exitCode, duration: r.duration, stderr: r.stderr.slice(0, 512) }
-    } catch {
-      return { ok: false, error: '候选输出非 JSON（或未正确 return）：' + r.stdout.slice(0, 200), exitCode: r.exitCode, duration: r.duration, stderr: r.stderr.slice(0, 512) }
-    }
-  } finally {
-    try { fs.rmSync(bundleDir, { recursive: true, force: true }) } catch { /* noop */ }
+    const out = JSON.parse(String(raw.stdout || '').slice(0, maxOutput))
+    return { ok: !!out.ok, output: out.output, error: out.error, errorClass: out.errorClass, exitCode, duration, stderr: String(stderr || '').slice(0, 512) }
+  } catch {
+    return { ok: false, error: '候选输出非 JSON（或未正确 return）：' + String(raw.stdout || '').slice(0, 200), exitCode, duration, stderr: String(stderr || '').slice(0, 512) }
   }
 }
 
-export default { runCandidate }
+/** 本地档会话：临时目录写 bundle，每个用例 spawn 一次 node */
+export async function createLocalCandidateSession({ source, timeoutMs = 3000, maxOutput = 8192 }) {
+  const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tevo-verify-'))
+  fs.writeFileSync(path.join(bundleDir, 'index.js'), String(source || ''))
+  fs.writeFileSync(path.join(bundleDir, 'runner.mjs'), RUNNER)
+  const env = { TOOL_INPUT_JSON: '', PATH: process.env.PATH || '', HOME: process.env.HOME || '' }
+  return {
+    backend: 'local',
+    async run({ input, timeoutMs: t = timeoutMs, maxOutput: mo = maxOutput } = {}) {
+      const ms = Math.max(500, Number(t) || 3000)
+      const t0 = Date.now()
+      const r = await new Promise((resolve) => {
+        const e = { ...env, TOOL_INPUT_JSON: JSON.stringify(input ?? {}) }
+        const proc = spawn(process.execPath, ['runner.mjs'], { cwd: bundleDir, env: e, stdio: ['ignore', 'pipe', 'pipe'] })
+        let stdout = '', stderr = ''
+        const timer = setTimeout(() => {
+          try { proc.kill('SIGKILL') } catch { /* noop */ }
+          resolve({ timedOut: true, timeoutMs: ms, stdout, stderr })
+        }, ms)
+        proc.stdout?.on('data', (d) => { stdout += d.toString() })
+        proc.stderr?.on('data', (d) => { stderr += d.toString() })
+        proc.on('error', (err) => { clearTimeout(timer); resolve({ spawnError: err.message, stdout, stderr }) })
+        proc.on('close', (code) => { clearTimeout(timer); resolve({ exitCode: code, stdout, stderr }) })
+      })
+      return foldOutput(r, { exitCode: r.exitCode, duration: Date.now() - t0, maxOutput: mo, stderr: r.stderr })
+    },
+    async close() {
+      try { fs.rmSync(bundleDir, { recursive: true, force: true }) } catch { /* noop */ }
+    },
+  }
+}
+
+/** 沙箱档会话：一个候选一个一次性 microVM（出口全关），多个用例复用同一沙箱 */
+export async function createSandboxCandidateSession(verifyManager, { source, timeoutMs = 3000, maxOutput = 8192 }) {
+  const bundle = await openSandboxBundle(verifyManager, 'tevo-verify', {
+    files: [{ path: 'index.js', data: String(source || '') }, { path: 'runner.mjs', data: RUNNER }],
+    oneShot: true,
+    purpose: 'toolEvo-verify',
+  })
+  return {
+    backend: 'sandbox',
+    sandboxId: bundle.sandboxId,
+    async run({ input, timeoutMs: t = timeoutMs, maxOutput: mo = maxOutput } = {}) {
+      const r = await bundle.run('node runner.mjs', {
+        runEnvs: { TOOL_INPUT_JSON: JSON.stringify(input ?? {}) },
+        timeoutMs: Math.max(500, Number(t) || 3000),
+        maxOutput: mo,
+      })
+      return foldOutput(r, { exitCode: r.exitCode, duration: r.duration, maxOutput: mo, stderr: r.stderr })
+    },
+    async close() { await bundle.close() },
+  }
+}
+
+/**
+ * 跑一次候选（保留原有入口：内部用一个会话跑一个用例）。
+ * @param {object} p { source, input, timeoutMs?, maxOutput?, createSession? }
+ */
+export async function runCandidate({ source, input, timeoutMs = 3000, maxOutput = 8192, createSession = null }) {
+  const factory = createSession || createLocalCandidateSession
+  const session = await factory({ source, timeoutMs, maxOutput })
+  try {
+    return await session.run({ input, timeoutMs, maxOutput })
+  } finally {
+    await session.close()
+  }
+}
+
+export default { runCandidate, createLocalCandidateSession, createSandboxCandidateSession }

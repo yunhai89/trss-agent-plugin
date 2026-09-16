@@ -124,12 +124,14 @@ export class ToolEvoRegistry {
 
   /**
    * 导出为 ToolRegistry 契约。execute 经隔离 runner 调用（审计 §4.2 / P0-1，F 阻断）：
-   * stable 不再主进程 import，而在常驻 worker 子进程执行；capability ctx 由 worker 冻结提供。
-   * runner 由 apps 注入；未注入则回退主进程 import（仅本地调试，仍传冻结的受限 ctx，不暴露 e/bot/fetcher）。
+   * stable 不再主进程 import，而在隔离执行面（本地 fork worker / E2B 沙箱）执行。
+   * runner 由 apps 注入 —— **未注入一律拒绝执行**：主进程 import 回退已删除，
+   * 因为「没有隔离面时退回主进程」正是审计里最危险的 fail-open 开口。
    */
   async toToolContract(stable, runner) {
     const dir = path.join(this.artifactsDir, stable.manifest.name, stable.semver)
     const artifactPath = pathToFileURL(path.join(dir, 'index.js')).href
+    const artifactRel = path.join(stable.manifest.name, stable.semver, 'index.js') // 沙箱档据此上传制品
     const versionId = stable.versionId
     const meta = { toolEvoVersionId: versionId, provenance: 'evolved', sideEffects: stable.manifest.permissions?.sideEffects || ['none'] }
     const base = {
@@ -143,22 +145,17 @@ export class ToolEvoRegistry {
       return {
         ...base,
         async execute(params) {
-          const r = await runner.invoke(versionId, { artifactPath, params })
+          const r = await runner.invoke(versionId, { artifactPath, artifactRel, params })
           if (!r.ok) throw new Error(r.error || '进化工具执行失败')
           return r.output
         },
       }
     }
-    // 回退：无 runner（本地调试 / 旧路径）——主进程 import，传冻结的受限 ctx（不暴露宿主）
-    let mod
-    try { mod = await import(artifactPath) }
-    catch (e) { throw new Error(`加载工具制品失败（${stable.manifest.name}@${stable.semver}）：${e?.message || e}`) }
-    if (typeof mod.run !== 'function') throw new Error(`工具制品未导出 run：${stable.manifest.name}@${stable.semver}`)
+    // fail-closed：没有隔离执行面就拒绝执行（绝不在 Bot 主进程跑进化工具）
     return {
       ...base,
-      async execute(params) {
-        const ctx = Object.freeze({ now: () => new Date().toISOString(), log: () => {} })
-        return mod.run(params, ctx)
+      async execute() {
+        throw new Error(`进化工具「${stable.manifest.name}@${stable.semver}」当前不可用：隔离执行面未就绪（toolEvo runner 未注入）。已拒绝在主进程执行。`)
       },
     }
   }

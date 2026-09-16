@@ -2,13 +2,19 @@
 // __setConfig 由驱动脚本在 import apps 之前调用（hooks 已把本模块替换为所有 import 方的 Config）。
 export const __state = { config: { agent: {} } }
 export function __setConfig(c) { __state.config = c }
+/** 显式触发 onChange 回调（等价真实 Config 的 fs.watch → reload → 通知）。
+ *  注意：__setConfig 刻意**不**自动触发，否则会影响既有 e2e 的多段 setCfg 流程。 */
+export function __emitChange() {
+  for (const cb of __state.cbs || []) { try { cb() } catch { /* 订阅回调自身的错误由调用方负责 */ } }
+}
+__state.cbs = new Set()
 
 const TMP = process.env.E2E_TMP || '/tmp/e2e-harness'
 const P = (...seg) => [TMP, ...seg].join('/')
 export default {
   get: () => __state.config,
   save: () => { throw new Error('E2E 桩不支持 Config.save') },
-  onChange: () => () => {},
+  onChange: (cb) => { if (typeof cb === 'function') __state.cbs.add(cb); return () => __state.cbs.delete(cb) },
   reload: () => false,
   startWatch: () => {},
   // path 契约与真实 Config 对齐（缺字段会让 import 期 path.join(undefined) 直接抛，如 model/sticker）

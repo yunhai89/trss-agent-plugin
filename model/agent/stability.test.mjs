@@ -22,7 +22,8 @@ import { Agent, ToolRegistry, memoryKv, SessionStore, STOP_REASON_CN, GOVERNOR_S
 import { ReplySender, createRunQueues } from './reply-sender.js'
 import { requestWithRetry } from '../openai/transport.js'
 import { TimeoutError, createClient, presets as openaiPresets } from '../openai/index.js'
-import { runShell } from '../terminal/exec.js'
+import { runSandboxShell } from '../sandbox/index.js'
+import { SandboxManager } from '../sandbox/manager.js'
 import { parseDevLog, checkConsistency } from '../../scripts/check-trace-consistency.mjs'
 
 let passed = 0
@@ -330,22 +331,35 @@ await test('caller abort 中止 provider 请求（signal 透传 fetch）', async
   ok(/abort/i.test(err?.message || ''), `请求被中止（${err?.message}）`)
 })
 
-await test('terminal：abort 杀掉子进程（runShell 支持 signal）', async () => {
-  const ac = new AbortController()
-  setTimeout(() => ac.abort(), 80)
-  const r = await noHang(runShell('sleep 4.7', { timeout: 30, signal: ac.signal }), 3000, 'terminal 未响应 abort')
-  eq(r.ok, false, 'abort 后 ok=false')
-  ok(r.duration < 2500, `快速返回（duration=${r.duration}ms）而非等满超时`)
-  // 无悬挂子进程：稍等后 pgrep 不应再见到该 sleep
-  await delay(250)
-  let leftover = false
+await test('terminal：abort 立即取消并杀掉沙箱命令（无宿主子进程）', async () => {
+  // 沙箱化后宿主不再产生子进程，旧实现里的 pgrep 断言恒真空通过（假绿），故整体改为
+  // 「桩 transport 的句柄永不 resolve + kill spy」：证明 abort 会把取消传播到命令层。
+  let killed = 0
+  let runs = 0
+  const transport = {
+    async init() { return this },
+    async ping() { return true },
+    async create() { return { id: 'sbx-stub', raw: {} } },
+    async connect() { return { id: 'sbx-stub', raw: {} } },
+    async run() {
+      runs++
+      return { async wait() { return new Promise(() => {}) }, async kill() { killed++; return true } }
+    },
+    async write() {}, async writeMany() {}, async kill() { return true },
+    async setTimeout() {}, async list() { return [] }, async updateNetwork() {},
+  }
+  const box = new SandboxManager({ transport, idleMs: 60000, sweepIntervalMs: 100000 })
   try {
-    const { execSync } = await import('node:child_process')
-    // 正则里加 [.]：避免 pgrep -f 匹配到 execSync 外壳 sh -c '...' 自身的命令行（自匹配假阳性）
-    execSync('pgrep -f "sleep 4[.]7" >/dev/null 2>&1')
-    leftover = true
-  } catch { /* pgrep 无匹配=已清理（pgrep 不存在也走这里，保守通过） */ }
-  ok(!leftover, '子进程已被清理（无悬挂 sleep）')
+    const ac = new AbortController()
+    setTimeout(() => ac.abort(), 80)
+    const r = await noHang(runSandboxShell(box, 'k', 'sleep 4.7', { timeout: 30, signal: ac.signal }), 3000, 'terminal 未响应 abort')
+    eq(r.ok, false, 'abort 后 ok=false')
+    eq(r.aborted, true, 'aborted=true')
+    eq(r.exitCode, null, 'exitCode=null（不冒充"命令跑了但失败"）')
+    ok(r.duration < 2500, `快速返回（duration=${r.duration}ms）而非等满超时`)
+    ok(runs === 1, '命令确实被送到沙箱执行面')
+    eq(killed, 1, '取消传播到沙箱命令层（kill 被调用）')
+  } finally { await box.shutdown() }
 })
 
 await test('工具拿到合并 ctx 的 signal；abort 中止异步工具后 run 干净退出', async () => {
