@@ -84,6 +84,16 @@ ok(bindings.form.modelId === 'm3', `切到豆包厂商后自动选中其下模�
 // 选模型 → 自动带上它所属厂商
 bindings.setBaseModel('m2')
 ok(bindings.form.providerId === 'pmimo2' && bindings.form.modelId === 'm2', `选模型 m2 后厂商自动切到 pmimo2（实际 ${JSON.stringify([bindings.form.providerId, bindings.form.modelId])}）`)
+
+// 旁路小模型只能选当前所选厂商的模型：切厂商后不属于新厂商的值被清空，回落主模型
+bindings.setBaseProvider('pmimo')
+f.utilityModel = 'mimo-v2.5'
+bindings.setBaseProvider('pdoubao')
+ok(f.utilityModel === '', `切厂商后不属于新厂商的旁路小模型被清空（实际 ${JSON.stringify(f.utilityModel)}）`)
+f.utilityModel = 'doubao-seed-1-6'
+bindings.setBaseProvider('pmimo')
+ok(f.utilityModel === '', '反向切换同样清空（保证 utilityModel 始终属于所选厂商）')
+
 bindings.setBaseModel('m1') // 复位到同端点主场景
 
 const list = bindings.knownModels.value

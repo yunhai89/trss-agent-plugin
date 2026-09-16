@@ -290,6 +290,11 @@
         form.providerId = pid
         const list = (form.llmModels || []).filter((m) => m && m.providerId === pid)
         if (!list.some((m) => m.id === form.modelId)) form.modelId = list[0]?.id || ''
+        // 旁路小模型走主 provider 端点：不属于新厂商的模型 id 会调用失败，清空回落到主模型
+        if (form.utilityModel && !list.some((m) => m.model === form.utilityModel)) {
+          form.utilityModel = ''
+          toast('旁路小模型不属于新厂商，已清空（回落主模型）', 'info')
+        }
       }
       const ensureModelEntry = (pid, modelId) => {
         let m = (form.llmModels || []).find((x) => x && x.providerId === pid && x.model === modelId)
@@ -724,8 +729,15 @@
                 剩余 $ {{ orKey.limit_remaining ?? '∞' }} / 上限 $ {{ orKey.limit ?? '∞' }} · 已用 $ {{ orKey.usage ?? 0 }}（本月 $ {{ orKey.usage_monthly ?? 0 }}）<span v-if="orKey.is_free_tier"> · 免费层</span>
               </div>
             </div>
-            <cfg-row name="旁路小模型" desc="进度播报等旁路任务;留空=主模型">
-              <input class="inp" style="width:180px" v-model="form.utilityModel" placeholder="留空=主模型">
+            <cfg-row full name="旁路小模型" desc="进度播报等旁路任务；留空=主模型。只能从当前所选厂商的模型里选（旁路任务走主 provider 端点）">
+              <div class="row g6">
+                <select class="sel" style="width:280px" :value="form.utilityModel" @change="form.utilityModel = $event.target.value" :disabled="!form.providerId || !mainModels.length">
+                  <option value="">（留空 = 沿用主模型）</option>
+                  <option v-for="m in mainModels" :key="m.id" :value="m.model">{{ m.name ? m.name + ' · ' : '' }}{{ m.model }}</option>
+                  <option v-if="form.utilityModel && !mainModels.some((m) => m.model === form.utilityModel)" :value="form.utilityModel">{{ form.utilityModel }}（不在当前厂商下）</option>
+                </select>
+                <span v-if="form.providerId && !mainModels.length" class="mut2" style="font-size:12px">该厂商下还没有模型，请到「模型列表」添加</span>
+              </div>
             </cfg-row>
 
             <div class="cf-sub"><v-icon name="shield"/>网络 / 容错</div>

@@ -16,7 +16,7 @@ agent:
   baseURL: ""
   apiKey: ""               # API Key（OpenAI/Anthropic 兼容或 Gemini 原生均填此）；★必填：留空则插件不初始化
   model: "deepseek-chat"
-  utilityModel: ""  # 进度播报等旁路任务用的小模型 id（留空=沿用主模型；填主 provider 支持的小模型 id 可降本）
+  utilityModel: ""  # 进度播报等旁路任务用的小模型：只能从上面 providerId 厂商的「模型列表」里选（留空=沿用主模型；选便宜小模型可降本）
 
   # ── 厂商/模型注册表（web 配置中心 → 厂商配置 / 模型列表 两区维护；运行时经上面 providerId/modelId 引用）──
   llmProviders: []  # [{ id, name, protocol, preset, baseURL, apiKey }] LLM 服务商端点（「厂商配置」区维护）
