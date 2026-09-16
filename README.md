@@ -501,8 +501,83 @@ mcp:
 `terminal` 工具让 Agent 在 **E2B 微虚机**里执行 shell 命令。宿主上**没有任何 shell 执行面**（旧主机执行路径已删除），拿不到沙箱就拒绝执行。
 
 **接入准备**（二选一，详见仓库内 `e2b-infra-nodejs-安全shell接入开发文档.md`）：
-- 自托管 Embed：按官方 Embed 指南部署带 KVM 的机器，`eval "$(docker compose exec ready cat /run/e2b/sdk.env)"` 拿到三变量 → 填入 `sandbox.apiKey / apiUrl / sandboxUrl`（无通配 DNS 时必须填 `sandboxUrl`，SDK 会自动附路由头）。
-- E2B 云：只填 `sandbox.apiKey`（注意：命令与文件会送往第三方）。
+- **E2B 云**：只填 `sandbox.apiKey`（注意：命令与文件会送往第三方）。
+- **自托管 Embed**：见下方「自托管安装」，把 `apiKey / apiUrl / sandboxUrl` 三要素填进 `agent.sandbox`。
+
+> 说明：插件依赖的 `e2b` npm 包只是 **SDK（客户端）**，不含任何沙箱服务端。沙箱由 `e2b-dev/runtime`（Firecracker 基础设施）提供，云托管由 E2B 运营，自托管需自己部署。
+
+### 🏗️ 自托管安装（E2B Embed）
+
+**硬前提（不满足就不要尝试，装了也跑不起来）**：
+
+| 项 | 要求 | 为什么 |
+| --- | --- | --- |
+| KVM | `/dev/kvm` 存在且可读写 | 每个沙箱是一台 Firecracker microVM，没有硬件虚拟化就无从创建 |
+| CPU 虚拟化 | `/proc/cpuinfo` 含 `vmx`（Intel）或 `svm`（AMD） | 没暴露虚拟化扩展的客机＝嵌套虚拟化未开启，**客机内部无法自行开启** |
+| 内存 | 宿主可用内存 ≥ 20 GiB（`PF_MIN_FREE_GIB`） | embed 会为沙箱预留大块内存 |
+| 磁盘 | 空闲 ≥ 30 GiB | 7 个镜像 + Firecracker + 内核 + 模板 |
+| 系统 | Linux x86-64/arm64，4 KiB 页内核，glibc ≥ 2.34，可写 `/etc` | 官方以 Ubuntu/Debian 验证；不支持 macOS/Windows 宿主与 Container-Optimized OS |
+
+> ⚠️ **绝大多数云主机无法自托管**：普通云主机本身是虚拟机且默认不开嵌套虚拟化（表现为无 `/dev/kvm`、无 `vmx/svm`）。需改用**裸金属 / 支持嵌套虚拟化的实例规格**（部分厂商要提交工单开通），或改用 **E2B 云托管**。
+
+**一键部署脚本**（推荐，内置上述前提检查，不满足会直接拒绝而不是"装一半"）：
+
+```bash
+# ① 只做前提检查（可先在候选机器上跑，不改系统）
+scripts/install-e2b-selfhost.sh --check
+
+# ② 安装（交互式；-y 无人值守；--write-config 装完直接写进插件配置）
+scripts/install-e2b-selfhost.sh -y --write-config
+
+# ③ 卸载（停栈 + 官方 host-teardown 还原宿主参数）
+scripts/install-e2b-selfhost.sh --uninstall
+```
+
+脚本会：检查前提 → apt 装 docker/compose v2/依赖 → 克隆 `e2b-dev/runtime` 到 `/opt/e2b-runtime` → 执行官方 `host-setup.sh`（hugepages/nbd/sysctl）→ `docker compose up -d --wait` → 跑官方 smoke 自检 → 用控制面 curl 实证创建沙箱 → 导出 `sdk.env` 三要素并给出配置片段（`--write-config` 会备份后直接改写 `config/config.yaml`）。
+
+可调环境变量：`E2B_REF`（锁定 runtime 版本，生产建议锁 CalVer tag）、`E2B_DIR`、`PF_MIN_FREE_GIB`、`MIN_DISK_GIB`、`SKIP_SMOKE`。
+
+**手工步骤**（想自己掌控每一环节时）：
+
+```bash
+sudo apt-get install -y git make docker.io docker-compose-v2 qemu-kvm
+git clone https://github.com/e2b-dev/runtime.git && cd runtime/embed/compose
+bash scripts/host-setup.sh            # hugepages / nbd / sysctl
+docker compose up -d --wait
+docker compose --profile test run --rm smoke   # 冒烟：栈内跑官方 JS SDK + 端口连通性
+eval "$(docker compose exec ready cat /run/e2b/sdk.env)"   # E2B_API_URL / E2B_SANDBOX_URL / E2B_API_KEY
+```
+
+把三要素填进 `agent.sandbox.apiUrl / sandboxUrl / apiKey`：
+
+```yaml
+agent:
+  sandbox:
+    mode: e2b
+    apiKey: "<sdk.env 里的 E2B_API_KEY>"
+    apiUrl: "http://<host>:3000"        # 控制面
+    sandboxUrl: "http://<host>:3002"    # 数据面（无通配 DNS 时**必须填**，SDK 会自动附路由头）
+    template: base
+```
+
+**排障**：
+
+| 症状 | 定位 |
+| --- | --- |
+| `--check` 报无 `/dev/kvm` | 见上表：换支持 KVM 的机器/实例规格，或改用云托管 |
+| 控制面 401 / `Unauthorized` | `apiKey` 取错，重读 `/run/e2b/sdk.env` |
+| `fetch failed` 或连 `:3002` 失败 | `sandboxUrl` 未填或 client-proxy 未起：`docker compose ps` 看服务 |
+| `TemplateError: You need to update the template` | 模板的 envd 版本过旧，栈内重跑 base 模板构建脚本 |
+| 沙箱跑到一半消失 | TTL 到期；长任务用续期（插件侧 `sandboxTtlMs` + 半衰续期已内置） |
+| smoke 失败 | `docker compose logs` 逐个服务看；常见是内存/磁盘不足或内核参数未生效 |
+
+部署完成后验证插件侧链路：
+
+```bash
+E2B_INTEGRATION=1 node model/sandbox/e2b.integration.test.mjs
+# 自托管会从插件配置读 apiUrl/sandboxUrl；环境变量优先，便于临时指向别处
+```
+
 
 **访问控制**：
 - **terminal 主人（自包含，不读框架配置）**：不沿用 Yunzai 的 `e.isMaster` / `agent.masters`。认领流程（类似 Yunzai `#设置主人`）：

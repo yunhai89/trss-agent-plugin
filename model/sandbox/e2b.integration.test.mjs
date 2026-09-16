@@ -5,6 +5,9 @@
  *   E2B_INTEGRATION=1 E2B_API_KEY=e2b_xxx node model/sandbox/e2b.integration.test.mjs
  *   自托管再加 E2B_API_URL / E2B_DOMAIN / E2B_SANDBOX_URL（见 sdk.env）
  *
+ * 环境变量优先；缺省回落到插件配置 agent.sandbox（面板里已配过就不必再导一遍）。
+ * 若配置里 mode 不是 e2b，会提示并 SKIP。
+ *
  * 纪律（绝不宣称未运行的测试通过）：
  *   - 未设 E2B_INTEGRATION=1 → 打印 SKIPPED + `通过 0，失败 0` + exit 0（CI 不因此失败）
  *   - 设了但端点不可达/鉴权失败（3s 预检）→ 同样 SKIPPED + exit 0
@@ -17,6 +20,17 @@ if (!ENABLED) {
   process.exit(0)
 }
 
+// 配置回落：面板里配过 agent.sandbox 时无需再导环境变量（环境变量仍优先）
+let fromCfg = {}
+try {
+  const { default: Config } = await import('../../utils/Config.js')
+  fromCfg = Config.get()?.agent?.sandbox || {}
+} catch (e) {
+  console.log(`（读取插件配置失败，仅用环境变量：${e?.message || e}）`)
+}
+const pick = (envKey, cfgVal) => (process.env[envKey] && String(process.env[envKey]).trim()) || String(cfgVal || '')
+const src = (envKey, cfgVal) => (process.env[envKey] ? 'env' : (cfgVal ? 'config' : '-'))
+
 const { makeTransport } = await import('./transport.js')
 const { SandboxManager } = await import('./manager.js')
 const { createSandboxRuntime } = await import('./index.js')
@@ -28,22 +42,28 @@ const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m}${JSON.
 
 const cfg = {
   mode: 'e2b',
-  apiKey: process.env.E2B_API_KEY || '',
-  apiUrl: process.env.E2B_API_URL || '',
-  domain: process.env.E2B_DOMAIN || '',
-  sandboxUrl: process.env.E2B_SANDBOX_URL || '',
-  template: process.env.E2B_TEMPLATE || 'base',
+  apiKey: pick('E2B_API_KEY', fromCfg.apiKey),
+  apiUrl: pick('E2B_API_URL', fromCfg.apiUrl),
+  domain: pick('E2B_DOMAIN', fromCfg.domain),
+  sandboxUrl: pick('E2B_SANDBOX_URL', fromCfg.sandboxUrl),
+  template: pick('E2B_TEMPLATE', fromCfg.template) || 'base',
   maxSandboxes: 2,
   idleMs: 120000,
   sandboxTtlMs: 300000,
   concurrencyWaitMs: 30000,
   audit: false,
-  network: { allowInternet: false, denyOut: ['0.0.0.0/0'], allowOut: ['pypi.org'] },
+  // 网络断言需要放行 pypi；若配置里显式配了 allowOut 就用配置的（便于验证自己的白名单）
+  network: {
+    allowInternet: false,
+    denyOut: ['0.0.0.0/0'],
+    allowOut: Array.isArray(fromCfg.network?.allowOut) && fromCfg.network.allowOut.length ? fromCfg.network.allowOut : ['pypi.org'],
+  },
 }
+console.log(`[来源] apiKey=${src('E2B_API_KEY', fromCfg.apiKey)} · apiUrl=${src('E2B_API_URL', fromCfg.apiUrl)} · sandboxUrl=${src('E2B_SANDBOX_URL', fromCfg.sandboxUrl)}`)
 
 // ── 可达性/鉴权预检：失败即 SKIPPED（环境问题不是代码失败）──
 if (!cfg.apiKey) {
-  console.log('SKIPPED：未设置 E2B_API_KEY')
+  console.log('SKIPPED：没有可用的 E2B API Key（既未设 E2B_API_KEY，插件配置 agent.sandbox.apiKey 也为空）')
   console.log('通过 0，失败 0')
   process.exit(0)
 }
