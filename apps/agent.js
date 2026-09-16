@@ -1418,6 +1418,9 @@ export class Chat extends plugin {
         rt.usageStats?.recordRun({
           inputTokens: nu.input || 0, outputTokens: nu.output || 0,
           cacheRead: nu.cacheRead || 0, cacheWrite: nu.cacheWrite || 0, cacheObserved: !!nu.cacheObserved,
+          // 观测口径（只含报告了缓存字段的轮）：Web 端命中率的分母与成本口径都基于它，
+          // 不能退回全量 input——未观测轮会被当 0 命中稀释命中率
+          observedInput: nu.observedInput || 0, observedOutput: nu.observedOutput || 0, observedUncached: nu.observedUncached || 0,
           turns, model: cfg.model || '',
         })
       } catch { /* 统计失败不阻塞回复 */ }

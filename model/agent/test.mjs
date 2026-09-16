@@ -1404,6 +1404,29 @@ await test('usage：多工具轮 mergeUsage 全字段逐项求和', async () => 
   ok(Array.isArray(acc.raws) && acc.raws.length === 2, 'raws 保留每轮原始 usage（不再只留末轮）')
 })
 
+await test('usage：观测口径精确到轮（混合流不被整轮剔除，也不把未观测轮灌进分母）', async () => {
+  // 第 1 轮 provider 未报缓存字段、第 2 轮报了（主备 provider 切换 / 网关偶发缺字段）
+  let acc = null
+  acc = mergeUsage(acc, { prompt_tokens: 1000, completion_tokens: 100 })
+  acc = mergeUsage(acc, { prompt_tokens: 1200, completion_tokens: 60, prompt_cache_hit_tokens: 900, prompt_cache_miss_tokens: 300 })
+  eq(acc.cacheObserved, true, '有任一轮被观测即算已观测')
+  eq(acc.input, 2200, 'input 仍为全量累加（趋势图/成本口径用）')
+  eq(acc.observedInput, 1200, 'observedInput 只含观测到的轮（命中率分母）')
+  eq(acc.observedOutput, 60, 'observedOutput 同分母')
+  eq(acc.observedUncached, 300, 'observedUncached 只含观测到的轮（未命中线用）')
+  const n = normalizeUsage(acc)
+  eq(n.cacheObserved, true, '再归一保持已观测')
+  eq(n.observedInput, 1200, '再归一保持细粒度分母（曾退回全量 input=2200）')
+
+  // 全未观测：显式布尔为权威——不得因已归一带 cacheRead(=0) 键被判「已观测 0 命中」
+  let z = null
+  z = mergeUsage(z, { prompt_tokens: 500, completion_tokens: 50 })
+  eq(z.cacheObserved, false, '无任何缓存字段 = 未观测')
+  eq(z.observedInput, 0, '未观测流不进分母')
+  eq(normalizeUsage(z).cacheObserved, false, '再归一仍是未观测（命中率显示「暂无」而非 0%）')
+  eq(normalizeUsage(z).observedInput, 0, '再归一仍不进分母')
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

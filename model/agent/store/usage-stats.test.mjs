@@ -137,8 +137,31 @@ await test('mergeTrend：KV 无数据 → 日志透传；有数据 → 按日切
   eq(b.tokenTrend.find((t) => t.day === '08-19').input, 60, '08-19 用 KV 值（非日志 50+KV 60 双算）')
   eq(b.tokenTrend.find((t) => t.day === '08-17').input, 100, '08-17 保留日志值')
   eq(b.requestTrend.find((t) => t.day === '08-19').count, 2, '请求趋势同切换')
-  // 趋势含今天（本地日）——症状回归：不再因 UTC 缺「今天」
-  eq(b.tokenTrend[b.tokenTrend.length - 1].day, localDayKey().slice(5), '最后一天=本地今天')
+  // 趋势末日 = KV 有数据的最后一天（fixture 固定 08-20，不随运行日期变化）
+  eq(b.tokenTrend[b.tokenTrend.length - 1].day, '08-20', 'KV 末日即趋势末日')
+  // 症状回归（不依赖运行日期的动态用例）：KV 含本地今天的数据时，趋势必须含本地今天——
+  // 不再因 UTC 偏移把本地 0~8 点的数据归到 UTC 昨天而缺「今天」。
+  // （原断言拿固定 fixture 的末日与 localDayKey() 比较，只在撰写当天成立，此后必然失败）
+  const todayKey = localDayKey()
+  const dToday = mergeTrend([], [], [{ date: todayKey, chats: 1, toolCalls: 0, inputTokens: 5, outputTokens: 1, cacheRead: 0 }])
+  eq(dToday.tokenTrend[dToday.tokenTrend.length - 1].day, todayKey.slice(5), 'KV 含今天数据时趋势含本地今天')
+})
+
+await test('观测口径随日聚合 + 趋势透传（observedInput/Output/Uncached）', async () => {
+  const kv = memoryKv()
+  const st = createUsageStats({ kv, flushIntervalMs: 0 })
+  // 混合流：全量 input=2200，但只有 1200 属于「报告了缓存字段」的轮
+  st.recordRun({ inputTokens: 2200, outputTokens: 160, cacheRead: 900, cacheObserved: true, observedInput: 1200, observedOutput: 60, observedUncached: 300, turns: 2 })
+  await st.flushNow()
+  const d = await kv.get(DAY_KEY_PREFIX + localDayKey())
+  eq(d.observedInput, 1200, 'KV 日落 observedInput（命中率分母，非全量 inputTokens）')
+  eq(d.observedOutput, 60, 'KV 日落 observedOutput')
+  eq(d.observedUncached, 300, 'KV 日落 observedUncached')
+  const merged = mergeTrend([], [], [d])
+  eq(merged.tokenTrend[0].observedInput, 1200, '趋势透传 observedInput（前端命中占比分母）')
+  eq(merged.tokenTrend[0].observedOutput, 60, '趋势透传 observedOutput')
+  eq(merged.tokenTrend[0].uncached, 300, '趋势 uncached 用观测口径（曾硬编码 0，未命中线恒空）')
+  st.stop()
 })
 
 await test('summarizeKvDays：总量 + 工具成功率', async () => {

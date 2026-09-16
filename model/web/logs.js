@@ -183,17 +183,20 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
             totalTokens += din + dout
           }
           if (n.cacheObserved) {
+            // 只计观测口径：混合流（部分轮未报缓存字段）只计入观测到的部分，未观测轮不进分母
+            const oin = n.observedInput || 0
+            const oout = n.observedOutput || 0
             observedRequests++
             if (isCold) coldObserved++
             else { warmObserved++; if (n.cacheRead > 0) warmHit++ }
             if (n.cacheRead > 0) hitRequests++
-            if (din) { observedInput += din; dayMap[day].observedInput += din }
-            if (dout) observedOutput += dout
+            if (oin) { observedInput += oin; dayMap[day].observedInput += oin }
+            if (oout) observedOutput += oout
             totalCacheRead += n.cacheRead
             totalCacheWrite += n.cacheWrite
             dayMap[day].cacheRead += n.cacheRead
             dayMap[day].cacheWrite += n.cacheWrite
-            dayMap[day].uncached += n.uncached
+            dayMap[day].uncached += n.observedUncached || 0
             dayMap[day].cached += n.cacheRead
             const t = Date.parse(e.time)
             if (Number.isFinite(t) && (firstObservedAt == null || t < firstObservedAt)) firstObservedAt = t

@@ -154,6 +154,28 @@ await test('readLogFile：路径穿越防护', async () => {
   eq(readLogFile(TMP, 'not-exist.log'), [], '不存在返回空')
 })
 
+await test('aggregateStats：已归一形态也必须区分观测/未观测（生产真实形态回归）', async () => {
+  const { aggregateStats } = await import('./logs.js')
+  const T = fs.mkdtempSync(path.join(os.tmpdir(), 'weblogs-norm-'))
+  const iso = new Date().toISOString()
+  // 生产真实形态：Agent 累加对象**恒带** cacheRead/cached(=0) 键 + cacheObserved 布尔。
+  // 因此绝不能用「cacheRead 键是否存在」判断是否观测——未观测流会被误判为「已观测 0 命中」。
+  const unobserved = { input: 1000, output: 100, total: 1100, cacheRead: 0, cacheWrite: 0, uncached: 1000, cacheObserved: false, observedInput: 0, observedOutput: 0, observedUncached: 0, cached: 0 }
+  const observed = { input: 1000, output: 50, total: 1050, cacheRead: 800, cacheWrite: 0, uncached: 200, cacheObserved: true, observedInput: 1000, observedOutput: 50, observedUncached: 200, cached: 800 }
+  // 混合流（同一 run 内部分轮未报字段）：分母只算观测到的 1200，不是全量 2200
+  const mixed = { input: 2200, output: 160, total: 2360, cacheRead: 900, cacheWrite: 0, uncached: 1300, cacheObserved: true, observedInput: 1200, observedOutput: 60, observedUncached: 300, cached: 900 }
+  const mkRun = (usage) => JSON.stringify({ level: 'info', time: iso, event: 'run_end', usage }) + '\n'
+  fs.writeFileSync(path.join(T, '960179589-1-1-' + fmt(new Date()) + '090000.log'), mkRun(unobserved) + mkRun(observed) + mkRun(mixed))
+  const r = aggregateStats(T, {})
+  fs.rmSync(T, { recursive: true, force: true })
+  eq(r.unobservedRequests, 1, '已归一 + 未观测 计入 unobservedRequests')
+  eq(r.observedRequests, 2, '已观测 + 混合流 各计 1')
+  eq(r.observedInput, 1000 + 1200, 'observedInput 只累计观测口径（混合流只计观测轮）')
+  eq(r.observedOutput, 50 + 60, 'observedOutput 同分母')
+  eq(r.totalCacheRead, 800 + 900, 'cacheRead 累计')
+  ok(Math.abs(r.tokenHitRate - 1700 / 2200) < 1e-9, `命中率=1700/2200（实际 ${r.tokenHitRate}；曾把未观测流算进分母 → 1700/4200≈40.5%）`)
+})
+
 
 function fmt(d) { const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` }
 function eq(a, b, m) { const s = JSON.stringify(a) === JSON.stringify(b); ok(s, `${m}${s ? '' : `（实际 ${JSON.stringify(a)}）`}`) }

@@ -71,8 +71,13 @@ export function estimateMessages(messages) {
  *  - cacheRead   缓存命中读取 token（Anthropic cache_read / DeepSeek hit / OpenAI cached_tokens）
  *  - cacheWrite  缓存写入 token（Anthropic cache_creation / OpenAI cache_write_tokens）
  *  - uncached    未走缓存的输入 token（Anthropic input_tokens / DeepSeek miss）
- *  - cacheObserved 布尔：该响应是否报告了缓存字段——**缺失≠0 命中**，聚合层必须把
- *    未观测请求从命中率分母中剔除（曾把无字段旧日志当 0 命中，稀释面板数字）
+ *  - cacheObserved 布尔：本次 usage（单次响应，或 mergeUsage 累加流）是否有**任一部分**报告了
+ *    缓存字段——**缺失≠0 命中**。
+ *  - observedInput / observedOutput / observedUncached  观测口径：只含「报告了缓存字段」的那部分。
+ *    命中率分母必须用 observedInput，不能用 input（否则未观测请求被当 0 命中稀释）。
+ *    单次响应只能整体计入/整体剔除；mergeUsage 累加流精确到轮，混合流只计观测到的轮。
+ *    **已归一对象恒带 cacheRead/cached(=0) 键**，因此绝不能用「字段是否存在」推断是否观测——
+ *    必须认 cacheObserved 布尔（曾按存在性 sniff，把未观测流判为已观测，80% 被稀释成 60%）。
  *  - cached      cacheRead 的兼容别名（过渡期保留）
  *  - raw         原始 usage 对象
  */
@@ -91,17 +96,21 @@ export function normalizeUsage(u) {
     cacheRead = Number(u.cacheRead ?? u.cached) || 0
     cacheWrite = Number(u.cacheWrite) || 0
     uncached = Number(u.uncached) || 0
-    cacheObserved = u.cacheObserved === true || cacheRead > 0 || cacheWrite > 0
-      || u.cacheRead != null || u.cached != null || (Number(u.uncached) || 0) > 0
-    // 顶层无任何缓存标记但带 provider 原始 usage（Agent 累加值 + 末轮 raw 的历史形态）：
-    // 缓存字段从 raw 提取（input/output 仍用顶层多轮累加值，更准）
-    if (!cacheObserved && u.raw && typeof u.raw === 'object' && u.raw !== u) {
-      const rn = normalizeUsage(u.raw)
-      if (rn && rn.cacheObserved) {
-        cacheRead = rn.cacheRead
-        cacheWrite = rn.cacheWrite
-        uncached = rn.uncached
-        cacheObserved = true
+    if (typeof u.cacheObserved === 'boolean') {
+      // 显式布尔是权威信号（本模块/mergeUsage 的产出都带它）
+      cacheObserved = u.cacheObserved
+    } else {
+      // 旧日志形态（仅 input/output/total，无缓存字段也无该布尔）：按字段存在性嗅探 + last raw 兜底
+      cacheObserved = cacheRead > 0 || cacheWrite > 0
+        || u.cacheRead != null || u.cached != null || uncached > 0
+      if (!cacheObserved && u.raw && typeof u.raw === 'object' && u.raw !== u) {
+        const rn = normalizeUsage(u.raw)
+        if (rn && rn.cacheObserved) {
+          cacheRead = rn.cacheRead
+          cacheWrite = rn.cacheWrite
+          uncached = rn.uncached
+          cacheObserved = true
+        }
       }
     }
     if (!uncached) uncached = Math.max(0, input - cacheRead)
@@ -133,14 +142,31 @@ export function normalizeUsage(u) {
       || u.prompt_tokens_details?.cached_tokens != null || u.input_tokens_details?.cached_tokens != null
       || u.input_tokens_details?.cache_write_tokens != null
   }
-  return { input, output, total, cacheRead, cacheWrite, uncached, cacheObserved, cached: cacheRead, raw: u }
+  // 观测口径（单一收敛点）：只把「报告了缓存字段」的那部分计入命中率分母与成本口径。
+  //  - fine：已归一的累加对象自带细粒度 observed* → 直接用（混合流只计观测到的轮）
+  //  - 否则（单次响应 / 旧日志对象）：无法再拆分，整体计入或整体剔除
+  const fine = preNormalized && typeof u.cacheObserved === 'boolean'
+    && (u.observedInput != null || u.observedOutput != null)
+  const observedInput = fine ? Number(u.observedInput) || 0 : (cacheObserved ? input : 0)
+  const observedOutput = fine ? Number(u.observedOutput) || 0 : (cacheObserved ? output : 0)
+  const observedUncached = fine ? Number(u.observedUncached) || 0 : (cacheObserved ? uncached : 0)
+  return {
+    input, output, total, cacheRead, cacheWrite, uncached, cacheObserved,
+    observedInput, observedOutput, observedUncached,
+    cached: cacheRead, raw: u,
+  }
 }
 
-/** 累计多轮 usage（完整 Agent 流口径：全字段逐项求和；raws 保留每轮原始值，封顶 64 条防膨胀） */
+/** 累计多轮 usage（完整 Agent 流口径：全字段逐项求和；raws 保留每轮原始值，封顶 64 条防膨胀）
+ *  观测口径按轮累加（observedInput/Output/Uncached）：只有报告了缓存字段的轮才进命中率分母，
+ *  混合流（部分轮不报字段）不会被整轮剔除、也不会把未观测轮灌进分母。 */
 export function mergeUsage(acc, u) {
   const n = normalizeUsage(u)
   if (!n) return acc
   if (!acc) return { ...n, raws: [n.raw] }
+  const observedInput = (acc.observedInput || 0) + (n.observedInput || 0)
+  const observedOutput = (acc.observedOutput || 0) + (n.observedOutput || 0)
+  const observedUncached = (acc.observedUncached || 0) + (n.observedUncached || 0)
   return {
     input: acc.input + n.input,
     output: acc.output + n.output,
@@ -148,7 +174,11 @@ export function mergeUsage(acc, u) {
     cacheRead: (acc.cacheRead || 0) + n.cacheRead,
     cacheWrite: (acc.cacheWrite || 0) + n.cacheWrite,
     uncached: (acc.uncached || 0) + n.uncached,
-    cacheObserved: (acc.cacheObserved && n.cacheObserved) !== false && (acc.cacheObserved || n.cacheObserved),
+    // 有任一片段被观测到即算「已观测」（cacheRead>0 必然来自已观测片段，作兜底证据）
+    cacheObserved: observedInput > 0 || observedOutput > 0 || observedUncached > 0 || ((acc.cacheRead || 0) + n.cacheRead) > 0,
+    observedInput,
+    observedOutput,
+    observedUncached,
     cached: (acc.cached || 0) + n.cached,
     raws: [...(acc.raws || []).slice(-63), n.raw],
     raw: n.raw,

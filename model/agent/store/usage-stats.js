@@ -32,6 +32,8 @@ function emptyDay(date) {
     chats: 0, turns: 0, errors: 0,
     inputTokens: 0, outputTokens: 0, reasoningTokens: 0,
     cacheRead: 0, cacheWrite: 0, observedRequests: 0,
+    // 观测口径（只含报告了缓存字段的请求；命中率分母用它而非 inputTokens）：见 messages.js normalizeUsage
+    observedInput: 0, observedOutput: 0, observedUncached: 0,
     toolCalls: 0, toolOk: 0, toolFail: 0,
     byTool: {},   // name -> { ok, fail }
     byModel: {},  // model -> { input, output, chats }
@@ -41,7 +43,7 @@ function emptyDay(date) {
 /** 增量并入目标日（纯函数：不修改入参） */
 export function mergeDay(dst, inc) {
   const out = { ...dst, byTool: { ...(dst.byTool || {}) }, byModel: { ...(dst.byModel || {}) } }
-  for (const k of ['chats', 'turns', 'errors', 'inputTokens', 'outputTokens', 'reasoningTokens', 'cacheRead', 'cacheWrite', 'observedRequests', 'toolCalls', 'toolOk', 'toolFail']) {
+  for (const k of ['chats', 'turns', 'errors', 'inputTokens', 'outputTokens', 'reasoningTokens', 'cacheRead', 'cacheWrite', 'observedRequests', 'observedInput', 'observedOutput', 'observedUncached', 'toolCalls', 'toolOk', 'toolFail']) {
     out[k] = (out[k] || 0) + (Number(inc?.[k]) || 0)
   }
   for (const [name, t] of Object.entries(inc?.byTool || {})) {
@@ -89,8 +91,10 @@ export function createUsageStats({ kv, logger = () => {}, flushIntervalMs = 2000
     }
   }
 
-  /** 对话 run 完成（成功/失败/取消共用；字段尽力而为） */
-  function recordRun({ inputTokens = 0, outputTokens = 0, reasoningTokens = 0, cacheRead = 0, cacheWrite = 0, cacheObserved = false, turns = 0, model = '', error = false, chats = 1 } = {}) {
+  /** 对话 run 完成（成功/失败/取消共用；字段尽力而为）
+   *  observedInput/observedOutput/observedUncached 为观测口径（只含报告了缓存字段的轮），
+   *  累积对象的 cacheObserved 已精确到轮——混合流不再整轮剔除、也不把未观测轮灌进命中率分母。 */
+  function recordRun({ inputTokens = 0, outputTokens = 0, reasoningTokens = 0, cacheRead = 0, cacheWrite = 0, cacheObserved = false, observedInput = 0, observedOutput = 0, observedUncached = 0, turns = 0, model = '', error = false, chats = 1 } = {}) {
     bump(() => {
       const key = dayOf(now())
       const d = buffer.get(key) || emptyDay(key)
@@ -98,6 +102,7 @@ export function createUsageStats({ kv, logger = () => {}, flushIntervalMs = 2000
         chats: chats && !error ? 1 : 0, turns: Number(turns) || 0, errors: error ? 1 : 0,
         inputTokens: Number(inputTokens) || 0, outputTokens: Number(outputTokens) || 0, reasoningTokens: Number(reasoningTokens) || 0,
         cacheRead: Number(cacheRead) || 0, cacheWrite: Number(cacheWrite) || 0, observedRequests: cacheObserved ? 1 : 0,
+        observedInput: Number(observedInput) || 0, observedOutput: Number(observedOutput) || 0, observedUncached: Number(observedUncached) || 0,
         byModel: model ? { [model]: { input: Number(inputTokens) || 0, output: Number(outputTokens) || 0, chats: error ? 0 : 1 } } : {},
       }
       buffer.set(key, mergeDay(d, inc))
@@ -182,7 +187,9 @@ export function mergeTrend(logTokenTrend = [], logReqTrend = [], kvDays = []) {
     day: d.date.slice(5),
     input: d.inputTokens || 0, output: d.outputTokens || 0,
     cached: d.cacheRead || 0, cacheRead: d.cacheRead || 0, cacheWrite: d.cacheWrite || 0,
-    uncached: 0, observedInput: 0, // 观测口径细分仅日志链路有；KV 趋势不拆（缓存卡仍走日志专项）
+    // 观测口径随日记录透传（前端趋势图的命中占比按 observedInput 算，用全量 input 会稀释）；
+    // uncached 用观测口径值而非全量派生——未观测轮不得混进「未命中」线
+    uncached: d.observedUncached || 0, observedInput: d.observedInput || 0, observedOutput: d.observedOutput || 0,
   }))
   const kvReq = kvWith.map((d) => ({ day: d.date.slice(5), count: d.chats || 0 }))
   return { tokenTrend: [...logTok, ...kvTrend], requestTrend: [...logReq, ...kvReq], firstKvDay }
