@@ -170,6 +170,7 @@
         if (form.stagehand.maxCallsPerDay == null) form.stagehand.maxCallsPerDay = 200
         if (form.stagehand.domSettleTimeoutMs == null) form.stagehand.domSettleTimeoutMs = 3000
         if (!Array.isArray(form.stagehand.blockedHosts)) form.stagehand.blockedHosts = []
+        if (form.privateChat == null) form.privateChat = false
         // 无损压缩 + 网页抓取引擎兜底（旧 config 无此字段时 v-model 不报错）
         if (!form.compaction) form.compaction = {}
         if (form.compaction.enable == null) form.compaction.enable = true
@@ -1224,6 +1225,9 @@
           <div class="cf-body" v-show="open.security"><div class="cf-grid">
             <cfg-row name="#ai 命令权限" desc="谁可以触发对话">
               <select class="sel" style="width:140px" v-model="form.chatPermission"><option v-for="o in OPT.permission" :value="o[0]">{{ o[1] }}</option></select>
+            </cfg-row>
+            <cfg-row name="私聊对话" desc="私聊是否触发对话（默认关：私聊不响应，仅群内 @/命令触发）">
+              <v-switch v-model="form.privateChat"/>
             </cfg-row>
             <cfg-row name="确认超时(秒)" desc="审批门超时自动拒绝">
               <input type="number" class="inp" style="width:120px" min="10" v-model.number="form.confirmTimeout">

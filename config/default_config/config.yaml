@@ -3,6 +3,7 @@ debug: false
 agent:
   trigger: at
   triggerCommand: "#ai"
+  privateChat: false   # 私聊是否触发对话（默认关；false=私聊不响应，仅群内 @/命令触发）
   isolation:
     enable: true  # 多用户数据隔离（默认开）。true=每个群每个用户完全独立（会话/长期记忆/recall/群历史可见范围）；false=同群完全共享（群体型 bot，会话+记忆+群历史全群共用）。跨群始终隔离；私聊始终按用户。提醒/笔记/人设始终按用户。
   # ── 基础模型：引用下方「厂商配置 / 模型列表」的条目，不在此单独设置 ──

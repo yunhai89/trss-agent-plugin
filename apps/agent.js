@@ -1141,6 +1141,12 @@ export class Chat extends plugin {
     // 关键：纯引用图片/文件无文字也算触发（问题4）—— 媒体由 _handleAgent 注入默认指令处理。
     // 私聊直接触发（私聊无 @，at 模式下原本不触发；私聊任何消息都该能对话）
     const isPrivate = !this.e.isGroup
+    // 私聊默认禁用（agent.privateChat=false）；开启后私聊任何消息直接触发。
+    // 注意：位置在 `#添加mcp` 交互监听之后，主人私聊补 MCP JSON 的流程不受影响。
+    if (isPrivate && cfg.privateChat !== true) {
+      Log.mark('[trigger]', `私聊对话已禁用（agent.privateChat=false）user=${this.e.user_id}`)
+      return false
+    }
     if (!(isPrivate || isCmd || (atMode && isAt && (text || hasMedia)))) return false
     // chatPermission：仅约束群内 `#ai` 命令（@机器人/私聊不受限，保持向后兼容）
     if (isCmd && !isPrivate && !this._hasChatPermission(cfg)) {

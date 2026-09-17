@@ -65,7 +65,7 @@ cfgMod.__setConfig(baseCfg())
   ok(allowed(replies), '主人 #ai → 放行（进入 Agent，运行时报错 ⚠️）')
 }
 
-console.log('\n[chatPermission=master：@机器人 / 私聊不受限]')
+console.log('\n[chatPermission=master：@机器人不受限 / 私聊默认禁用]')
 {
   const { bot, replies } = makeBot({ user_id: 'u14', msg: '你好', atBot: true })
   await bot.onTrigger()
@@ -73,8 +73,16 @@ console.log('\n[chatPermission=master：@机器人 / 私聊不受限]')
 }
 {
   const { bot, replies } = makeBot({ user_id: 'u15', msg: '#ai 你好', isGroup: false, group_id: null })
+  const r = await bot.onTrigger()
+  ok(r === false && replies.length === 0, '私聊默认禁用（privateChat 未开 → 不响应）')
+}
+{
+  // 显式开启 privateChat 后私聊放行
+  cfgMod.__setConfig({ agent: { ...baseCfg().agent, privateChat: true } })
+  const { bot, replies } = makeBot({ user_id: 'u15b', msg: '#ai 你好', isGroup: false, group_id: null })
   await bot.onTrigger()
-  ok(allowed(replies), '私聊 #ai → 放行（私聊始终可对话）')
+  ok(allowed(replies), 'privateChat=true → 私聊放行')
+  cfgMod.__setConfig(baseCfg())
 }
 
 console.log('\n[chatPermission=all：命令对所有人开放]')

@@ -60,7 +60,7 @@
 | 🌐 浏览器自动化 | **Stagehand**：goto/observe/extract/act 自然语言原语，本地或 Browserbase 云，会话跨调用保持 | 🧪 早期 |
 | 🎭 表情包 | 自动发现（群聊被动采集→视觉打标→入库）+ 手动安装 + LLM 自主引用 `[sticker:名称]` | ✅ 稳定 |
 | 🤖 伪人模式 | 群聊环境参与者：旁听→门控→Planner 决策→Replyer 自然回复（参照 MaiBot） | 🧪 早期 |
-| 💬 私聊对话 | 私聊任何消息直接触发（不需 #ai/@），独立会话与记忆 | ✅ 稳定 |
+| 💬 私聊对话 | 私聊触发对话（默认**关闭**：`agent.privateChat=false`；开启后私聊任何消息直接触发，独立会话与记忆） | ✅ 稳定 |
 | 🌐 代理访问 | HTTP/SOCKS 代理（国内服务器访问 GPT/Gemini 等海外 LLM） | ✅ 稳定 |
 | 🔁 回退模型 | 主模型失败自动依次尝试 `fallbackModels`（同 provider） | ✅ 稳定 |
 | 📂 日志分文件 | 按会话分文件 + 图片底部会话/对话id + `#上报错误` 打包发主人 | ✅ 稳定 |
@@ -225,6 +225,7 @@ agent:
 | `memoryLimits` | 空 | 声明式记忆字符上限，如 `{ memory: 2200, user: 1375 }` |
 | `systemPrompt` | 空 | 默认身份 system prompt（留空用富默认身份；被人设覆盖时失效） |
 | `chatPermission` | `master` | `#ai` 命令权限：`master`/`admin`/`owner`/`all` |
+| `privateChat` | `false` | 私聊是否触发对话；默认关（私聊不响应，仅群内 @/命令触发），设 `true` 开启 |
 | `masters` | `[]` | 接收审批通知的 master QQ 号列表 |
 | `masterSkipConfirm` | `false` | ⚠️高危：主人发起的确认类工具（stagehand act 等）免 `#确认` 直接执行（仅主人，控制台有日志不在聊天提示；denylist 仍硬拦）。注：terminal 已沙箱化，不走审批 |
 | `confirmTimeout` | `300` | 审批超时自动拒绝（秒） |
