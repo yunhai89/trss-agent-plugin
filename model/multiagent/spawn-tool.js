@@ -30,6 +30,26 @@ const FOCUS_PROMPTS = {
 
 const ALLOWED_TOOL_CATEGORIES = new Set(['query'])
 
+/** 子代理 run 时只注入身份字段（见 workerCtxOf）；这些是「可用 ctx 键」集合 */
+const WORKER_CTX_KEYS = new Set(['userId', 'scopeUserId', 'scopeId', 'groupId', 'conversationId'])
+
+/**
+ * 依赖运行时句柄（e/bot/sandbox/media/fetcher/miyoushe…）的 query 类工具。
+ * 子代理拿不到这些句柄，调用必然失败——下发给子代理只会空转/浪费轮次，故排除。
+ * 新增此类工具时请同步登记（或在工具 meta.requires 里声明所需 ctx 键）。
+ */
+const WORKER_CTX_UNSUPPORTED = new Set([
+  'terminal',                 // ctx.sandbox
+  'read_attachment',          // ctx.media
+  'list_group_folder', 'get_group_file_url', // ctx.e/bot
+  'get_chat_history', 'get_forward_msg', 'get_group_notice', // ctx.e/bot
+  'group_info', 'group_member', 'user_info', // ctx.bot
+  'get_ai_characters', 'ai_tts', // ctx.e/bot（AI 语音通道）
+  'read_pdf', 'create_excel', 'send_file', 'file_to_pdf', // ctx.e / ctx.media
+  'miyoushe_search', 'miyoushe_post', 'miyoushe_replies', // ctx.miyoushe/fetcher/e
+  'pixiv_search', 'pixiv_illust', 'pixiv_ranking', 'pixiv_user', 'pixiv_tags', // ctx.e
+])
+
 const MIN_BUDGET_MS = 10000
 const MAX_BUDGET_MS = 600000
 const HARD_GRACE_MS = 30000 // 预算到点（协作取消）后，最多再等这么久；仍不结算就强制判超时并释放并发槽
@@ -41,9 +61,12 @@ function buildWorkerTools(sourceRegistry, names, defaultNames) {
   const workerReg = new ToolRegistry()
   for (const name of wanted) {
     if (name === 'spawn_subagent' || name === 'check_subagent' || name === 'extend_subagent') continue
+    if (WORKER_CTX_UNSUPPORTED.has(name)) continue // 依赖子代理没有的运行时句柄 → 剔除
     const tool = sourceRegistry.get(name)
     if (!tool) continue
     if (!ALLOWED_TOOL_CATEGORIES.has(tool.category || 'query')) continue
+    // 声明式能力校验：meta.requires 里有子代理 ctx 不提供的键 → 不下发
+    if (Array.isArray(tool.meta?.requires) && tool.meta.requires.some((k) => !WORKER_CTX_KEYS.has(k))) continue
     workerReg.register(tool)
   }
   return workerReg

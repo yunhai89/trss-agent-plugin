@@ -322,6 +322,34 @@ await test('状态同步：shutdown 取消的在跑任务也回推', async () =>
   eq(settled[0], 'cancelled', 'status=cancelled')
 })
 
+// ---------- 15. 子代理工具可达性：剔除依赖运行时句柄的工具 ----------
+await test('子代理工具可达性：剔除依赖 e/bot/sandbox/media 的工具', async () => {
+  let toolsSent = null
+  const prov = {
+    async chat(opts) {
+      toolsSent = (opts.tools || []).map((t) => t.name)
+      return { role: 'assistant', content: 'done', toolCalls: [], finishReason: 'stop', usage: null }
+    },
+  }
+  const reg = new ToolRegistry()
+  reg.register({ name: 'web_search', category: 'query', description: 'd', parameters: { type: 'object' }, async execute() { return {} } })
+  reg.register({ name: 'terminal', category: 'query', description: 'd', parameters: { type: 'object' }, async execute() { return {} } })
+  reg.register({ name: 'get_group_file', category: 'group_manage', description: 'd', parameters: { type: 'object' }, async execute() { return {} } })
+  reg.register({ name: 'read_excel', category: 'query', description: 'd', parameters: { type: 'object' }, async execute() { return {} } })
+  const [spawn, check] = makeSpawnSubagentTools({
+    provider: prov, sourceRegistry: reg, maxConcurrent: 1, minBudgetMs: 10000,
+    defaultTools: ['web_search', 'terminal', 'get_group_file', 'read_excel'],
+  })
+  const ctx = { userId: 'u', conversationId: 'c' }
+  const r = await spawn.execute({ task: 't' }, ctx)
+  for (let i = 0; i < 50; i++) { const s = await check.execute({ taskId: r.taskId, waitMs: 0 }, ctx); if (['done', 'failed', 'timeout'].includes(s.status)) break; await delay(20) }
+  ok(Array.isArray(toolsSent), '子代理已发起调用')
+  ok(toolsSent.includes('web_search'), '纯网络工具保留')
+  ok(toolsSent.includes('read_excel'), '无 ctx 依赖的 query 工具保留')
+  ok(!toolsSent.includes('terminal'), 'terminal（需 ctx.sandbox）被剔除')
+  ok(!toolsSent.includes('get_group_file'), 'get_group_file（group_manage）被剔除')
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
