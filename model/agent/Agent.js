@@ -645,7 +645,8 @@ export class Agent {
             const tc = result.toolCalls[i]
             const trm = toolResults[i]
             const ok = !!trm && !isToolError(trm.content)
-            this.governor.noteToolCall(tc.name, tc.arguments, ok, undefined, resultSignature(trm?.content))
+            const toolDef = this.tools?.get?.(tc.name) ?? this._metaTools?.[tc.name]
+            this.governor.noteToolCall(tc.name, tc.arguments, ok, undefined, resultSignature(trm?.content), { polling: !!toolDef?.meta?.polling })
           }
           const g = this.governor.shouldStop()
           if (g.stop) {

@@ -1006,6 +1006,25 @@ await test('LoopGovernor 单元：指纹/重复/失败/无进展/预算', async 
   eq(g6.shouldStop().reason, 'no_progress', 'A,B,A,B 同结果交替窗口满 → no_progress')
 })
 
+await test('LoopGovernor：duplicate 需「同动作+同结果」；轮询工具豁免（子代理 check 不被误杀）', async () => {
+  const mk = (o) => new LoopGovernor({ maxSameAction: 2, maxConsecutiveFailures: 99, noProgressWindow: 99, timeBudgetMs: 0, tokenBudget: 0, ...o })
+  // 同动作+同结果 → 仍判 duplicate（保护不变）
+  const g1 = mk({})
+  g1.noteToolCall('ping', { x: 1 }, true, undefined, 'same'); eq(g1.shouldStop().stop, false, '第1次不停')
+  g1.noteToolCall('ping', { x: 1 }, true, undefined, 'same'); eq(g1.shouldStop().stop, false, '第2次不停')
+  g1.noteToolCall('ping', { x: 1 }, true, undefined, 'same'); eq(g1.shouldStop().reason, 'duplicate_action', '同动作同结果第3次 → duplicate')
+  // 同动作+结果变化（轮询到新状态）→ 不算重复
+  const g2 = mk({})
+  g2.noteToolCall('check_subagent', { taskId: 't' }, true, undefined, 'running:1')
+  g2.noteToolCall('check_subagent', { taskId: 't' }, true, undefined, 'running:2')
+  g2.noteToolCall('check_subagent', { taskId: 't' }, true, undefined, 'done:3')
+  eq(g2.shouldStop().stop, false, '结果签名变化 = 进展，不判 duplicate')
+  // 轮询工具显式豁免：即使结果完全相同也不判 duplicate
+  const g3 = mk({})
+  for (let i = 0; i < 6; i++) g3.noteToolCall('check_subagent', { taskId: 't' }, true, undefined, 'running:same', { polling: true })
+  eq(g3.shouldStop().stop, false, 'polling 工具连续同参同结果不判 duplicate')
+})
+
 await test('Agent 集成：重复动作终止 + 强制收尾（审计 §2.1 探针）', async () => {
   // 假 provider 每轮都调 ping({x:1})；maxTurns=3 + loop.maxSameAction=2 → 第3轮 governor 终止 + 收尾调用
   const provider = mockProvider([
@@ -1023,6 +1042,29 @@ await test('Agent 集成：重复动作终止 + 强制收尾（审计 §2.1 探�
   eq(res.stopReason, 'duplicate_action', '重复动作触发 governor 终止（非 max_turns）')
   ok(res.content.includes('收尾'), '强制收尾交付非空进展（不返回空串）')
   eq(provider.calls.count, 4, '3 轮工具 + 1 次收尾调用')
+})
+
+await test('Agent 集成：meta.polling 工具连续轮询不被误判 duplicate_action', async () => {
+  const polls = [
+    { toolCalls: [{ id: 'c1', name: 'poll', arguments: {} }], finishReason: 'tool_calls' },
+    { toolCalls: [{ id: 'c2', name: 'poll', arguments: {} }], finishReason: 'tool_calls' },
+    { toolCalls: [{ id: 'c3', name: 'poll', arguments: {} }], finishReason: 'tool_calls' },
+    { toolCalls: [{ id: 'c4', name: 'poll', arguments: {} }], finishReason: 'tool_calls' },
+    { content: '子代理已完成', finishReason: 'stop' },
+  ]
+  const provider = mockProvider(polls)
+  const tools = new ToolRegistry().register({
+    name: 'poll', category: 'query', meta: { polling: true }, description: 'd', parameters: { type: 'object' },
+    async execute() { return { status: 'running' } }, // 结果恒定的最坏情况：无 polling 豁免时本应触发 duplicate_action
+  })
+  const agent = new Agent({
+    provider, tools, maxTurns: 10, reflect: 'off',
+    loop: { maxSameAction: 2, maxConsecutiveFailures: 99, noProgressWindow: 99, timeBudgetMs: 0, tokenBudget: 0 },
+  })
+  const res = await agent.run('等待')
+  ok(res.stopReason !== 'duplicate_action', `轮询不被误判 duplicate（实际 ${res.stopReason}）`)
+  eq(res.content, '子代理已完成', '正常完成交付')
+  eq(provider.calls.count, 5, '4 次轮询 + 1 次最终回复，全程未被 governor 打断')
 })
 
 // ---------- Gemini 原生适配器（官方 SDK + Interactions API）----------

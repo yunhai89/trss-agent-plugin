@@ -732,6 +732,7 @@ async function buildRuntime() {
   }
 
   // 子代理编排：主 Agent 可自主创建子代理委派任务（异步三件套：spawn + check + extend）
+  let multiagent = null
   if (cfg.multiagent?.enable !== false) {
     try {
       const subagentTools = makeSpawnSubagentTools({
@@ -743,11 +744,12 @@ async function buildRuntime() {
         maxSpawns: cfg.multiagent?.maxSpawnsPerConversation ?? 5,
       })
       for (const t of subagentTools) tools.register(t)
+      multiagent = subagentTools // 暴露 shutdown()：热重载/退出时终止在跑子代理
       Log.info('[multiagent] spawn_subagent + check_subagent + extend_subagent 已注册（异步委派 + 预算控制）')
     } catch (e) { Log.warn('[multiagent] 子代理工具注册失败', e?.message || e) }
   }
 
-  return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox }
+  return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent }
 }
 
 const getRuntime = async () => {
@@ -788,6 +790,10 @@ function invalidateRuntime() {
     // 统计缓冲落 KV 后停采集器（2s 窗口内未 flush 的数据不丢）
     try { _runtime.usageStats.flushNow().catch(() => {}) } catch { /* noop */ }
     try { _runtime.usageStats.stop() } catch { /* noop */ }
+  }
+  // 在跑子代理：热重载/退出时终止，避免后台继续烧 token/占用并发
+  if (_runtime?.multiagent?.shutdown) {
+    try { const n = _runtime.multiagent.shutdown(); if (n) Log.info(`[multiagent] 运行时失效：已终止 ${n} 个在跑子代理`) } catch { /* noop */ }
   }
   // 沙箱必须最后关：toolEvo.runner 依赖 sandbox.transport，先关 transport 会让 runner 停止时操作已失效沙箱
   if (_runtime?.sandbox?.manager) {

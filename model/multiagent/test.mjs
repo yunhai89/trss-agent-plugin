@@ -5,6 +5,7 @@
 import {
   Orchestrator,
   SubagentSpec,
+  makeSpawnSubagentTools,
   pipeline,
   parallel,
   router,
@@ -13,6 +14,7 @@ import {
   Trace,
   SharedState,
 } from './index.js'
+import { ToolRegistry } from '../agent/tools/registry.js'
 
 let passed = 0
 let failed = 0
@@ -165,6 +167,88 @@ await test('Trace + SharedState', async () => {
   s.update({ z: 3 })
   eq(s.toJSON(), { x: 1, y: 2, z: 3 }, 'toJSON')
   ok(s.keys.includes('z'), 'keys 含 z')
+})
+
+// ---------- 10. spawn 三件套：配额按会话隔离 + taskId 归属校验 ----------
+const doneProvider = () => ({ async chat() { return { role: 'assistant', content: 'ok', toolCalls: [], finishReason: 'stop', usage: null } } })
+
+await test('spawn 三件套：配额按会话隔离，跨会话不可读', async () => {
+  const [spawn, check] = makeSpawnSubagentTools({
+    provider: doneProvider(), sourceRegistry: null, maxSpawns: 2, maxConcurrent: 1, minBudgetMs: 10000, hardGraceMs: 200,
+  })
+  const A = { userId: 'uA', groupId: 'gA', conversationId: 'cA' }
+  const B = { userId: 'uB', groupId: 'gB', conversationId: 'cB' }
+  eq((await spawn.execute({ task: 't1' }, A)).ok, true, 'A 第 1 次')
+  eq((await spawn.execute({ task: 't2' }, A)).ok, true, 'A 第 2 次')
+  ok(!!(await spawn.execute({ task: 't3' }, A)).error, 'A 超出本会话上限被拒')
+  const rb = await spawn.execute({ task: 't4' }, B)
+  eq(rb.ok, true, 'B 不受 A 配额影响（按会话隔离）')
+  const cross = await check.execute({ taskId: rb.taskId }, A)
+  ok(!!cross.error && /无权/.test(cross.error), 'A 读 B 的任务被拒（归属校验）')
+  const own = await check.execute({ taskId: rb.taskId }, B)
+  eq(own.taskId, rb.taskId, 'B 读自己的任务 OK')
+})
+
+// ---------- 11. spawn 三件套：硬超时释放并发槽 + 超时判定 ----------
+await test('spawn 三件套：不响应取消的 worker 被硬判超时并释放并发槽', async () => {
+  let mode = 'hang'
+  const prov = {
+    async chat() {
+      if (mode === 'hang') return new Promise(() => {}) // 永不 settle，且忽略 abort signal
+      return { role: 'assistant', content: 'done', toolCalls: [], finishReason: 'stop', usage: null }
+    },
+  }
+  const [spawn, check] = makeSpawnSubagentTools({ provider: prov, sourceRegistry: null, maxConcurrent: 1, minBudgetMs: 40, hardGraceMs: 60 })
+  const ctx = { userId: 'u', conversationId: 'c' }
+  const r1 = await spawn.execute({ task: 'hang', timeBudgetMs: 40 }, ctx)
+  await delay(220) // 40ms 预算 + 60ms 硬宽限 + 余量
+  const s1 = await check.execute({ taskId: r1.taskId }, ctx)
+  eq(s1.status, 'timeout', '不响应取消的 worker 被判 timeout')
+  ok(/未响应|预算/.test(String(s1.error)), '超时原因可读')
+  // 并发槽已释放（maxConcurrent=1）：下一个任务能真正运行并完成
+  mode = 'ok'
+  const r2 = await spawn.execute({ task: 'second', timeBudgetMs: 5000 }, ctx)
+  await delay(120)
+  const s2 = await check.execute({ taskId: r2.taskId }, ctx)
+  eq(s2.status, 'done', '硬超时后并发槽释放，后续任务可运行')
+})
+
+// ---------- 12. spawn 三件套：身份 ctx 下传（memory_search 可用）----------
+await test('spawn 三件套：身份 ctx 下传，子代理 query 工具可用', async () => {
+  let seenCtx = null
+  const reg = new ToolRegistry().register({
+    name: 'memory_search', category: 'query', description: '检索记忆',
+    parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+    async execute(_p, ctx) { seenCtx = ctx; return { found: 1, text: '记忆内容' } },
+  })
+  let calls = 0
+  const workerProv = {
+    async chat() {
+      calls++
+      if (calls === 1) return { role: 'assistant', content: '', toolCalls: [{ id: 'c1', name: 'memory_search', arguments: { query: '偏好' } }], finishReason: 'tool_calls', usage: null }
+      return { role: 'assistant', content: '基于记忆的结论', toolCalls: [], finishReason: 'stop', usage: null }
+    },
+  }
+  const [spawn, check] = makeSpawnSubagentTools({ provider: workerProv, sourceRegistry: reg, defaultTools: ['memory_search'], maxConcurrent: 1, minBudgetMs: 10000 })
+  const ctx = { userId: 'u1', scopeUserId: 'u1', groupId: 'g1', conversationId: 'c1' }
+  const r = await spawn.execute({ task: '用记忆回答' }, ctx)
+  let status = null
+  for (let i = 0; i < 50; i++) { const s = await check.execute({ taskId: r.taskId }, ctx); status = s.status; if (status === 'done' || status === 'failed' || status === 'timeout') break; await delay(20) }
+  eq(status, 'done', '子代理完成')
+  ok(seenCtx && seenCtx.userId === 'u1' && seenCtx.conversationId === 'c1', '子代理工具收到身份 ctx（memory_search 不再因无 ctx 恒失败）')
+})
+
+// ---------- 13. spawn 三件套：shutdown 终止在跑任务 ----------
+await test('spawn 三件套：shutdown 终止在跑子代理', async () => {
+  const prov = { async chat() { return new Promise(() => {}) } }
+  const tools = makeSpawnSubagentTools({ provider: prov, sourceRegistry: null, maxConcurrent: 1, minBudgetMs: 60000, hardGraceMs: 60000 })
+  const ctx = { userId: 'u', conversationId: 'c' }
+  await tools[0].execute({ task: 'hang' }, ctx)
+  await delay(30)
+  const n = tools.shutdown()
+  eq(n, 1, 'shutdown 报告终止 1 个在跑子代理')
+  const after = await tools[1].execute({ taskId: 'sub_1_x' }, ctx)
+  ok(!!after.error, 'shutdown 后任务表已清空')
 })
 
 // ---------- 总结 ----------

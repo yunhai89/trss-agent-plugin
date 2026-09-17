@@ -66,6 +66,7 @@ export class LoopGovernor {
   reset() {
     this._start = this._now()
     this._lastFingerprint = null
+    this._lastResultSig = undefined
     this._sameCount = 0
     this._consecutiveFailures = 0
     this._progressFlags = [] // 滚动窗口：最近 N 步是否产出新事实
@@ -86,11 +87,24 @@ export class LoopGovernor {
    *   结果签名参与判定使轮询型工具（如 check_subagent）状态变化仍算进展，
    *   而"同参同结果"的空转（A,B,A,B 交替或状态卡死）会触发 no_progress。
    * @param {string} [resultSig] 工具结果签名（内容摘要；缺省只按指纹判重）
+   * @param {{polling?:boolean}} [opt] polling=true 表示这是轮询型工具（如 check_subagent）：
+   *   同工具+同参数是其正常用法，不计入 duplicate_action，交由 no_progress 与预算门控判定停滞。
    */
-  noteToolCall(name, args, ok, hasNewFact, resultSig) {
+  noteToolCall(name, args, ok, hasNewFact, resultSig, { polling = false } = {}) {
     const fp = fingerprint(name, args)
-    if (fp === this._lastFingerprint) this._sameCount++
-    else { this._lastFingerprint = fp; this._sameCount = 1 }
+    if (polling) {
+      // 轮询工具显式豁免 duplicate_action：重复调用是设计用法，不是死循环。
+      this._lastFingerprint = fp
+      this._lastResultSig = resultSig
+      this._sameCount = 0
+    } else if (fp === this._lastFingerprint && (resultSig === undefined || resultSig === this._lastResultSig)) {
+      // 「同动作」必须同时「同结果」才算重复；结果变了（如轮询到新状态）就是进展，重置计数。
+      this._sameCount++
+    } else {
+      this._lastFingerprint = fp
+      this._lastResultSig = resultSig
+      this._sameCount = 1
+    }
     if (ok === false) this._consecutiveFailures++
     else this._consecutiveFailures = 0
     let isNew = ok !== false
