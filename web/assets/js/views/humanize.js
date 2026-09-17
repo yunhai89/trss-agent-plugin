@@ -179,7 +179,7 @@
       const enableWarn = computed(() => form.enable === true && !(form.groups || []).length)
 
       return {
-        form, dirty, save, reset, sections, open, activeSec, jump, OPT, adv,
+        form, dirty, save, reset, sections, open, activeSec, jump, adv,
         talkPct, tempPlannerPct, tempReplyerPct, humorPct, initiativePct, enableWarn,
       }
     },
