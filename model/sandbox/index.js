@@ -25,22 +25,45 @@ export function isSandboxEnabled(cfg) {
 }
 
 /**
- * agent.sandbox.network → E2B 网络选项。
- * 语义：allowOut 恒优先于 denyOut；未指定 allowOut 等于放行全部，所以"默认拒绝"必须显式给空 allowOut + deny 全部。
+ * agent.sandbox.network → E2B 网络选项 + allowInternetAccess（两者必须成对计算，不能各算各的）。
+ *
+ * E2B 语义（docs.e2b.dev/network/internet-access）：
+ *   - 沙箱**默认放行全部出口**；`allowOut` 未指定同样等于放行全部；allow 规则恒优先于 deny；
+ *   - `allowInternetAccess: false` ≡ `denyOut: ['0.0.0.0/0']`（官方默认拒绝全部的方式）。
+ * 因此"默认拒绝"**不能**靠下发空 `allowOut: []`——空数组在服务端可能被归一成"未指定=放行全部"，
+ * 叠加「allow 优先于 deny」后反而把 denyOut 的兜底拒绝顶掉（曾导致沙箱默认全网可达）。
+ * 这里只在白名单非空时下发 allowOut，其余情况用 allowInternetAccess 显式控制。
+ *
+ * 组合（denyAll 用于候选验证这类不需要出口的一次性沙箱）：
+ *   - 有白名单 → allowOut 白名单 + denyOut 全拒 + allowInternetAccess:true（白名单可达，其余全拒）；
+ *   - 无白名单 + allowInternet:true → 不下发 allowOut/denyOut + allowInternetAccess:true（显式全网放行）；
+ *   - 无白名单 + allowInternet:false（默认）→ denyOut 全拒 + allowInternetAccess:false（全网拒绝）。
  * @param {object} cfg agent.sandbox
- * @param {{denyAll?:boolean}} [opt] denyAll=true 用于候选验证这类不需要出口的沙箱
+ * @param {{denyAll?:boolean}} [opt]
+ * @returns {{network:object, allowInternetAccess:boolean}}
  */
-export function buildNetworkOpts(cfg = {}, { denyAll = false } = {}) {
+export function buildEgressOpts(cfg = {}, { denyAll = false } = {}) {
   const net = cfg.network || {}
   const allowOut = denyAll ? [] : (Array.isArray(net.allowOut) ? net.allowOut.map((s) => String(s)).filter(Boolean) : [])
-  const denyOut = denyAll
-    ? ['0.0.0.0/0']
-    : (Array.isArray(net.denyOut) && net.denyOut.length ? net.denyOut.map((s) => String(s)) : ['0.0.0.0/0'])
-  return {
-    allowOut,
-    denyOut,
-    allowPublicTraffic: cfg.allowPublicTraffic === true,
+  const denyOut = Array.isArray(net.denyOut) && net.denyOut.length ? net.denyOut.map((s) => String(s)) : ['0.0.0.0/0']
+  // 白名单存在时也必须放通"互联网开关"，否则 deny 语义可能盖过 allow；实际可达范围由 allowOut 收窄。
+  const allowInternetAccess = !denyAll && (net.allowInternet === true || allowOut.length > 0)
+  const network = { allowPublicTraffic: cfg.allowPublicTraffic === true }
+  if (allowOut.length) {
+    network.allowOut = allowOut
+    network.denyOut = denyOut
+  } else if (!allowInternetAccess) {
+    network.denyOut = denyOut
   }
+  return { network, allowInternetAccess }
+}
+
+/**
+ * 兼容出口：仅返回 network 部分（不含 allowInternetAccess）。
+ * 新代码请用 buildEgressOpts——空 allowOut 不再下发，默认拒绝由 allowInternetAccess:false 承担。
+ */
+export function buildNetworkOpts(cfg = {}, opt = {}) {
+  return buildEgressOpts(cfg, opt).network
 }
 
 /**
@@ -110,20 +133,22 @@ export async function createSandboxRuntime(cfg = {}, { logger = null, transport 
       sweepIntervalMs: cfg.sweepIntervalMs,
       logger,
     }
+    const egress = buildEgressOpts(cfg)
     const manager = new SandboxManager({
       ...common,
       maxSandboxes: cfg.maxSandboxes,
-      network: buildNetworkOpts(cfg),
-      allowInternetAccess: cfg.network?.allowInternet === true,
+      network: egress.network,
+      allowInternetAccess: egress.allowInternetAccess,
     })
     // 候选验证用独立 manager：出口**全关**（跑的是不可信候选代码，不需要任何网络）、
     // 一次性用完即毁、并发上限更小（避免候选验证挤占会话沙箱额度）
+    const verifyEgress = buildEgressOpts(cfg, { denyAll: true })
     const verifyManager = new SandboxManager({
       ...common,
       template: cfg.verifyTemplate || cfg.template || 'base',
       maxSandboxes: Math.max(1, Math.min(2, Number(cfg.maxSandboxes) || 4)),
-      network: buildNetworkOpts(cfg, { denyAll: true }),
-      allowInternetAccess: false,
+      network: verifyEgress.network,
+      allowInternetAccess: verifyEgress.allowInternetAccess,
     })
     return {
       ...base,

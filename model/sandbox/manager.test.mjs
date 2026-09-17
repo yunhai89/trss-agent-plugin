@@ -13,7 +13,7 @@ import path from 'node:path'
 import { SandboxManager } from './manager.js'
 import { runSandboxShell } from './shell.js'
 import { SandboxError, classify } from './errors.js'
-import { makeCommandCounter, buildNetworkOpts, sessionKeyOf, isSandboxEnabled, createSandboxRuntime } from './index.js'
+import { makeCommandCounter, buildNetworkOpts, buildEgressOpts, sessionKeyOf, isSandboxEnabled, createSandboxRuntime } from './index.js'
 
 let passed = 0
 let failed = 0
@@ -312,13 +312,27 @@ await test('模式判定 / 网络选项 / 会话键 / 命令数闸', async () =>
   eq(isSandboxEnabled({ mode: 'e2b' }), false, '缺 apiKey 不启用（fail-closed）')
   eq(isSandboxEnabled({ mode: 'e2b', apiKey: 'k' }), true, 'mode=e2b + apiKey 启用')
 
-  const net = buildNetworkOpts({ network: { allowOut: ['pypi.org'], denyOut: [] } })
-  eq(net.allowOut, ['pypi.org'], 'allowOut 透传')
-  eq(net.denyOut, ['0.0.0.0/0'], 'denyOut 空 → 默认拒绝全部')
-  eq(net.allowPublicTraffic, false, '默认沙箱公开 URL 也要 token')
-  const deny = buildNetworkOpts({ network: { allowOut: ['pypi.org'] } }, { denyAll: true })
-  eq(deny.allowOut, [], 'denyAll 时清空白名单')
-  eq(deny.denyOut, ['0.0.0.0/0'], 'denyAll 拒绝全部出口')
+  // 白名单模式：allowOut 透传 + denyOut 兜底全拒 + 必须 allowInternetAccess:true（否则 allow 被 deny 压掉）
+  const wl = buildEgressOpts({ network: { allowOut: ['pypi.org'], denyOut: [] } })
+  eq(wl.network.allowOut, ['pypi.org'], 'allowOut 透传')
+  eq(wl.network.denyOut, ['0.0.0.0/0'], 'denyOut 空 → 默认拒绝全部')
+  eq(wl.network.allowPublicTraffic, false, '默认沙箱公开 URL 也要 token')
+  eq(wl.allowInternetAccess, true, '白名单模式放通互联网开关（可达范围由 allowOut 收窄）')
+  // 关键回归：无白名单 + 默认（allowInternet 未开）→ 绝不下发空 allowOut，走 allowInternetAccess:false 全拒
+  const def = buildEgressOpts({ network: {} })
+  eq(def.network.allowOut, undefined, '无白名单不下发空 allowOut（避免被归一成“未指定=放行全部”）')
+  eq(def.network.denyOut, ['0.0.0.0/0'], '无白名单显式 denyOut 全拒')
+  eq(def.allowInternetAccess, false, '默认 allowInternetAccess:false（官方等价 deny 全部）')
+  // 显式放开互联网（无白名单）→ 不下发 denyOut，allowInternetAccess:true
+  const open = buildEgressOpts({ network: { allowInternet: true } })
+  eq(open.network.denyOut, undefined, 'allowInternet:true 无白名单时不下发 denyOut')
+  eq(open.allowInternetAccess, true, 'allowInternet:true → allowInternetAccess:true')
+  // denyAll（候选验证）：无白名单 + 全拒
+  const deny = buildEgressOpts({ network: { allowOut: ['pypi.org'] } }, { denyAll: true })
+  eq(deny.network.allowOut, undefined, 'denyAll 时不下发白名单')
+  eq(deny.network.denyOut, ['0.0.0.0/0'], 'denyAll 拒绝全部出口')
+  eq(deny.allowInternetAccess, false, 'denyAll → allowInternetAccess:false')
+  eq(buildNetworkOpts({ network: {} }).allowOut, undefined, 'buildNetworkOpts 兼容出口同样不下发空 allowOut')
 
   eq(sessionKeyOf({ groupId: 'g1', scopeUserId: 'u1', conversationId: 'c9' }), 'conv:g1:u1:c9', '会话键含群/用户/会话')
   eq(sessionKeyOf({ scopeUserId: 'u1' }), 'conv:private:u1:default', '私聊缺省值稳定')

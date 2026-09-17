@@ -16,7 +16,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import Config from '../../utils/Config.js'
-import { resolveMedia, isTextLike, isTextLike as _isText, truncateText, mimeFromName } from './resolve.js'
+import { resolveMedia, isTextLike } from './resolve.js'
 import { excelBufferToText } from '../document/excel.js'
 
 const TEMP_DIR = () => Config.path.temp
@@ -65,6 +65,34 @@ function noFs(ctx) {
   return { error: '当前会话不支持群文件操作（需在群内且协议端提供 fs.ls/download）' }
 }
 
+/** 单页文本窗口上限（字符）：默认每次返回 6000，模型可用 limit 放大到 12000。
+ *  resultCap 必须大于单页最坏 JSON 体量（转义后约 2×limit + 信封），否则会被二次截断。 */
+const TEXT_CHUNK_DEFAULT = 6000
+const TEXT_CHUNK_MAX = 12000
+const TEXT_RESULT_CAP = 26000
+
+/**
+ * 文本类附件分页读取：大文件不再静默截断，而是返回一段窗口 + nextOffset，
+ * 模型据此继续按 offset 拉取直到读完整份，每页长度受 limit 约束以免撑爆上下文。
+ * 小文件（一页读完）行为与旧版一致：直接给全文，不带分页字段。
+ */
+function readTextChunk(mf, params = {}) {
+  const text = Buffer.isBuffer(mf.buffer) ? mf.buffer.toString('utf8') : String(mf.buffer || '')
+  const total = text.length
+  const offset = Math.max(0, Math.min(Number(params.offset) || 0, total))
+  const limit = Math.min(Math.max(1, Number(params.limit) || TEXT_CHUNK_DEFAULT), TEXT_CHUNK_MAX)
+  const content = text.slice(offset, offset + limit)
+  const nextOffset = offset + content.length
+  const out = { name: mf.name, size: mf.bytes, mime: mf.mime, content }
+  if (nextOffset < total) {
+    out.total = total
+    out.offset = offset
+    out.nextOffset = nextOffset
+    out.note = `文件较大（共 ${total} 字符），已分页返回 offset ${offset}~${nextOffset}。继续读取请再调用本工具并传 offset=${nextOffset}（可用 limit 调整每页长度，最大 ${TEXT_CHUNK_MAX}）。`
+  }
+  return out
+}
+
 function pickGroup(ctx) {
   return ctx?.e?.group || ctx?.bot?.pickGroup?.(ctx?.e?.group_id) || null
 }
@@ -104,14 +132,16 @@ export const listGroupFilesTool = {
 
 export const getGroupFileTool = {
   name: 'get_group_file',
-  description: '下载并读取群文件内容。按 name（文件名，模糊匹配）或 fid（群文件 id）定位。文本类（txt/md/csv/json/代码/文档等）直接返回内容；图片/二进制返回元信息（当前工具结果不支持内联图片）。',
+  description: '下载并读取群文件内容。按 name（文件名，模糊匹配）或 fid（群文件 id）定位。文本类（txt/md/csv/json/代码/文档等）返回内容——大文件自动分页，结果带 nextOffset，续读时再调用本工具并传 offset；图片/二进制返回元信息（当前工具结果不支持内联图片）。',
   category: 'group_manage',
-  meta: { resultCap: 12000 },
+  meta: { resultCap: TEXT_RESULT_CAP },
   parameters: {
     type: 'object',
     properties: {
       name: { type: 'string', description: '群文件名（与 fid 二选一）' },
       fid: { type: 'string', description: '群文件 id（与 name 二选一）' },
+      offset: { type: 'integer', description: '可选：文本类起始字符偏移（默认 0；读大文件时用上一页返回的 nextOffset）' },
+      limit: { type: 'integer', description: '可选：本次返回的最大字符数（默认 6000，最大 12000）' },
     },
   },
   async execute(params, ctx) {
@@ -139,23 +169,23 @@ export const getGroupFileTool = {
     const mf = { name: name || fid, url, fid, busid, kind: 'file' }
     await resolveMedia(mf, { bot: ctx?.bot, fetcher: ctx?.fetcher })
     if (mf.resolveError || !mf.buffer) return { name: mf.name, url, error: `下载失败：${mf.resolveError || '未知'}` }
-    if (isTextLike(mf.mime)) {
-      return { name: mf.name, size: mf.bytes, mime: mf.mime, content: truncateText(mf.buffer) }
-    }
+    if (isTextLike(mf.mime)) return readTextChunk(mf, params)
     return { name: mf.name, size: mf.bytes, mime: mf.mime, note: '非文本文件，工具结果不支持内联展示；如需识别请让用户直接发送该文件。' }
   },
 }
 
 export const readAttachmentTool = {
   name: 'read_attachment',
-  description: '读取本次对话用户已发送（被自动收集）的附件内容。文本类（txt/csv/json/代码等）直接返回内容；Excel(.xlsx/.xls) 直接解析为表格文本；PDF/Word 落盘后返回路径（可再调 read_pdf）。何时用：用户发送了文件让你查看/分析/统计时，优先用本工具（无需知道文件路径）。图片已在对话上下文中随消息发送，通常无需再读。',
+  description: '读取本次对话用户已发送（被自动收集）的附件内容。文本类（txt/csv/json/代码等）返回内容——大文件自动分页，结果带 nextOffset，续读时再调用本工具并传 offset；Excel(.xlsx/.xls) 直接解析为表格文本；PDF/Word 落盘后返回路径（可再调 read_pdf）。何时用：用户发送了文件让你查看/分析/统计时，优先用本工具（无需知道文件路径）。图片已在对话上下文中随消息发送，通常无需再读。',
   category: 'query',
-  meta: { summary: '读取附件内容', resultCap: 8000 },
+  meta: { summary: '读取附件内容', resultCap: TEXT_RESULT_CAP },
   parameters: {
     type: 'object',
     properties: {
       name: { type: 'string', description: '附件名（模糊匹配，与 index 二选一）' },
       index: { type: 'integer', description: '附件序号（从 1 开始，与 name 二选一）' },
+      offset: { type: 'integer', description: '可选：文本类起始字符偏移（默认 0；读大文件时用上一页返回的 nextOffset）' },
+      limit: { type: 'integer', description: '可选：本次返回的最大字符数（默认 6000，最大 12000）' },
     },
   },
   async execute(params, ctx) {
@@ -167,9 +197,7 @@ export const readAttachmentTool = {
     else mf = active[0]
     if (!mf) return { error: '未找到匹配的附件', available: active.map((m) => m.name) }
     if (mf.resolveError || !mf.buffer) return { name: mf.name, error: `附件未就绪：${mf.resolveError || '未下载'}` }
-    if (isTextLike(mf.mime)) {
-      return { name: mf.name, size: mf.bytes, mime: mf.mime, content: truncateText(mf.buffer) }
-    }
+    if (isTextLike(mf.mime)) return readTextChunk(mf, params)
     // 办公文档（xlsx/pdf/docx）：落盘 + 解析（问题3）
     const parsed = await parseOfficeDoc(mf)
     if (parsed) return parsed

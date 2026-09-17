@@ -184,6 +184,31 @@ await test('被动工具 get_group_file：文本类返回内容', async () => {
   ok(!r.note, '文本类无 note')
 })
 
+// ---------- 12b. 大文本分页（不再静默截断）----------
+await test('被动工具 get_group_file：大文本分页读取 + nextOffset 续读', async () => {
+  const big = 'A'.repeat(7000) + 'B'.repeat(7000) // 14000 字符，超过单页 6000
+  const ctx = {
+    e: { group_id: 'g1', group: { fs: {
+      ls: async () => ({ files: [{ file_name: 'big.txt', file_id: 'f1', size: big.length }] }),
+      download: async () => ({ url: 'http://g/big.txt' }),
+    } } },
+    bot: { download: async () => ({ buffer: Buffer.from(big) }) },
+  }
+  const p1 = await getGroupFileTool.execute({ name: 'big.txt' }, ctx)
+  eq(p1.total, 14000, 'total=全文长度')
+  eq(p1.offset, 0, '首页 offset=0')
+  eq(p1.content.length, 6000, '首页 6000 字符')
+  eq(p1.nextOffset, 6000, '首页 nextOffset=6000')
+  ok(!!p1.note, '大文件带续读指引')
+  const p2 = await getGroupFileTool.execute({ name: 'big.txt', offset: p1.nextOffset }, ctx)
+  eq(p2.offset, 6000, '第二页 offset=上一页 nextOffset')
+  eq(p2.content.length, 6000, '第二页 6000 字符')
+  const p3 = await getGroupFileTool.execute({ name: 'big.txt', offset: p2.nextOffset }, ctx)
+  eq(p3.content.length, 2000, '末页剩余 2000 字符')
+  eq(p3.nextOffset, undefined, '读完无 nextOffset')
+  ok(p3.content.endsWith('B'), '末页覆盖到文件结尾（全文可分页读全）')
+})
+
 // ---------- 13. 被动工具：read_attachment ----------
 await test('被动工具 read_attachment：读本次会话附件', async () => {
   const ctx = { media: [{ name: 'a.txt', mime: 'text/plain', buffer: Buffer.from('xyz'), bytes: 3, kind: 'file' }] }
@@ -193,6 +218,17 @@ await test('被动工具 read_attachment：读本次会话附件', async () => {
 
   const r2 = await readAttachmentTool.execute({}, { media: [] })
   ok(r2.error, '无附件 → 报错')
+})
+
+await test('被动工具 read_attachment：大文本分页（limit 封顶 + nextOffset）', async () => {
+  const big = 'x'.repeat(13000)
+  const ctx = { media: [{ name: 'big.txt', mime: 'text/plain', buffer: Buffer.from(big), bytes: big.length, kind: 'file' }] }
+  const p1 = await readAttachmentTool.execute({ index: 1, limit: 99999 }, ctx)
+  eq(p1.content.length, 12000, 'limit 被夹到上限 12000')
+  eq(p1.nextOffset, 12000, 'nextOffset=12000')
+  const p2 = await readAttachmentTool.execute({ index: 1, offset: p1.nextOffset }, ctx)
+  eq(p2.content.length, 1000, '第二页剩余 1000 字符')
+  eq(p2.nextOffset, undefined, '读完无 nextOffset')
 })
 
 // ---------- 14. applyLimits：超图片上限 ----------
