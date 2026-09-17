@@ -50,18 +50,9 @@ router.get('/config', asyncHandler(async (req, res) => {
   return ok(res, redactConfig(agent))
 }))
 
-// GET /api/sticker —— 表情包库概览（启用/总数/自动采集/目录启停/仓库状态）
+// GET /api/sticker —— 表情包库概览（启用/总数/自动采集数）
 router.get('/sticker', asyncHandler(async (req, res) => {
   return ok(res, getStickerManager().libStats())
-}))
-
-// POST /api/sticker/dir-toggle —— 启停目录 { dir, enable } → 重建清单
-router.post('/sticker/dir-toggle', asyncHandler(async (req, res) => {
-  const { dir, enable } = req.body || {}
-  if (!dir) return fail(res, CODE.BAD, '缺少 dir')
-  const result = await getStickerManager().dirToggle(String(dir), !!enable)
-  if (result?.ok === false) return fail(res, CODE.BAD, result.msg || '操作失败')
-  return ok(res, result)
 }))
 
 // GET /api/scopes —— 数据隔离维度列表（扫 memories 目录反解 scopeId）

@@ -20,7 +20,7 @@
     </div>`,
   }
 
-  /* 标签编辑器（数组字段：discoverGroups / githubProxies / excludeDirs / excludeKeywords） */
+  /* 标签编辑器（数组字段：discoverGroups） */
   const TagEditor = {
     name: 'TagEditor',
     props: { modelValue: { type: Array, required: true }, placeholder: { type: String, default: '回车添加' }, mono: { type: Boolean, default: false } },
@@ -47,9 +47,9 @@
 
   /* 默认值兜底（与 config.yaml agent.sticker 段对齐；旧 config 缺字段时防 v-model 报错） */
   const DEFAULTS = {
-    enable: false, repo: '', gitProxy: '', githubProxies: [],
+    enable: false,
     maxPerReply: 2, cooldown: 300, sendRate: 0.25, antiConsecutive: true, groupOnly: false,
-    manifest: '', excludeDirs: [], excludeKeywords: [], listTopN: 30,
+    listTopN: 30,
     autoDiscover: false, discoverGroups: [], maxDiscovered: 200, discoverMaxSizeMB: 5,
     sendStickerTool: true,
   }
@@ -78,15 +78,6 @@
         } catch (e) { lib.error = e?.message || String(e) }
         finally { lib.loading = false }
       }
-      const toggleDir = async (d) => {
-        if (!d) return
-        try {
-          await window.api.post('/sticker/dir-toggle', { dir: d.name, enable: !d.enabled })
-          toast(`${!d.enabled ? '启用' : '停用'} ${d.name}`, 'success')
-          await refreshLib()
-        } catch (e) { toast(e?.message || '操作失败', 'error') }
-      }
-
       const withDefaults = (h) => {
         const merge = (base, over) => {
           const out = Array.isArray(base) ? [...base] : { ...base }
@@ -145,7 +136,6 @@
       const sections = [
         { id: 'basic', name: '基础 / 总开关', icon: 'smile', grad: 'var(--grad-honey)' },
         { id: 'send', name: '发送策略', icon: 'send', grad: 'var(--grad-sky)' },
-        { id: 'repo', name: '仓库 / 同步', icon: 'refresh', grad: 'var(--grad-mint)' },
         { id: 'discover', name: '自动发现', icon: 'bot', grad: 'var(--grad-rose)' },
         { id: 'lib', name: '表情包库', icon: 'image', grad: 'var(--grad)' },
       ]
@@ -177,7 +167,7 @@
 
       return {
         form, dirty, save, reset, sections, open, activeSec, jump,
-        sendRatePct, lib, refreshLib, toggleDir,
+        sendRatePct, lib, refreshLib,
       }
     },
     template: `
@@ -191,8 +181,8 @@
         <div class="note">
             <v-icon name="smile" />
             <div>
-              <b>表情包</b>：reply 时按情绪/语境贴图，自动发现（MaiBot 式）被动采集群内图片 → 视觉判定+打标 → 入库。
-              <span class="mut2">未启用时零影响（不注入清单、不解析）。命令：<code>#表情包安装</code> / <code>#表情包目录</code>。</span>
+              <b>表情包</b>：reply 时按情绪/语境贴图。资源仅来自<b>自动发现</b>（MaiBot 式）：被动采集群内图片 → 视觉判定+打标 → 入库。
+              <span class="mut2">未启用时零影响（不注入清单、不解析）。命令：<code>#表情包状态</code> / <code>#表情包开启</code>。</span>
             </div>
         </div>
 
@@ -200,18 +190,12 @@
         <div :id="'sk-basic'" class="card cf-sec" :class="{open: open.basic}">
           <div class="cf-sh" @click="open.basic = !open.basic">
             <span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="smile"/></span>
-            <div><div class="ct-t">基础 / 总开关</div><div class="ct-s">总开关、仓库地址、清单注入</div></div>
+            <div><div class="ct-t">基础 / 总开关</div><div class="ct-s">总开关、清单注入</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.basic"><div class="cf-grid">
             <cfg-row name="启用表情包" desc="未启用 → 不注入清单、不解析贴图标记（零影响）">
               <v-switch v-model="form.enable"/>
-            </cfg-row>
-            <cfg-row full name="官方仓库地址" desc="作者维护的表情包仓库；留空=尚未接入（可手动 git clone 到 _repo）">
-              <input class="inp mono" style="width:100%" v-model="form.repo" placeholder="https://github.com/xxx/stickers">
-            </cfg-row>
-            <cfg-row name="manifest 文件名" desc="留空=自动识别根目录第一个合规 .json（含 id/name/tags/docs）">
-              <input class="inp" style="width:170px" v-model="form.manifest" placeholder="留空=自动">
             </cfg-row>
             <cfg-row name="清单注入上限" desc="prompt 注入的清单条数上限（listTopN）">
               <input type="number" class="inp" style="width:110px" min="5" max="200" v-model.number="form.listTopN">
@@ -251,29 +235,6 @@
           </div></div>
         </div>
 
-        <!-- ===== 仓库 / 同步 ===== -->
-        <div :id="'sk-repo'" class="card cf-sec" :class="{open: open.repo}">
-          <div class="cf-sh" @click="open.repo = !open.repo">
-            <span class="ct-ico" style="background:var(--grad-mint)"><v-icon name="refresh"/></span>
-            <div><div class="ct-t">仓库 / 同步</div><div class="ct-s">git 代理加速、目录/关键词黑名单</div></div>
-            <v-icon class="cf-arrow" name="chevron"/>
-          </div>
-          <div class="cf-body" v-show="open.repo"><div class="cf-grid">
-            <cfg-row name="git http.proxy" desc="fetch 兜底代理（如 http://127.0.0.1:7890）">
-              <input class="inp mono" style="width:200px" v-model="form.gitProxy" placeholder="留空=不走代理">
-            </cfg-row>
-            <cfg-row full name="克隆加速代理" desc="追加在内置 ghfast.top/gh-proxy.com 等之上，安装时测速选最快">
-              <tag-editor v-model="form.githubProxies" placeholder="https://ghproxy.net/" :mono="true"/>
-            </cfg-row>
-            <cfg-row full name="目录黑名单" desc="不复制进 images/ 的目录（excludeDirs）">
-              <tag-editor v-model="form.excludeDirs" placeholder="目录名回车" :mono="true"/>
-            </cfg-row>
-            <cfg-row full name="文件名关键词黑名单" desc="追加在内置表之上（excludeKeywords）">
-              <tag-editor v-model="form.excludeKeywords" placeholder="关键词回车"/>
-            </cfg-row>
-          </div></div>
-        </div>
-
         <!-- ===== 自动发现 ===== -->
         <div :id="'sk-discover'" class="card cf-sec" :class="{open: open.discover}">
           <div class="cf-sh" @click="open.discover = !open.discover">
@@ -301,7 +262,7 @@
         <div :id="'sk-lib'" class="card cf-sec" :class="{open: open.lib}">
           <div class="cf-sh" @click="open.lib = !open.lib">
             <span class="ct-ico" style="background:var(--grad)"><v-icon name="info"/></span>
-            <div><div class="ct-t">表情包库</div><div class="ct-s">已入库统计 + 目录启停（只读概览）</div></div>
+            <div><div class="ct-t">表情包库</div><div class="ct-s">已入库统计（只读概览）</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.lib">
@@ -314,21 +275,9 @@
               <cfg-row name="总开关状态" desc="当前 sticker.enable">
                 <span class="pill" :class="lib.data.enabled ? 'chip-green' : 'chip-rose'">{{ lib.data.enabled ? '已启用' : '未启用' }}</span>
               </cfg-row>
-              <cfg-row name="仓库安装状态" desc="_repo 是否已克隆">
-                <span class="pill" :class="lib.data.repoInstalled ? 'chip-green' : 'chip-rose'">{{ lib.data.repoInstalled ? '已安装' : '未安装（#表情包安装）' }}</span>
-              </cfg-row>
-              <cfg-row name="入库总数 / 自动采集" desc="index 内 sticker 总数；其中 source=discovered 计数">
+              <cfg-row name="入库总数 / 自动采集" desc="index 内 sticker 总数；其中 source=discovered（自动发现）计数">
                 <b class="num">{{ lib.data.total }}</b><span class="mut" style="margin:0 8px">/</span><b class="num">{{ lib.data.discovered }}</b>
               </cfg-row>
-              <div class="full" style="margin-top:6px">
-                <div class="mut" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="info"/> 目录启停（✅启用 / ⏸️停用；停用即加入 excludeDirs 并重建清单）</div>
-                <div v-if="(lib.data.dirs || []).length" class="row g6 wrap">
-                  <span v-for="d in lib.data.dirs" :key="d.name" class="pill" :class="d.enabled ? 'p-green' : 'p-rose'" style="cursor:pointer;padding:5px 10px" @click="toggleDir(d)">
-                    {{ d.enabled ? '✅' : '⏸️' }} {{ d.label || d.name }}
-                  </span>
-                </div>
-                <div v-else class="mut2" style="font-size:12px">暂无目录（未安装仓库，或仓库为空）。</div>
-              </div>
             </div>
             <div v-else-if="!lib.loading && !lib.error" class="mut2" style="font-size:12px">点「刷新」加载库数据。</div>
           </div>

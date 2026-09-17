@@ -97,7 +97,7 @@
         'filesystem-remote': { type: 'http', url: 'https://mcp.example.com/fs', headers: { Authorization: 'Bearer demo-token-9f' } },
       },
     },
-    sticker: { enable: true, repo: 'https://github.com/example/stickers', gitProxy: '', maxPerReply: 2, cooldown: 60, sendRate: 1 },
+    sticker: { enable: true, maxPerReply: 2, cooldown: 60, sendRate: 1 },
     calc: { enable: true, python: 'python3', timeout: 30 },
     diagram: {
       enable: true, renderer: 'kroki', fallbackRenderer: 'none', defaultTheme: 'paper-blue', defaultFormat: 'png',
@@ -340,6 +340,6 @@
     conversations, sessions, logFiles, schedules, confirms,
     suggestions, perceptions, tokenTrend, requestTrend, toolTop,
     totalRequests, totalToolCalls, totalTokens, tevoTools,
-    stickerLib: { enabled: true, repoInstalled: true, total: 128, discovered: 16, dirs: [{ name: '猫猫', enabled: true }, { name: '沙雕', enabled: true }, { name: '原神', enabled: false }] },
+    stickerLib: { enabled: true, total: 128, discovered: 128 },
   })
 })()
