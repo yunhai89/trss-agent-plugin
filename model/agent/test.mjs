@@ -1470,6 +1470,16 @@ await test('activeTools 跨轮持久：会话状态存取 + Agent 恢复扩充�
   ok(Array.isArray(st3.activeTools) && st3.activeTools.includes('web_crawl'), 'run 结束把最终激活集写回会话状态')
 })
 
+await test('工具按需发现：未配 alwaysOn 时默认常驻含群文件工具（防主代理用 terminal 瞎找）', async () => {
+  let sent = null
+  const provider = { async chat(opts) { sent = (opts.tools || []).map((t) => t.name); return { role: 'assistant', content: 'ok', toolCalls: [], finishReason: 'stop', usage: null } } }
+  const mk = (name, category) => ({ name, category, description: 'd', parameters: { type: 'object' }, async execute() { return 'x' } })
+  const tools = new ToolRegistry().register(mk('get_group_file', 'group_manage'), mk('list_group_files', 'group_manage'), mk('web_search', 'query'))
+  const agent = new Agent({ provider, tools, maxTurns: 1, reflect: 'off', toolDiscovery: { enable: true } })
+  await agent.run('看看群文件')
+  ok(sent && sent.includes('get_group_file') && sent.includes('list_group_files'), `默认常驻含群文件工具（实际 ${JSON.stringify(sent)}）`)
+})
+
 // ---------- 跨协议 usage 归一化（P0：缓存统计失真源头） ----------
 await test('usage：Anthropic input 含缓存读/写，cacheRead/cacheWrite/uncached 分离', async () => {
   const n = normalizeUsage({ input_tokens: 50, cache_read_input_tokens: 1000, cache_creation_input_tokens: 100, output_tokens: 20 })

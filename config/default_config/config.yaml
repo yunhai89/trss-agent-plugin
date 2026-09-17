@@ -154,6 +154,8 @@ agent:
       - spawn_subagent
       - check_subagent
       - extend_subagent
+      - get_group_file
+      - list_group_files
     topK: 8                   # tool_search 默认返回数
     minScore: 0.3             # 最低相似度（query 覆盖率/cosine；0.3=至少 30% 命中，平衡召回与精度）
   miyoushe:
