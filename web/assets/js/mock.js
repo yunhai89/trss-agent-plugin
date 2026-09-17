@@ -182,7 +182,7 @@
 
   /* ---------- §2.3 技能 ---------- */
   const skills = [
-    { name: 'capability-inquiry', description: '机器人能力询问:能做什么、有哪些工具、MCP 状态', when: { always: false, keywords: ['功能', 'MCP', '能做什么'], regex: ['你会(啥|什么)', 'help'] }, priority: 10, body: '# 能力询问\n\n当用户询问机器人能力时,列出当前可用工具分类:\n\n- 搜索类:web_search / deep_research\n- 媒体类:看图、识图、表情包\n- 计算类:Python 沙盒\n- 终端类(需主人)\n\n回答控制在 8 行以内。' },
+    { name: 'capability-inquiry', description: '机器人能力询问:能做什么、有哪些工具、MCP 状态', when: { always: false, keywords: ['功能', 'MCP', '能做什么'], regex: ['你会(啥|什么)', 'help'] }, priority: 10, body: '# 能力询问\n\n当用户询问机器人能力时,列出当前可用工具分类:\n\n- 搜索类:web_search / deep_research\n- 媒体类:看图、识图、表情包\n- 计算类:Python 沙盒\n- 终端类(E2B 沙箱)\n\n回答控制在 8 行以内。' },
     { name: 'deep-research', description: '深度研究:多轮检索 + 子代理并行 + 评估汇总成报告', when: { always: false, keywords: ['研究', '调研', '深挖'], regex: ['^#研究'] }, priority: 20, body: '# 深度研究\n\n触发 `#研究 <课题>` 后:\n\n1. 拆解课题为 3-5 个子问题\n2. 并行调度 worker 子代理检索\n3. 评估器打分,低分重检\n4. 汇总为带引用的研究报告(PDF)' },
     { name: 'group-admin', description: '群管:迎新、关键词提醒、违规温和警告', when: { always: true, keywords: [], regex: [] }, priority: 5, body: '# 群管技能\n\n常驻生效:\n\n- 新成员入群自动欢迎并提示群规\n- 检测到广告/引战,先私聊式温和警告\n- 被 @ 求助群规时引用公告回答' },
     { name: 'skillhub-install', description: '技能市场:从 GitHub 仓库安装/更新第三方技能', when: { always: false, keywords: ['安装技能', '技能市场'], regex: ['^#安装技能'] }, priority: 15, body: '# 技能安装\n\n`#安装技能 <repo>` 时:\n\n1. 克隆仓库到 temp/\n2. 校验 SKILL.md frontmatter\n3. 拷贝到 skills/ 并热加载\n\n注意安全:拒绝含 exec 调用的技能。' },

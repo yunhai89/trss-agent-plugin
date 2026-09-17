@@ -60,7 +60,7 @@ import { PromptRegistry, PromptTemplate, regressionGate, evolveTemplate, TEMPLAT
 import { TraceStore } from '../model/evolution/trace.js'
 import { SelfReviewer, listPendingSuggestions, removeSuggestion } from '../model/evolution/review.js'
 import { buildSituationalContext } from '../model/perception.js'
-import { makeTerminalTool, requestClaim, claim, getMaster as getTerminalMaster, isMaster as isTerminalMaster } from '../model/terminal/index.js'
+import { makeTerminalTool } from '../model/terminal/index.js'
 import { createSandboxRuntime, sessionKeyOf } from '../model/sandbox/index.js'
 import { makeStagehand } from '../model/stagehand/index.js'
 import { makeDownloadTool } from '../model/download/index.js'
@@ -224,9 +224,8 @@ function makeReplyStream(e, {
  *   #模型切换 <id>（master）                    切换模型
  *   #启用mcp <名> / #停止mcp <名>（master）     MCP 服务端启停
  *   #mcp（master）                             MCP 状态
- * 主人判定：大部分主人指令用 Yunzai 原生 permission:'master'（即 e.isMaster / cfg.master）。
- * 例外：terminal 工具用自包含的「terminal 主人」（验证码认领，model/terminal/master.js），
- *   #确认/#拒绝/#待确认 放宽为「框架主人 OR terminal 主人」均可。
+ * 主人判定：主人指令用 Yunzai 原生 permission:'master'（即 e.isMaster / cfg.master）。
+ * 例外：terminal 工具已全员开放（无身份门槛，隔离靠 E2B microVM），不再有独立认领。
  */
 
 let _runtime = null
@@ -466,8 +465,7 @@ async function buildRuntime() {
   if (sandbox.manager) {
     try {
       tools.register(makeTerminalTool({ manager: sandbox.manager }))
-      const tm = getTerminalMaster()
-      Log.info(`[terminal] 已启用沙箱终端执行工具（仅 terminal 主人可用；当前主人：${tm || '未认领，发 #agents设置主人 认领'}）`)
+      Log.info('[terminal] 已启用沙箱终端执行工具（全员可用；命令在 E2B microVM 内执行）')
     } catch (e) {
       Log.warn('[terminal] 注册失败（本工具不可用，不影响其它功能）', e?.message || e)
     }
@@ -928,11 +926,6 @@ export const makeFireDispatch = (rt) => {
 const MCP_ADD_PENDING_TTL = 120000 // 2 分钟
 const mcpAddPending = new Map() // userId(String) -> { at }
 
-// #agents设置主人 交互式监听：发命令后控制台打印验证码，该用户接下来直接发验证码认领（无需另发命令）。
-// 群聊/私聊均可；per-user 监听，其他人消息不受影响。验证码错误不消费、可重发，直到正确或超时。
-const TERMINAL_CLAIM_TTL_MS = 5 * 60 * 1000 // 5 分钟（与 master.js 验证码 TTL 一致）
-const terminalClaimPending = new Map() // userId(String) -> { at, expires }
-
 export class Chat extends plugin {
   constructor() {
     super({
@@ -945,7 +938,7 @@ export class Chat extends plugin {
         { reg: '^#启用mcp\\s+(.+)', fnc: 'enableMcp', permission: 'master' },
         { reg: '^#停止mcp\\s+(.+)', fnc: 'disableMcp', permission: 'master' },
         { reg: '^#模型切换\\s+(.+)', fnc: 'switchModel', permission: 'master' },
-        { reg: '^#确认\\s*(\\d+)', fnc: 'approve' }, // 审批：框架主人 OR terminal 主人均可用（内部 guard）
+        { reg: '^#确认\\s*(\\d+)', fnc: 'approve' }, // 审批（stagehand act / 定时任务等；terminal 已沙箱化无审批）
         { reg: '^#拒绝\\s*(\\d+)', fnc: 'reject' },
         { reg: '^#待确认$', fnc: 'pending' },
         { reg: '^#mcp$', fnc: 'mcpStatus', permission: 'master' },
@@ -971,9 +964,6 @@ export class Chat extends plugin {
         { reg: '^#取消定时任务\\s+(\\S+)', fnc: 'cancelCronTask', permission: 'master' },
         { reg: '^#LLM进化$', fnc: 'llmEvolve', permission: 'master' },
         // —— 所有用户 ——
-        // terminal 主人认领（自包含，不读框架配置；安全靠控制台验证码）
-        // #agents设置主人 → 控制台打印验证码 → 直接发验证码认领（监听下一条消息，类似 Yunzai #设置主人）
-        { reg: '^#agents设置主人$', fnc: 'terminalRequestClaim' },
         { reg: '^#聊天列表$', fnc: 'chatList' },
         { reg: '^#进入聊天\\s*(\\d+)', fnc: 'enterChat' },
         { reg: '^#new$', fnc: 'newChat' },
@@ -1026,24 +1016,6 @@ export class Chat extends plugin {
       const p = mcpAddPending.get(__uid)
       if (Date.now() - p.at > MCP_ADD_PENDING_TTL) mcpAddPending.delete(__uid) // 超时自清
       else return this._consumeMcpAddJson(this.e.msg)
-    }
-    // #agents设置主人 交互式认领：该用户处于监听态时，下一条消息作为验证码消费（群聊/私聊均生效）
-    if (terminalClaimPending.has(__uid)) {
-      const p = terminalClaimPending.get(__uid)
-      if (Date.now() > p.expires) {
-        terminalClaimPending.delete(__uid) // 超时自清
-      } else {
-        const code = (this.e.msg || '').trim()
-        const r = claim(code, __uid)
-        if (r.ok) {
-          terminalClaimPending.delete(__uid) // 认领成功，退出监听
-          await this.e.reply(`✅ 认领成功！你（${r.userId}）已成为 terminal 主人。\n现在可让 AI 使用 terminal 工具在 E2B 沙箱内执行命令（与宿主隔离、出口按白名单放行、无审批）。若尚未配置沙箱（agent.sandbox.mode=e2b + apiKey），该工具不会注册。`)
-        } else {
-          // 验证码错误：保持监听，用户可在超时前继续重发（code 不变，无需重新 #agents设置主人）
-          await this.e.reply(`❌ ${r.reason}，请直接重新发送验证码（控制台查看 ${Math.round((p.expires - Date.now()) / 1000)} 秒内有效）。`)
-        }
-        return true
-      }
     }
     const cfg = Config.get().agent || {}
     const mode = cfg.trigger || 'at' // at | command | both
@@ -1170,7 +1142,7 @@ export class Chat extends plugin {
       },
       cancel: (id) => rt.schedule.cancel(id),
     }
-    // terminal 工具运行时配置（沙箱执行；无审批无黑名单，只有主人校验 + 成本闸）
+    // terminal 工具运行时配置（沙箱执行；全员可用，无审批无黑名单，只有成本闸）
     ctx.sandbox = {
       manager: rt.sandbox?.manager || null,
       defaultCwd: cfg.sandbox?.defaultCwd || '/home/user',
@@ -1992,7 +1964,7 @@ export class Chat extends plugin {
   // 注：terminal 已沙箱化，不再走审批（无 #确认 / 无 terminal 自包含审批队列）。
   async approve() {
     const id = this.e.msg.match(/\d+/)?.[0]
-    if (!this.e.isMaster && !isTerminalMaster(this.e.user_id)) return this.e.reply('无权限：仅主人可审批'), true
+    if (!this.e.isMaster) return this.e.reply('无权限：仅主人可审批'), true
     const rt = await getRuntime()
     if (rt.confirm.resolve(id, true)) return this.e.reply(`已批准 #${id}`), true
     await this.e.reply(`未找到待审 #${id}`)
@@ -2001,7 +1973,7 @@ export class Chat extends plugin {
 
   async reject() {
     const id = this.e.msg.match(/\d+/)?.[0]
-    if (!this.e.isMaster && !isTerminalMaster(this.e.user_id)) return this.e.reply('无权限：仅主人可审批'), true
+    if (!this.e.isMaster) return this.e.reply('无权限：仅主人可审批'), true
     const rt = await getRuntime()
     if (rt.confirm.resolve(id, false)) return this.e.reply(`已拒绝 #${id}`), true
     await this.e.reply(`未找到待审 #${id}`)
@@ -2009,23 +1981,13 @@ export class Chat extends plugin {
   }
 
   async pending() {
-    if (!this.e.isMaster && !isTerminalMaster(this.e.user_id)) return this.e.reply('无权限：仅主人可查看'), true
+    if (!this.e.isMaster) return this.e.reply('无权限：仅主人可查看'), true
     const rt = await getRuntime()
     const list = rt.confirm.list()
     if (!list.length) return this.e.reply('当前无待审批'), true
     const lines = []
     for (const p of list) lines.push(`#${p.id} ${p.tool} ${JSON.stringify(p.args || {}).slice(0, 80)}`)
     await this.e.reply(lines.join('\n'))
-    return true
-  }
-
-  // —— terminal 主人认领（自包含、验证码；不读框架配置）——
-  // #agents设置主人 → 控制台打印验证码 + 进入监听态，用户接下来直接发验证码认领（类似 Yunzai #设置主人）
-  async terminalRequestClaim() {
-    const { ttlMs } = requestClaim()
-    const uid = String(this.e.user_id)
-    terminalClaimPending.set(uid, { at: Date.now(), expires: Date.now() + ttlMs })
-    await this.e.reply(`✅ terminal 主人认领验证码已打印到控制台（${Math.round(ttlMs / 1000)} 秒有效）。\n请在控制台查看验证码，然后直接把它发到这里完成认领（无需加任何命令前缀，${Math.round(ttlMs / 1000)} 秒内可重发）。认领成功即成为 terminal 主人（替换旧主人）。\n注：命令在 E2B 沙箱内执行，无需 #确认；需先在配置里设 agent.sandbox.mode=e2b 并填 apiKey。`)
     return true
   }
 

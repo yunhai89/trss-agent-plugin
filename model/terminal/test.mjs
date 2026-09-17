@@ -7,6 +7,8 @@
  *   - 旧「黑名单拦截 / 自定义 blocklist / 审批拒 / 审批通过」四个断言删除：
  *     沙箱化后无审批、无黑名单 —— 这里反向固化为「灾难命令会到达沙箱传输层」，
  *     防止哪天有人把宿主黑名单逻辑又加回来造成"以为安全其实没隔离"
+ *   - 旧「terminal 主人验证码认领」访问门删除：产品决策为**全员可用**，
+ *     隔离与成本由 E2B microVM + 单会话命令数/并发/超时上限承担（不再有身份校验）。
  */
 import { makeTerminalTool } from './index.js'
 import { runSandboxShell } from '../sandbox/index.js'
@@ -39,25 +41,26 @@ function stubTransport({ runImpl = null } = {}) {
 }
 const mkBox = (t, over = {}) => new SandboxManager({ transport: t, idleMs: 60000, sandboxTtlMs: 600000, sweepIntervalMs: 100000, ...over })
 
-// ---------- 1. 非主人：直接拒，连沙箱都不碰 ----------
-await test('terminal：非主人直接拒（不创建沙箱、不执行命令）', async () => {
+// ---------- 1. 全员可用：任意用户都能执行（无身份门槛）----------
+await test('terminal：任意用户可执行（不再校验主人）', async () => {
   const t = stubTransport()
   const box = mkBox(t)
   try {
-    const tool = makeTerminalTool({ isMasterFn: () => false, manager: box })
-    const r = await tool.execute({ command: 'echo hi' }, { userId: '999', sandbox: {} })
-    ok(r.error && r.error.includes('主人'), '非主人被拒')
-    eq(t.calls.create, 0, '未创建沙箱')
-    eq(t.calls.run, 0, '未执行命令')
+    const tool = makeTerminalTool({ manager: box })
+    const r = await tool.execute({ command: 'echo hi' }, { userId: '999', sandbox: { audit: false, manager: box, sessionKey: 'k-any' } })
+    ok(!r.error, '普通用户不被拒')
+    eq(r.ok, true, '命令执行（沙箱返回 0）')
+    eq(t.calls.create, 1, '创建沙箱')
+    eq(t.calls.run, 1, '执行命令')
   } finally { await box.shutdown() }
 })
 
-// ---------- 2. 主人 + 沙箱执行：契约字段 ----------
-await test('terminal：主人执行 → 走沙箱并回显契约字段', async () => {
+// ---------- 2. 沙箱执行：契约字段 ----------
+await test('terminal：执行 → 走沙箱并回显契约字段', async () => {
   const t = stubTransport({ runImpl: () => makeHandle({ exitCode: 0, stdout: 'approved' }) })
   const box = mkBox(t)
   try {
-    const tool = makeTerminalTool({ isMasterFn: () => true, manager: box })
+    const tool = makeTerminalTool({ manager: box })
     const r = await tool.execute({ command: 'echo approved' }, { userId: '1', sandbox: { audit: false } })
     eq(r.command, 'echo approved', '回显命令')
     eq(r.ok, true, 'ok:true')
@@ -73,7 +76,7 @@ await test('terminal：审批与黑名单已移除（灾难命令直达沙箱）
   const t = stubTransport()
   const box = mkBox(t)
   try {
-    const tool = makeTerminalTool({ isMasterFn: () => true, manager: box })
+    const tool = makeTerminalTool({ manager: box })
     // 旧实现在这里有 #确认 审批；现在 approve 就算抛错也不应被调用
     const r = await tool.execute({ command: 'rm -rf / --no-preserve-root' }, {
       userId: '1',
@@ -87,7 +90,7 @@ await test('terminal：审批与黑名单已移除（灾难命令直达沙箱）
 
 // ---------- 4. 沙箱不可用 → fail-closed ----------
 await test('terminal：沙箱不可用时拒绝执行（不在本机跑）', async () => {
-  const tool = makeTerminalTool({ isMasterFn: () => true, manager: null })
+  const tool = makeTerminalTool({ manager: null })
   const r = await tool.execute({ command: 'echo hi' }, { userId: '1', sandbox: { manager: null } })
   ok(r.error && r.error.includes('沙箱不可用'), '返回失败而非执行')
   eq(r.stdout, undefined, '没有 stdout（没有本地执行兜底）')
@@ -98,7 +101,7 @@ await test('terminal：单会话命令数超限 → 拒绝并提示', async () =
   const t = stubTransport()
   const box = mkBox(t)
   try {
-    const tool = makeTerminalTool({ isMasterFn: () => true, manager: box })
+    const tool = makeTerminalTool({ manager: box })
     const ctx = { userId: '1', sandbox: { audit: false, manager: box, sessionKey: 'k', maxCommandsPerSession: 2 } }
     const { makeCommandCounter } = await import('../sandbox/index.js')
     ctx.sandbox.commands = makeCommandCounter(2)
@@ -115,7 +118,7 @@ await test('terminal：空命令直接拒', async () => {
   const t = stubTransport()
   const box = mkBox(t)
   try {
-    const tool = makeTerminalTool({ isMasterFn: () => true, manager: box })
+    const tool = makeTerminalTool({ manager: box })
     const r = await tool.execute({ command: '   ' }, { userId: '1', sandbox: { manager: box } })
     eq(r.error, '空命令', '空命令报错')
     eq(t.calls.run, 0, '未送达沙箱')
@@ -178,16 +181,17 @@ await test('runShell：abort 立即结算并杀命令（桩句柄，无宿主子
   } finally { await box.shutdown() }
 })
 
-// ---------- 11. 语义常量不再导出（避免误解为仍有黑名单）----------
-await test('导出面：不再暴露黑名单/审批 API', async () => {
+// ---------- 11. 语义常量/身份门不再导出（避免误解为仍有黑名单或主人门）----------
+await test('导出面：不再暴露黑名单/审批/主人认领 API', async () => {
   const mod = await import('./index.js')
   eq(mod.DEFAULT_BLOCKLIST, undefined, 'DEFAULT_BLOCKLIST 已移除')
   eq(mod.matchesAny, undefined, 'matchesAny 已移除')
   eq(mod.requestTerminalApproval, undefined, 'requestTerminalApproval 已移除')
   eq(mod.resolveApproval, undefined, 'resolveApproval 已移除')
   eq(mod.listApprovals, undefined, 'listApprovals 已移除')
+  eq(mod.isMaster, undefined, 'isMaster 已移除（全员可用，无身份门槛）')
+  eq(mod.requestClaim, undefined, 'requestClaim 已移除（不再需要认领）')
   ok(typeof mod.makeTerminalTool === 'function', 'makeTerminalTool 保留')
-  ok(typeof mod.isMaster === 'function' && typeof mod.requestClaim === 'function', '主人认领 API 保留（唯一访问门）')
 })
 
 // ---------- 总结 ----------

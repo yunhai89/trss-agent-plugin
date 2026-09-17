@@ -202,7 +202,7 @@ export function supportGuoba() {
           field: 'agent.sandbox.mode',
           label: '执行面模式',
           helpMessage: 'off=不注册终端工具（宿主无 shell 执行面）；e2b=命令在 E2B 微虚机内执行。',
-          bottomHelpMessage: '沙箱化后不再有 #确认 审批与命令黑名单：命令跑在独立 Firecracker microVM 里，网络出口按白名单收紧。连不上 E2B 时一律拒绝执行（绝不回退到本机）。仅 terminal 主人可用（#agents设置主人 → 控制台验证码 → 直接发码认领）。',
+          bottomHelpMessage: '沙箱化后不再有 #确认 审批与命令黑名单：命令跑在独立 Firecracker microVM 里，网络出口按白名单收紧。连不上 E2B 时一律拒绝执行（绝不回退到本机）。**全员可用**（按会话隔离沙箱，成本由单会话命令数/并发/超时上限兜底，无需认领主人）。',
           component: 'Select',
           componentProps: { options: [{ label: 'off（关闭）', value: 'off' }, { label: 'e2b（沙箱执行）', value: 'e2b' }] },
         },
