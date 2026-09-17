@@ -55,21 +55,28 @@ const MAX_BUDGET_MS = 600000
 const HARD_GRACE_MS = 30000 // 预算到点（协作取消）后，最多再等这么久；仍不结算就强制判超时并释放并发槽
 const STALE_MS = 10 * 60 * 1000 // 终态任务保留时长 / 会话配额记录过期时长
 
+/**
+ * 按白名单 + 可达性构建子代理工具集。
+ * @returns {{ registry: ToolRegistry|null, granted: string[], dropped: string[] }}
+ *   granted=实际下发的工具名；dropped=请求了但不可用的工具名（供主代理据此改派/自己完成）。
+ */
 function buildWorkerTools(sourceRegistry, names, defaultNames) {
-  if (!sourceRegistry) return null
+  if (!sourceRegistry) return { registry: null, granted: [], dropped: [] }
   const wanted = (Array.isArray(names) && names.length ? names : defaultNames).map(String)
   const workerReg = new ToolRegistry()
+  const granted = []
+  const dropped = []
   for (const name of wanted) {
-    if (name === 'spawn_subagent' || name === 'check_subagent' || name === 'extend_subagent') continue
-    if (WORKER_CTX_UNSUPPORTED.has(name)) continue // 依赖子代理没有的运行时句柄 → 剔除
+    if (name === 'spawn_subagent' || name === 'check_subagent' || name === 'extend_subagent') { dropped.push(name); continue }
+    if (WORKER_CTX_UNSUPPORTED.has(name)) { dropped.push(name); continue } // 依赖子代理没有的运行时句柄 → 剔除
     const tool = sourceRegistry.get(name)
-    if (!tool) continue
-    if (!ALLOWED_TOOL_CATEGORIES.has(tool.category || 'query')) continue
+    if (!tool) { dropped.push(name); continue }
+    if (!ALLOWED_TOOL_CATEGORIES.has(tool.category || 'query')) { dropped.push(name); continue }
     // 声明式能力校验：meta.requires 里有子代理 ctx 不提供的键 → 不下发
-    if (Array.isArray(tool.meta?.requires) && tool.meta.requires.some((k) => !WORKER_CTX_KEYS.has(k))) continue
-    workerReg.register(tool)
+    if (Array.isArray(tool.meta?.requires) && tool.meta.requires.some((k) => !WORKER_CTX_KEYS.has(k))) { dropped.push(name); continue }
+    if (!workerReg.has(name)) { workerReg.register(tool); granted.push(name) }
   }
-  return workerReg
+  return { registry: workerReg, granted, dropped }
 }
 
 /** 会话作用域键：配额与任务归属都按它隔离（与 Agent/session 的群:用户:会话同源） */
@@ -116,6 +123,11 @@ export function makeSpawnSubagentTools({
   let _seq = 0 // 全局自增序号（taskId/specName 用；与配额无关）
   const sem = semaphore || new Semaphore(3)
   const trace = new Trace()
+  // 子代理能力清单（默认工具集里实际可下发的安全工具名）——写进工具描述，让主代理知道子代理能干什么
+  const _capability = buildWorkerTools(sourceRegistry, null, defaultTools)
+  const capabilityLine = _capability.granted.length
+    ? `子代理默认可用工具：${_capability.granted.join('、')}。`
+    : '子代理当前没有可用工具（只能凭自身知识作答）。'
 
   // 任务注册表（闭包内，per-runtime 隔离）
   // taskId → { status, scope, createdAt, startedAt, finishedAt, budgetMs, abort, _budgetTimer, _hardTimer, _hardReject, result, error, specName }
@@ -240,6 +252,8 @@ export function makeSpawnSubagentTools({
     name: 'spawn_subagent',
     description:
       '异步启动一个独立子代理执行子任务，立即返回 taskId（不阻塞）。子代理在后台独立运行，有自己的上下文和时间预算。' +
+      capabilityLine +
+      '子代理只能使用上述只读类工具，无法访问群文件/群成员/附件/终端/发消息等需要主会话句柄的工具——若任务需要这些能力，请主代理自己完成，不要委派。' +
       '启动后用 check_subagent(taskId) 查看进度（running/done/failed/timeout），done 时返回完整结果。' +
       '快到时间预算但子代理还在跑，用 extend_subagent(taskId, extraMs) 续期。建议每 1-2 轮 check 一次。',
     category: 'query',
@@ -250,7 +264,7 @@ export function makeSpawnSubagentTools({
       properties: {
         task: { type: 'string', description: '自包含的任务描述（子代理看不到主对话）：目标+输出格式+边界。', maxLength: 2000 },
         focus: { type: 'string', description: '专注方向', enum: ['research', 'analysis', 'writing', 'code'] },
-        tools: { type: 'array', items: { type: 'string' }, description: '子代理可用工具（默认 web_search+memory_search，仅只读类）' },
+        tools: { type: 'array', items: { type: 'string' }, description: `子代理可指定工具子集；不可用工具会被拒绝并在结果里列出。默认：${_capability.granted.join('、') || '（无）'}` },
         timeBudgetMs: { type: 'integer', description: '子代理时间预算（毫秒，默认 120000=2 分钟）。超时则 timeout 终止。', default: 120000, minimum: 10000, maximum: 600000 },
       },
       additionalProperties: false,
@@ -259,6 +273,15 @@ export function makeSpawnSubagentTools({
     async execute(params = {}, ctx) {
       const task = String(params.task || '').trim()
       if (!task) return { error: 'task 不能为空' }
+
+      // 能力解析（先于配额计数）：主代理指定的工具不可用时直接拒绝并回报，避免"以为给到了、其实没有"
+      const { registry: workerTools, granted, dropped } = buildWorkerTools(sourceRegistry, params.tools, defaultTools)
+      if (Array.isArray(params.tools) && params.tools.length && !granted.length) {
+        return {
+          error: `请求的工具子代理均不可用：${dropped.join('、')}（子代理只能用只读类、且不依赖主会话句柄的工具）`,
+          available: _capability.granted,
+        }
+      }
 
       _cleanupOld()
       const scope = scopeKeyOf(ctx)
@@ -275,13 +298,12 @@ export function makeSpawnSubagentTools({
       const taskId = `sub_${_seq}_${Date.now().toString(36)}`
 
       // 构造子代理（身份 ctx 子集随 run 传入，供 memory_search 等 query 工具使用）
-      const workerTools = buildWorkerTools(sourceRegistry, params.tools, defaultTools)
       const workerCtx = workerCtxOf(ctx)
       // 回推用的最小投递上下文（e/bot 供会话回复；不带权限对象）——主循环结束后结算时使用
       const deliverCtx = ctx ? { e: ctx.e, bot: ctx.bot, groupId: ctx.groupId, userId: ctx.userId, conversationId: ctx.conversationId } : null
       const spec = new SubagentSpec({
         name: specName, description: `子代理 #${_seq}（${focus}）`,
-        systemPrompt: FOCUS_PROMPTS[focus], tools: workerTools, model, provider, maxTurns,
+        systemPrompt: FOCUS_PROMPTS[focus], tools: (workerTools && workerTools.list().length) ? workerTools : null, model, provider, maxTurns,
       })
 
       const abort = new AbortController()
@@ -337,7 +359,8 @@ export function makeSpawnSubagentTools({
 
       return {
         ok: true, taskId, status: 'queued', timeBudgetMs: budgetMs,
-        message: `子代理 ${taskId} 已启动（预算 ${Math.round(budgetMs / 1000)} 秒，按本会话计数）。调用 check_subagent("${taskId}") 等待其完成：该工具会阻塞至完成或最多等待 30 秒（可传 waitMs 调整），期间不消耗额外模型轮次。`,
+        tools: granted, ...(dropped.length ? { droppedTools: dropped, warning: `以下工具有子代理不可用，已忽略：${dropped.join('、')}（需要这些能力请在主代理内完成）` } : {}),
+        message: `子代理 ${taskId} 已启动（可用工具：${granted.join('、') || '无'}；预算 ${Math.round(budgetMs / 1000)} 秒，按本会话计数）。调用 check_subagent("${taskId}") 等待其完成：该工具会阻塞至完成或最多等待 30 秒（可传 waitMs 调整），期间不消耗额外模型轮次。`,
       }
     },
   }

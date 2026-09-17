@@ -350,6 +350,28 @@ await test('子代理工具可达性：剔除依赖 e/bot/sandbox/media 的工�
   ok(!toolsSent.includes('get_group_file'), 'get_group_file（group_manage）被剔除')
 })
 
+// ---------- 16. 子代理能力可见 + 不可用工具反馈 ----------
+await test('子代理能力可见：spawn 回报可用工具、拒绝/标注不可用工具', async () => {
+  const prov = { async chat() { return { role: 'assistant', content: 'ok', toolCalls: [], finishReason: 'stop', usage: null } } }
+  const reg = new ToolRegistry()
+  reg.register({ name: 'web_search', category: 'query', description: 'd', parameters: { type: 'object' }, async execute() { return {} } })
+  reg.register({ name: 'terminal', category: 'query', description: 'd', parameters: { type: 'object' }, async execute() { return {} } })
+  const tools = makeSpawnSubagentTools({ provider: prov, sourceRegistry: reg, defaultTools: ['web_search'], maxConcurrent: 1, minBudgetMs: 10000 })
+  const spawn = tools[0]
+  ok(spawn.description.includes('web_search'), 'spawn 描述列出默认可用工具（能力可见）')
+  const ctx = { userId: 'u', conversationId: 'c' }
+  // 部分可用：回报 granted + dropped
+  const r = await spawn.execute({ task: 't', tools: ['web_search', 'terminal'] }, ctx)
+  eq(r.ok, true, '部分可用仍可启动')
+  eq(r.tools, ['web_search'], '回报实际下发的工具')
+  eq(r.droppedTools, ['terminal'], '回报被忽略的工具')
+  ok(/不可用/.test(String(r.warning || '')), 'warning 提示不可用工具')
+  // 全不可用：直接拒绝并给出可用清单
+  const r2 = await spawn.execute({ task: 't2', tools: ['terminal'] }, ctx)
+  ok(!!r2.error && /不可用/.test(r2.error), '请求工具全不可用 → 直接拒绝')
+  eq(r2.available, ['web_search'], '返回可用清单供改派/主代理自行完成')
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
