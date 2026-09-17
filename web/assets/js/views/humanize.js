@@ -44,16 +44,10 @@
     </div>`,
   }
 
-  const OPT = {
-    triggerMode: [['necessity', '必要性评分（推荐）'], ['frequency', '有效发言频率']],
-    quoteTarget: [['auto', 'auto（Planner 决定）'], ['always', 'always（总是引用）'], ['never', 'never（不引用）']],
-    learningStyle: [['shadow', 'shadow（只采集）'], ['review', 'review（人工审核）'], ['on', 'on（已审核注入）'], ['off', 'off（关闭）']],
-  }
-
   /* 默认值兜底（与 model/humanize/default-config.js 对齐；旧 config 缺字段时防 v-model 报错） */
   const DEFAULTS = {
-    enable: false, groups: [], shadow: true, triggerMode: 'necessity', talkValue: 0.35,
-    mentionHandledByDirectAgent: true, debounceMs: 1200, plannerTimeoutMs: 30000, maxPlannerRounds: 4,
+    enable: false, groups: [], shadow: true, talkValue: 0.35,
+    debounceMs: 1200, plannerTimeoutMs: 30000, maxPlannerRounds: 4,
     contextMessages: 30, threshold: 80, cooldownSeconds: 45, presenceWindowSeconds: 300, maxRepliesPer10Minutes: 4,
     bufferCapacity: 150, bufferTtlHours: 2, idleBackoffBaseSeconds: 15, idleBackoffCapSeconds: 300,
     idleBackoffStartCount: 2, bypassPendingCount: 6, personaName: '', botId: '',
@@ -61,10 +55,9 @@
     persona: { name: '', prompt: '', fromPersonaId: '' },
     planner: { model: '', temperature: 0.2, maxTokens: 800, allowedReadTools: [] },
     replyer: { model: '', temperature: 0.7, maxTokens: 500, maxChars: 500 },
-    reply: { maxBubbles: 3, typingSpeed: 1.0, minDelayMs: 600, maxDelayMs: 3500, typos: false, allowSticker: true, quoteTarget: 'auto' },
+    reply: { maxBubbles: 3, typingSpeed: 1.0, minDelayMs: 600, maxDelayMs: 3500, typos: false, allowSticker: true },
     behaviorPolicy: { topics: [], avoidTopics: [], initiative: 0.35, humor: 0.4, answerUnknownQuestions: false, interruptHumanConversation: false, maxRepliesPer10Minutes: 4 },
-    learning: { style: 'shadow', jargon: 'shadow', behavior: false, minSamples: 20, requireReview: true },
-    safety: { blockCommands: true, blockDestructiveTools: true, privateMemoryInGroup: false, maxConcurrentGroups: 1 },
+    safety: { privateMemoryInGroup: false, maxConcurrentGroups: 1 },
   }
 
   window.VIEWS.humanize = {
@@ -227,9 +220,6 @@
             <cfg-row name="shadow 观察模式" desc="true=只记录决策 trace、不真实发送（强烈建议先观察）">
               <v-switch v-model="form.shadow"/>
             </cfg-row>
-            <cfg-row name="触发模式" desc="necessity=评分触发（推荐）；frequency=有效发言频率">
-              <select class="sel" style="width:190px" v-model="form.triggerMode"><option v-for="o in OPT.triggerMode" :value="o[0]">{{ o[1] }}</option></select>
-            </cfg-row>
             <cfg-row name="机器人群内名字" desc="提及昵称判定用；留空=自动取 Bot.nickname">
               <input class="inp" style="width:170px" v-model="form.personaName" placeholder="留空=自动">
             </cfg-row>
@@ -377,9 +367,6 @@
                 <input type="number" class="inp" style="width:100px" min="100" v-model.number="form.reply.maxDelayMs">
               </div>
             </cfg-row>
-            <cfg-row name="引用目标消息" desc="首段是否引用目标">
-              <select class="sel" style="width:190px" v-model="form.reply.quoteTarget"><option v-for="o in OPT.quoteTarget" :value="o[0]">{{ o[1] }}</option></select>
-            </cfg-row>
             <cfg-row name="尾随表情包" desc="复用 sticker cooldown/sendRate/antiConsecutive">
               <v-switch v-model="form.reply.allowSticker"/>
             </cfg-row>
@@ -424,26 +411,6 @@
             <cfg-row name="群内最大回复/10分钟" desc="行为政策层频率上限（覆盖全局）">
               <input type="number" class="inp" style="width:110px" min="0" max="60" v-model.number="form.behaviorPolicy.maxRepliesPer10Minutes">
             </cfg-row>
-            <div class="full" style="margin-top:6px;padding-top:10px;border-top:1px dashed var(--line)">
-              <div class="mut" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="info"/> 表达/黑话学习（Phase 4 · 仅 shadow 采集，不进 Prompt）</div>
-              <div class="cf-grid">
-                <cfg-row name="表达样本采集">
-                  <select class="sel" style="width:150px" v-model="form.learning.style"><option v-for="o in OPT.learningStyle" :value="o[0]">{{ o[1] }}</option></select>
-                </cfg-row>
-                <cfg-row name="黑话样本采集">
-                  <select class="sel" style="width:150px" v-model="form.learning.jargon"><option v-for="o in OPT.learningStyle" :value="o[0]">{{ o[1] }}</option></select>
-                </cfg-row>
-                <cfg-row name="行为学习" desc="第一版建议关闭">
-                  <v-switch v-model="form.learning.behavior"/>
-                </cfg-row>
-                <cfg-row name="最小样本数" desc="达到才生成候选">
-                  <input type="number" class="inp" style="width:100px" min="5" v-model.number="form.learning.minSamples">
-                </cfg-row>
-                <cfg-row name="需人工审核" desc="开=候选须经主人审核才注入；关=自动注入（不建议）">
-                  <v-switch v-model="form.learning.requireReview"/>
-                </cfg-row>
-              </div>
-            </div>
           </div></div>
         </div>
 
@@ -455,12 +422,6 @@
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.safety"><div class="cf-grid">
-            <cfg-row name="阻断命令触发" desc="命令消息绝不触发环境回复">
-              <v-switch v-model="form.safety.blockCommands"/>
-            </cfg-row>
-            <cfg-row name="阻断破坏性工具" desc="写/删/管理/终端工具对 Planner 不可见">
-              <v-switch v-model="form.safety.blockDestructiveTools"/>
-            </cfg-row>
             <cfg-row name="发送前脱敏" desc="拦截回复中的秘钥/Token（redactSecrets）">
               <v-switch v-model="form.redactSecrets"/>
             </cfg-row>
@@ -469,9 +430,6 @@
             </cfg-row>
             <cfg-row name="同时 Planning 群数上限" desc="全局信号量；默认 1（MVP）">
               <input type="number" class="inp" style="width:90px" min="1" max="10" v-model.number="form.safety.maxConcurrentGroups">
-            </cfg-row>
-            <cfg-row name="@机器人 由 Direct Agent 接管" desc="环境模式不从此触发（独占回复）">
-              <v-switch v-model="form.mentionHandledByDirectAgent"/>
             </cfg-row>
             <div class="full" style="margin-top:8px;padding:10px 14px;border:1px dashed var(--line);border-radius:10px;background:rgba(255,255,255,.42)">
               <div class="mut2" style="font-size:12px;line-height:1.7">

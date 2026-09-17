@@ -56,7 +56,7 @@ import { randomUUID } from 'node:crypto'
 import devLog from '../utils/DevLog.js'
 import { ReplySender, createRunQueues } from '../model/agent/reply-sender.js'
 import { SkillRegistry, loadSkillPack, makeSkillTool } from '../model/skill/index.js'
-import { PromptRegistry, PromptTemplate, regressionGate, evolveTemplate, TEMPLATES } from '../model/prompt/index.js'
+import { PromptRegistry, PromptTemplate, evolveTemplate, TEMPLATES } from '../model/prompt/index.js'
 import { TraceStore } from '../model/evolution/trace.js'
 import { SelfReviewer, listPendingSuggestions, removeSuggestion } from '../model/evolution/review.js'
 import { buildSituationalContext } from '../model/perception.js'
@@ -444,7 +444,9 @@ async function buildRuntime() {
       .register(reminderSetTool) // reminder_set：对话设提醒（到时间 fireReminder 主动发消息）
       .register(reminderListTool) // reminder_list：查看当前用户提醒/定时任务
       .register(reminderCancelTool) // reminder_cancel：取消指定 id 的提醒/定时任务
-      .register(scheduleTaskTool) // schedule_task：对话设 cron 重复任务链（到点跑 Agent + 发结果）
+    // schedule_task：对话设 cron 重复任务链（到点跑 Agent + 发结果）；taskEnabled=false 时不注册
+    if (cfg.schedule?.taskEnabled !== false) tools.register(scheduleTaskTool)
+    else Log.info('[schedule] 定时任务已关闭（schedule.taskEnabled=false），schedule_task 工具不注册')
   }
 
   // Pixiv（需 refreshToken；未配置则不注册，避免暴露不可用工具）
@@ -497,7 +499,7 @@ async function buildRuntime() {
   tools.register(readPdfTool) // read_pdf：读取 PDF 文本+页面图片
   tools.register(createExcelTool) // create_excel：创建带样式 Excel
   tools.register(readExcelTool) // read_excel：读取 Excel 为表格文本
-  tools.register(transcribeMediaTool) // transcribe_media：音视频转文字(STT)
+  if (cfg.stt?.enable !== false) tools.register(transcribeMediaTool) // transcribe_media：音视频转文字(STT)
   tools.register(fileToPdfTool) // file_to_pdf：任意文件转 PDF 并发送
 
   // 示意图渲染（diagram_render）：LLM 提交语义 DiagramSpec → 确定性 D2 编译 → 自托管 Kroki 渲染 SVG
@@ -742,6 +744,22 @@ async function buildRuntime() {
         maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
         defaultTools: cfg.multiagent?.defaultTools || ['web_search', 'memory_search'],
         maxSpawns: cfg.multiagent?.maxSpawnsPerConversation ?? 5,
+        // 主循环结束后，未被 check_subagent 取走的子代理结果/失败异步回推给会话（防"后续无反应"）
+        onSettle: (info, sctx) => {
+          try {
+            const label = info.task ? `「${String(info.task).slice(0, 40)}」` : ''
+            const head = info.status === 'done'
+              ? `🤖 后台子代理任务完成${label}：`
+              : `⚠️ 后台子代理任务${info.status === 'timeout' ? '超时' : info.status === 'cancelled' ? '已中止' : '失败'}${label}：${String(info.error || '未知原因').slice(0, 200)}`
+            const body = redactSecrets(info.status === 'done' ? `${head}\n${String(info.result || '').slice(0, 1800)}` : head).trim()
+            if (!body) return
+            const send = (m) => (sctx?.e?.reply ? sctx.e.reply(m)
+              : (sctx?.bot?.pickGroup && sctx.groupId) ? sctx.bot.pickGroup(sctx.groupId).sendMsg(m)
+                : (sctx?.bot?.pickFriend && sctx.userId) ? sctx.bot.pickFriend(sctx.userId).sendMsg(m)
+                  : null)
+            Promise.resolve(send(body)).catch((err) => Log.warn('[multiagent] 子代理结果回推失败', err?.message || err))
+          } catch (e) { Log.warn('[multiagent] onSettle 异常', e?.message || e) }
+        },
       })
       for (const t of subagentTools) tools.register(t)
       multiagent = subagentTools // 暴露 shutdown()：热重载/退出时终止在跑子代理
@@ -1032,16 +1050,40 @@ export class Chat extends plugin {
     const isAt = !!this.e.atBot
     const cmdRe = new RegExp(`^${cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`)
     const isCmd = cmdMode && cmdRe.test(text)
-    const hasMedia = this._hasMedia(this.e)
+    // media.enable=false 时不把媒体算作触发条件（图片/文件消息不触发，避免每张图都回"未识别到"）
+    const hasMedia = cfg.media?.enable !== false && this._hasMedia(this.e)
     // 触发条件：命令匹配 ｜（@机器人 且（有文字 或 有媒体））。
     // 关键：纯引用图片/文件无文字也算触发（问题4）—— 媒体由 _handleAgent 注入默认指令处理。
     // 私聊直接触发（私聊无 @，at 模式下原本不触发；私聊任何消息都该能对话）
     const isPrivate = !this.e.isGroup
     if (!(isPrivate || isCmd || (atMode && isAt && (text || hasMedia)))) return false
+    // chatPermission：仅约束群内 `#ai` 命令（@机器人/私聊不受限，保持向后兼容）
+    if (isCmd && !isPrivate && !this._hasChatPermission(cfg)) {
+      Log.mark('[trigger]', `命令权限不足：user=${this.e.user_id} gid=${this.e.group_id || '-'} need=${cfg.chatPermission || 'all'}`)
+      try { await this.e.reply(`你没有使用「${cmd}」的权限（agent.chatPermission=${cfg.chatPermission || 'all'}）；可直接 @机器人 对话。`) } catch { /* best effort */ }
+      return true
+    }
     const input = isCmd ? text.replace(cmdRe, '').trim() : text
     if (!input && !hasMedia) return false // 既无文字又无媒体（如裸 `#ai`）：不触发
     Log.mark('[trigger]', `user=${this.e.user_id} gid=${this.e.group_id || '-'} mode=${isCmd ? 'cmd' : 'at'} inputLen=${input.length} media=${hasMedia}`)
     return this._handleAgent(input)
+  }
+
+  /**
+   * chatPermission：群内 `#ai` 命令的触发权限（master/admin/owner/all；@机器人 与私聊不受限）。
+   * 未知取值一律放行，避免配置笔误把所有人挡在门外。
+   */
+  _hasChatPermission(cfg) {
+    const perm = String(cfg?.chatPermission || 'all').toLowerCase()
+    if (perm === 'all') return true
+    if (this.e?.isMaster) return true
+    const role = this.e?.sender?.role
+    const isOwner = !!(this.e?.member?.is_owner || role === 'owner')
+    const isAdmin = !!(this.e?.member?.is_admin || role === 'admin')
+    if (perm === 'owner') return isOwner
+    if (perm === 'admin') return isOwner || isAdmin
+    if (perm === 'master') return false
+    return true
   }
 
   /** 轻量探测：消息是否含图片/文件/音视频段，或引用了某条消息（引用的媒体由 collectActive 兜底拉取）。不发网络请求。 */
@@ -1166,59 +1208,70 @@ export class Chat extends plugin {
       maxTimeoutSec: cfg.download?.maxTimeoutSec || undefined,
       ytDlpBin: cfg.download?.bin || undefined,
     }
-    const media = createMediaService({
+    // media.enable=false：关闭多模态（不收集/不注入附件/不转视觉），纯文本处理
+    const mediaEnabled = cfg.media?.enable !== false
+    const media = mediaEnabled ? createMediaService({
       bot: ctx.bot, e: this.e, caps, protocol, config: mediaCfg, fetcher: ctx.fetcher,
       log: (m) => (/失败|未能|异常/.test(m) ? Log.warn('[media]', m) : Log.debug('[media]', m)),
-    })
+    }) : null
     let input = text
     let blindImage = false // 收集到图片但模型无法识别（主模型无视觉 + 未被 vision 子模型转成文本）—— 防臆测
-    try {
-      let files = await media.collectActive()
-      const nImg = files.filter((f) => f.kind === 'image' || (f.mime || '').startsWith('image/')).length
-      // A 方案：主模型不支持视觉时，由视觉子模型把图片转成文本描述，再喂给主模型
-      if (!caps.vision && rt.vision && nImg > 0) {
-        Log.mark('[chat]', `vision 子模型识别 ${nImg} 张图（主模型 ${cfg.model} 无视觉）`)
-        try {
-          files = await describeImages(rt.vision, files, text)
-          media.replaceActive(files)
-        } catch (e) {
-          Log.warn('[vision] 图片识别失败，按原能力降级', e?.message || e)
+    let effText = text
+    if (mediaEnabled) {
+      try {
+        let files = await media.collectActive()
+        const nImg = files.filter((f) => f.kind === 'image' || (f.mime || '').startsWith('image/')).length
+        // A 方案：主模型不支持视觉时，由视觉子模型把图片转成文本描述，再喂给主模型
+        if (!caps.vision && rt.vision && nImg > 0) {
+          Log.mark('[chat]', `vision 子模型识别 ${nImg} 张图（主模型 ${cfg.model} 无视觉）`)
+          try {
+            files = await describeImages(rt.vision, files, text)
+            media.replaceActive(files)
+          } catch (e) {
+            Log.warn('[vision] 图片识别失败，按原能力降级', e?.message || e)
+          }
         }
-      }
-      ctx.media = files // 供 read_attachment 等被动工具读取
-      devLog('media', { files: (files || []).map((f) => ({
-        // source: message=消息附带 reply=引用 forward=合并转发 group_file=群文件
-        source: f.source, kind: f.kind, name: f.name, ext: f.ext || null, mime: f.mime || null,
-        size: f.size ?? null,            // 协议/消息段报告大小（与 bytes 对比判断下载是否完整）
-        bytes: f.bytes ?? null,          // 实际下载字节（null/0=未拿到字节=下载未成功）
-        hasUrl: !!f.url,                 // 是否拿到直链
-        status: f.resolveError || 'ok',  // ok / no_url / download_failed / limit_images / limit_size
-        skipReason: f.__skipReason || null,
-        visionDescribed: !!f.__visionDescribed, // 图片是否已被 vision 子模型转成文本描述
-      })) }, traceId, ctx.devScope)
-      // 盲图判定（问题1）：有图片，主模型无视觉，且这些图片没被 vision 子模型转成文本（__visionDescribed）
-      if (nImg > 0 && !caps.vision) {
-        const rawImageLeft = files.some((f) => (f.kind === 'image' || (f.mime || '').startsWith('image/')) && f.buffer && !f.__visionDescribed)
-        blindImage = rawImageLeft
-        if (blindImage) Log.warn('[vision] 用户发送了图片但当前无法识别（主模型无视觉，未配 agent.vision.model）；将提示用户而非臆测')
-      }
-      // 纯媒体无文字：注入默认指令（问题4）；既无文字又无媒体：提示而非空跑
-      const effText = text || (files.length ? '（我发了一张图片/文件给你，请查看并告诉我内容，或按需处理）' : '')
-      if (!effText) {
-        try {
-          await this.e.reply('未识别到文字或图片/文件内容（引用的图片可能获取失败），请重新发送或补充说明。')
-          terminal('reply_sent', { mode: 'text', stopReason: 'no_input', earlyReturn: true })
-        } catch (re) {
-          terminal('reply_failed', { mode: 'text', stopReason: 'no_input', earlyReturn: true, error: re?.message || String(re) })
+        ctx.media = files // 供 read_attachment 等被动工具读取
+        devLog('media', { files: (files || []).map((f) => ({
+          // source: message=消息附带 reply=引用 forward=合并转发 group_file=群文件
+          source: f.source, kind: f.kind, name: f.name, ext: f.ext || null, mime: f.mime || null,
+          size: f.size ?? null,            // 协议/消息段报告大小（与 bytes 对比判断下载是否完整）
+          bytes: f.bytes ?? null,          // 实际下载字节（null/0=未拿到字节=下载未成功）
+          hasUrl: !!f.url,                 // 是否拿到直链
+          status: f.resolveError || 'ok',  // ok / no_url / download_failed / limit_images / limit_size
+          skipReason: f.__skipReason || null,
+          visionDescribed: !!f.__visionDescribed, // 图片是否已被 vision 子模型转成文本描述
+        })) }, traceId, ctx.devScope)
+        // 盲图判定（问题1）：有图片，主模型无视觉，且这些图片没被 vision 子模型转成文本（__visionDescribed）
+        if (nImg > 0 && !caps.vision) {
+          const rawImageLeft = files.some((f) => (f.kind === 'image' || (f.mime || '').startsWith('image/')) && f.buffer && !f.__visionDescribed)
+          blindImage = rawImageLeft
+          if (blindImage) Log.warn('[vision] 用户发送了图片但当前无法识别（主模型无视觉，未配 agent.vision.model）；将提示用户而非臆测')
         }
-        return true
+        // 纯媒体无文字：注入默认指令（问题4）
+        effText = text || (files.length ? '（我发了一张图片/文件给你，请查看并告诉我内容，或按需处理）' : '')
+        if (effText) {
+          const content = media.buildContent(effText)
+          if (Array.isArray(content)) input = { role: 'user', content, _media: true }
+          else input = effText
+          if (files.length) Log.debug('[chat]', `media files=${files.length} images=${nImg} vision=${!!caps.vision} blind=${blindImage} multimodal=${Array.isArray(content)}`)
+        }
+      } catch (e) {
+        Log.warn('[media] 主动收集失败，回退纯文本', e?.message || e)
+        ctx.media = []
       }
-      const content = media.buildContent(effText)
-      if (Array.isArray(content)) input = { role: 'user', content, _media: true }
-      else input = effText
-      if (files.length) Log.debug('[chat]', `media files=${files.length} images=${nImg} vision=${!!caps.vision} blind=${blindImage} multimodal=${Array.isArray(content)}`)
-    } catch (e) {
-      Log.warn('[media] 主动收集失败，回退纯文本', e?.message || e)
+    } else {
+      ctx.media = []
+    }
+    // 既无文字又无媒体（或媒体已关闭）：提示而非空跑
+    if (!effText) {
+      try {
+        await this.e.reply('未识别到文字或图片/文件内容（引用的图片可能获取失败），请重新发送或补充说明。')
+        terminal('reply_sent', { mode: 'text', stopReason: 'no_input', earlyReturn: true })
+      } catch (re) {
+        terminal('reply_failed', { mode: 'text', stopReason: 'no_input', earlyReturn: true, error: re?.message || String(re) })
+      }
+      return true
     }
 
     // —— 人设：解析当前用户激活的人设，覆盖身份层 systemPrompt ——
@@ -1288,7 +1341,7 @@ export class Chat extends plugin {
       onSendError: (err, _p, tag) => Log.warn(`[reply:${tag}] 消息发送失败`, err?.message || err),
     })
     const safeReply = (msg, quote, opts) => replyQueue.enqueue({ msg, quote, opts })
-    if (cfg?.agent?.progress) safeReply('思考中…') // best effort：发送失败只记日志，绝不阻塞 Agent 执行
+    if (wantProgress) safeReply('思考中…') // best effort：发送失败只记日志，绝不阻塞 Agent 执行
     const rs = makeReplyStream(this.e, { progress: wantProgress, recall: cfg.progressRecall ?? 3, shortCircuitTools: ['clarify'], replyQueue })
 
     // —— diagram 示意图交付（应用层发送，工具绝不直接 e.reply）——
@@ -1335,6 +1388,11 @@ export class Chat extends plugin {
           if (res?.toolCalls?.length && res?.content && cfg.reply?.narrate !== false) {
             safeReply(redactSecrets(res.content))
           }
+        },
+        // 主人免确认直执行（masterSkipConfirm）时的高危提示——否则该开关静默绕过审批
+        onMasterAutoApprove: (tc) => {
+          const args = typeof tc?.arguments === 'string' ? tc.arguments : JSON.stringify(tc?.arguments ?? {})
+          safeReply(redactSecrets(`⚠️ 主人任务免确认自动执行（高危）：${tc?.name || '?'} ${String(args).slice(0, 200)}`))
         },
       })
       // —— 在线自进化：采迹（数据闭环）+ 后台自评审触发（全异步、兜底，绝不阻塞回复）——
@@ -1468,6 +1526,8 @@ export class Chat extends plugin {
       }
       devLog('reply', { mode: replyMode, delivered, replyLen: (body || '').length, body: body || '', turns, stopReason }, traceId, ctx.devScope)
       })
+      // run 正常结束：标记本轮结束，未被 check_subagent 消费的子代理终态结果异步回推
+      try { rt.multiagent?.endRun?.(ctx) } catch { /* noop */ }
     } catch (e) {
       // 用量统计：错误终态（cancelled/run_error）也计数（errors 维度；无 usage 可记）
       try { rt.usageStats?.recordRun({ error: true }) } catch { /* noop */ }
@@ -1479,6 +1539,8 @@ export class Chat extends plugin {
       }
       Log.error('[chat] agent 失败', e?.message || e)
       terminal('run_error', { error: e?.message || String(e), stack: e?.stack || null, input: (text || '').slice(0, 200), model: cfg.model, turns: 'unknown' })
+      // run 已结束（异常路径）：标记子代理任务结算，未消费结果稍后异步回推
+      try { rt.multiagent?.endRun?.(ctx) } catch { /* noop */ }
       await safeReply(redactSecrets([
         `⚠️ 处理时出错：${e?.message || e}`,
         '如反复出错，请发送 #上报错误 <问题描述> 上报（自动打包会话日志给开发者）；',

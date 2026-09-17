@@ -65,7 +65,7 @@ export class ConcernManager {
       this.trace?.record?.('ss_concern', { groupId, kind: 'upgrade', type: concernType, target: actorUserId, intensity })
       return { ...existing, intensity }
     }
-    // 记仇需重复（§18 minRepeatedEvents）：重复度不足时仍建但低强度（monitor）
+    // 记仇需重复证据（§18）：重复度不足时仍建但低强度（monitor）
     const rep = Number(appraisal?.repetition) || 0
     const res = await this.dao.run(
       `INSERT INTO ss_concerns(bot_id,group_id,concern_type,target_user_id,source_event_ids,summary,intensity,priority,desired_resolution,status,created_at,updated_at)

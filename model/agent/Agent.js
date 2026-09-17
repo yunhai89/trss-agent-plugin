@@ -311,7 +311,7 @@ export class Agent {
 
   /**
    * @param {string|object} input 用户文本或消息对象
-   * @param {object} opts signal/ctx/onDelta/onReasoning/onToolStart/onToolEnd/onAssistant/onContextPressure/onApprove/onBeforeTool/taskId/stream/...
+   * @param {object} opts signal/ctx/onDelta/onReasoning/onToolStart/onToolEnd/onAssistant/onContextPressure/onBeforeTool/onMasterAutoApprove/taskId/stream/...
    *   ctx = { role, isMaster, userId, groupId, isGroup, isGroupAdmin, notify, fetcher, ... }
    */
   async run(input, opts = {}) {
@@ -322,7 +322,6 @@ export class Agent {
       onToolEnd: opts.onToolEnd,
       onAssistant: opts.onAssistant,
       onContextPressure: opts.onContextPressure,
-      onApprove: opts.onApprove,
       onBeforeTool: opts.onBeforeTool,
       onMasterAutoApprove: opts.onMasterAutoApprove,
     }

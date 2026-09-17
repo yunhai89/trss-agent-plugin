@@ -144,7 +144,10 @@ export class KrokiClient {
     if (v.ok) this.endpoint = v
     else this.endpointError = v.reason
     this.onEvent = (e) => { try { this.cfg.onEvent?.(e) } catch { /* 日志失败不影响渲染 */ } }
-    this.cb = new CircuitBreaker({ ...this.cfg.circuitBreaker, onEvent: this.onEvent })
+    // circuitBreaker.enabled=false → 用空操作熔断器（永不放行拒绝、永不累计失败）
+    this.cb = this.cfg.circuitBreaker?.enabled === false
+      ? { acquire: () => null, state: 'disabled', onSuccess() {}, onFailure() {} }
+      : new CircuitBreaker({ ...this.cfg.circuitBreaker, onEvent: this.onEvent })
     this.sem = new Semaphore(this.cfg.maxConcurrency)
   }
 

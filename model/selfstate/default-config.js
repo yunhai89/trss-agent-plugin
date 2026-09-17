@@ -15,18 +15,12 @@
 export const DEFAULT_SELFSTATE_CONFIG = Object.freeze({
   enabled: false,
   shadowMode: true,          // 计算但不影响发言；观察后翻 false 放量
-  expressionFrozen: false,   // 冻结情绪外显（继续影子计算）§19.3
 
   scope: {
     isolateByGroup: true,    // 群级隔离（唯一支持模式；跨群不传事件/怨气）
-    crossGroupMoodCarry: 0,  // 无来源全局心境携带，默认关闭
   },
 
   eventDetection: {
-    directReply: true,
-    directMention: true,
-    nicknameReference: true,
-    expectationTracking: true,
     semantic: true,                   // 语义近邻检测层（需 agent.recall.embedProvider；未配自动回落关键词）
     ambiguousIntentModelProfile: '',  // 歧义评价模型（留空=utilityModel→主模型）
     minEventConfidence: 0.55,         // 低于此值不产生事件
@@ -46,7 +40,6 @@ export const DEFAULT_SELFSTATE_CONFIG = Object.freeze({
   resentment: {
     enabled: true,
     minCreateConfidence: 0.72,
-    minRepeatedEvents: 2,
     maxSingleEventDelta: 0.05,   // 单次事件对怨气的最大增量
     halfLifeDays: 7,
   },
@@ -57,12 +50,10 @@ export const DEFAULT_SELFSTATE_CONFIG = Object.freeze({
     maximumWindowSeconds: 3600,
     minIgnoredConfidence: 0.65,          // ignore_score 达到此值才算高置信冷落
     requireTargetActivityEvidence: true, // 必须有目标活跃证据
-    firstIgnoreCanBeExpressed: false,    // 首次被忽略不表达（§11.6 防卖惨）
   },
 
   reflection: {
     enabled: true,
-    schedule: '37 4 * * *',
     minSignificantEvents: 3,   // 同成员相似高显著事件数阈值
     maxReflectionsPerDay: 10,
     defaultTtlDays: 7,
@@ -81,8 +72,6 @@ export const DEFAULT_SELFSTATE_CONFIG = Object.freeze({
   },
 
   stability: {
-    commandsIgnoreEmotion: true,
-    toolsIgnoreEmotion: true,
     noCrossUserSpillover: true,     // 禁无关扩散（§20.2）
     preventEmotionalBlackmail: true,// 禁情绪绑架（§20.1）
     preventSelfHarmNarratives: true,
@@ -115,7 +104,6 @@ export function validateSelfStateConfig(raw = {}) {
   c.emotion.minVisibleIntensity = cl(c.emotion?.minVisibleIntensity, 0, 1, 0.18)
   c.emotion.maxActiveEmotions = cl(c.emotion?.maxActiveEmotions, 2, 32, 8)
   c.resentment.minCreateConfidence = cl(c.resentment?.minCreateConfidence, 0.5, 0.95, 0.72)
-  c.resentment.minRepeatedEvents = cl(c.resentment?.minRepeatedEvents, 1, 10, 2)
   c.resentment.maxSingleEventDelta = cl(c.resentment?.maxSingleEventDelta, 0.01, 0.2, 0.05)
   c.resentment.halfLifeDays = cl(c.resentment?.halfLifeDays, 1, 60, 7)
   c.expectations.minimumWindowSeconds = cl(c.expectations?.minimumWindowSeconds, 30, 1800, 90)

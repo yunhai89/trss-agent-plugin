@@ -185,8 +185,21 @@ await test('spawn 三件套：配额按会话隔离，跨会话不可读', async
   eq(rb.ok, true, 'B 不受 A 配额影响（按会话隔离）')
   const cross = await check.execute({ taskId: rb.taskId }, A)
   ok(!!cross.error && /无权/.test(cross.error), 'A 读 B 的任务被拒（归属校验）')
-  const own = await check.execute({ taskId: rb.taskId }, B)
+  const own = await check.execute({ taskId: rb.taskId, waitMs: 0 }, B)
   eq(own.taskId, rb.taskId, 'B 读自己的任务 OK')
+})
+
+// ---------- 10b. check_subagent 长轮询：一次调用等到完成，不烧模型轮次 ----------
+await test('check_subagent：waitMs 长轮询等到完成并返回结果', async () => {
+  const slowProv = { async chat() { await delay(300); return { role: 'assistant', content: '最终研究结论', toolCalls: [], finishReason: 'stop', usage: null } } }
+  const [spawn, check] = makeSpawnSubagentTools({ provider: slowProv, sourceRegistry: null, maxConcurrent: 1, minBudgetMs: 10000 })
+  const ctx = { userId: 'u', conversationId: 'c' }
+  const r = await spawn.execute({ task: '慢任务' }, ctx)
+  const t0 = Date.now()
+  const s = await check.execute({ taskId: r.taskId, waitMs: 5000 }, ctx)
+  eq(s.status, 'done', '长轮询直接等到 done（无需多次轮询）')
+  eq(s.result, '最终研究结论', '返回完整结果')
+  ok(Date.now() - t0 >= 250 && Date.now() - t0 < 5000, `等待了一个子代理周期（${Date.now() - t0}ms）而非立即返回`)
 })
 
 // ---------- 11. spawn 三件套：硬超时释放并发槽 + 超时判定 ----------
@@ -249,6 +262,64 @@ await test('spawn 三件套：shutdown 终止在跑子代理', async () => {
   eq(n, 1, 'shutdown 报告终止 1 个在跑子代理')
   const after = await tools[1].execute({ taskId: 'sub_1_x' }, ctx)
   ok(!!after.error, 'shutdown 后任务表已清空')
+})
+
+// ---------- 14. 主/子代理状态同步：主循环结束后未消费的结果异步回推 ----------
+await test('状态同步：主循环结束后未消费的完成结果异步回推', async () => {
+  const slowProv = { async chat() { await delay(200); return { role: 'assistant', content: '回推结果', toolCalls: [], finishReason: 'stop', usage: null } } }
+  const settled = []
+  const tools = makeSpawnSubagentTools({
+    provider: slowProv, sourceRegistry: null, maxConcurrent: 1, minBudgetMs: 10000,
+    onSettle: (info, sctx) => settled.push({ id: info.taskId, status: info.status, result: info.result, uid: sctx?.userId }),
+  })
+  const ctx = { userId: 'u', conversationId: 'c' }
+  await tools[0].execute({ task: '慢任务' }, ctx)
+  tools.endRun(ctx) // 主循环先结束（子代理仍在跑）
+  eq(settled.length, 0, 'endRun 时任务未完成 → 暂不回推')
+  await delay(450)
+  eq(settled.length, 1, '子代理完成后回推一次')
+  eq(settled[0].status, 'done', 'status=done')
+  eq(settled[0].result, '回推结果', '结果回推')
+  eq(settled[0].uid, 'u', '携带投递上下文')
+})
+
+await test('状态同步：已被 check 消费的结果不再回推（防重复）', async () => {
+  const slowProv = { async chat() { await delay(150); return { role: 'assistant', content: 'X', toolCalls: [], finishReason: 'stop', usage: null } } }
+  const settled = []
+  const tools = makeSpawnSubagentTools({ provider: slowProv, sourceRegistry: null, maxConcurrent: 1, minBudgetMs: 10000, onSettle: (i) => settled.push(i.status) })
+  const ctx = { userId: 'u', conversationId: 'c' }
+  const r = await tools[0].execute({ task: 't' }, ctx)
+  const s = await tools[1].execute({ taskId: r.taskId, waitMs: 5000 }, ctx) // 长轮询取走结果
+  eq(s.status, 'done', 'check 取到结果')
+  tools.endRun(ctx)
+  await delay(300)
+  eq(settled.length, 0, '已被 check 消费 → 不回推')
+})
+
+await test('状态同步：失败也回推给主代理（不再静默）', async () => {
+  const badProv = { async chat() { throw new Error('worker provider 挂了') } }
+  const settled = []
+  const tools = makeSpawnSubagentTools({ provider: badProv, sourceRegistry: null, maxConcurrent: 1, minBudgetMs: 10000, onSettle: (i) => settled.push({ status: i.status, error: i.error }) })
+  const ctx = { userId: 'u', conversationId: 'c' }
+  await tools[0].execute({ task: '会失败' }, ctx)
+  tools.endRun(ctx)
+  await delay(300)
+  eq(settled.length, 1, '失败任务回推')
+  eq(settled[0].status, 'failed', 'status=failed')
+  ok(/挂了/.test(settled[0].error), '带失败原因')
+})
+
+await test('状态同步：shutdown 取消的在跑任务也回推', async () => {
+  const prov = { async chat() { return new Promise(() => {}) } }
+  const settled = []
+  const tools = makeSpawnSubagentTools({ provider: prov, sourceRegistry: null, maxConcurrent: 1, minBudgetMs: 60000, hardGraceMs: 60000, onSettle: (i) => settled.push(i.status) })
+  const ctx = { userId: 'u', conversationId: 'c' }
+  await tools[0].execute({ task: 'hang' }, ctx)
+  await delay(30)
+  tools.shutdown()
+  await delay(50)
+  eq(settled.length, 1, 'shutdown 取消的任务被回推')
+  eq(settled[0], 'cancelled', 'status=cancelled')
 })
 
 // ---------- 总结 ----------

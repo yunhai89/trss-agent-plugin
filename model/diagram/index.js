@@ -49,7 +49,6 @@ export class DiagramService {
     const krokiCfg = {
       enabled: true,
       endpoint: 'http://127.0.0.1:8000',
-      deploymentMode: 'self-hosted-only',
       allowPublicEndpoint: false,
       allowedDiagramTypes: ['d2'],
       connectTimeoutMs: 2000,
@@ -119,7 +118,7 @@ export class DiagramService {
     const base = { toolCallId, traceId }
 
     // 1) 校验 + 规范化
-    const v = validateSpec(raw, { maxNodes: this.cfg.maxNodes, maxEdges: this.cfg.maxEdges })
+    const v = validateSpec(raw, { maxNodes: this.cfg.maxNodes, maxEdges: this.cfg.maxEdges, defaultTheme: this.cfg.defaultTheme })
     this.#emit({ event: 'diagram_validate', ...base, ok: v.ok, errorClass: v.ok ? undefined : v.errorClass, field: v.field })
     if (!v.ok) return v
     const spec = v.spec

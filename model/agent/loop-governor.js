@@ -15,7 +15,9 @@
  *   - 'finalize' 收尾总结（独立预留，不占工作预算，但计入总量对账）
  * 命名口径（snapshot 暴露）：
  *   - contextTokens  单次上下文占用（最近一次工作调用的完整输入，含缓存命中）
- *   - workTokens     累计工作 token（每轮完整 input+output 累加，含缓存读——本插件 tokenBudget 的语义）
+ *   - workTokens     累计「有效工作 token」：未命中输入 + 缓存写 + 输出，缓存命中读按 CACHE_READ_WEIGHT(0.1) 折算
+ *                    ——tokenBudget 门控口径（与真实成本对齐；整段缓存上下文按全价计会误杀长任务）
+ *   - rawTokens      累计原始 input+output（含全部缓存读）——仅观测
  *   - finalizeTokens 收尾调用累计
  *   - bill          实际计费口径估算累计 { uncached, cacheWrite, cacheRead, output }（观察用，不作门控）
  *
@@ -41,6 +43,10 @@ function stableJson(v) {
 export function fingerprint(name, args) {
   return String(name || '') + '|' + stableJson(args)
 }
+
+/** 缓存命中读在 tokenBudget 里的折算权重：provider 普遍 0.1x（Anthropic cache read / DeepSeek hit），
+ *  取保守近似。把整段被缓存的长上下文按全价计入预算，会让长任务几轮就被 token_budget 误杀。 */
+export const CACHE_READ_WEIGHT = 0.1
 
 export class LoopGovernor {
   constructor({
@@ -70,7 +76,9 @@ export class LoopGovernor {
     this._sameCount = 0
     this._consecutiveFailures = 0
     this._progressFlags = [] // 滚动窗口：最近 N 步是否产出新事实
-    this._workTokens = 0 // 累计工作 token（input+output，含缓存读）
+    this._workTokens = 0 // 累计「有效工作 token」：缓存命中读按 CACHE_READ_WEIGHT 折算（tokenBudget 门控口径）
+    this._rawWorkTokens = 0 // 累计原始工作 token（input+output，含全部缓存读）——仅观测
+    this._lastWorkInc = 0 // 最近一轮有效增量（precheck 预估下一轮成本用）
     this._finalizeTokens = 0 // 收尾调用累计（独立预留）
     this._contextTokens = 0 // 单次上下文占用（最近一次工作调用的完整输入）
     this._bill = { uncached: 0, cacheWrite: 0, cacheRead: 0, output: 0 } // 计费口径估算累计
@@ -125,33 +133,39 @@ export class LoopGovernor {
    */
   noteUsage(usage, { scope = 'work' } = {}) {
     if (!usage) return
-    const input = usage.input ?? usage.prompt_tokens ?? 0
-    const output = usage.output ?? usage.completion_tokens ?? 0
-    const cacheRead = usage.cacheRead
+    const num = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0 }
+    const input = num(usage.input ?? usage.prompt_tokens ?? usage.input_tokens)
+    const output = num(usage.output ?? usage.completion_tokens ?? usage.output_tokens)
+    const cacheRead = num(usage.cacheRead
       ?? usage.cache_read_input_tokens
       ?? usage.prompt_cache_hit_tokens
       ?? usage.prompt_tokens_details?.cached_tokens
-      ?? usage.input_tokens_details?.cached_tokens
-      ?? 0
-    const cacheWrite = usage.cacheWrite
+      ?? usage.input_tokens_details?.cached_tokens)
+    const cacheWrite = num(usage.cacheWrite
       ?? usage.cache_creation_input_tokens
-      ?? usage.input_tokens_details?.cache_write_tokens
-      ?? 0
-    // uncached：显式字段优先；否则从 input 扣除缓存读（OpenAI 口径 input 含缓存；Anthropic input_tokens 本就不含）
-    const uncached = usage.uncached
-      ?? usage.prompt_cache_miss_tokens
-      ?? Math.max(0, Number(input) - Number(cacheRead))
-    const inc = (Number(input) || 0) + (Number(output) || 0)
+      ?? usage.input_tokens_details?.cache_write_tokens)
+    // uncached（未命中、全价输入）：显式字段优先；Anthropic 的 input_tokens 本就不含缓存读写，直接取；
+    // OpenAI/DeepSeek 口径 input 含缓存读，需扣除。协议判别：是否出现 cache_read_input_tokens 专有字段。
+    let uncached
+    if (usage.uncached != null) uncached = num(usage.uncached)
+    else if (usage.prompt_cache_miss_tokens != null) uncached = num(usage.prompt_cache_miss_tokens)
+    else if (usage.cache_read_input_tokens != null || usage.cache_creation_input_tokens != null) uncached = input
+    else uncached = Math.max(0, input - cacheRead)
+    const rawInc = input + output
+    // 有效 token：缓存命中读按 CACHE_READ_WEIGHT 折算——与真实成本对齐，避免长上下文被整段全价计入门控
+    const effInc = uncached + cacheWrite + Math.round(cacheRead * CACHE_READ_WEIGHT) + output
     if (scope === 'finalize') {
-      if (inc > 0) this._finalizeTokens += inc
+      if (rawInc > 0) this._finalizeTokens += rawInc
     } else {
-      if (inc > 0) this._workTokens += inc
-      if (Number(input) > 0) this._contextTokens = Number(input) // 单次上下文占用（单调可观）
+      if (effInc > 0) this._workTokens += effInc
+      if (rawInc > 0) this._rawWorkTokens += rawInc
+      if (input > 0) this._contextTokens = input // 单次上下文占用（完整输入，单调可观）
+      if (effInc > 0) this._lastWorkInc = effInc // 下一轮成本预估
     }
-    this._bill.uncached += Number(uncached) || 0
-    this._bill.cacheWrite += Number(cacheWrite) || 0
-    this._bill.cacheRead += Number(cacheRead) || 0
-    this._bill.output += Number(output) || 0
+    this._bill.uncached += uncached
+    this._bill.cacheWrite += cacheWrite
+    this._bill.cacheRead += cacheRead
+    this._bill.output += output
   }
 
   /** 快照（供 devLog/调试；tokens 兼容旧字段名=workTokens） */
@@ -160,10 +174,12 @@ export class LoopGovernor {
       sameCount: this._sameCount,
       consecutiveFailures: this._consecutiveFailures,
       progressWindow: this._progressFlags.slice(),
-      tokens: this._workTokens,
+      tokens: this._workTokens, // 有效工作 token（门控口径）
       workTokens: this._workTokens,
+      rawTokens: this._rawWorkTokens, // 原始 input+output（含全部缓存读）——仅观测
       finalizeTokens: this._finalizeTokens,
       contextTokens: this._contextTokens,
+      lastWorkInc: this._lastWorkInc,
       bill: { ...this._bill },
       elapsedMs: this._now() - this._start,
     }
@@ -171,12 +187,12 @@ export class LoopGovernor {
 
   /**
    * 预检（调模型前 / 执行长工具前）。与 shouldStop 的区别：这是"还要不要开始下一轮"的判断，
-   * token 维度按「已用 + 最近一次上下文占用」预估——不再启动一轮注定超支的调用，为收尾留出空间。
+   * token 维度按「已用有效 token + 最近一轮有效增量」预估——不再启动一轮注定超支的调用，为收尾留出空间。
    * @returns {{ stop: boolean, reason: string|null }}
    */
   precheck() {
     if (this.timeBudgetMs && this._now() - this._start > this.timeBudgetMs) return { stop: true, reason: 'time_budget' }
-    if (this.tokenBudget && this._workTokens + this._contextTokens > this.tokenBudget) return { stop: true, reason: 'token_budget' }
+    if (this.tokenBudget && this._workTokens + this._lastWorkInc > this.tokenBudget) return { stop: true, reason: 'token_budget' }
     return { stop: false, reason: null }
   }
 

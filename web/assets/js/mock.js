@@ -57,7 +57,7 @@
     recall: { cap: 200, extractEvery: 10, model: '', embedProvider: '' },
     selfReview: { enable: true, every: 20, model: '', autoApplyMemory: true, autoApplyPrompt: false, dailyBudgetTokens: 200000 },
     evolution: { traceDir: 'data/evolution/traces', promptDir: 'data/evolution/prompts', suggestionDir: 'data/evolution/suggestions' },
-    toolEvo: { enable: true, dbPath: 'data/evolution/tevo.db', artifactsDir: 'data/evolution/tools', maxRepairAttempts: 2, retrievalThreshold: 0.78, deduplicationThreshold: 0.88, autoPromoteSideEffects: ['none'] },
+    toolEvo: { enable: true, dbPath: 'data/evolution/tevo.db', artifactsDir: 'data/evolution/tools', maxRepairAttempts: 2 },
     systemPrompt: null,
     chatPermission: 'master',
     masterSkipConfirm: false,
@@ -66,7 +66,7 @@
     guardAction: 'flag',
     guardSensitivity: 'medium',
     redactSecrets: true,
-    devLog: { enable: true, dir: 'data/logs', level: 'info' },
+    devLog: { enable: true, dir: 'data/logs' },
     policy: { categoryMin: { terminal: 3, group: 2 } },
     media: { enable: true, active: true, passive: true, maxImages: 6, maxFileBytes: 20971520, degrade: 'describe', caps: { vision: true, file: true } },
     vision: {
@@ -104,7 +104,7 @@
       timeoutMs: 15000, targetWidth: 1600, maxNodes: 50, maxEdges: 100, maxWidth: 2000, maxHeight: 5000,
       maxPixels: 10000000, maxOutputBytes: 8388608, tempTtlMinutes: 30,
       kroki: {
-        enabled: true, endpoint: 'http://127.0.0.1:8000', deploymentMode: 'self-hosted-only', allowPublicEndpoint: false,
+        enabled: true, endpoint: 'http://127.0.0.1:8000', allowPublicEndpoint: false,
         allowedDiagramTypes: ['d2'], connectTimeoutMs: 2000, requestTimeoutMs: 12000, maxSourceBytes: 131072,
         maxResponseBytes: 4194304, maxConcurrency: 2, circuitBreaker: { enabled: true, failureThreshold: 3, cooldownMs: 30000 },
         d2: { layout: 'elk' }, imageTag: '',

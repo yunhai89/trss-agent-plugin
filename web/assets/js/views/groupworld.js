@@ -41,10 +41,10 @@
 
   const DEFAULTS = {
     enabled: false, groups: [], online: false,
-    ingestion: { rawMessageRetentionDays: 30, segmentIdleSeconds: 300, segmentMaxMessages: 100, ignoreCommandMessages: true, ignoreSystemNotices: true, topicShiftEnabled: true, topicShiftWindow: 6, topicShiftSimThreshold: 0.06 },
+    ingestion: { rawMessageRetentionDays: 30, segmentIdleSeconds: 300, segmentMaxMessages: 100, ignoreCommandMessages: true, topicShiftEnabled: true, topicShiftWindow: 6, topicShiftSimThreshold: 0.06 },
     analysis: { schedule: '7 * * * *', minSegmentMessages: 4, maxSegmentsPerRun: 50, modelProfile: '', maxDailyCallsPerGroup: 100, retryCount: 1, maxTokens: 1200, episodeMergeSim: 0.85 },
-    profiles: { hotActiveDays30d: 10, warmMessageCount30d: 5, minOnlineConfidence: 0.55, maxTraitsPerUser: 5, temporaryTraitTtlDays: 14, traitMergeSimThreshold: 0.82 },
-    graph: { activeEdgeDays: 90, maxNeighborsPerUser: 40, maxOnlineHops: 1, weeklyCommunityDetection: true, minCommunitySize: 3 },
+    profiles: { hotActiveDays30d: 10, warmMessageCount30d: 5, minOnlineConfidence: 0.55, maxTraitsPerUser: 5, traitMergeSimThreshold: 0.82 },
+    graph: { activeEdgeDays: 90, maxNeighborsPerUser: 40, weeklyCommunityDetection: true, minCommunitySize: 3 },
     retrieval: { plannerTokenBudget: 800, replyerTokenBudget: 500, maxEpisodes: 3, maxRelationships: 5, cacheTtlSeconds: 60 },
     privacy: { allowUserOptOut: true, allowUserInspect: true, allowUserCorrect: true, blockSensitiveInference: true },
   }
@@ -208,7 +208,7 @@
             <cfg-row name="切片静默阈值(秒)"><input type="number" class="inp" style="width:120px" min="60" max="1800" v-model.number="form.ingestion.segmentIdleSeconds"></cfg-row>
             <cfg-row name="单片段最大消息数"><input type="number" class="inp" style="width:110px" min="20" max="200" v-model.number="form.ingestion.segmentMaxMessages"></cfg-row>
             <cfg-row name="忽略 #指令消息" desc="不摄入以 # 开头的指令消息"><v-switch v-model="form.ingestion.ignoreCommandMessages"/></cfg-row>
-            <cfg-row name="忽略系统通知" desc="不摄入入群/撤回等系统事件"><v-switch v-model="form.ingestion.ignoreSystemNotices"/></cfg-row>
+
             <cfg-row name="主题漂移切分" desc="TextTiling 式：换话题但无静默间隙时也提前分割（提高分析质量；词面 bigram 相似度）"><v-switch v-model="form.ingestion.topicShiftEnabled"/></cfg-row>
             <cfg-row name="漂移比较近窗" desc="参与相似度比较的近窗有效消息数"><input type="number" class="inp" style="width:90px" min="2" max="30" v-model.number="form.ingestion.topicShiftWindow"></cfg-row>
             <cfg-row name="漂移相似度阈值" desc="近窗相似度低于此值即提前分割（越小越激进）"><input type="number" class="inp" style="width:100px" min="0" max="0.5" step="0.01" v-model.number="form.ingestion.topicShiftSimThreshold"></cfg-row>

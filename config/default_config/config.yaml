@@ -1,5 +1,4 @@
 debug: false
-prefix: "#agents"
 
 agent:
   trigger: at
@@ -42,9 +41,10 @@ agent:
     maxConsecutiveFailures: 3 # 连续工具失败次数上限（超出 → consecutive_failures 终止）
     noProgressWindow: 4       # 连续 N 步无新事实 → no_progress 终止
     timeBudgetMs: 300000       # 单次对话工作时间预算（毫秒，超出终止在途调用并进入收尾）
-    tokenBudget: 240000       # 单次对话累计工作 token 上限：每轮完整输入+输出累加（含缓存命中读）。
-                             # 语义明确化：调模型前按「已用+最近一次上下文占用」预检，不再启动注定超支的一轮；
-                             # 收尾总结调用独立预留（不占本预算）。默认 24 万 ≈ 15~18k/轮 × 12~15 轮长任务
+    tokenBudget: 240000       # 单次对话累计「有效工作 token」上限：未命中输入 + 缓存写 + 输出；缓存命中读按 0.1x 折算。
+                             # （与真实成本对齐：长上下文整段被缓存时按全价计会几轮就误杀长任务）
+                             # 语义：调模型前按「已用有效 token + 最近一轮有效增量」预检，不再启动注定超支的一轮；
+                             # 收尾总结调用独立预留（不占本预算）。
     finalizeGraceMs: 45000   # 收尾宽限：预算/时间耗尽后，收尾总结调用可用的独立时间窗（只受用户取消约束）
   temperature: 0.2  # 工具调用稳定性（建议 0.1~0.3；勿设 0 避免复读式回复）
   thinking:
@@ -90,7 +90,6 @@ agent:
     minScore: 0.3           # 最低相似度（cosine；低于不返回）；embedding 复用上面的 recall.embedProvider
   schedule:
     taskEnabled: true       # 定时任务链总开关（#定时任务 cron 重复 task；false 则拒绝创建）
-    taskTimeout: 180        # 任务链最长执行秒（到点 Agent.run 工具循环预算）
     taskMaxTurns: 15        # 任务链工具调用轮次上限（防失控烧 token）
   selfReview:
     enable: true            # 在线自进化：每 N 轮对话后台异步自我评审，产出改进 suggestion（不阻塞回复）
@@ -108,10 +107,7 @@ agent:
     dbPath: "data/evolution/tevo.db"              # sqlite 库（工具/版本/调用/审计）
     artifactsDir: "data/evolution/tools"          # 工具制品（TOOL.md/index.js/manifest.json/tests.json）
     maxRepairAttempts: 2                          # 候选生成失败自动修复上限（文档 §13）
-    retrievalThreshold: 0.78                      # 检索接受阈值（§12.1，与去重阈值分开）
-    deduplicationThreshold: 0.88                  # 去重阈值
     runnerTimeoutMs: 5000                         # stable 工具单次调用超时（本地 fork 档与沙箱档共用）
-    autoPromoteSideEffects: ["none"]              # 仅 none 副作用可自动晋升；read/write/message/delete 必人工审批
   systemPrompt:
   chatPermission: master
   masterSkipConfirm: false   # 主人发起的任务免确认直执行（高危！仅主人；denylist 仍拦）。开启后主人命令不再 #确认，但会发高危提示
@@ -123,7 +119,6 @@ agent:
   devLog:
     enable: true             # 生产环境默认开：记录 AI 全链路(缩进 JSON 人工可读)，方便 #上报错误 排查
     dir: ""                  # 日志目录(留空=默认 <插件>/data/logs)
-    level: debug             # 预留(pino 遗留字段，当前自写日志忽略)
   policy:
     categoryMin:
   media:
@@ -181,11 +176,7 @@ agent:
     pollMaxInterval: 8        # 轮询最大间隔（秒）
     maxImages: 4              # 单次最多发图数（防爆刷）
     outputDir: ""             # 产物落盘目录（留空=插件 data/temp；视频/调试用）
-    allowUserModel: true      # 是否允许 model 参数覆盖默认 ck（false 则锁死模板内置模型名）
-  persona:
-    dir: ""
   skill:
-    builtin: true
     dir: "skills"
     historyCount: 15
   search:
@@ -254,7 +245,6 @@ agent:
     kroki:
       enabled: true
       endpoint: "http://127.0.0.1:8000"  # 自托管 Kroki 地址（docker service 名/127.0.0.1/内网 IP）
-      deploymentMode: self-hosted-only
       allowPublicEndpoint: false     # ⚠️ true=允许 kroki.io 公共服务（图中文字将发往第三方）；且强制 HTTPS
       allowedDiagramTypes:           # Kroki 图类型白名单（模型不可指定；新增类型需配套确定性编译器+安全测试）
         - d2
@@ -273,6 +263,7 @@ agent:
   document:
     soffice: "soffice"      # LibreOffice 可执行名/路径（file_to_pdf 转任意文件；容器装 libreoffice 后填，如 /usr/bin/soffice）
   stt:
+    enable: true            # transcribe_media 工具开关（需填 apiKey 才可用；关则不注册）
     apiBase: ""             # Whisper 兼容 STT API 地址（如 https://api.openai.com/v1/audio/transcriptions）
     apiKey: ""              # STT API Key（OpenAI/Groq/Azure 等）
     model: "whisper-1"     # 模型名
@@ -365,9 +356,7 @@ agent:
     enable: false                  # 总开关（即便 true，groups 为空也不开启）
     groups: []                     # 显式白名单群号（字符串）；空数组=不开启
     shadow: true                   # true=只记录决策 trace、不真实发送（先观察再放量）
-    triggerMode: necessity         # necessity（评分触发，推荐）| frequency
     talkValue: 0.35                # 0~1 主动性基线（不等于回复概率）
-    mentionHandledByDirectAgent: true  # @机器人 由现有 Direct Agent 独占，环境不从此触发
     debounceMs: 1200               # 消息安静窗口（ms）：burst 后等此窗口再评估
     plannerTimeoutMs: 30000        # 单轮 Planner 超时（ms）；超时默认沉默
     maxPlannerRounds: 4            # Planner 内部工具循环最大轮数
@@ -420,7 +409,6 @@ agent:
       maxDelayMs: 3500
       typos: false                 # 自动错字（第一版强制 false）
       allowSticker: true           # 允许尾随表情包（复用 sticker cooldown/sendRate）
-      quoteTarget: auto            # auto=Planner 决定是否引用目标
     behaviorPolicy:                # 「何时参与」（与「怎么说」的人设分离）
       topics: []                   # 关注主题（命中 +10~25）
       avoidTopics: []              # 回避主题
@@ -429,15 +417,7 @@ agent:
       answerUnknownQuestions: false
       interruptHumanConversation: false
       maxRepliesPer10Minutes: 4
-    learning:                      # Phase 4：仅 shadow 采集，不进 Prompt
-      style: shadow
-      jargon: shadow
-      behavior: false
-      minSamples: 20
-      requireReview: true
     safety:
-      blockCommands: true
-      blockDestructiveTools: true
       privateMemoryInGroup: false  # 隐私红线（强制 false，不可改）
       maxConcurrentGroups: 1       # 同时 Planning 的群数上限
 
@@ -456,7 +436,6 @@ agent:
       segmentIdleSeconds: 300      # 会话切片静默阈值（文档 3~8min，默认 5min）
       segmentMaxMessages: 100      # 单片段最大消息数（文档 60~120）
       ignoreCommandMessages: true  # #指令消息不摄入
-      ignoreSystemNotices: true    # 系统通知不摄入
       topicShiftEnabled: true      # 主题漂移切分（TextTiling 式；换话题无静默间隙也提前分割）
       topicShiftWindow: 6          # 参与漂移比较的近窗有效消息数
       topicShiftSimThreshold: 0.06 # 新消息与近窗相似度低于此值 → 分割（保守防碎片化）
@@ -476,13 +455,11 @@ agent:
       warmMessageCount30d: 5       # 近30天发言数≥此值=warm
       minOnlineConfidence: 0.55    # 在线上下文最低置信（不可低于0.55；低置信推断不进回复）
       maxTraitsPerUser: 5          # 每成员在线返回画像上限
-      temporaryTraitTtlDays: 14    # 临时状态过期天数
       traitMergeSimThreshold: 0.82 # 近义特征聚类合并阈值（每日维护；embedding 余弦）
 
     graph:
       activeEdgeDays: 90           # 关系边活跃窗口
       maxNeighborsPerUser: 40      # 每成员活跃一跳关系上限
-      maxOnlineHops: 1             # 在线检索跳数（默认一跳）
       weeklyCommunityDetection: true  # 每周小圈子识别
       minCommunitySize: 3          # 最小圈子人数
 
@@ -506,17 +483,11 @@ agent:
   selfState:
     enabled: false              # 总开关（关=整层 no-op）
     shadowMode: true            # 计算入库但不影响发言（观察期）；false 才注入 Planner/Replyer
-    expressionFrozen: false     # 冻结情绪外显（继续影子计算）
 
     scope:
       isolateByGroup: true      # 群级隔离（唯一模式）
-      crossGroupMoodCarry: 0
 
     eventDetection:
-      directReply: true
-      directMention: true
-      nicknameReference: true
-      expectationTracking: true
       semantic: true                     # 语义近邻检测层（需 agent.recall.embedProvider 配 embedding 模型；未配自动回落关键词）
       ambiguousIntentModelProfile: ""   # 歧义评价模型（留空=主模型）
       minEventConfidence: 0.55
@@ -534,7 +505,6 @@ agent:
     resentment:
       enabled: true
       minCreateConfidence: 0.72
-      minRepeatedEvents: 2          # 记仇需重复证据
       maxSingleEventDelta: 0.05     # 单次怨气增量上限
       halfLifeDays: 7
 
@@ -544,11 +514,9 @@ agent:
       maximumWindowSeconds: 3600
       minIgnoredConfidence: 0.65    # ignore_score 达此值才算高置信冷落
       requireTargetActivityEvidence: true
-      firstIgnoreCanBeExpressed: false  # 首次被忽略不表达（防卖惨）
 
     reflection:
       enabled: true
-      schedule: "37 4 * * *"
       minSignificantEvents: 3
       maxReflectionsPerDay: 10
       defaultTtlDays: 7
@@ -564,8 +532,6 @@ agent:
       allowNaturalEmotionDisclosure: true
 
     stability:
-      commandsIgnoreEmotion: true
-      toolsIgnoreEmotion: true
       noCrossUserSpillover: true    # 强制 true（红线）
       preventEmotionalBlackmail: true  # 强制 true（红线）
       preventSelfHarmNarratives: true  # 强制 true（红线）

@@ -15,6 +15,7 @@ import { computeTargetSize, rasterizeSvg } from './raster.js'
 import { TempDir } from './tempdir.js'
 import { DiagramCache } from './cache.js'
 import { DiagramService, summaryOf } from './index.js'
+import { KrokiClient } from './kroki.js'
 import { THEMES } from './themes.js'
 
 let passed = 0, failed = 0
@@ -468,6 +469,28 @@ await test('临时目录：非法文件名拒绝（路径穿越）', async () =>
 await test('摘要生成', async () => {
   ok(/5 个节点、5 条连接/.test(summaryOf(validateSpec(FLOW).spec)), 'flowchart 摘要')
   ok(/3 个参与者和 3 条消息/.test(summaryOf(validateSpec(SEQ).spec)), 'sequence 摘要')
+})
+
+// ─── 8. 配置接线：defaultTheme / circuitBreaker.enabled ───
+await test('diagram.defaultTheme 生效（spec 未指定 theme 时采用配置默认）', async () => {
+  const d = validateSpec(FLOW, { defaultTheme: 'midnight' })
+  eq(d.ok, true, '校验通过')
+  eq(d.spec.theme, 'midnight', '采用配置默认主题')
+  const explicit = validateSpec({ ...FLOW, theme: 'technical' }, { defaultTheme: 'midnight' })
+  eq(explicit.spec.theme, 'technical', 'spec 显式 theme 优先于配置默认')
+  const fallback = validateSpec(FLOW, { defaultTheme: 'not-a-theme' })
+  eq(fallback.spec.theme, 'paper-blue', '非法配置默认回落到内置 DEFAULT_THEME')
+})
+
+await test('kroki.circuitBreaker.enabled=false → 熔断器不生效（永不拒绝）', async () => {
+  const off = new KrokiClient({ endpoint: 'http://127.0.0.1:8000', circuitBreaker: { enabled: false }, onEvent: () => {} })
+  eq(off.cb.state, 'disabled', '关闭时状态为 disabled')
+  for (let i = 0; i < 10; i++) off.cb.onFailure()
+  eq(off.cb.acquire(), null, '连续失败也不拒绝请求')
+  const on = new KrokiClient({ endpoint: 'http://127.0.0.1:8000', circuitBreaker: { enabled: true, failureThreshold: 2 }, onEvent: () => {} })
+  eq(on.cb.state, 'closed', '开启时状态为 closed')
+  on.cb.onFailure(); on.cb.onFailure()
+  eq(on.cb.acquire(), 'circuit_open', '达到阈值后熔断拒绝')
 })
 
 console.log(`\n通过 ${passed}，失败 ${failed}`)

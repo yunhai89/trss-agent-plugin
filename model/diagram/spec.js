@@ -199,13 +199,20 @@ export function validateSpec(raw, limits = {}) {
     }
   }
 
-  return { ok: true, spec: canonicalize(s), specHash: hashSpec(s) }
+  const spec = canonicalize(s, { defaultTheme: limits.defaultTheme })
+  return { ok: true, spec, specHash: hashSpec(spec) }
 }
 
-/** canonicalize：补默认值、裁 undefined、稳定序列化（key 排序；数组保持声明顺序——顺序是语义的一部分） */
-export function canonicalize(s) {
+/**
+ * canonicalize：补默认值、裁 undefined、稳定序列化（key 排序；数组保持声明顺序——顺序是语义的一部分）。
+ * @param {object} s 校验后的 spec
+ * @param {{defaultTheme?:string}} [opt] 默认主题（来自 agent.diagram.defaultTheme；spec 未指定 theme 时生效）
+ */
+export function canonicalize(s, { defaultTheme } = {}) {
   const dir = s.direction || (s.type === 'architecture' || s.type === 'mindmap' ? 'left-right' : 'top-down')
-  const out = { version: 1, type: s.type, title: s.title, direction: dir, theme: s.theme || DEFAULT_THEME }
+  // 配置的默认主题需合法（非法值回落内置），避免把未知名透传给渲染层/缓存
+  const dt = THEME_NAMES.includes(defaultTheme) ? defaultTheme : DEFAULT_THEME
+  const out = { version: 1, type: s.type, title: s.title, direction: dir, theme: s.theme || dt }
   if (s.caption) out.caption = s.caption
   if (s.output) out.output = s.output
   if (s.type === 'sequence') {

@@ -632,6 +632,27 @@ await test('集成：confirm 批准后执行', async () => {
   eq(res.content, '已发送', '批准后执行并返回')
 })
 
+await test('集成：masterSkipConfirm 触发 onMasterAutoApprove 高危提示回调', async () => {
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'danger', arguments: { x: 1 } }], finishReason: 'tool_calls' },
+    { content: '已执行', finishReason: 'stop' },
+  ])
+  let ran = false
+  const tools = new ToolRegistry().register({
+    name: 'danger', category: 'system', meta: { alwaysConfirm: true }, description: 'd', parameters: { type: 'object' },
+    async execute() { ran = true; return { ok: true } },
+  })
+  const events = []
+  const agent = new Agent({ provider, tools, policy: { decide }, masterSkipConfirm: true, maxTurns: 5 })
+  const res = await agent.run('危险操作', {
+    ctx: { role: 'member', isMaster: true, userId: 'u1' },
+    onMasterAutoApprove: (tc) => events.push(tc?.name),
+  })
+  ok(ran, '主人免确认后工具确实执行')
+  eq(events, ['danger'], 'onMasterAutoApprove 被调用（高危提示已接线）')
+  eq(res.content, '已执行', '最终回复')
+})
+
 await test('集成：clarify 短路作最终回复', async () => {
   const provider = mockProvider([
     { toolCalls: [{ id: 'c1', name: 'clarify', arguments: { question: '你要哪种颜色？' } }], finishReason: 'tool_calls' },
@@ -1023,6 +1044,26 @@ await test('LoopGovernor：duplicate 需「同动作+同结果」；轮询工具
   const g3 = mk({})
   for (let i = 0; i < 6; i++) g3.noteToolCall('check_subagent', { taskId: 't' }, true, undefined, 'running:same', { polling: true })
   eq(g3.shouldStop().stop, false, 'polling 工具连续同参同结果不判 duplicate')
+})
+
+await test('LoopGovernor：tokenBudget 按有效 token 计（缓存命中读 0.1x，长上下文不被误杀）', async () => {
+  const mk = (o) => new LoopGovernor({ maxSameAction: 99, maxConsecutiveFailures: 99, noProgressWindow: 99, timeBudgetMs: 0, tokenBudget: 0, ...o })
+  // DeepSeek/OpenAI 口径：input 含缓存读
+  const g = mk({ tokenBudget: 200000 })
+  const usage = { prompt_tokens: 90000, completion_tokens: 1000, prompt_cache_hit_tokens: 85000, prompt_cache_miss_tokens: 5000 }
+  g.noteUsage(usage, { scope: 'work' })
+  // 有效 = 未命中 5000 + 缓存读 85000*0.1 + 输出 1000 = 14500；原始 = 91000
+  eq(g.snapshot().workTokens, 14500, 'workTokens=有效 token（缓存读按 0.1x）')
+  eq(g.snapshot().rawTokens, 91000, 'rawTokens=原始 input+output')
+  eq(g.snapshot().bill.cacheRead, 85000, 'bill.cacheRead 保留原始命中量（观测不丢）')
+  for (let i = 0; i < 9; i++) g.noteUsage(usage, { scope: 'work' })
+  eq(g.shouldStop().stop, false, '10 轮长上下文（有效 145k）未触发 token_budget')
+  eq(g.precheck().stop, false, 'precheck 同样按有效 token 预判')
+  ok(g.snapshot().rawTokens > 200000, `原始 ${g.snapshot().rawTokens} 已超预算但不门控（证明非全价计）`)
+  // Anthropic 口径：input_tokens 已不含缓存读写
+  const ga = mk({ tokenBudget: 100000 })
+  ga.noteUsage({ input_tokens: 5000, output_tokens: 200, cache_read_input_tokens: 80000, cache_creation_input_tokens: 1000 }, { scope: 'work' })
+  eq(ga.snapshot().workTokens, 14200, 'Anthropic uncached=input_tokens（不重复扣缓存）+ cacheWrite + 0.1*cacheRead')
 })
 
 await test('Agent 集成：重复动作终止 + 强制收尾（审计 §2.1 探针）', async () => {

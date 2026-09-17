@@ -18,7 +18,6 @@ export const DEFAULT_GROUPWORLD_CONFIG = Object.freeze({
     segmentIdleSeconds: 300,  // 文档 3~8min，默认 5min
     segmentMaxMessages: 100,  // 文档 60~120
     ignoreCommandMessages: true,
-    ignoreSystemNotices: true,
     // 主题漂移切分（TextTiling 式，§6.2「明显更换主题时可提前分割」；词面 bigram 相似度）
     topicShiftEnabled: true,
     topicShiftWindow: 6,          // 参与比较的近窗有效消息数
@@ -39,13 +38,11 @@ export const DEFAULT_GROUPWORLD_CONFIG = Object.freeze({
     warmMessageCount30d: 5,
     minOnlineConfidence: 0.55,
     maxTraitsPerUser: 5,
-    temporaryTraitTtlDays: 14,
     traitMergeSimThreshold: 0.82, // 近义特征聚类合并阈值（每日维护；embedding 余弦）
   },
   graph: {
     activeEdgeDays: 90,
     maxNeighborsPerUser: 40,
-    maxOnlineHops: 1,
     weeklyCommunityDetection: true,
     minCommunitySize: 3,
   },
@@ -99,13 +96,11 @@ export function validateGroupWorldConfig(raw = {}) {
   c.profiles.hotActiveDays30d = cl(c.profiles?.hotActiveDays30d, 1, 30, 10)
   c.profiles.warmMessageCount30d = cl(c.profiles?.warmMessageCount30d, 1, 1000, 5)
   c.profiles.maxTraitsPerUser = cl(c.profiles?.maxTraitsPerUser, 1, 20, 5)
-  c.profiles.temporaryTraitTtlDays = cl(c.profiles?.temporaryTraitTtlDays, 1, 90, 14)
   c.profiles.traitMergeSimThreshold = cl(c.profiles?.traitMergeSimThreshold, 0.5, 1, 0.82)
   // minOnlineConfidence 不得低于 0.55
   c.profiles.minOnlineConfidence = Math.max(0.55, Math.min(0.99, Number(c.profiles?.minOnlineConfidence) || 0.55))
   c.graph.activeEdgeDays = cl(c.graph?.activeEdgeDays, 7, 365, 90)
   c.graph.maxNeighborsPerUser = cl(c.graph?.maxNeighborsPerUser, 0, 200, 40)
-  c.graph.maxOnlineHops = Math.max(1, Math.min(2, Number(c.graph?.maxOnlineHops) || 1))
   c.graph.minCommunitySize = Math.max(2, Math.min(20, Number(c.graph?.minCommunitySize) || 3))
   c.retrieval.plannerTokenBudget = cl(c.retrieval?.plannerTokenBudget, 100, 4000, 800)
   c.retrieval.replyerTokenBudget = cl(c.retrieval?.replyerTokenBudget, 100, 3000, 500)

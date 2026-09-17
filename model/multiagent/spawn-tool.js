@@ -86,6 +86,7 @@ export function makeSpawnSubagentTools({
   defaultBudgetMs = 120000, // 默认 2 分钟
   hardGraceMs = HARD_GRACE_MS, // 测试可调小
   minBudgetMs = MIN_BUDGET_MS,
+  onSettle = null, // 任务终态且主循环本轮已结束、结果未被 check 消费时回调（异步回推给会话）
 } = {}) {
   if (!provider) throw new Error('makeSpawnSubagentTools: provider 必填')
 
@@ -133,6 +134,62 @@ export function makeSpawnSubagentTools({
     }
   }
 
+  /** 任务进入终态时唤醒所有等待者（check_subagent 长轮询用） */
+  function _notifyWaiters(t) {
+    for (const w of [...(t._waiters || [])]) { try { w() } catch { /* noop */ } }
+  }
+
+  /**
+   * 主/子代理状态同步：任务已终态、发起它的主循环已结束、且结果没有被 check_subagent 取走
+   * （consumed=false）时，回调 onSettle 把结果/失败异步回推给会话。
+   * 这样即使主循环因预算/轮次先结束，子代理的结果或失败也不会静默丢失（曾导致"后续无反应"）。
+   */
+  function _maybeSettle(t) {
+    if (!onSettle || t.consumed || t._settled || !t.runEnded) return
+    if (t.status === 'queued' || t.status === 'running') return
+    t._settled = true
+    try {
+      Promise.resolve(onSettle({
+        taskId: t.id, status: t.status, task: t.task, result: t.result, error: t.error, specName: t.specName,
+      }, t.deliverCtx)).catch(() => { /* 回推失败不影响主流程 */ })
+    } catch { /* noop */ }
+  }
+
+  /** 主循环本轮结束（apps 在 Agent.run 返回后调用）：标记该会话任务并结算已终态者 */
+  function endRun(ctx) {
+    const scope = scopeKeyOf(ctx)
+    for (const t of _tasks.values()) {
+      if (t.scope !== scope) continue
+      t.runEnded = true
+      _maybeSettle(t)
+    }
+  }
+
+  /** 等待任务进入终态或超时/取消；status 已终态则立即返回 */
+  function _waitFor(t, ms, signal) {
+    if (t.status !== 'queued' && t.status !== 'running') return Promise.resolve()
+    const wait = Math.max(0, Number(ms) || 0)
+    if (wait <= 0) return Promise.resolve()
+    return new Promise((resolve) => {
+      let timer = null
+      let onAbort = null
+      const done = () => {
+        if (timer) clearTimeout(timer)
+        if (onAbort && signal) signal.removeEventListener('abort', onAbort)
+        t._waiters.delete(done)
+        resolve()
+      }
+      t._waiters.add(done)
+      timer = setTimeout(done, wait)
+      timer.unref?.()
+      if (signal) {
+        onAbort = () => done()
+        if (signal.aborted) return done()
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
+    })
+  }
+
   /** 热重载/退出：终止在跑子代理（协作取消 + 硬释放），清空任务与配额 */
   function shutdown() {
     let n = 0
@@ -142,8 +199,13 @@ export function makeSpawnSubagentTools({
         try { t._hardReject?.(new Error('运行时关闭')) } catch { /* noop */ }
         clearTimeout(t._budgetTimer); clearTimeout(t._hardTimer)
         t.status = 'cancelled'
+        t.error = t.error || '运行时关闭（配置更新/退出）'
         n++
       }
+      t.finishedAt = t.finishedAt || Date.now()
+      t.runEnded = true // 运行时已不存在，强制结算未消费的终态任务
+      _notifyWaiters(t)
+      _maybeSettle(t)
     }
     _tasks.clear()
     _spawnCounts.clear()
@@ -192,6 +254,8 @@ export function makeSpawnSubagentTools({
       // 构造子代理（身份 ctx 子集随 run 传入，供 memory_search 等 query 工具使用）
       const workerTools = buildWorkerTools(sourceRegistry, params.tools, defaultTools)
       const workerCtx = workerCtxOf(ctx)
+      // 回推用的最小投递上下文（e/bot 供会话回复；不带权限对象）——主循环结束后结算时使用
+      const deliverCtx = ctx ? { e: ctx.e, bot: ctx.bot, groupId: ctx.groupId, userId: ctx.userId, conversationId: ctx.conversationId } : null
       const spec = new SubagentSpec({
         name: specName, description: `子代理 #${_seq}（${focus}）`,
         systemPrompt: FOCUS_PROMPTS[focus], tools: workerTools, model, provider, maxTurns,
@@ -199,9 +263,10 @@ export function makeSpawnSubagentTools({
 
       const abort = new AbortController()
       const taskInfo = {
-        status: 'queued', scope, createdAt: Date.now(), startedAt: null, finishedAt: null,
+        id: taskId, task: task.slice(0, 80), scope, createdAt: Date.now(), startedAt: null, finishedAt: null,
         budgetMs, abort, _budgetTimer: null, _hardTimer: null, _hardReject: null,
-        result: null, error: null, specName,
+        _waiters: new Set(), result: null, error: null, specName,
+        consumed: false, runEnded: false, _settled: false, deliverCtx,
       }
       _tasks.set(taskId, taskInfo)
 
@@ -241,12 +306,15 @@ export function makeSpawnSubagentTools({
           clearTimeout(taskInfo._budgetTimer)
           clearTimeout(taskInfo._hardTimer)
           if (slotHeld) sem.release()
+          _notifyWaiters(taskInfo) // 唤醒 check_subagent 的长轮询等待者
+          // 延后一个微任务：让被唤醒的 check_subagent 先拿到终态并标记 consumed，再判断是否需要异步回推（防重复）
+          queueMicrotask(() => _maybeSettle(taskInfo))
         }
       })()
 
       return {
         ok: true, taskId, status: 'queued', timeBudgetMs: budgetMs,
-        message: `子代理 ${taskId} 已启动（预算 ${Math.round(budgetMs / 1000)} 秒，按本会话计数）。下一轮调用 check_subagent("${taskId}") 查看进度。`,
+        message: `子代理 ${taskId} 已启动（预算 ${Math.round(budgetMs / 1000)} 秒，按本会话计数）。调用 check_subagent("${taskId}") 等待其完成：该工具会阻塞至完成或最多等待 30 秒（可传 waitMs 调整），期间不消耗额外模型轮次。`,
       }
     },
   }
@@ -254,19 +322,24 @@ export function makeSpawnSubagentTools({
   // ── check_subagent（查看子代理状态 + 结果）──
   const checkTool = {
     name: 'check_subagent',
-    description: '查看子代理任务状态。返回 status（queued=排队中/running=运行中/done=完成/failed=失败/timeout=超时）。done 时包含完整结果。快到预算时会提示用 extend_subagent 续期。可反复轮询（不会被判死循环）。',
+    description: '查看子代理任务状态。默认会等待子代理完成（最多 30 秒，可传 waitMs 调整），完成即返回 done + 结果——因此只需调用一两次，不要高频轮询。返回 status（queued=排队中/running=运行中/done=完成/failed=失败/timeout=超时）。快到预算时会提示用 extend_subagent 续期。',
     category: 'query',
     meta: { polling: true, resultCap: 16000 }, // polling：轮询豁免 duplicate_action；resultCap 避免研究结果被 4000 全局默认截断
     parameters: {
       type: 'object',
       required: ['taskId'],
-      properties: { taskId: { type: 'string', description: 'spawn_subagent 返回的 taskId' } },
+      properties: {
+        taskId: { type: 'string', description: 'spawn_subagent 返回的 taskId' },
+        waitMs: { type: 'integer', description: '本次等待子代理完成的最长毫秒数（默认 30000；0=不等待立即返回状态，最大 120000）', default: 30000, minimum: 0, maximum: 120000 },
+      },
       additionalProperties: false,
     },
-    execute(params = {}, ctx) {
+    async execute(params = {}, ctx) {
       const t = _tasks.get(String(params.taskId || ''))
       if (!t) return { error: `未找到任务 ${params.taskId}（可能已过期或不存在）` }
       if (t.scope !== scopeKeyOf(ctx)) return { error: '无权查看该任务（仅发起会话可访问）' }
+      const waitMs = Math.max(0, Math.min(120000, params.waitMs == null ? 30000 : Number(params.waitMs) || 0))
+      if (waitMs > 0) await _waitFor(t, waitMs, ctx?.signal)
       const now = Date.now()
       const waitingMs = t.startedAt ? t.startedAt - t.createdAt : now - t.createdAt
       const remaining = t.startedAt ? Math.max(0, t.budgetMs - (now - t.startedAt)) : t.budgetMs
@@ -274,6 +347,8 @@ export function makeSpawnSubagentTools({
         taskId: params.taskId, status: t.status,
         elapsedMs: now - t.createdAt, waitingMs, budgetMs: t.budgetMs, remainingMs: remaining,
       }
+      // 主循环已取走终态结果 → 标记已消费，避免主循环结束后再异步回推造成重复
+      if (t.status === 'done' || t.status === 'failed' || t.status === 'timeout' || t.status === 'cancelled') t.consumed = true
       if (t.status === 'done') {
         res.result = t.result
         res.message = '子代理已完成，结果在 result 字段。可直接用于回复用户。'
@@ -317,6 +392,7 @@ export function makeSpawnSubagentTools({
 
   const tools = [spawnTool, checkTool, extendTool]
   Object.defineProperty(tools, 'shutdown', { value: shutdown, enumerable: false })
+  Object.defineProperty(tools, 'endRun', { value: endRun, enumerable: false })
   return tools
 }
 

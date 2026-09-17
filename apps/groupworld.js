@@ -145,7 +145,7 @@ export class GroupWorld extends plugin {
 
     const selfIds = botSelfIds(e)
     const norm = normalizeYunzaiEvent(e, { selfIds, botNames: [], isCommand: isCommandText, platform: 'qq' })
-    // 命令/系统通知不摄入（文档 §6.1 ingestion.ignoreCommandMessages/ignoreSystemNotices）
+    // 命令消息与系统事件不摄入（文档 §6.1）
     const ing = c.ingestion || {}
     if ((ing.ignoreCommandMessages !== false && norm.isCommand) || norm.message_type === 'system') return false
 

@@ -189,6 +189,8 @@
         if (!Array.isArray(form.sandbox.network.allowOut)) form.sandbox.network.allowOut = []
         if (!form.download) form.download = {}
         if (!form.multiagent) form.multiagent = {}
+        if (!form.stt) form.stt = {}
+        if (form.stt.enable == null) form.stt.enable = true
         // 统一模型配置块兜底（recall/selfReview/vision 原有；humanize/groupWorld 为新纳入字段）
         if (!form.recall) form.recall = {}
         if (!form.selfReview) form.selfReview = {}
@@ -940,7 +942,7 @@
             <cfg-row name="时间预算(ms)" desc="单次对话超时(0=不限)">
               <input type="number" class="inp" style="width:120px" min="0" step="1000" v-model.number="form.loop.timeBudgetMs">
             </cfg-row>
-            <cfg-row name="token 预算" desc="单次对话累计工作 token 上限(0=不限,收尾不占)">
+            <cfg-row name="token 预算" desc="单次对话累计「有效 token」上限(0=不限;缓存命中读按 0.1x 折算,收尾不占)">
               <input type="number" class="inp" style="width:120px" min="0" step="1000" v-model.number="form.loop.tokenBudget">
             </cfg-row>
             <cfg-row name="收尾宽限(ms)" desc="预算耗尽后收尾总结的独立时间窗">
@@ -1088,12 +1090,6 @@
                 <cfg-row name="候选修复次数" desc="生成失败自动修复上限">
                   <input type="number" class="inp" style="width:90px" min="0" max="3" v-model.number="form.toolEvo.maxRepairAttempts">
                 </cfg-row>
-                <cfg-row name="检索接受阈值" desc="与去重阈值分开(§12.1)">
-                  <input type="number" class="inp" style="width:100px" min="0" max="1" step="0.01" v-model.number="form.toolEvo.retrievalThreshold">
-                </cfg-row>
-                <cfg-row name="去重阈值" desc="候选去重相似度">
-                  <input type="number" class="inp" style="width:100px" min="0" max="1" step="0.01" v-model.number="form.toolEvo.deduplicationThreshold">
-                </cfg-row>
               </div>
             </div>
           </div></div>
@@ -1127,9 +1123,6 @@
             </cfg-row>
             <cfg-row name="主人任务免确认" desc="主人发起的确认类工具跳过审批,高危!" danger>
               <v-switch v-model="form.masterSkipConfirm"/>
-            </cfg-row>
-            <cfg-row name="日志级别" desc="devLog.level">
-              <select class="sel" style="width:120px" v-model="form.devLog.level"><option value="info">info</option><option value="warn">warn</option><option value="debug">debug</option></select>
             </cfg-row>
             <cfg-row class="full" name="主人列表" desc="主人 QQ 号(明文,点标签删除)">
               <div class="row g6 wrap" style="justify-content:flex-end">

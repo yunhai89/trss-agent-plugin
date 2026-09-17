@@ -14,9 +14,7 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
   enable: false,
   groups: [],                 // 显式白名单；空=不开启
   shadow: true,               // true=只记录决策，不实发
-  triggerMode: 'necessity',   // necessity | frequency
   talkValue: 0.35,
-  mentionHandledByDirectAgent: true,
   personaName: '',             // 机器人在群里的名字（留空=自动探测 Bot.nickname）
   botId: '',                   // bot 自身账号 id（默认自动取协议端 self_id；显式配置可覆盖，多协议/改名场景用）
 
@@ -63,7 +61,6 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
     maxDelayMs: 3500,
     typos: false,             // 第一版永关
     allowSticker: true,
-    quoteTarget: 'auto',
   },
   behaviorPolicy: { ...DEFAULT_BEHAVIOR_POLICY },
   knownBots: [],              // 已知其它 bot 账号（QQ 号）：bot↔bot 交替≥3轮无真人 → 10分钟熔断（真人不受影响）
@@ -75,16 +72,7 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
     incrementalMinMessages: 20, // 每小时增量整合水位（新增 ≥N 条才跑；梗当天入库）
     forgetDays: 30,           // 超龄硬遗忘（天）
   },
-  learning: {                 // Phase 4：仅 shadow 采集，不进 Prompt
-    style: 'shadow',
-    jargon: 'shadow',
-    behavior: false,
-    minSamples: 20,
-    requireReview: true,
-  },
   safety: {
-    blockCommands: true,
-    blockDestructiveTools: true,
     privateMemoryInGroup: false, // 不可改的硬约束
     maxConcurrentGroups: 2,
   },

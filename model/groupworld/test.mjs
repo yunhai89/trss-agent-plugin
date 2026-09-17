@@ -33,8 +33,8 @@ const dao = Db.dao
 const cfgFn = () => ({
   ingestion: { rawMessageRetentionDays: 30, segmentIdleSeconds: 300, segmentMaxMessages: 100 },
   analysis: { minSegmentMessages: 2, maxSegmentsPerRun: 50, modelProfile: '', maxDailyCallsPerGroup: 100, retryCount: 1, maxTokens: 1200 },
-  profiles: { hotActiveDays30d: 10, warmMessageCount30d: 5, minOnlineConfidence: 0.55, maxTraitsPerUser: 5, temporaryTraitTtlDays: 14 },
-  graph: { activeEdgeDays: 90, maxNeighborsPerUser: 40, maxOnlineHops: 1, weeklyCommunityDetection: true, minCommunitySize: 3 },
+  profiles: { hotActiveDays30d: 10, warmMessageCount30d: 5, minOnlineConfidence: 0.55, maxTraitsPerUser: 5 },
+  graph: { activeEdgeDays: 90, maxNeighborsPerUser: 40, weeklyCommunityDetection: true, minCommunitySize: 3 },
   retrieval: { plannerTokenBudget: 800, replyerTokenBudget: 500, maxEpisodes: 3, maxRelationships: 5, cacheTtlSeconds: 60 },
 })
 
