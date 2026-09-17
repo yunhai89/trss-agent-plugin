@@ -168,6 +168,8 @@
         if (form.stagehand.maxSessions == null) form.stagehand.maxSessions = 3
         if (form.stagehand.maxCallsPerMinute == null) form.stagehand.maxCallsPerMinute = 10
         if (form.stagehand.maxCallsPerDay == null) form.stagehand.maxCallsPerDay = 200
+        if (form.stagehand.domSettleTimeoutMs == null) form.stagehand.domSettleTimeoutMs = 3000
+        if (!Array.isArray(form.stagehand.blockedHosts)) form.stagehand.blockedHosts = []
         // 无损压缩 + 网页抓取引擎兜底（旧 config 无此字段时 v-model 不报错）
         if (!form.compaction) form.compaction = {}
         if (form.compaction.enable == null) form.compaction.enable = true
@@ -1220,8 +1222,20 @@
             <cfg-row class="full" name="Pixiv refreshToken" desc="明文">
               <input class="inp mono" style="width:100%" v-model="form.pixiv.refreshToken" placeholder="refresh token">
             </cfg-row>
-            <cfg-row name="语音转写 STT" desc="whisper 兼容接口">
+            <cfg-row name="语音转写 STT" desc="whisper 兼容接口；关则不注册 transcribe_media 工具">
               <v-switch v-model="form.stt.enable"/>
+            </cfg-row>
+            <cfg-row name="STT API 地址" desc="Whisper 兼容接口（如 https://api.openai.com/v1/audio/transcriptions）">
+              <input class="inp mono" style="width:100%" v-model="form.stt.apiBase" placeholder="留空=默认">
+            </cfg-row>
+            <cfg-row name="STT API Key" desc="OpenAI/Groq/Azure 等（敏感：已在回复脱敏中屏蔽）">
+              <input class="inp mono" style="width:100%" v-model="form.stt.apiKey" placeholder="sk-...">
+            </cfg-row>
+            <cfg-row name="STT 模型">
+              <input class="inp mono" style="width:200px" v-model="form.stt.model" placeholder="whisper-1">
+            </cfg-row>
+            <cfg-row name="STT 语言" desc="如 zh/en；留空自动检测">
+              <input class="inp mono" style="width:120px" v-model="form.stt.language" placeholder="留空=自动">
             </cfg-row>
             <cfg-row name="Python 计算沙盒" desc="calc:python3 超时秒">
               <div class="row g6">
@@ -1246,6 +1260,9 @@
                 </cfg-row>
                 <cfg-row name="真机化指纹" desc="随机设备 UA/视口/语言/触屏 + 去自动化 flag + 规避脚本（降低被风控拦截概率）">
                   <v-switch v-model="form.stagehand.stealth"/>
+                </cfg-row>
+                <cfg-row name="固定 User-Agent(可选)" desc="留空=按设备指纹池随机；填写则全局固定">
+                  <input class="inp mono" style="width:260px" v-model="form.stagehand.userAgent" placeholder="留空=随机设备指纹">
                 </cfg-row>
                 <cfg-row name="浏览器模式">
                   <select class="sel" style="width:190px" v-model="form.stagehand.mode"><option v-for="o in OPT.shMode" :value="o[0]">{{ o[1] }}</option></select>
@@ -1276,6 +1293,12 @@
                 </cfg-row>
                 <cfg-row name="会话空闲超时(毫秒)">
                   <input type="number" class="inp" style="width:130px" min="60000" step="60000" v-model.number="form.stagehand.idleTimeoutMs">
+                </cfg-row>
+                <cfg-row name="DOM 稳定等待(毫秒)" desc="domSettleTimeoutMs：页面动作后等待 DOM 稳定">
+                  <input type="number" class="inp" style="width:120px" min="0" step="500" v-model.number="form.stagehand.domSettleTimeoutMs">
+                </cfg-row>
+                <cfg-row class="full" name="额外禁访主机" desc="在默认内网/元数据黑名单之外追加禁访域名（回车添加）">
+                  <tag-editor v-model="form.stagehand.blockedHosts" mono placeholder="如 internal.example.com"/>
                 </cfg-row>
               </div>
             </div>
