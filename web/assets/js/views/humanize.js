@@ -58,6 +58,8 @@
     reply: { maxBubbles: 3, typingSpeed: 1.0, minDelayMs: 600, maxDelayMs: 3500, typos: false, allowSticker: true },
     behaviorPolicy: { topics: [], avoidTopics: [], initiative: 0.35, humor: 0.4, answerUnknownQuestions: false, interruptHumanConversation: false, maxRepliesPer10Minutes: 4 },
     safety: { privateMemoryInGroup: false, maxConcurrentGroups: 1 },
+    knownBots: [],
+    memory: { enabled: true, maxPerQuery: 5, maxPerGroup: 300, incrementalMinMessages: 20, forgetDays: 30 },
   }
 
   window.VIEWS.humanize = {
@@ -144,6 +146,7 @@
         { id: 'safety', name: '安全 / 红线', icon: 'shield', grad: 'var(--grad)' },
       ]
       const open = reactive(Object.fromEntries(sections.map((s) => [s.id, s.id === 'basic'])))
+      const adv = reactive({ safety: false }) // 卡片内「高级参数」折叠态（默认折叠）
       const activeSec = ref('basic')
       const jump = (id) => {
         open[id] = true
@@ -176,7 +179,7 @@
       const enableWarn = computed(() => form.enable === true && !(form.groups || []).length)
 
       return {
-        form, dirty, save, reset, sections, open, activeSec, jump, OPT,
+        form, dirty, save, reset, sections, open, activeSec, jump, OPT, adv,
         talkPct, tempPlannerPct, tempReplyerPct, humorPct, initiativePct, enableWarn,
       }
     },
@@ -431,6 +434,22 @@
             <cfg-row name="同时 Planning 群数上限" desc="全局信号量；默认 1（MVP）">
               <input type="number" class="inp" style="width:90px" min="1" max="10" v-model.number="form.safety.maxConcurrentGroups">
             </cfg-row>
+            <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.safety = !adv.safety">
+              {{ adv.safety ? '▾' : '▸' }} 高级参数
+            </div>
+            <div v-show="adv.safety" class="full">
+              <div style="font-weight:800;color:var(--ink3);font-size:12px;margin:6px 0">其它 bot / 独立记忆库</div>
+              <div class="cf-grid">
+                <cfg-row name="已知其它 bot" desc="QQ号；bot↔bot 连续对线≥3轮无真人 → 熔断10分钟">
+                  <tag-editor v-model="form.knownBots" mono placeholder="QQ号"/>
+                </cfg-row>
+                <cfg-row name="启用伪人记忆库" desc="独立 sqlite；每日睡眠整合近期对话为长时记忆"><v-switch v-model="form.memory.enabled"/></cfg-row>
+                <cfg-row name="单次注入条数"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.memory.maxPerQuery"></cfg-row>
+                <cfg-row name="单群容量"><input type="number" class="inp" style="width:110px" min="50" v-model.number="form.memory.maxPerGroup"></cfg-row>
+                <cfg-row name="增量整合水位"><input type="number" class="inp" style="width:110px" min="4" v-model.number="form.memory.incrementalMinMessages"></cfg-row>
+                <cfg-row name="超龄遗忘(天)"><input type="number" class="inp" style="width:100px" min="7" v-model.number="form.memory.forgetDays"></cfg-row>
+              </div>
+            </div>
             <div class="full" style="margin-top:8px;padding:10px 14px;border:1px dashed var(--line);border-radius:10px;background:rgba(255,255,255,.42)">
               <div class="mut2" style="font-size:12px;line-height:1.7">
                 <b>运行期可观察</b>：群里发 <code>#伪人状态</code> 看活跃运行时；<code>#伪人决策 [n]</code> 看最近 n 条门控/规划 trace；<code>#伪人记忆 [群号]</code> 看独立记忆库（每日 04:47 自动整合近期对话为长时记忆，回复时按相关性注入）；

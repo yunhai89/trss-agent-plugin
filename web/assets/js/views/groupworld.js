@@ -165,8 +165,9 @@
         try { await window.store.loadConfig(); if (M.config) syncForm(M.config.groupWorld) } catch (e) { toast(e.message, 'error') }
       })
 
+      const adv = reactive({ graph: false, privacy: false }) // 卡片内「高级参数」折叠态（默认折叠）
       return {
-        form, dirty, save, reset, enableWarn, onlineWarn, cfgOpen,
+        form, dirty, save, reset, enableWarn, onlineWarn, cfgOpen, adv,
         tab, sub, switchTab, dataGid, dataGroups, stats, members, episodes, communities, detail, loading,
         loadData, openProfile, tierName, srcName, epName, pct, shortId, parseArr,
         sections: [], // 占位（配置页锚点导航已内联）
@@ -238,6 +239,12 @@
             <cfg-row name="关系边活跃窗口(天)"><input type="number" class="inp" style="width:100px" min="7" max="365" v-model.number="form.graph.activeEdgeDays"></cfg-row>
             <cfg-row name="每成员一跳关系上限"><input type="number" class="inp" style="width:100px" min="0" max="200" v-model.number="form.graph.maxNeighborsPerUser"></cfg-row>
             <cfg-row name="每周小圈子识别"><v-switch v-model="form.graph.weeklyCommunityDetection"/></cfg-row>
+            <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.graph = !adv.graph">
+              {{ adv.graph ? '▾' : '▸' }} 高级参数
+            </div>
+            <div v-show="adv.graph" class="full"><div class="cf-grid">
+              <cfg-row name="最小圈子人数"><input type="number" class="inp" style="width:100px" min="2" max="20" v-model.number="form.graph.minCommunitySize"></cfg-row>
+            </div></div>
           </div></div>
         </div>
 
@@ -251,6 +258,12 @@
             <cfg-row name="允许纠正画像" desc="群友可发 #纠正我的群聊画像 补充/纠正"><v-switch v-model="form.privacy.allowUserCorrect"/></cfg-row>
             <cfg-row name="允许退出建模" desc="群友可发 #关闭我的群聊建模 退出（清除派生数据）"><v-switch v-model="form.privacy.allowUserOptOut"/></cfg-row>
             <cfg-row name="拦截敏感推断" danger><v-switch v-model="form.privacy.blockSensitiveInference"/></cfg-row>
+            <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.privacy = !adv.privacy">
+              {{ adv.privacy ? '▾' : '▸' }} 高级参数
+            </div>
+            <div v-show="adv.privacy" class="full"><div class="cf-grid">
+              <cfg-row name="社会现场缓存(秒)" desc="groupWorld.retrieval.cacheTtlSeconds"><input type="number" class="inp" style="width:110px" min="0" v-model.number="form.retrieval.cacheTtlSeconds"></cfg-row>
+            </div></div>
           </div></div>
         </div>
 

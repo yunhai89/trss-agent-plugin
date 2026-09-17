@@ -490,10 +490,11 @@
         { id: 'mcp', name: 'MCP 服务', icon: 'tool', grad: 'var(--grad-mint)' },
         { id: 'sandbox', name: 'E2B 沙箱', icon: 'tool', grad: 'var(--grad-mint)' },
         { id: 'ext', name: '多模态 / 工具 / 扩展', icon: 'tool', grad: 'var(--grad-sky)' },
-        { id: 'advanced', name: '高级参数', icon: 'tool', grad: 'var(--grad-sky)' },
       ]
       // 仅「基础/模型」默认展开，其余收起（配置多时便于查找）
       const open = reactive(Object.fromEntries(sections.map((s) => [s.id, s.id === 'basic'])))
+      // 各卡片内「高级参数」折叠态（默认折叠）
+      const adv = reactive({ reason: false, evolution: false, security: false, ext: false, sandbox: false, selfstate: false })
       const activeSec = ref('basic')
       const jump = (id) => {
         open[id] = true
@@ -957,8 +958,42 @@
             <cfg-row name="冷落判定置信门槛" desc="ignore_score 达此值才算高置信被冷落（防误判）"><input type="number" class="inp" style="width:100px" min="0.6" max="0.95" step="0.05" v-model.number="form.selfState.expectations.minIgnoredConfidence"></cfg-row>
             <cfg-row name="负心境恢复上限(小时)" desc="负状态超时强制进入恢复流程"><input type="number" class="inp" style="width:100px" min="1" max="48" v-model.number="form.selfState.stability.maxNegativeMoodHours"></cfg-row>
             <div class="full" style="padding:8px 12px;border:1px dashed var(--line);border-radius:10px">
-              <div class="mut2" style="font-size:12px">实时状态/情绪/期待/心事/关系情感 → 侧栏「自我状态」页。</div>
+              <div class="mut2" style="font-size:12px">实时状态/情绪/期待/心事/关系情感 → 侧栏「自我状态」页；完整参数见下方「高级参数」。</div>
             </div>
+            <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.selfstate = !adv.selfstate">
+              {{ adv.selfstate ? '▾' : '▸' }} 高级参数
+            </div>
+            <div v-show="adv.selfstate" class="full"><div class="cf-grid">
+              <cfg-row name="群级隔离" desc="scope.isolateByGroup（强制 true 红线）" danger><v-switch v-model="form.selfState.scope.isolateByGroup" :disabled="true"/></cfg-row>
+              <cfg-row name="歧义评价模型(可选)" desc="eventDetection.ambiguousIntentModelProfile（留空=主模型）"><input class="inp mono" style="width:180px" v-model="form.selfState.eventDetection.ambiguousIntentModelProfile"></cfg-row>
+              <cfg-row name="事件最低置信度"><input type="number" class="inp" style="width:110px" min="0.3" max="0.95" step="0.01" v-model.number="form.selfState.eventDetection.minEventConfidence"></cfg-row>
+              <cfg-row name="可见强度下限"><input type="number" class="inp" style="width:100px" min="0" max="1" step="0.01" v-model.number="form.selfState.emotion.minVisibleIntensity"></cfg-row>
+              <cfg-row name="最大并存情绪数"><input type="number" class="inp" style="width:100px" min="2" max="32" v-model.number="form.selfState.emotion.maxActiveEmotions"></cfg-row>
+              <cfg-row name="允许混合情绪"><v-switch v-model="form.selfState.emotion.enableMixedEmotions"/></cfg-row>
+              <cfg-row name="懒衰减"><v-switch v-model="form.selfState.emotion.lazyDecay"/></cfg-row>
+              <cfg-row name="启用怨气"><v-switch v-model="form.selfState.resentment.enabled"/></cfg-row>
+              <cfg-row name="怨气最低置信度"><input type="number" class="inp" style="width:110px" min="0.5" max="0.95" step="0.01" v-model.number="form.selfState.resentment.minCreateConfidence"></cfg-row>
+              <cfg-row name="怨气半衰期(天)"><input type="number" class="inp" style="width:100px" min="1" max="60" v-model.number="form.selfState.resentment.halfLifeDays"></cfg-row>
+              <cfg-row name="启用期待"><v-switch v-model="form.selfState.expectations.enabled"/></cfg-row>
+              <cfg-row name="等待窗上限(秒)"><input type="number" class="inp" style="width:120px" min="120" v-model.number="form.selfState.expectations.maximumWindowSeconds"></cfg-row>
+              <cfg-row name="需目标活跃证据"><v-switch v-model="form.selfState.expectations.requireTargetActivityEvidence"/></cfg-row>
+              <cfg-row name="启用反思"><v-switch v-model="form.selfState.reflection.enabled"/></cfg-row>
+              <cfg-row name="反思最小事件数"><input type="number" class="inp" style="width:110px" min="2" v-model.number="form.selfState.reflection.minSignificantEvents"></cfg-row>
+              <cfg-row name="每日反思上限"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.selfState.reflection.maxReflectionsPerDay"></cfg-row>
+              <cfg-row name="反思默认 TTL(天)"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.selfState.reflection.defaultTtlDays"></cfg-row>
+              <cfg-row name="注入状态投影"><v-switch v-model="form.selfState.planner.includeStateProjection"/></cfg-row>
+              <cfg-row name="状态 token 上限"><input type="number" class="inp" style="width:110px" min="60" v-model.number="form.selfState.planner.maxStateTokens"></cfg-row>
+              <cfg-row name="情绪仅作偏置" desc="planner.emotionIsBiasOnly（强制 true 红线）" danger><v-switch v-model="form.selfState.planner.emotionIsBiasOnly" :disabled="true"/></cfg-row>
+              <cfg-row name="注入表达胶囊"><v-switch v-model="form.selfState.replyer.includeExpressionCapsule"/></cfg-row>
+              <cfg-row name="外显数值" desc="replyer.exposeNumericState（强制 false 红线）" danger><v-switch v-model="form.selfState.replyer.exposeNumericState" :disabled="true"/></cfg-row>
+              <cfg-row name="自然情绪表达"><v-switch v-model="form.selfState.replyer.allowNaturalEmotionDisclosure"/></cfg-row>
+              <cfg-row name="禁跨用户扩散" desc="stability.noCrossUserSpillover（强制 true 红线）" danger><v-switch v-model="form.selfState.stability.noCrossUserSpillover" :disabled="true"/></cfg-row>
+              <cfg-row name="禁情绪绑架" desc="stability.preventEmotionalBlackmail（强制 true 红线）" danger><v-switch v-model="form.selfState.stability.preventEmotionalBlackmail" :disabled="true"/></cfg-row>
+              <cfg-row name="禁自伤叙事" desc="stability.preventSelfHarmNarratives（强制 true 红线）" danger><v-switch v-model="form.selfState.stability.preventSelfHarmNarratives" :disabled="true"/></cfg-row>
+              <cfg-row name="迁移日志留存(天)"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.selfState.retention.transitionLogDays"></cfg-row>
+              <cfg-row name="已解决情绪留存(天)"><input type="number" class="inp" style="width:120px" min="1" v-model.number="form.selfState.retention.resolvedEmotionDays"></cfg-row>
+              <cfg-row name="已解决期待留存(天)"><input type="number" class="inp" style="width:120px" min="1" v-model.number="form.selfState.retention.resolvedExpectationDays"></cfg-row>
+            </div></div>
           </div></div>
         </div>
 
@@ -1030,6 +1065,19 @@
             <cfg-row class="full" name="reasoning 字段映射" desc="不同厂商的推理字段名">
               <tag-editor v-model="form.reasoningFields"/>
             </cfg-row>
+            <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.reason = !adv.reason">
+              {{ adv.reason ? '▾' : '▸' }} 高级参数
+            </div>
+            <div v-show="adv.reason" class="full"><div class="cf-grid">
+              <cfg-row name="压缩归档目录" desc="compaction.archiveDir（留空=默认 data/context-archive）">
+                <input class="inp mono" style="width:220px" v-model="form.compaction.archiveDir" placeholder="data/context-archive">
+              </cfg-row>
+              <cfg-row name="Anthropic 缓存断点" desc="cacheControl：off / auto(官方端点开) / explicit">
+                <select class="sel" style="width:140px" v-model="form.cacheControl">
+                  <option value="off">off</option><option value="auto">auto</option><option value="explicit">explicit</option>
+                </select>
+              </cfg-row>
+            </div></div>
           </div></div>
         </div>
 
@@ -1141,6 +1189,14 @@
                 </cfg-row>
               </div>
             </div>
+            <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.evolution = !adv.evolution">
+              {{ adv.evolution ? '▾' : '▸' }} 高级参数
+            </div>
+            <div v-show="adv.evolution" class="full"><div class="cf-grid">
+              <cfg-row name="工具进化库路径"><input class="inp mono" style="width:220px" v-model="form.toolEvo.dbPath"></cfg-row>
+              <cfg-row name="工具制品目录"><input class="inp mono" style="width:220px" v-model="form.toolEvo.artifactsDir"></cfg-row>
+              <cfg-row name="stable 工具超时(ms)"><input type="number" class="inp" style="width:120px" min="100" step="500" v-model.number="form.toolEvo.runnerTimeoutMs"></cfg-row>
+            </div></div>
           </div></div>
         </div>
 
@@ -1183,6 +1239,15 @@
             <cfg-row class="full" name="默认身份 systemPrompt" desc="留空用富默认身份;被人设覆盖时失效">
               <textarea class="txa" style="min-height:64px" v-model="form.systemPrompt" placeholder="留空=使用内置默认身份"></textarea>
             </cfg-row>
+            <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.security = !adv.security">
+              {{ adv.security ? '▾' : '▸' }} 高级参数
+            </div>
+            <div v-show="adv.security" class="full"><div class="cf-grid">
+              <cfg-row name="日志目录" desc="devLog.dir（留空=默认 data/logs）"><input class="inp mono" style="width:220px" v-model="form.devLog.dir" placeholder="留空=默认"></cfg-row>
+              <cfg-row class="full" name="策略类别最低角色" desc="policy.categoryMin（JSON，如 {&quot;mcp_write&quot;:1}；留空=默认）">
+                <textarea class="inp mono" style="width:100%;min-height:54px" :value="JSON.stringify(form.policy.categoryMin || {})" @change="updateJson('policy.categoryMin', $event.target.value)"></textarea>
+              </cfg-row>
+            </div></div>
           </div></div>
         </div>
 
@@ -1457,6 +1522,82 @@
                 </cfg-row>
               </div>
             </div>
+            <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.ext = !adv.ext">
+              {{ adv.ext ? '▾' : '▸' }} 高级参数
+            </div>
+            <div v-show="adv.ext" class="full">
+              <div style="font-weight:800;color:var(--ink3);font-size:12px;margin:6px 0">知识库 KB</div>
+              <div class="cf-grid">
+                <cfg-row name="启用知识库" desc="kb.enable"><v-switch v-model="form.kb.enable"/></cfg-row>
+                <cfg-row name="启用网页抓取" desc="kb.crawlEnable"><v-switch v-model="form.kb.crawlEnable"/></cfg-row>
+                <cfg-row name="抓取超时(秒)"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.kb.crawlTimeout"></cfg-row>
+                <cfg-row name="分块大小"><input type="number" class="inp" style="width:110px" min="50" v-model.number="form.kb.chunkSize"></cfg-row>
+                <cfg-row name="分块重叠"><input type="number" class="inp" style="width:100px" min="0" v-model.number="form.kb.chunkOverlap"></cfg-row>
+                <cfg-row name="默认返回片段数"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.kb.topK"></cfg-row>
+                <cfg-row name="最低相似度"><input type="number" class="inp" style="width:100px" min="0" max="1" step="0.01" v-model.number="form.kb.minScore"></cfg-row>
+              </div>
+              <div style="font-weight:800;color:var(--ink3);font-size:12px;margin:12px 0 6px">定时任务</div>
+              <div class="cf-grid">
+                <cfg-row name="启用定时任务链" desc="taskEnabled（关则 #定时任务 拒绝且 schedule_task 不注册）"><v-switch v-model="form.schedule.taskEnabled"/></cfg-row>
+                <cfg-row name="任务链轮次上限"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.schedule.taskMaxTurns"></cfg-row>
+              </div>
+              <div style="font-weight:800;color:var(--ink3);font-size:12px;margin:12px 0 6px">多模态 / 视觉</div>
+              <div class="cf-grid">
+                <cfg-row name="主动收集附件" desc="media.active"><v-switch v-model="form.media.active"/></cfg-row>
+                <cfg-row name="被动读取附件" desc="media.passive"><v-switch v-model="form.media.passive"/></cfg-row>
+                <cfg-row name="单文件上限(字节)"><input type="number" class="inp" style="width:130px" min="0" step="1048576" v-model.number="form.media.maxFileBytes"></cfg-row>
+                <cfg-row name="降级策略" desc="media.degrade"><input class="inp mono" style="width:120px" v-model="form.media.degrade"></cfg-row>
+                <cfg-row name="视觉描述 maxTokens"><input type="number" class="inp" style="width:110px" min="64" step="64" v-model.number="form.vision.maxTokens"></cfg-row>
+                <cfg-row class="full" name="视觉描述提示词"><input class="inp" style="width:100%" v-model="form.vision.describePrompt" placeholder="留空=内置"></cfg-row>
+                <cfg-row class="full" name="能力覆盖" desc="media.caps（JSON，如 {&quot;vision&quot;:false,&quot;file&quot;:true}；留空=自动探测）">
+                  <textarea class="inp mono" style="width:100%;min-height:54px" :value="JSON.stringify(form.media.caps || {})" @change="updateJson('media.caps', $event.target.value)"></textarea>
+                </cfg-row>
+              </div>
+              <div style="font-weight:800;color:var(--ink3);font-size:12px;margin:12px 0 6px">工具 / 技能 / 扩展</div>
+              <div class="cf-grid">
+                <cfg-row name="内置工具包" desc="tools.builtin"><v-switch v-model="form.tools.builtin"/></cfg-row>
+                <cfg-row name="工具包目录" desc="tools.dir"><input class="inp mono" style="width:140px" v-model="form.tools.dir"></cfg-row>
+                <cfg-row name="技能目录" desc="skill.dir"><input class="inp mono" style="width:140px" v-model="form.skill.dir"></cfg-row>
+                <cfg-row name="技能历史条数"><input type="number" class="inp" style="width:100px" min="0" v-model.number="form.skill.historyCount"></cfg-row>
+                <cfg-row name="米游社默认分区(bbs)"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.miyoushe.defaultGid"></cfg-row>
+                <cfg-row name="米游社单帖最大图"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.miyoushe.maxImages"></cfg-row>
+                <cfg-row name="启用 Pixiv"><v-switch v-model="form.pixiv.enable"/></cfg-row>
+                <cfg-row name="Pixiv 图片代理"><input class="inp mono" style="width:220px" v-model="form.pixiv.imageProxy"></cfg-row>
+                <cfg-row name="Pixiv API 反代(可选)"><input class="inp mono" style="width:220px" v-model="form.pixiv.apiProxy" placeholder="留空=直连"></cfg-row>
+                <cfg-row name="Pixiv 单次最大图"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.pixiv.maxImages"></cfg-row>
+                <cfg-row name="计算器 python 解释器"><input class="inp mono" style="width:130px" v-model="form.calc.python"></cfg-row>
+                <cfg-row name="文档转 PDF soffice"><input class="inp mono" style="width:140px" v-model="form.document.soffice"></cfg-row>
+                <cfg-row name="深度研究并发"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.research.maxConcurrent"></cfg-row>
+                <cfg-row name="研究结果评估"><v-switch v-model="form.research.evaluation"/></cfg-row>
+              </div>
+              <div style="font-weight:800;color:var(--ink3);font-size:12px;margin:12px 0 6px">ComfyUI</div>
+              <div class="cf-grid">
+                <cfg-row name="启用 ComfyUI" desc="comfyui.enable"><v-switch v-model="form.comfyui.enable"/></cfg-row>
+                <cfg-row name="服务地址"><input class="inp mono" style="width:220px" v-model="form.comfyui.host"></cfg-row>
+                <cfg-row name="Cloud 模式"><v-switch v-model="form.comfyui.cloud"/></cfg-row>
+                <cfg-row name="Cloud API Key"><input class="inp mono" style="width:200px" v-model="form.comfyui.apiKey"></cfg-row>
+                <cfg-row name="生成超时(秒)"><input type="number" class="inp" style="width:110px" min="10" v-model.number="form.comfyui.timeout"></cfg-row>
+                <cfg-row name="轮询初始间隔(秒)"><input type="number" class="inp" style="width:110px" min="0.5" step="0.5" v-model.number="form.comfyui.pollInterval"></cfg-row>
+                <cfg-row name="轮询最大间隔(秒)"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.comfyui.pollMaxInterval"></cfg-row>
+                <cfg-row name="单次最大图"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.comfyui.maxImages"></cfg-row>
+                <cfg-row name="产物目录(可选)"><input class="inp mono" style="width:220px" v-model="form.comfyui.outputDir" placeholder="留空=插件 temp"></cfg-row>
+              </div>
+              <div style="font-weight:800;color:var(--ink3);font-size:12px;margin:12px 0 6px">示意图 limits / Kroki</div>
+              <div class="cf-grid">
+                <cfg-row name="最大连线数"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.diagram.maxEdges"></cfg-row>
+                <cfg-row name="最大宽度(px)"><input type="number" class="inp" style="width:110px" min="200" v-model.number="form.diagram.maxWidth"></cfg-row>
+                <cfg-row name="最大高度(px)"><input type="number" class="inp" style="width:110px" min="200" v-model.number="form.diagram.maxHeight"></cfg-row>
+                <cfg-row name="最大像素"><input type="number" class="inp" style="width:130px" min="100000" step="100000" v-model.number="form.diagram.maxPixels"></cfg-row>
+                <cfg-row name="输出字节上限"><input type="number" class="inp" style="width:130px" min="65536" step="1048576" v-model.number="form.diagram.maxOutputBytes"></cfg-row>
+                <cfg-row name="启用 Kroki" desc="diagram.kroki.enabled"><v-switch v-model="form.diagram.kroki.enabled"/></cfg-row>
+                <cfg-row name="DSL 源上限(字节)"><input type="number" class="inp" style="width:130px" min="1024" step="1024" v-model.number="form.diagram.kroki.maxSourceBytes"></cfg-row>
+                <cfg-row name="熔断失败阈值"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.diagram.kroki.circuitBreaker.failureThreshold"></cfg-row>
+                <cfg-row name="熔断冷却(ms)"><input type="number" class="inp" style="width:120px" min="1000" step="1000" v-model.number="form.diagram.kroki.circuitBreaker.cooldownMs"></cfg-row>
+                <cfg-row class="full" name="允许图类型" desc="kroki.allowedDiagramTypes（回车添加）">
+                  <tag-editor v-model="form.diagram.kroki.allowedDiagramTypes" mono placeholder="如 d2"/>
+                </cfg-row>
+              </div>
+            </div>
           </div></div>
         </div>
 
@@ -1508,6 +1649,22 @@
             <cfg-row class="full" name="命令审计日志" desc="每条命令记录会话键/退出码/命令前 200 字符（不含密钥）">
               <v-switch v-model="form.sandbox.audit"/>
             </cfg-row>
+            <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.sandbox = !adv.sandbox">
+              {{ adv.sandbox ? '▾' : '▸' }} 高级参数
+            </div>
+            <div v-show="adv.sandbox" class="full"><div class="cf-grid">
+              <cfg-row name="默认工作目录"><input class="inp mono" style="width:160px" v-model="form.sandbox.defaultCwd"></cfg-row>
+              <cfg-row name="沙箱 TTL(ms)"><input type="number" class="inp" style="width:130px" min="10000" step="60000" v-model.number="form.sandbox.sandboxTtlMs"></cfg-row>
+              <cfg-row name="等并发名额(ms)"><input type="number" class="inp" style="width:130px" min="0" step="1000" v-model.number="form.sandbox.concurrencyWaitMs"></cfg-row>
+              <cfg-row name="SDK 请求超时(ms)"><input type="number" class="inp" style="width:130px" min="1000" step="1000" v-model.number="form.sandbox.requestTimeoutMs"></cfg-row>
+              <cfg-row name="SDK 重试次数"><input type="number" class="inp" style="width:100px" min="0" max="5" v-model.number="form.sandbox.retries"></cfg-row>
+              <cfg-row name="公开 URL 需鉴权" desc="false=沙箱公开 URL 也要 token"><v-switch v-model="form.sandbox.allowPublicTraffic"/></cfg-row>
+              <cfg-row name="允许互联网" desc="network.allowInternet（有白名单时由白名单收窄）"><v-switch v-model="form.sandbox.network.allowInternet"/></cfg-row>
+              <cfg-row name="候选验证超时(ms)"><input type="number" class="inp" style="width:120px" min="100" step="500" v-model.number="form.sandbox.toolEvoVerifyTimeoutMs"></cfg-row>
+              <cfg-row class="full" name="兜底拒绝网段" desc="network.denyOut（仅 CIDR/IP；回车添加）">
+                <tag-editor v-model="form.sandbox.network.denyOut" mono placeholder="如 0.0.0.0/0"/>
+              </cfg-row>
+            </div></div>
           </div></div>
         </div>
 
@@ -1548,178 +1705,6 @@
               </div>
             </div>
           </div></div>
-        </div>
-
-        <!-- ===== 高级参数（低频/进阶配置，覆盖面板其余 section 未列出的运行时可读键）===== -->
-        <div :id="'cfg-advanced'" class="card cf-sec" :class="{open: open.advanced}">
-          <div class="cf-sh" @click="open.advanced = !open.advanced">
-            <span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="tool"/></span>
-            <div><div class="ct-t">高级参数</div><div class="ct-s">知识库 / 定时任务 / 工具进化 / 多模态 / 扩展 / 沙箱等进阶项</div></div>
-            <v-icon class="cf-arrow" name="chevron"/>
-          </div>
-          <div class="cf-body" v-show="open.advanced">
-            <div class="full" style="font-weight:800;color:var(--sky);margin:2px 0 8px">上下文压缩 / 缓存</div>
-            <div class="cf-grid">
-              <cfg-row name="压缩归档目录" desc="compaction.archiveDir（留空=默认 data/context-archive）">
-                <input class="inp mono" style="width:220px" v-model="form.compaction.archiveDir" placeholder="data/context-archive">
-              </cfg-row>
-              <cfg-row name="Anthropic 缓存断点" desc="cacheControl：off / auto(官方端点开) / explicit">
-                <select class="sel" style="width:140px" v-model="form.cacheControl">
-                  <option value="off">off</option><option value="auto">auto</option><option value="explicit">explicit</option>
-                </select>
-              </cfg-row>
-            </div>
-
-            <div class="full" style="font-weight:800;color:var(--sky);margin:12px 0 8px">知识库 KB</div>
-            <div class="cf-grid">
-              <cfg-row name="启用知识库" desc="kb.enable"><v-switch v-model="form.kb.enable"/></cfg-row>
-              <cfg-row name="启用网页抓取" desc="kb.crawlEnable"><v-switch v-model="form.kb.crawlEnable"/></cfg-row>
-              <cfg-row name="抓取超时(秒)"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.kb.crawlTimeout"></cfg-row>
-              <cfg-row name="分块大小(字符)"><input type="number" class="inp" style="width:110px" min="50" v-model.number="form.kb.chunkSize"></cfg-row>
-              <cfg-row name="分块重叠"><input type="number" class="inp" style="width:100px" min="0" v-model.number="form.kb.chunkOverlap"></cfg-row>
-              <cfg-row name="默认返回片段数"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.kb.topK"></cfg-row>
-              <cfg-row name="最低相似度"><input type="number" class="inp" style="width:100px" min="0" max="1" step="0.01" v-model.number="form.kb.minScore"></cfg-row>
-            </div>
-
-            <div class="full" style="font-weight:800;color:var(--sky);margin:12px 0 8px">定时任务</div>
-            <div class="cf-grid">
-              <cfg-row name="启用定时任务链" desc="schedule.taskEnabled（关则 #定时任务 拒绝且 schedule_task 不注册）"><v-switch v-model="form.schedule.taskEnabled"/></cfg-row>
-              <cfg-row name="任务链轮次上限"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.schedule.taskMaxTurns"></cfg-row>
-            </div>
-
-            <div class="full" style="font-weight:800;color:var(--sky);margin:12px 0 8px">工具进化 / 日志</div>
-            <div class="cf-grid">
-              <cfg-row name="工具进化库路径"><input class="inp mono" style="width:220px" v-model="form.toolEvo.dbPath"></cfg-row>
-              <cfg-row name="工具制品目录"><input class="inp mono" style="width:220px" v-model="form.toolEvo.artifactsDir"></cfg-row>
-              <cfg-row name="stable 工具超时(ms)"><input type="number" class="inp" style="width:120px" min="100" step="500" v-model.number="form.toolEvo.runnerTimeoutMs"></cfg-row>
-              <cfg-row name="日志目录" desc="devLog.dir（留空=默认 data/logs）"><input class="inp mono" style="width:220px" v-model="form.devLog.dir" placeholder="留空=默认"></cfg-row>
-              <cfg-row class="full" name="策略类别最低角色" desc="policy.categoryMin（JSON，如 {&quot;mcp_write&quot;:1}；留空=默认）">
-                <textarea class="inp mono" style="width:100%;min-height:54px" :value="JSON.stringify(form.policy.categoryMin || {})" @change="updateJson('policy.categoryMin', $event.target.value)"></textarea>
-              </cfg-row>
-            </div>
-
-            <div class="full" style="font-weight:800;color:var(--sky);margin:12px 0 8px">多模态 / 视觉</div>
-            <div class="cf-grid">
-              <cfg-row name="主动收集附件" desc="media.active"><v-switch v-model="form.media.active"/></cfg-row>
-              <cfg-row name="被动读取附件" desc="media.passive"><v-switch v-model="form.media.passive"/></cfg-row>
-              <cfg-row name="单文件上限(字节)"><input type="number" class="inp" style="width:130px" min="0" step="1048576" v-model.number="form.media.maxFileBytes"></cfg-row>
-              <cfg-row name="降级策略" desc="media.degrade（如 note）"><input class="inp mono" style="width:120px" v-model="form.media.degrade"></cfg-row>
-              <cfg-row class="full" name="能力覆盖" desc="media.caps（JSON，如 {&quot;vision&quot;:false,&quot;file&quot;:true}；留空=自动探测）">
-                <textarea class="inp mono" style="width:100%;min-height:54px" :value="JSON.stringify(form.media.caps || {})" @change="updateJson('media.caps', $event.target.value)"></textarea>
-              </cfg-row>
-              <cfg-row name="视觉描述 maxTokens"><input type="number" class="inp" style="width:110px" min="64" step="64" v-model.number="form.vision.maxTokens"></cfg-row>
-              <cfg-row class="full" name="视觉描述提示词"><input class="inp" style="width:100%" v-model="form.vision.describePrompt" placeholder="留空=内置"></cfg-row>
-            </div>
-
-            <div class="full" style="font-weight:800;color:var(--sky);margin:12px 0 8px">工具 / 扩展</div>
-            <div class="cf-grid">
-              <cfg-row name="内置工具包" desc="tools.builtin"><v-switch v-model="form.tools.builtin"/></cfg-row>
-              <cfg-row name="工具包目录" desc="tools.dir"><input class="inp mono" style="width:140px" v-model="form.tools.dir"></cfg-row>
-              <cfg-row name="技能目录" desc="skill.dir"><input class="inp mono" style="width:140px" v-model="form.skill.dir"></cfg-row>
-              <cfg-row name="技能历史条数"><input type="number" class="inp" style="width:100px" min="0" v-model.number="form.skill.historyCount"></cfg-row>
-              <cfg-row name="米游社默认分区(bbs)"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.miyoushe.defaultGid"></cfg-row>
-              <cfg-row name="米游社单帖最大图"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.miyoushe.maxImages"></cfg-row>
-              <cfg-row name="启用 Pixiv"><v-switch v-model="form.pixiv.enable"/></cfg-row>
-              <cfg-row name="Pixiv 图片代理"><input class="inp mono" style="width:220px" v-model="form.pixiv.imageProxy"></cfg-row>
-              <cfg-row name="Pixiv API 反代(可选)"><input class="inp mono" style="width:220px" v-model="form.pixiv.apiProxy" placeholder="留空=直连"></cfg-row>
-              <cfg-row name="Pixiv 单次最大图"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.pixiv.maxImages"></cfg-row>
-              <cfg-row name="计算器 python 解释器"><input class="inp mono" style="width:130px" v-model="form.calc.python"></cfg-row>
-              <cfg-row name="文档转 PDF soffice"><input class="inp mono" style="width:140px" v-model="form.document.soffice"></cfg-row>
-              <cfg-row name="深度研究并发"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.research.maxConcurrent"></cfg-row>
-              <cfg-row name="研究结果评估"><v-switch v-model="form.research.evaluation"/></cfg-row>
-            </div>
-
-            <div class="full" style="font-weight:800;color:var(--sky);margin:12px 0 8px">ComfyUI</div>
-            <div class="cf-grid">
-              <cfg-row name="启用 ComfyUI" desc="comfyui.enable"><v-switch v-model="form.comfyui.enable"/></cfg-row>
-              <cfg-row name="服务地址"><input class="inp mono" style="width:220px" v-model="form.comfyui.host"></cfg-row>
-              <cfg-row name="Cloud 模式"><v-switch v-model="form.comfyui.cloud"/></cfg-row>
-              <cfg-row name="Cloud API Key"><input class="inp mono" style="width:200px" v-model="form.comfyui.apiKey"></cfg-row>
-              <cfg-row name="生成超时(秒)"><input type="number" class="inp" style="width:110px" min="10" v-model.number="form.comfyui.timeout"></cfg-row>
-              <cfg-row name="轮询初始间隔(秒)"><input type="number" class="inp" style="width:110px" min="0.5" step="0.5" v-model.number="form.comfyui.pollInterval"></cfg-row>
-              <cfg-row name="轮询最大间隔(秒)"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.comfyui.pollMaxInterval"></cfg-row>
-              <cfg-row name="单次最大图"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.comfyui.maxImages"></cfg-row>
-              <cfg-row name="产物目录(可选)"><input class="inp mono" style="width:220px" v-model="form.comfyui.outputDir" placeholder="留空=插件 temp"></cfg-row>
-            </div>
-
-            <div class="full" style="font-weight:800;color:var(--sky);margin:12px 0 8px">示意图 limits / Kroki</div>
-            <div class="cf-grid">
-              <cfg-row name="最大连线数"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.diagram.maxEdges"></cfg-row>
-              <cfg-row name="最大宽度(px)"><input type="number" class="inp" style="width:110px" min="200" v-model.number="form.diagram.maxWidth"></cfg-row>
-              <cfg-row name="最大高度(px)"><input type="number" class="inp" style="width:110px" min="200" v-model.number="form.diagram.maxHeight"></cfg-row>
-              <cfg-row name="最大像素"><input type="number" class="inp" style="width:130px" min="100000" step="100000" v-model.number="form.diagram.maxPixels"></cfg-row>
-              <cfg-row name="输出字节上限"><input type="number" class="inp" style="width:130px" min="65536" step="1048576" v-model.number="form.diagram.maxOutputBytes"></cfg-row>
-              <cfg-row name="启用 Kroki" desc="diagram.kroki.enabled"><v-switch v-model="form.diagram.kroki.enabled"/></cfg-row>
-              <cfg-row name="DSL 源上限(字节)"><input type="number" class="inp" style="width:130px" min="1024" step="1024" v-model.number="form.diagram.kroki.maxSourceBytes"></cfg-row>
-              <cfg-row name="熔断失败阈值"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.diagram.kroki.circuitBreaker.failureThreshold"></cfg-row>
-              <cfg-row name="熔断冷却(ms)"><input type="number" class="inp" style="width:120px" min="1000" step="1000" v-model.number="form.diagram.kroki.circuitBreaker.cooldownMs"></cfg-row>
-              <cfg-row class="full" name="允许图类型" desc="kroki.allowedDiagramTypes（如 d2；回车添加）">
-                <tag-editor v-model="form.diagram.kroki.allowedDiagramTypes" mono placeholder="如 d2"/>
-              </cfg-row>
-            </div>
-
-            <div class="full" style="font-weight:800;color:var(--sky);margin:12px 0 8px">E2B 沙箱（高级）</div>
-            <div class="cf-grid">
-              <cfg-row name="默认工作目录"><input class="inp mono" style="width:160px" v-model="form.sandbox.defaultCwd"></cfg-row>
-              <cfg-row name="沙箱 TTL(ms)"><input type="number" class="inp" style="width:130px" min="10000" step="60000" v-model.number="form.sandbox.sandboxTtlMs"></cfg-row>
-              <cfg-row name="等并发名额(ms)"><input type="number" class="inp" style="width:130px" min="0" step="1000" v-model.number="form.sandbox.concurrencyWaitMs"></cfg-row>
-              <cfg-row name="SDK 请求超时(ms)"><input type="number" class="inp" style="width:130px" min="1000" step="1000" v-model.number="form.sandbox.requestTimeoutMs"></cfg-row>
-              <cfg-row name="SDK 重试次数"><input type="number" class="inp" style="width:100px" min="0" max="5" v-model.number="form.sandbox.retries"></cfg-row>
-              <cfg-row name="公开 URL 需鉴权" desc="allowPublicTraffic=false=沙箱公开 URL 也要 token"><v-switch v-model="form.sandbox.allowPublicTraffic"/></cfg-row>
-              <cfg-row name="允许互联网" desc="network.allowInternet（有白名单时由白名单收窄）"><v-switch v-model="form.sandbox.network.allowInternet"/></cfg-row>
-              <cfg-row name="候选验证超时(ms)"><input type="number" class="inp" style="width:120px" min="100" step="500" v-model.number="form.sandbox.toolEvoVerifyTimeoutMs"></cfg-row>
-              <cfg-row class="full" name="兜底拒绝网段" desc="network.denyOut（仅 CIDR/IP；回车添加）">
-                <tag-editor v-model="form.sandbox.network.denyOut" mono placeholder="如 0.0.0.0/0"/>
-              </cfg-row>
-            </div>
-
-            <div class="full" style="font-weight:800;color:var(--sky);margin:12px 0 8px">伪人 Humanize / 小世界 GroupWorld</div>
-            <div class="cf-grid">
-              <cfg-row name="已知其它 bot" desc="humanize.knownBots（QQ号；回车添加）">
-                <tag-editor v-model="form.humanize.knownBots" mono placeholder="QQ号"/>
-              </cfg-row>
-              <cfg-row name="启用伪人记忆库" desc="humanize.memory.enabled"><v-switch v-model="form.humanize.memory.enabled"/></cfg-row>
-              <cfg-row name="单次注入条数"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.humanize.memory.maxPerQuery"></cfg-row>
-              <cfg-row name="单群容量"><input type="number" class="inp" style="width:110px" min="50" v-model.number="form.humanize.memory.maxPerGroup"></cfg-row>
-              <cfg-row name="增量整合水位"><input type="number" class="inp" style="width:110px" min="4" v-model.number="form.humanize.memory.incrementalMinMessages"></cfg-row>
-              <cfg-row name="超龄遗忘(天)"><input type="number" class="inp" style="width:100px" min="7" v-model.number="form.humanize.memory.forgetDays"></cfg-row>
-              <cfg-row name="小圈子最小人数" desc="groupWorld.graph.minCommunitySize"><input type="number" class="inp" style="width:110px" min="2" v-model.number="form.groupWorld.graph.minCommunitySize"></cfg-row>
-              <cfg-row name="社会现场缓存(秒)" desc="groupWorld.retrieval.cacheTtlSeconds"><input type="number" class="inp" style="width:110px" min="0" v-model.number="form.groupWorld.retrieval.cacheTtlSeconds"></cfg-row>
-            </div>
-
-            <div class="full" style="font-weight:800;color:var(--sky);margin:12px 0 8px">自我状态 SelfState</div>
-            <div class="cf-grid">
-              <cfg-row name="群级隔离" desc="scope.isolateByGroup（强制 true 红线）" danger><v-switch v-model="form.selfState.scope.isolateByGroup" :disabled="true"/></cfg-row>
-              <cfg-row name="歧义评价模型(可选)" desc="eventDetection.ambiguousIntentModelProfile（留空=主模型）"><input class="inp mono" style="width:180px" v-model="form.selfState.eventDetection.ambiguousIntentModelProfile"></cfg-row>
-              <cfg-row name="事件最低置信度"><input type="number" class="inp" style="width:110px" min="0.3" max="0.95" step="0.01" v-model.number="form.selfState.eventDetection.minEventConfidence"></cfg-row>
-              <cfg-row name="可见强度下限"><input type="number" class="inp" style="width:100px" min="0" max="1" step="0.01" v-model.number="form.selfState.emotion.minVisibleIntensity"></cfg-row>
-              <cfg-row name="最大并存情绪数"><input type="number" class="inp" style="width:100px" min="2" max="32" v-model.number="form.selfState.emotion.maxActiveEmotions"></cfg-row>
-              <cfg-row name="允许混合情绪"><v-switch v-model="form.selfState.emotion.enableMixedEmotions"/></cfg-row>
-              <cfg-row name="懒衰减"><v-switch v-model="form.selfState.emotion.lazyDecay"/></cfg-row>
-              <cfg-row name="启用怨气"><v-switch v-model="form.selfState.resentment.enabled"/></cfg-row>
-              <cfg-row name="怨气最低置信度"><input type="number" class="inp" style="width:110px" min="0.5" max="0.95" step="0.01" v-model.number="form.selfState.resentment.minCreateConfidence"></cfg-row>
-              <cfg-row name="怨气半衰期(天)"><input type="number" class="inp" style="width:100px" min="1" max="60" v-model.number="form.selfState.resentment.halfLifeDays"></cfg-row>
-              <cfg-row name="启用期待"><v-switch v-model="form.selfState.expectations.enabled"/></cfg-row>
-              <cfg-row name="等待窗上限(秒)"><input type="number" class="inp" style="width:120px" min="120" v-model.number="form.selfState.expectations.maximumWindowSeconds"></cfg-row>
-              <cfg-row name="需目标活跃证据"><v-switch v-model="form.selfState.expectations.requireTargetActivityEvidence"/></cfg-row>
-              <cfg-row name="启用反思"><v-switch v-model="form.selfState.reflection.enabled"/></cfg-row>
-              <cfg-row name="反思最小事件数"><input type="number" class="inp" style="width:110px" min="2" v-model.number="form.selfState.reflection.minSignificantEvents"></cfg-row>
-              <cfg-row name="每日反思上限"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.selfState.reflection.maxReflectionsPerDay"></cfg-row>
-              <cfg-row name="反思默认 TTL(天)"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.selfState.reflection.defaultTtlDays"></cfg-row>
-              <cfg-row name="注入状态投影"><v-switch v-model="form.selfState.planner.includeStateProjection"/></cfg-row>
-              <cfg-row name="状态 token 上限"><input type="number" class="inp" style="width:110px" min="60" v-model.number="form.selfState.planner.maxStateTokens"></cfg-row>
-              <cfg-row name="情绪仅作偏置" desc="planner.emotionIsBiasOnly（强制 true 红线）" danger><v-switch v-model="form.selfState.planner.emotionIsBiasOnly" :disabled="true"/></cfg-row>
-              <cfg-row name="注入表达胶囊"><v-switch v-model="form.selfState.replyer.includeExpressionCapsule"/></cfg-row>
-              <cfg-row name="外显数值" desc="replyer.exposeNumericState（强制 false 红线）" danger><v-switch v-model="form.selfState.replyer.exposeNumericState" :disabled="true"/></cfg-row>
-              <cfg-row name="自然情绪表达"><v-switch v-model="form.selfState.replyer.allowNaturalEmotionDisclosure"/></cfg-row>
-              <cfg-row name="禁跨用户扩散" desc="stability.noCrossUserSpillover（强制 true 红线）" danger><v-switch v-model="form.selfState.stability.noCrossUserSpillover" :disabled="true"/></cfg-row>
-              <cfg-row name="禁情绪绑架" desc="stability.preventEmotionalBlackmail（强制 true 红线）" danger><v-switch v-model="form.selfState.stability.preventEmotionalBlackmail" :disabled="true"/></cfg-row>
-              <cfg-row name="禁自伤叙事" desc="stability.preventSelfHarmNarratives（强制 true 红线）" danger><v-switch v-model="form.selfState.stability.preventSelfHarmNarratives" :disabled="true"/></cfg-row>
-              <cfg-row name="迁移日志留存(天)"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.selfState.retention.transitionLogDays"></cfg-row>
-              <cfg-row name="已解决情绪留存(天)"><input type="number" class="inp" style="width:120px" min="1" v-model.number="form.selfState.retention.resolvedEmotionDays"></cfg-row>
-              <cfg-row name="已解决期待留存(天)"><input type="number" class="inp" style="width:120px" min="1" v-model.number="form.selfState.retention.resolvedExpectationDays"></cfg-row>
-            </div>
-          </div>
         </div>
 
         <!-- 新建 MCP 弹窗（弹窗内始终有 stdio/http 选择）-->
