@@ -4,6 +4,10 @@
  * 内部是一个 Agent（旗舰模型）+ 每个 SubagentSpec 注册为委派工具 + 综合 prompt。
  * 模型一次返回多个 delegate__* 工具调用 → Agent._executeToolCalls 的 Promise.all 并发执行（Semaphore 限流）。
  * 结果（压缩摘要）回到 Orchestrator → 综合 → 最终回复。
+ *
+ * 已接入（config 开关）：agent.multiagent.topology=orchestrator 时，apps 注册同步 `orchestrate`
+ * 工具使用本类（通用 worker 子代理）；默认 topology=spawn 走 multiagent/spawn-tool.js 异步三件套。
+ * patterns.js 仍为库导出（pipeline/parallel/router/evaluatorOptimizer），生产未直接使用。
  */
 import { Agent } from '../agent/Agent.js'
 import { ToolRegistry } from '../agent/tools/registry.js'

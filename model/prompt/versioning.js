@@ -191,6 +191,8 @@ export async function runEval({ system, provider, model, evalset = [], judge, si
 
 /**
  * 检查新 prompt 版本是否通过回归门禁。
+ * 已接入：apps/agent.js evolvePrompt 在落盘进化版本前调用（best 低于 baseline-0.01 或未达
+ * minScore 则拒绝写入）。fixtures/eval 由 GEPA 进化过程产出（evalset + judge）。
  * @param {object} current { meanScore, passRate }
  * @param {object} baseline 上一版基线 { meanScore }
  * @param {object} gates { maxRegression(默认 0.01), minScore(默认 0.6) }

@@ -1,6 +1,11 @@
 /**
  * Tavily Agent 工具 —— 包装 TavilyClient 为 ToolRegistry 兼容工具。
  * 在 Agent 中替换 DDG 兜底，提供高质量 AI 搜索结果 + 内容提取。
+ *
+ * ⚠️ 未接入生产（有意保留）：这些工具的 name（web_search/web_extract）与 apps 已注册的
+ * 多源工具（model/search/tools.js，经 search/manager 路由到 Tavily 等 provider）重名，
+ * 注册会遮蔽现网工具。Tavily 生产路径是 model/tavily/client.js → search/providers/tavily.js；
+ * 本文件仅供库导出与离线测试使用，勿在 ToolRegistry 注册。
  */
 
 function truncate(s, n) {

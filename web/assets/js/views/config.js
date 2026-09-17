@@ -189,6 +189,7 @@
         if (!Array.isArray(form.sandbox.network.allowOut)) form.sandbox.network.allowOut = []
         if (!form.download) form.download = {}
         if (!form.multiagent) form.multiagent = {}
+        if (!form.multiagent.topology) form.multiagent.topology = 'spawn'
         if (!form.stt) form.stt = {}
         if (form.stt.enable == null) form.stt.enable = true
         // 统一模型配置块兜底（recall/selfReview/vision 原有；humanize/groupWorld 为新纳入字段）
@@ -1345,6 +1346,12 @@
               <div class="cf-grid">
                 <cfg-row name="启用子代理委派" desc="注册 spawn_subagent，主模型自行决定是否创建子代理">
                   <v-switch v-model="form.multiagent.enable"/>
+                </cfg-row>
+                <cfg-row name="编排拓扑" desc="spawn=异步三件套（默认，可轮询/续期）| orchestrator=同步 orchestrate 工具（分解→委派→综合）">
+                  <select class="sel" style="width:150px" v-model="form.multiagent.topology">
+                    <option value="spawn">spawn（异步三件套）</option>
+                    <option value="orchestrator">orchestrator（同步编排）</option>
+                  </select>
                 </cfg-row>
                 <cfg-row name="最大并发子代理" desc="同时运行子代理数上限（进程级 Semaphore）">
                   <input type="number" class="inp" style="width:90px" min="1" max="10" v-model.number="form.multiagent.maxConcurrent">

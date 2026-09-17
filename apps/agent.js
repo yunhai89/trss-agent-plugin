@@ -56,7 +56,7 @@ import { randomUUID } from 'node:crypto'
 import devLog from '../utils/DevLog.js'
 import { ReplySender, createRunQueues } from '../model/agent/reply-sender.js'
 import { SkillRegistry, loadSkillPack, makeSkillTool } from '../model/skill/index.js'
-import { PromptRegistry, PromptTemplate, evolveTemplate, TEMPLATES } from '../model/prompt/index.js'
+import { PromptRegistry, PromptTemplate, evolveTemplate, regressionGate, TEMPLATES } from '../model/prompt/index.js'
 import { TraceStore } from '../model/evolution/trace.js'
 import { SelfReviewer, listPendingSuggestions, removeSuggestion } from '../model/evolution/review.js'
 import { buildSituationalContext } from '../model/perception.js'
@@ -64,7 +64,7 @@ import { makeTerminalTool } from '../model/terminal/index.js'
 import { createSandboxRuntime, sessionKeyOf } from '../model/sandbox/index.js'
 import { makeStagehand } from '../model/stagehand/index.js'
 import { makeDownloadTool } from '../model/download/index.js'
-import { makeSpawnSubagentTools, Semaphore } from '../model/multiagent/index.js'
+import { makeSpawnSubagentTools, Semaphore, Orchestrator, SubagentSpec } from '../model/multiagent/index.js'
 import { calcTool } from '../model/calc/index.js'
 import { sendFileTool } from '../model/document/sendfile.js'
 import { readPdfTool } from '../model/document/pdf.js'
@@ -211,6 +211,35 @@ function makeReplyStream(e, {
       const msg = hint ? `${label}：${hint}` : `${label}…`
       replyQueue?.enqueue({ msg, quote: false, opts: { recallMsg: recall } }, { tag: 'progress' })
     },
+  }
+}
+
+/**
+ * 逐字流式发射器（仅 stream=true + 文本回复模式启用）：
+ * 累积 provider 的 onDelta 增量，按时间/字数节流，只发送【新增】文本（多条气泡=打字机效果）。
+ * rawFull 供调用方在 run 结束后与最终正文比对：一致则跳过重复的整段最终回复。
+ */
+export function makeDeltaStreamer(safeReply, { enabled = false, minIntervalMs = 1200, minChars = 24 } = {}) {
+  let raw = ''
+  let sentLen = 0
+  let lastAt = 0
+  let sentAny = false
+  const flush = (force = false) => {
+    if (!enabled) return
+    if (!force && !(raw.length - sentLen >= minChars && Date.now() - lastAt >= minIntervalMs)) return
+    const next = raw.slice(sentLen)
+    if (!next) return
+    const chunk = redactSecrets(next)
+    sentLen = raw.length
+    lastAt = Date.now()
+    if (chunk.trim()) { sentAny = true; safeReply(chunk) }
+  }
+  return {
+    enabled,
+    push(d) { if (typeof d === 'string') raw += d; flush(false) },
+    finish() { flush(true) },
+    get rawFull() { return raw },
+    get sentAny() { return sentAny },
   }
 }
 
@@ -733,9 +762,48 @@ async function buildRuntime() {
     }
   }
 
-  // 子代理编排：主 Agent 可自主创建子代理委派任务（异步三件套：spawn + check + extend）
+  // 子代理编排：multiagent.topology 选择拓扑（默认 spawn=异步三件套；orchestrator=同步编排工具 orchestrate）
   let multiagent = null
-  if (cfg.multiagent?.enable !== false) {
+  if (cfg.multiagent?.enable !== false && cfg.multiagent?.topology === 'orchestrator') {
+    try {
+      // Orchestrator 编排模式：注册一个同步 `orchestrate` 工具（flagship 分解 → 通用 worker 委派 → 综合）
+      const workerReg = new ToolRegistry()
+      for (const t of tools.list()) {
+        if (t.name === 'tool_search') continue
+        if ((t.category || 'query') === 'query') workerReg.register(t)
+      }
+      const worker = new SubagentSpec({
+        name: 'worker',
+        description: '通用子代理：只做被委派的独立子任务，返回精炼结果',
+        systemPrompt: '你是独立子任务子代理。只完成被委派的任务，直接给出结果，不解释过程；任务自包含（你看不到主对话）。',
+        tools: workerReg.list().length ? workerReg : null,
+        model: cfg.multiagent?.workerModel || null,
+        provider, maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
+      })
+      const orch = new Orchestrator({
+        provider, model: cfg.model,
+        subagents: [worker],
+        tools: null,
+        maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
+        maxConcurrent: cfg.multiagent?.maxConcurrent ?? 3,
+        logger: Log.tag('multiagent'),
+      })
+      tools.register({
+        name: 'orchestrate',
+        description: '把复杂任务交给编排器：分解为子任务→并行委派给子代理→综合成完整结果。适合需要多路检索/分头处理再汇总的复杂任务（单步查询不必用）。',
+        category: 'query',
+        meta: { subagent: true, resultCap: 8000 },
+        parameters: { type: 'object', required: ['task'], properties: { task: { type: 'string', description: '要编排完成的复杂任务（目标+输出格式+边界）' } }, additionalProperties: false },
+        async execute(params = {}, ctx) {
+          const task = String(params.task || '').trim()
+          if (!task) return { error: 'task 不能为空' }
+          const r = await orch.run(task, { ctx })
+          return { result: r?.content || '', turns: r?.turns, stopReason: r?.stopReason }
+        },
+      })
+      Log.info('[multiagent] 编排模式（topology=orchestrator）：orchestrate 工具已注册')
+    } catch (e) { Log.warn('[multiagent] 编排模式装配失败', e?.message || e) }
+  } else if (cfg.multiagent?.enable !== false) {
     try {
       const subagentTools = makeSpawnSubagentTools({
         provider, model: cfg.multiagent?.workerModel || null,
@@ -1343,7 +1411,9 @@ export class Chat extends plugin {
 
     Log.mark('[chat]', `user=${ctx.userId} gid=${ctx.groupId || '-'} conv=${ctx.conversationId} model=${cfg.model} persona=${personaId || 'default'} vision=${caps.vision ? 'on' : 'off'} thinking=${cfg.thinking ? 'on' : 'off'}${context ? ` ctx=${String(context).length}字` : ''}`)
     const wantProgress = cfg.progress !== false
-    const wantStream = cfg.stream === true // 逐字流式默认关（适配器差异大）；进度反馈默认开
+    // 逐字流式默认关（适配器差异大）；进度反馈默认开。
+    // stream=true + 文本回复模式时，onDelta 增量按节流逐字发送；流式全文与最终正文一致则跳过重复整段回复。
+    const wantStream = cfg.stream === true
 
     // —— 受控串行发送队列（P0-5）：思考中/进度/旁白/最终回复全部经它发送 ——
     // 取代 `try { e.reply(...) } catch {}`（同步 catch 捕获不了适配器 Promise 的 rejection，
@@ -1360,6 +1430,10 @@ export class Chat extends plugin {
     const safeReply = (msg, quote, opts) => replyQueue.enqueue({ msg, quote, opts })
     if (wantProgress) safeReply('思考中…') // best effort：发送失败只记日志，绝不阻塞 Agent 执行
     const rs = makeReplyStream(this.e, { progress: wantProgress, recall: cfg.progressRecall ?? 3, shortCircuitTools: ['clarify'], replyQueue })
+    // 流式：仅文本回复模式下逐字发增量（图片模式需整段渲染，不流式）；onDelta 始终用于观测计数
+    const replyModeEarly = cfg.reply?.mode || 'image'
+    const streamer = makeDeltaStreamer(safeReply, { enabled: wantStream && replyModeEarly === 'text' })
+    let __deltaEvents = 0, __deltaChars = 0, __reasonChars = 0
 
     // —— diagram 示意图交付（应用层发送，工具绝不直接 e.reply）——
     // diagram_render 的成功结果在工具完成回调里收集（未截断的 content），最终回复送达后经队列发送：
@@ -1394,6 +1468,9 @@ export class Chat extends plugin {
         ctx, systemPrompt: systemPrompt ? systemPrompt + __textHint : __textHint.trim(), context,
         taskId: traceId, // 串联 dev trace：Agent 内 run_start/turn/tool/.../run_end 用同一 id
         stream: wantStream,
+        // 流式增量：观测计数（devLog）+ 文本模式逐字发送
+        onDelta: (d) => { __deltaEvents++; __deltaChars += typeof d === 'string' ? d.length : 0; streamer.push(d) },
+        onReasoning: (r) => { __reasonChars += String(r || '').length },
         ...(rs.onToolStart ? { onToolStart: rs.onToolStart } : {}),
         onToolEnd: (tc, content) => {
           onDiagramToolEnd(tc, content) // diagram_render 成功结果收集（应用层随最终回复发送）
@@ -1419,6 +1496,10 @@ export class Chat extends plugin {
       Log.mark('[chat]', `reply turns=${turns} stop=${stopReason} usage=${u} replyLen=${(content || '').length}`)
       // 发送前脱敏：屏蔽 API Key / token 等敏感信息（agent.redactSecrets 默认开；异常不阻塞回复）
       const body = cfg.redactSecrets === false ? (content || '') : redactSecrets(content || '')
+      // 收尾流式：发完剩余增量；若流式全文与最终正文一致，则视为已投递，跳过重复的整段最终回复
+      streamer.finish()
+      const streamedFinal = streamer.enabled && streamer.sentAny && streamer.rawFull === (content || '')
+      devLog('stream', { enabled: streamer.enabled, deltaEvents: __deltaEvents, deltaChars: __deltaChars, reasoningChars: __reasonChars, streamedFinal }, traceId, ctx.devScope)
       // 异常停止必须以可见标记落到回复上：否则预算耗尽 / 空转 / 连续失败与普通回复外形完全一致
       // （用户以为任务正常完成）。文案复用 Agent 的确定性兜底表，保持单一真源。
       const suffix = STOP_REASON_CN[stopReason] ? `（${STOP_REASON_CN[stopReason]}）` : ''
@@ -1428,9 +1509,9 @@ export class Chat extends plugin {
       const atSender = (ctx.isGroup && cfg.reply?.atSender !== false && ctx.userId && typeof segment !== 'undefined') ? segment.at(ctx.userId) : null
       // 回复渲染：默认图片（markdown→图片，失败退文本）；replyMode 已在上方 run 前计算
       // 发送经受控队列；delivered 依据队列 outcome（适配器返回值/retcode/rejection），不再"执行过 await 即成功"。
-      let delivered = false
+      let delivered = streamedFinal // 流式已逐字送达 → 不再重复发整段正文
       let finalOutcome = null
-      devLog('send_start', { mode: replyMode, replyLen: (body || '').length, stopReason, turns }, traceId, ctx.devScope)
+      devLog('send_start', { mode: replyMode, replyLen: (body || '').length, stopReason, turns, streamed: streamedFinal }, traceId, ctx.devScope)
       if (replyMode === 'image' && body) {
         try {
           // 拆 sticker：正文剥标记（无图，applyImage 空 map）+ 图独立成气泡（stickerImgs）
@@ -1828,6 +1909,15 @@ export class Chat extends plugin {
       }
       const result = await evolveTemplate({ templateKey: key, provider: rt.provider, model: cfg.model, evalset, judge, iterations: 2, populationSize: 3, logger: Log.tag('evolve') })
       if (!result?.best) { await this.e.reply('进化未产出有效版本。'); return true }
+      // 回归门禁：best 得分不得低于 baseline（默认允许 0.01 波动）且需达到最低分，否则不落盘
+      const gate = regressionGate(
+        { meanScore: result.best.score ?? 0 },
+        { meanScore: result.baseline?.score },
+      )
+      if (!gate.passed) {
+        await this.e.reply(`⛔ 未通过回归门禁，已放弃写入进化版本：\n- ${gate.reasons.join('\n- ')}`)
+        return true
+      }
       const tpl = rt.promptRegistry.get(key)
       const base = tpl ? tpl.toJSON() : { id: key, system: TEMPLATES[key]?.system || '' }
       const evolved = { ...base, system: result.best.text, version: `${base.version || '1.0.0'}-evolved-${Date.now().toString(36)}` }

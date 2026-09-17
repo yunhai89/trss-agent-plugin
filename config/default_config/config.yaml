@@ -334,8 +334,9 @@ agent:
     # 子代理是隔离 Agent（看不到主对话历史），只做被委派的任务，返回结果文本。
     # 安全：子代理只能用 query 类工具（搜索/记忆/计算），群管/系统/终端不可；不会递归创建子代理。
     enable: true
+    topology: spawn             # spawn=异步三件套 spawn/check/extend_subagent（默认）| orchestrator=同步编排工具 orchestrate
     maxConcurrent: 3            # 同时运行的子代理数上限
-    maxSpawnsPerConversation: 5 # 单次对话最多创建几个子代理
+    maxSpawnsPerConversation: 5 # 单次对话最多创建几个子代理（topology=spawn 时生效）
     workerMaxTurns: 10          # 子代理工具循环上限（防失控烧 token）
     workerModel: ""             # 子代理模型（空=复用主模型；填便宜模型可降本）
     defaultTools:               # 子代理默认可用工具（模型未指定时）
