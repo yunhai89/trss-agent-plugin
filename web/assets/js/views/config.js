@@ -197,8 +197,22 @@
         if (!Array.isArray(form.sandbox.network.denyOut)) form.sandbox.network.denyOut = []
         if (!form.policy) form.policy = {}
         if (!form.media) form.media = {}
+        if (!form.diagram) form.diagram = {}
         if (!form.diagram.kroki) form.diagram.kroki = {}
         if (!Array.isArray(form.diagram.kroki.allowedDiagramTypes)) form.diagram.kroki.allowedDiagramTypes = []
+        if (!form.diagram.kroki.circuitBreaker) form.diagram.kroki.circuitBreaker = {}
+        if (!form.selfState) form.selfState = {}
+        if (!form.selfState.emotion) form.selfState.emotion = {}
+        if (!form.selfState.expectations) form.selfState.expectations = {}
+        if (!form.selfState.stability) form.selfState.stability = {}
+        if (!form.selfState.resentment) form.selfState.resentment = {}
+        if (!form.selfState.eventDetection) form.selfState.eventDetection = {}
+        if (!form.selfState.planner) form.selfState.planner = {}
+        if (!form.selfState.replyer) form.selfState.replyer = {}
+        if (!form.loop) form.loop = {}
+        if (!form.multiagent) form.multiagent = {}
+        if (!form.toolDiscovery) form.toolDiscovery = {}
+        if (!Array.isArray(form.reasoningFields)) form.reasoningFields = []
         if (!form.kb) form.kb = {}
         if (!form.schedule) form.schedule = {}
         if (!form.toolEvo) form.toolEvo = {}
@@ -694,7 +708,7 @@
       }
 
       return {
-        form, dirty, save, reset, sections, open, activeSec, jump, OPT, updateJson,
+        form, dirty, save, reset, sections, open, activeSec, jump, OPT, updateJson, adv,
         addFallback, delFallback, masterInput, addMaster, delMaster,
         mcpServersToUi, delMcp, mcpModal, openNewMcp, confirmNewMcp,
         thinkingOn, tempPct,
