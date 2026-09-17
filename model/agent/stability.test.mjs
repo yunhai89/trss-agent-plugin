@@ -5,7 +5,7 @@
  * 覆盖（对应审计 P0/P1 清单）：
  *  1. 旁白 + tool_calls + token_budget：旁白不得成为最终答案（复现一）
  *  2. 反思否决的草稿永不交付（复现二）
- *  3. 六种异常停止（max_turns/token/time/duplicate/no_progress/consecutive_failures）必进无工具 finalizer
+ *  3. 六种异常停止（max_turns/token/time/duplicate/no_progress/consecutive_failures）必进禁工具 finalizer
  *  4. finalizer 输出写入 session 且等于 run().content
  *  5. finalizer 自身失败 → 代码生成的确定性兜底（非空/含步骤/含继续指引）
  *  6/7. 成功与错误响应体卡死都会被超时中止（复现三）
@@ -113,8 +113,8 @@ await test('旁白+tool_calls+token_budget：旁白不得成为最终答案（�
   const last = res.messages[res.messages.length - 1]
   eq(last.role, 'assistant', '消息历史最后一条是 assistant（不是 tool）')
   eq(last.content, FINAL, '历史末条 assistant 即最终答案')
-  eq(provider.calls[1].tools, undefined, 'finalizer 调用不带工具（tools:undefined）')
-  eq(provider.calls[1].tool_choice, 'none', 'finalizer 用 tool_choice:"none"')
+  ok(Array.isArray(provider.calls[1].tools) && provider.calls[1].tools.some((t) => t.name === 'step'), 'finalizer 携带主请求同款 tools（前缀缓存对齐）')
+  eq(provider.calls[1].tool_choice, 'none', 'finalizer 用 tool_choice:"none" 禁止新调用')
   ok(!res.content.includes('我先处理'), '旁白文本不出现在最终回复')
 })
 
@@ -143,7 +143,7 @@ await test('反思否决草稿：revise 后的旧草稿不可能再次出现（�
 })
 
 // ============================================================
-// 3. 六种异常停止必进 finalizer（无工具 + tool_choice none + 入历史）
+// 3. 六种异常停止必进 finalizer（同前缀 tools + tool_choice none + 入历史）
 // ============================================================
 const abnormalCases = [
   {
@@ -187,7 +187,7 @@ const abnormalCases = [
   },
 ]
 for (const c of abnormalCases) {
-  await test(`异常停止[${c.name}] → 无工具 finalizer + 输出入历史`, async () => {
+  await test(`异常停止[${c.name}] → 禁工具 finalizer + 输出入历史`, async () => {
     const FINAL = '收尾交付：进展与下一步。'
     const script = [...c.script, { content: FINAL, finishReason: 'stop', usage: { prompt_tokens: 10, completion_tokens: 5 } }]
     const provider = scriptedProvider(script)
@@ -206,11 +206,11 @@ for (const c of abnormalCases) {
     eq(last.role, 'assistant', '历史末条是 assistant')
     eq(last.content, FINAL, 'finalizer 输出已追加为最终 assistant 消息')
     const finCall = provider.calls[provider.calls.length - 1]
-    eq(finCall.tools, undefined, 'finalizer 请求 tools:undefined')
-    eq(finCall.tool_choice, 'none', 'finalizer 请求 tool_choice:"none"')
+    ok(Array.isArray(finCall.tools) && finCall.tools.length > 0, 'finalizer 携带主请求同款 tools（前缀缓存对齐）')
+    eq(finCall.tool_choice, 'none', 'finalizer 请求 tool_choice:"none" 禁止新调用')
   })
 }
-await test('异常停止[time_budget（注入时钟）] → 无工具 finalizer', async () => {
+await test('异常停止[time_budget（注入时钟）] → 禁工具 finalizer', async () => {
   const FINAL = '时间到，先交付进展。'
   let t = 0
   const provider = scriptedProvider([
@@ -403,7 +403,7 @@ await test('deadline 主动取消在途模型调用 + 独立宽限完成收尾',
   const res = await noHang(agent.run('任务'), 5000, 'deadline 后 run 悬挂（收尾未在宽限内完成）')
   eq(res.stopReason, 'time_budget', 'stopReason=time_budget')
   eq(res.content, FINAL, '宽限期内完成收尾总结')
-  eq(provider.calls[1].tools, undefined, '收尾调用无工具')
+  ok(Array.isArray(provider.calls[1].tools) && provider.calls[1].tools.some((t) => t.name === 'step'), '收尾调用携带同款 tools（前缀缓存对齐）')
   ok(res.messages[res.messages.length - 1].role === 'assistant', '收尾输出入历史')
 })
 

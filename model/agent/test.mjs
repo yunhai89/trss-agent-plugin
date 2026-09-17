@@ -930,6 +930,41 @@ await test('reflect：反馈走 system 不进 messages（草稿 pop），仅留�
   for (let i = 1; i < hist.length; i++) ok(hist[i].role === 'user' || hist[i - 1].role !== hist[i].role, `历史交替合法 @${i}`)
 })
 
+await test('缓存前缀对齐：reflect 复用主请求 system+tools，自检指令走末尾 user 不污染前缀', async () => {
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'ping', arguments: { x: 1 } }], finishReason: 'tool_calls' }, // turn1 用工具
+    { content: '初稿结论', finishReason: 'stop' }, // turn2 草稿（无 toolCalls → 触发 reflect）
+    { content: '{"revise":false}', finishReason: 'stop' }, // reflect 评判通过
+  ])
+  const tools = new ToolRegistry().register({ name: 'ping', description: 'd', parameters: { type: 'object' }, async execute() { return { ok: true } } })
+  const agent = new Agent({ provider, tools, maxTurns: 5, reflect: 'always', reflectMaxIterations: 1 })
+  await agent.run('任务')
+  const main = provider.calls.history[1] // 触发 reflect 的主请求
+  const judge = provider.calls.history[2] // reflect 评判请求
+  eq(judge.system, main.system, 'reflect system 与主请求逐字节一致（前缀命中）')
+  eq(judge.tools?.map((t) => t.name), main.tools?.map((t) => t.name), 'reflect tools 与主请求一致（前缀命中）')
+  eq(judge.tool_choice, 'none', 'reflect 用 tool_choice:none 禁止真调用')
+  ok(!judge.system.includes('交付前自检'), '自检指令不进 system（稳定前缀不被改写）')
+  ok(String(judge.messages[judge.messages.length - 1].content).includes('交付前自检'), '自检指令作为末尾 user 消息')
+})
+
+await test('缓存前缀对齐：finalizer 复用主请求 system+tools（异常收尾也命中 warm 缓存）', async () => {
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'ping', arguments: { x: 1 } }], finishReason: 'tool_calls' },
+    { toolCalls: [{ id: 'c2', name: 'ping', arguments: { x: 1 } }], finishReason: 'tool_calls' },
+    { content: '收尾总结', finishReason: 'stop' }, // finalizer（maxTurns 触发）
+  ])
+  const tools = new ToolRegistry().register({ name: 'ping', description: 'd', parameters: { type: 'object' }, async execute() { return { ok: true } } })
+  const agent = new Agent({ provider, tools, maxTurns: 2, reflect: 'off' })
+  const res = await agent.run('任务')
+  eq(res.stopReason, 'max_turns', 'maxTurns 异常停止')
+  const main = provider.calls.history[1]
+  const fin = provider.calls.history[2]
+  eq(fin.system, main.system, 'finalizer system 复用主请求（逐字节一致）')
+  eq(fin.tools?.map((t) => t.name), main.tools?.map((t) => t.name), 'finalizer tools 与主请求一致（前缀命中）')
+  eq(fin.tool_choice, 'none', 'finalizer tool_choice:none 禁止新调用')
+})
+
 // ---------- 审计 P0 第二批A：LoopGovernor 循环智能终止 ----------
 
 await test('LoopGovernor 单元：指纹/重复/失败/无进展/预算', async () => {

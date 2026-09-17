@@ -113,7 +113,7 @@ function truncateJson(value, max) {
  *  注：以 JSON 字段注入（而非追加文本），保证 tool 结果仍可被 JSON.parse。 */
 const TOOL_FAIL_HINT = '这是工具返回的真实失败原因——请据此如实回复用户（勿臆测/编造其它原因）；若给出可重试方向（缺参数/权限不足/网络不可达/需先查 id）则换方式重试或指导用户；若反复失败无法解决，引导用户发送 #上报错误 <问题描述> 上报（命令会自动打包本次会话日志给开发者）。'
 
-/** 异常停止原因集合（命中且尚无最终答案时必须进一次无工具 finalizer；不以"有没有旁白"为条件） */
+/** 异常停止原因集合（命中且尚无最终答案时必须进一次禁工具 finalizer；不以"有没有旁白"为条件） */
 export const GOVERNOR_STOP = new Set(['max_turns', 'duplicate_action', 'consecutive_failures', 'no_progress', 'time_budget', 'token_budget'])
 /** 强制收尾指令：让模型据已完成工具结果交付进展，不再调工具（审计 §2.1：预算耗尽不返回空串） */
 const GOVERNOR_WRAP_DIRECTIVE = '任务尚未完成。请根据上方已完成的工具调用与结果，向用户简要交付：①已完成的进展；②遇到的问题或失败原因；③建议的下一步。直接给出文字回复，不要再调用工具。'
@@ -208,6 +208,7 @@ export class Agent {
     this._curDevScope = null
     this.messages = []
     this._pendingReflect = null // 反思反馈暂存：下轮拼入 system（非 messages），防被模型当用户话（审计 §3.7）
+    this._lastSystem = null // 最近一次主循环下发的 system；finalizer 复用以对齐前缀缓存
   }
 
   /**
@@ -245,15 +246,16 @@ export class Agent {
   }
 
   /**
-   * 无工具 finalizer：异常停止（预算/停滞/max_turns）后的一次收尾调用。
-   * - tools:undefined + tool_choice:'none'，绝不执行新工具；
+   * 禁工具 finalizer：异常停止（预算/停滞/max_turns）后的一次收尾调用。
+   * - 复用主请求的 system + tools（前缀逐字节对齐 → 全量命中 warm 缓存），
+   *   tool_choice:'none' 禁止执行新工具；返回 tool_calls 直接判失败走确定性兜底；
    * - 独立宽限窗（finalizeGraceMs）：只受用户取消约束，不受工作预算/时间预算约束；
    * - 输出追加为最终 assistant 消息后返回（调用方随后才持久化 session → run().content === 历史末条 assistant）；
    * - 失败/空输出 → _deterministicWrapUp 代码兜底（同样入历史），绝不返回空串或中间旁白。
    * @returns {{ text: string, via: 'llm' | 'fallback' }}
    */
-  async _finalize({ stopReason, memories, systemPromptOverride, context, scopeId, userSignal, taskId, ctx }) {
-    this.logger('mark', `[finalize] 异常停止（${stopReason}），进入无工具收尾`)
+  async _finalize({ stopReason, memories, systemPromptOverride, context, scopeId, userSignal, system, taskId, ctx }) {
+    this.logger('mark', `[finalize] 异常停止（${stopReason}），进入禁工具收尾`)
     this.devLog?.('finalize_start', { reason: stopReason }, taskId, ctx?.devScope)
     const finCtl = new AbortController()
     const onUserAbort = () => finCtl.abort({ kind: 'user' })
@@ -264,13 +266,17 @@ export class Agent {
     const graceMs = this.governor?.finalizeGraceMs ?? 45_000
     const finTimer = setTimeout(() => finCtl.abort({ kind: 'finalize_timeout' }), graceMs)
     try {
-      const wrapSys = this._assembleSystem(memories, systemPromptOverride, context, scopeId).system
+      // 优先复用主循环最近一次的 system（逐字节一致）；仅在预检提前 break、从未组装过时重建。
+      const wrapSys = system || this._assembleSystem(memories, systemPromptOverride, context, scopeId).system
+      const toolList = this._buildToolList()
       const wrap = await this.provider.chat({
         model: this.model,
         messages: [...this.messages, { role: 'user', content: GOVERNOR_WRAP_DIRECTIVE }],
         system: wrapSys,
-        tools: undefined,
+        tools: toolList.length ? toolList : undefined, // 同前缀 tools；tool_choice:'none' 保证不调用
         tool_choice: 'none',
+        ...(this._cacheControlFor(this.provider) ? { cacheControl: true } : {}),
+        ...(this._promptCacheKeyFor(this.provider)),
         temperature: this.temperature,
         max_tokens: Math.min(this.maxTokens ?? 1024, 1024), // 收尾只需简短总结，防吞掉预留
         thinking: this.thinking,
@@ -478,6 +484,7 @@ export class Agent {
         }
 
         const { system, breakdown, prefixFp = null, cacheBreakReason = null } = this._assembleSystem(memories, systemPromptOverride, context, scopeId)
+        this._lastSystem = system // 收尾 finalizer 复用同一 system，与主请求逐字节对齐（前缀缓存命中）
 
         // 高低水位滞回：未超 highWater 只追加（前缀逐字节稳定）；超了才一次压到 lowWater + epoch++
         const pressure = await this._hysteresisPressure(system, { scopeUserId, groupId: ctx?.groupId, conversationId: ctx?.conversationId })
@@ -674,11 +681,11 @@ export class Agent {
 
     // ── 异常停止强制收尾（长任务稳定性审计 P0-1）──
     // token/time_budget、duplicate_action、no_progress、consecutive_failures、max_turns 等异常停止，
-    // 且尚未产出通过 reflection 的最终答案时，必须进一次无工具 finalizer（不以"有没有工具旁白"为条件）。
+    // 且尚未产出通过 reflection 的最终答案时，必须进一次禁工具 finalizer（不以"有没有工具旁白"为条件）。
     // finalizer 输出追加为最终 assistant 消息后再持久化 → run().content 恒等于持久化历史末条 assistant。
     // 正常通过 reflection 的最终答案已在 messages 中（finalContent 非空 → 跳过，不重复追加）。
     if (finalContent == null && GOVERNOR_STOP.has(stopReason)) {
-      const fin = await this._finalize({ stopReason, memories, systemPromptOverride, context, scopeId, userSignal: signal, taskId, ctx })
+      const fin = await this._finalize({ stopReason, memories, systemPromptOverride, context, scopeId, userSignal: signal, system: this._lastSystem, taskId, ctx })
       finalContent = fin.text
       finalizedVia = fin.via
       if (fin.usage) usage = mergeUsage(usage, fin.usage)
@@ -1081,13 +1088,24 @@ export class Agent {
    * 草拟回复已是 this.messages 末尾的 assistant 消息，评判者据此核查完整性/准确性/一致性。
    */
   async _reflect({ system, signal } = {}) {
-    const reflectSystem = system ? `${system}\n\n${REFLECTION_DIRECTIVE}` : REFLECTION_DIRECTIVE
-    const messages = [...this.messages, { role: 'user', content: '请对上面你草拟的最终回复做交付前自检，并按指定 JSON 格式给出结论。' }]
+    // 前缀缓存对齐（关键）：评判调用必须复用主请求的 system 与 tools，指令只追加为末尾
+    // user 消息（tool_choice:'none' 禁止真调用）。此前把 REFLECTION_DIRECTIVE 拼进 system
+    // 且不带 tools——请求从首字节就与主请求分叉，整段持续增长的会话历史在评判里 100% cache
+    // miss；评判 prompt 与主请求同量级，等于每个工具任务额外白付一遍全价输入（命中率被腰斩）。
+    // 对齐后 tools/system/历史与主请求逐字节一致 → 全量命中 warm 缓存，仅草稿+自检指令是小段新增。
+    const toolList = this._buildToolList()
+    const messages = [...this.messages, {
+      role: 'user',
+      content: `${REFLECTION_DIRECTIVE}\n\n请对上面你草拟的最终回复做交付前自检，并按指定 JSON 格式给出结论。`,
+    }]
     const res = await this.provider.chat({
       model: this.model,
       messages,
-      system: reflectSystem,
-      tools: undefined, // 纯评判，不带工具
+      system,
+      tools: toolList.length ? toolList : undefined,
+      tool_choice: toolList.length ? 'none' : undefined,
+      ...(this._cacheControlFor(this.provider) ? { cacheControl: true } : {}),
+      ...this._promptCacheKeyFor(this.provider),
       temperature: this.temperature,
       max_tokens: this.maxTokens,
       thinking: this.thinking,
