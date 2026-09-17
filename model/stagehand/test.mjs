@@ -12,6 +12,7 @@ import { jsonSchemaToZod } from './index.js'
 let passed = 0
 let failed = 0
 function ok(c, m) { if (c) { passed++; console.log('  ✓', m) } else { failed++; console.error('  ✗ FAIL', m) } }
+function eq(a, b, m) { ok(JSON.stringify(a) === JSON.stringify(b), `${m}（实际 ${JSON.stringify(a)}，期望 ${JSON.stringify(b)}）`) }
 async function test(name, fn) { console.log(`\n[${name}]`); try { await fn() } catch (e) { failed++; console.error('  ✗ THROW', e?.message || e); console.error(e?.stack) } }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -182,6 +183,54 @@ await test('jsonSchemaToZod：object/array/类型 + required（需 zod，未装�
   // 非 required 缺失 → 通过
   const noOpt = zodSchema.safeParse({ title: 't', count: 1 })
   ok(noOpt.success === true, '可选字段缺失仍通过')
+})
+
+// ---------- 5. 出口护栏：内网/元数据拦截 ----------
+await test('guard：内网/环回/元数据地址拦截 + 公网放行', async () => {
+  const { isPrivateIp, assertUrlAllowed, buildLaunchOptions, pickDeviceProfile } = await import('./guard.js')
+  ok(isPrivateIp('127.0.0.1') && isPrivateIp('10.1.2.3') && isPrivateIp('192.168.1.1') && isPrivateIp('172.16.0.1'), 'IPv4 私有段识别')
+  ok(isPrivateIp('169.254.169.254') && isPrivateIp('::1') && isPrivateIp('fd00::1') && isPrivateIp('fe80::1'), '链路本地/元数据/IPv6 识别')
+  ok(!isPrivateIp('8.8.8.8') && !isPrivateIp('1.1.1.1'), '公网 IP 放行')
+  const lookupPublic = async () => [{ address: '93.184.216.34', family: 4 }]
+  const lookupPrivate = async () => [{ address: '10.0.0.5', family: 4 }]
+  eq((await assertUrlAllowed('http://example.com/a', { lookup: lookupPublic })).ok, true, '公网域名放行')
+  eq((await assertUrlAllowed('http://127.0.0.1:8080/', { lookup: lookupPublic })).ok, false, '环回 IP 拒绝')
+  eq((await assertUrlAllowed('http://169.254.169.254/latest/meta-data/', { lookup: lookupPublic })).ok, false, '云元数据拒绝')
+  eq((await assertUrlAllowed('http://localhost:2536', { lookup: lookupPublic })).ok, false, 'localhost 拒绝')
+  eq((await assertUrlAllowed('file:///etc/passwd', { lookup: lookupPublic })).ok, false, 'file:// 协议拒绝')
+  eq((await assertUrlAllowed('http://internal.corp', { lookup: lookupPrivate })).ok, false, '域名解析到内网拒绝')
+  const bad = await assertUrlAllowed('http://nope.invalid', { lookup: async () => { throw new Error('ENOTFOUND') } })
+  eq(bad.ok, false, '解析失败拒绝')
+
+  // 真机化启动参数
+  const p = pickDeviceProfile(() => 0) // win-chrome
+  const lo = buildLaunchOptions({ headless: true, stealth: true }, p)
+  ok(lo.args.some((a) => a.includes('AutomationControlled')), 'stealth：去自动化 flag')
+  ok(lo.args.some((a) => a.startsWith('--user-agent=')), 'stealth：UA 参数')
+  ok(lo.viewport && lo.locale && lo.deviceScaleFactor != null, 'stealth：视口/语言/像素比')
+  const off = buildLaunchOptions({ stealth: false }, p)
+  eq(off.args, undefined, 'stealth=false：不加指纹参数')
+})
+
+// ---------- 6. 权限 + 配额 + goto 拦截（不启动浏览器） ----------
+await test('makeStagehand：permission 控制 category；goto 拦内网；配额生效', async () => {
+  const { makeStagehand } = await import('./index.js')
+  const all = makeStagehand({ cfg: { permission: 'all' }, agent: {} })
+  const names = Object.fromEntries(all.pack.resolve({}).map((t) => [t.name, t.category]))
+  eq(names['stagehand__goto'], 'query', 'permission=all：goto 归 query（全员可用）')
+  eq(names['stagehand__act'], 'query', 'permission=all：act 归 query（仍 alwaysConfirm）')
+  const master = makeStagehand({ cfg: { permission: 'master' }, agent: {} })
+  eq(master.pack.resolve({}).find((t) => t.name === 'stagehand__goto').category, 'system', 'permission=master：system（仅主人）')
+
+  const tools = makeStagehand({ cfg: { permission: 'all', maxCallsPerMinute: 1 }, agent: {} }).pack.resolve({})
+  const goto = tools.find((t) => t.name === 'stagehand__goto')
+  const ctx = { scopeUserId: 'u1' }
+  const r1 = await goto.execute({ url: 'http://127.0.0.1:2536' }, ctx)
+  eq(r1.ok, false, 'goto 内网被拒（未启动浏览器）')
+  ok(/内网|禁止|拒绝/.test(String(r1.error || r1.message || '')), '拒绝原因可读')
+  const r2 = await goto.execute({ url: 'http://example.com' }, ctx)
+  eq(r2.ok, false, '第二次触发配额限制（maxCallsPerMinute=1）')
+  ok(/频繁|上限/.test(String(r2.error || r2.message || '')), '配额提示可读')
 })
 
 // ---------- 总结 ----------

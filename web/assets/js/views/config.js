@@ -163,6 +163,11 @@
         mcpServersToUi()
         // 兜底：确保各子对象存在（防旧 config 无此字段时 v-model 报错）
         if (!form.stagehand) form.stagehand = {}
+        if (!form.stagehand.permission) form.stagehand.permission = 'all'
+        if (form.stagehand.stealth == null) form.stagehand.stealth = true
+        if (form.stagehand.maxSessions == null) form.stagehand.maxSessions = 3
+        if (form.stagehand.maxCallsPerMinute == null) form.stagehand.maxCallsPerMinute = 10
+        if (form.stagehand.maxCallsPerDay == null) form.stagehand.maxCallsPerDay = 200
         // 无损压缩 + 网页抓取引擎兜底（旧 config 无此字段时 v-model 不报错）
         if (!form.compaction) form.compaction = {}
         if (form.compaction.enable == null) form.compaction.enable = true
@@ -1228,16 +1233,34 @@
 
             <div class="full subpanel sp-sky">
               <div class="row g10 mb12" style="font-weight:800;color:var(--sky)">🌐 Stagehand 浏览器自动化</div>
-              <div class="desc mb10">act/extract/observe 自然语言原语；仅框架主人可用，act 写动作需 <code>#确认</code>。会话 per-scope 隔离 + 5min idle 自动关。</div>
+              <div class="desc mb10">act/extract/observe 自然语言原语；permission=all 时全部成员可用（act 写动作仍需 <code>#确认</code>）。goto 强制拒绝内网/元数据地址，并按会员限流；会话 per-scope 隔离 + idle 自动关。</div>
               <div class="cf-grid">
                 <cfg-row name="启用浏览器自动化" desc="依赖 @browserbasehq/stagehand+zod（云崽根 pnpm install）">
                   <v-switch v-model="form.stagehand.enable"/>
+                </cfg-row>
+                <cfg-row name="使用权限" desc="all=全部成员（act 仍需 #确认）| master=仅主人">
+                  <select class="sel" style="width:150px" v-model="form.stagehand.permission">
+                    <option value="all">全部成员</option>
+                    <option value="master">仅主人</option>
+                  </select>
+                </cfg-row>
+                <cfg-row name="真机化指纹" desc="随机设备 UA/视口/语言/触屏 + 去自动化 flag + 规避脚本（降低被风控拦截概率）">
+                  <v-switch v-model="form.stagehand.stealth"/>
                 </cfg-row>
                 <cfg-row name="浏览器模式">
                   <select class="sel" style="width:190px" v-model="form.stagehand.mode"><option v-for="o in OPT.shMode" :value="o[0]">{{ o[1] }}</option></select>
                 </cfg-row>
                 <cfg-row name="无头模式(本地)" desc="服务器建议开">
                   <v-switch v-model="form.stagehand.headless"/>
+                </cfg-row>
+                <cfg-row name="并发会话上限" desc="全局同时打开的浏览器数">
+                  <input type="number" class="inp" style="width:90px" min="1" max="10" v-model.number="form.stagehand.maxSessions">
+                </cfg-row>
+                <cfg-row name="每分钟上限" desc="每会员浏览器操作/分钟">
+                  <input type="number" class="inp" style="width:100px" min="1" v-model.number="form.stagehand.maxCallsPerMinute">
+                </cfg-row>
+                <cfg-row name="每日上限" desc="每会员浏览器操作/天">
+                  <input type="number" class="inp" style="width:110px" min="1" v-model.number="form.stagehand.maxCallsPerDay">
                 </cfg-row>
                 <cfg-row name="chrome 路径(本地,可选)" desc="空=默认/CHROME_PATH；可填复用已装 chrome">
                   <input class="inp mono" style="width:200px" v-model="form.stagehand.executablePath" placeholder="留空=默认">

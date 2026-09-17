@@ -5,6 +5,7 @@
  * 只负责拿到 browser 对象 + 一个 close 句柄；Stagehand.create 由 session.js 调。
  */
 import Log from '../../utils/Log.js'
+import { buildLaunchOptions } from './guard.js'
 
 let _mod = null
 async function getMod() {
@@ -20,7 +21,7 @@ async function getMod() {
  * @param {object} cfg agent.stagehand 配置（mode/headless/executablePath/browserbaseApiKey/region）
  * @returns {Promise<{browser, close: ()=>Promise<void>}>}
  */
-export async function launchBrowser(cfg = {}) {
+export async function launchBrowser(cfg = {}, profile = null) {
   const { localBrowser, browserbase } = await getMod()
   const mode = cfg.mode || 'local'
   if (mode === 'cloud') {
@@ -32,13 +33,9 @@ export async function launchBrowser(cfg = {}) {
     const browser = await browserbase.launch(opts)
     return { browser, close: () => browser.close().catch(() => {}) }
   }
-  // local
-  const opts = {
-    headless: cfg.headless !== false,
-    chromiumSandbox: false, // 服务器通常无 sandbox 权限
-  }
-  if (cfg.executablePath) opts.executablePath = String(cfg.executablePath)
-  Log.info('[stagehand] 启动本地浏览器', opts.headless ? 'headless' : 'headed', opts.executablePath || '(默认chromium)')
+  // local（stealth 默认开：真机 UA/视口/语言 + 去自动化 flag）
+  const opts = buildLaunchOptions(cfg, profile || undefined)
+  Log.info('[stagehand] 启动本地浏览器', opts.headless ? 'headless' : 'headed', opts.executablePath || '(默认chromium)', cfg.stealth === false ? 'stealth=off' : `fingerprint=${profile?.name || 'default'}`)
   const browser = await localBrowser.launch(opts)
   return { browser, close: () => browser.close().catch(() => {}) }
 }

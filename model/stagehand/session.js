@@ -10,6 +10,7 @@
  */
 import Log from '../../utils/Log.js'
 import { launchBrowser, getStagehandClass } from './browser.js'
+import { pickDeviceProfile, buildStealthInitScript, BLOCKED_HOSTS } from './guard.js'
 
 export class SessionManager {
   /**
@@ -23,6 +24,7 @@ export class SessionManager {
     this._launcher = launcher || null
     this._sessions = new Map() // scopeKey -> { stagehand, page, close, browser, timer, lastUsed }
     this._inflight = new Map() // scopeKey -> Promise<page>（并发去重）
+    this.maxSessions = Math.max(1, Number(cfg.maxSessions) || 3) // 全局并发浏览器会话上限（防成员刷爆）
   }
 
   /** 启动或复用会话，返回 { stagehand, page }。 */
@@ -33,6 +35,11 @@ export class SessionManager {
       return { stagehand: existing.stagehand, page: existing.page }
     }
     if (this._inflight.has(scopeKey)) return this._inflight.get(scopeKey)
+    if (this._sessions.size >= this.maxSessions) {
+      const err = new Error(`浏览器会话已达上限（${this.maxSessions}），请稍后再试`)
+      err.code = 'max_sessions'
+      return Promise.reject(err)
+    }
     const p = (async () => {
       try {
         const entry = await this._launch(scopeKey)
@@ -63,13 +70,18 @@ export class SessionManager {
       stagehand = injected.stagehand
     } else {
       const Stagehand = await getStagehandClass()
-      ;({ browser, close } = await launchBrowser(this._cfg))
+      const profile = this._cfg.stealth === false ? null : pickDeviceProfile(Math.random, this._cfg)
+      ;({ browser, close } = await launchBrowser(this._cfg, profile))
       const model = this._buildModel()
       stagehand = await Stagehand.create({
         browser,
         ...(model ? { model } : {}),
         domSettleTimeoutMs: Number(this._cfg.domSettleTimeoutMs) || 3000,
       })
+      // 真机化指纹注入（init script）+ 域名级内网兜底（导航前的 IP/域名校验在 index.js goto）
+      if (profile) {
+        await installStealth(stagehand, profile)
+      }
     }
     const page = await resolveFirstPage(browser)
     if (!page) {
@@ -112,6 +124,21 @@ export class SessionManager {
 
   /** 测试/诊断用：当前会话数。 */
   size() { return this._sessions.size }
+}
+
+/**
+ * 安装真机化规避脚本 + 域名级内网兜底。任一失败只告警，不阻断会话（主防线是 goto 前的 IP/域名校验）。
+ */
+async function installStealth(stagehand, profile) {
+  const script = buildStealthInitScript(profile)
+  try {
+    const ctx = stagehand?.context
+    if (ctx?.addInitScript) await ctx.addInitScript(script)
+    else if (stagehand?.page?.addInitScript) await stagehand.page.addInitScript(script)
+    if (ctx?.setDomainPolicy) await ctx.setDomainPolicy({ blockedDomains: [...BLOCKED_HOSTS] })
+  } catch (e) {
+    Log.warn('[stagehand] 指纹/域名策略注入失败（不阻断）', e?.message || e)
+  }
 }
 
 /** 从 browser 对象取首个 page（兼容 pages() 同步/异步）。 */

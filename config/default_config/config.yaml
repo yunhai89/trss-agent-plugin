@@ -310,17 +310,26 @@ agent:
     toolEvoVerifyTimeoutMs: 5000  # toolEvo 候选行为验证：单用例超时（沙箱模式）
   stagehand:
     # Stagehand 浏览器自动化（act/extract/observe 自然语言原语，LLM 把指令映射到页面元素）。
-    # 仅框架主人可用（category:system）；act 写动作额外需 #确认。会话 per-scopeUserId 隔离 + 5min idle 自动关。
+    # permission=all：全部成员可用 goto/observe/extract，act 写动作仍需主人 #确认；=master：仅主人。
+    # 安全：goto 强制拒绝内网/环回/元数据地址（防 SSRF），并按会员限流；本地浏览器跑在宿主进程，非沙箱。
+    # 会话 per-scopeUserId 隔离 + idle 自动关 + 全局会话上限。
     # 依赖 @browserbasehq/stagehand + zod（云崽根 pnpm install 随 workspace 装入插件）；本地模式另需 chromium+系统库。
     enable: false
+    permission: all        # all（全部成员）| master（仅主人）
     mode: local            # local（本地 Playwright+chromium，默认）| cloud（Browserbase 云浏览器）
     headless: true         # 本地模式是否无头
+    stealth: true          # 真机化：随机设备指纹(UA/视口/语言/触屏)+去自动化 flag+规避脚本，降低被风控拦截概率
+    userAgent: ""          # 指定固定 UA（留空=按设备指纹池随机）
     executablePath: ""     # 本地 chrome 可执行路径（空=Stagehand 自定/CHROME_PATH；可填复用已装 chrome）
     browserbaseApiKey: ""  # 云模式必填（bb_live_...）
     region: ""             # 云模式可选：us-west-2(默认)/us-east-1/eu-central-1/ap-southeast-1
     modelName: ""          # Stagehand 原生模型（如 google/gemini-2.5-flash；空=复用插件 provider，仅 OpenAI 兼容；云模式空=Model Gateway 自动选）
     modelApiKey: ""        # 原生模型 apiKey（云模式部分 provider 可空）
     idleTimeoutMs: 300000  # 会话空闲多久自动关（默认 5 分钟）
+    maxSessions: 3         # 全局并发浏览器会话上限
+    maxCallsPerMinute: 10  # 每会员每分钟浏览器操作上限
+    maxCallsPerDay: 200    # 每会员每日浏览器操作上限
+    blockedHosts: []       # 额外禁访主机（在默认内网/元数据黑名单之外）
     domSettleTimeoutMs: 3000  # act 前 DOM 稳定等待（毫秒）
   download:
     # 媒体下载工具（yt-dlp；仅框架主人，受约束）。下载视频/音频时 LLM 优先用 web_download，不走 terminal 裸 shell。
