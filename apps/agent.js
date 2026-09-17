@@ -929,14 +929,31 @@ function ctxFromInfo(info) {
 export const makeFireDispatch = (rt) => {
   return async (info) => {
     if (info.type === 'task' && info.prompt) {
+      const cfg = Config.get().agent || {}
+      const ctx = ctxFromInfo(info)
+      const taskId = randomUUID() // 与交互路径同源：定时任务也落 dev trace / 用量 / 采迹
       try {
-        const cfg = Config.get().agent?.schedule || {}
-        const ctx = ctxFromInfo(info)
-        const r = await rt.makeAgent().run(info.prompt, { ctx, maxTurns: cfg.taskMaxTurns || 15 })
+        const r = await rt.makeAgent().run(info.prompt, {
+          ctx, maxTurns: cfg.schedule?.taskMaxTurns || 15, taskId,
+          onToolEnd: (tc, content) => { try { rt.usageStats?.recordToolResult?.(tc?.name, content) } catch { /* 统计不阻塞 */ } },
+        })
+        // 与交互路径一致的可观测性：用量统计 + 进化采迹 + 自评审（此前定时任务全部旁路）
+        try {
+          const nu = normalizeUsage(r?.usage) || {}
+          rt.usageStats?.recordRun({
+            inputTokens: nu.input || 0, outputTokens: nu.output || 0,
+            cacheRead: nu.cacheRead || 0, cacheWrite: nu.cacheWrite || 0, cacheObserved: !!nu.cacheObserved,
+            observedInput: nu.observedInput || 0, observedOutput: nu.observedOutput || 0, observedUncached: nu.observedUncached || 0,
+            turns: r?.turns, model: cfg.model || '',
+          })
+        } catch { /* noop */ }
+        try { rt.traceStore?.record({ scope: ctx.scopeUserId, scopeId: ctx.scopeId, input: info.prompt, output: r?.content, turns: r?.turns, usage: r?.usage, stopReason: r?.stopReason, taskId }) } catch (e) { Log.warn('[evolution] 定时任务采迹失败', e?.message || e) }
+        try { rt.selfReview?.tick(ctx, { input: info.prompt, output: r?.content, turns: r?.turns, usage: r?.usage, stopReason: r?.stopReason }) } catch (e) { Log.warn('[evolution] 定时任务自评审触发失败', e?.message || e) }
         const text = `🤖 定时任务：${(r?.content || '').trim() || '(无输出)'}`
         await sendByInfo(info, text)
         Log.info('[schedule] 任务链完成', info.id, 'turns=', r?.turns)
       } catch (e) {
+        try { rt.usageStats?.recordRun({ error: true }) } catch { /* noop */ }
         Log.warn('[schedule] 任务链失败', info.id, e?.message || e)
         try { await sendByInfo(info, `⚠️ 定时任务「${String(info.prompt).slice(0, 30)}」执行失败：${e?.message || e}`) } catch { /* noop */ }
       }
