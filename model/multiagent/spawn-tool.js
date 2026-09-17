@@ -113,7 +113,7 @@ export function makeSpawnSubagentTools({
   maxTurns = 10,
   defaultTools = ['web_search', 'memory_search'],
   maxSpawns = 5,
-  defaultBudgetMs = 120000, // 默认 2 分钟
+  defaultBudgetMs = 600000, // 默认 10 分钟（长任务如大文件处理需要）
   hardGraceMs = HARD_GRACE_MS, // 测试可调小
   minBudgetMs = MIN_BUDGET_MS,
   onSettle = null, // 任务终态且主循环本轮已结束、结果未被 check 消费时回调（异步回推给会话）
@@ -265,7 +265,7 @@ export function makeSpawnSubagentTools({
         task: { type: 'string', description: '自包含的任务描述（子代理看不到主对话）：目标+输出格式+边界。', maxLength: 2000 },
         focus: { type: 'string', description: '专注方向', enum: ['research', 'analysis', 'writing', 'code'] },
         tools: { type: 'array', items: { type: 'string' }, description: `子代理可指定工具子集；不可用工具会被拒绝并在结果里列出。默认：${_capability.granted.join('、') || '（无）'}` },
-        timeBudgetMs: { type: 'integer', description: '子代理时间预算（毫秒，默认 120000=2 分钟）。超时则 timeout 终止。', default: 120000, minimum: 10000, maximum: 600000 },
+        timeBudgetMs: { type: 'integer', description: '子代理时间预算（毫秒，默认 600000=10 分钟）。超时则 timeout 终止。', default: 600000, minimum: 10000, maximum: 600000 },
       },
       additionalProperties: false,
     },
