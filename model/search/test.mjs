@@ -89,6 +89,19 @@ await test('provider/searxng：自建元搜索', async () => {
   eq(r.results[0].title, 'S', 'result')
 })
 
+await test('provider/searxng：实例只回 HTML → 给出可执行报错（需开启 json 格式）', async () => {
+  const f = async () => ({
+    ok: true, status: 200,
+    headers: { get: (k) => (String(k).toLowerCase() === 'content-type' ? 'text/html; charset=utf-8' : null) },
+    async text() { return '<!doctype html><html><body>searxng html</body></html>' },
+    async json() { throw new Error('not json') },
+  })
+  const p = createSearXNGProvider({ url: 'http://localhost:8080', fetcher: f })
+  let err = null
+  try { await p.search('test') } catch (e) { err = e }
+  ok(err && /json/i.test(err.message) && /formats|settings\.yml/i.test(err.message), '提示在 settings.yml 开启 json')
+})
+
 // ---------- 6. DDG provider ----------
 await test('provider/ddg：本地兜底（始终可用）', async () => {
   const html = '<a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com">Example</a><td class="result-snippet">an example site</td>'

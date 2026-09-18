@@ -170,6 +170,10 @@
         if (form.stagehand.maxCallsPerDay == null) form.stagehand.maxCallsPerDay = 200
         if (form.stagehand.domSettleTimeoutMs == null) form.stagehand.domSettleTimeoutMs = 3000
         if (!Array.isArray(form.stagehand.blockedHosts)) form.stagehand.blockedHosts = []
+        // 搜索源兜底（旧 config 无 searxng 字段时 v-model 不报错）
+        if (!form.search) form.search = {}
+        if (!form.search.searxng) form.search.searxng = {}
+        if (form.search.searxng.url == null) form.search.searxng.url = ''
         if (form.privateChat == null) form.privateChat = false
         // 无损压缩 + 网页抓取引擎兜底（旧 config 无此字段时 v-model 不报错）
         if (!form.compaction) form.compaction = {}
@@ -503,7 +507,9 @@
         { id: 'evolution', name: '自进化', icon: 'evolution', grad: 'var(--grad-rose)' },
         { id: 'security', name: '权限 / 安全 / 日志', icon: 'shield', grad: 'var(--grad)' },
         { id: 'mcp', name: 'MCP 服务', icon: 'tool', grad: 'var(--grad-mint)' },
+        { id: 'search', name: '搜索', icon: 'search', grad: 'var(--grad-sky)' },
         { id: 'sandbox', name: 'E2B 沙箱', icon: 'tool', grad: 'var(--grad-mint)' },
+        { id: 'stagehand', name: '浏览器自动化', icon: 'tool', grad: 'var(--grad-sky)' },
         { id: 'ext', name: '多模态 / 工具 / 扩展', icon: 'tool', grad: 'var(--grad-sky)' },
       ]
       // 仅「基础/模型」默认展开，其余收起（配置多时便于查找）
@@ -1324,19 +1330,11 @@
               <select class="sel" style="width:150px" v-model="form.kb.crawl.engine"><option v-for="o in OPT.crawlEngine" :value="o[0]">{{ o[1] }}</option></select>
             </cfg-row>
 
-            <cfg-row name="Tavily 搜索 Key" desc="任填一个搜索源即启用">
-              <input class="inp mono" style="width:220px" v-model="form.search.tavily.apiKey" placeholder="tvly-...">
-            </cfg-row>
-            <cfg-row class="full" name="Exa / Brave / PPLX Key" desc="其余搜索源密钥(明文)">
-              <div class="row g6 wrap">
-                <input class="inp mono" style="width:150px" v-model="form.search.exa.apiKey" placeholder="Exa">
-                <input class="inp mono" style="width:150px" v-model="form.search.brave.apiKey" placeholder="Brave">
-                <input class="inp mono" style="width:150px" v-model="form.search.perplexity.apiKey" placeholder="Perplexity">
-              </div>
-            </cfg-row>
-            <cfg-row name="DDG 兜底" desc="本地 DuckDuckGo,免 key">
-              <v-switch v-model="form.search.ddg"/>
-            </cfg-row>
+            <div class="note n-honey full">
+              <v-icon name="search"/>
+              <div style="flex:1"><b>搜索</b>配置已拆到独立卡片：<b>搜索</b>（Tavily/Exa/Brave/PPLX / 自建 SearXNG / DDG 兜底）。</div>
+              <button class="btn b-line b-sm" @click="jump('search')">前往<v-icon name="arrowr"/></button>
+            </div>
             <cfg-row name="深度研究权限" desc="#研究 命令">
               <select class="sel" style="width:170px" v-model="form.research.permission"><option v-for="o in OPT.researchPerm" :value="o[0]">{{ o[1] }}</option></select>
             </cfg-row>
@@ -1367,65 +1365,7 @@
                 <input type="number" class="inp" style="width:90px" min="1" v-model.number="form.calc.timeout">
               </div>
             </cfg-row>
-            <!-- MCP 服务端已拆到独立「MCP 服务」section -->
-
-            <div class="full subpanel sp-sky">
-              <div class="row g10 mb12" style="font-weight:800;color:var(--sky)">🌐 Stagehand 浏览器自动化</div>
-              <div class="desc mb10">act/extract/observe 自然语言原语；permission=all 时全部成员可用（act 写动作仍需 <code>#确认</code>）。goto 强制拒绝内网/元数据地址，并按会员限流；会话 per-scope 隔离 + idle 自动关。</div>
-              <div class="cf-grid">
-                <cfg-row name="启用浏览器自动化" desc="依赖 @browserbasehq/stagehand+zod（云崽根 pnpm install）">
-                  <v-switch v-model="form.stagehand.enable"/>
-                </cfg-row>
-                <cfg-row name="使用权限" desc="all=全部成员（act 仍需 #确认）| master=仅主人">
-                  <select class="sel" style="width:150px" v-model="form.stagehand.permission">
-                    <option value="all">全部成员</option>
-                    <option value="master">仅主人</option>
-                  </select>
-                </cfg-row>
-                <cfg-row name="真机化指纹" desc="随机设备 UA/视口/语言/触屏 + 去自动化 flag + 规避脚本（降低被风控拦截概率）">
-                  <v-switch v-model="form.stagehand.stealth"/>
-                </cfg-row>
-                <cfg-row name="固定 User-Agent(可选)" desc="留空=按设备指纹池随机；填写则全局固定">
-                  <input class="inp mono" style="width:260px" v-model="form.stagehand.userAgent" placeholder="留空=随机设备指纹">
-                </cfg-row>
-                <cfg-row name="浏览器模式">
-                  <select class="sel" style="width:190px" v-model="form.stagehand.mode"><option v-for="o in OPT.shMode" :value="o[0]">{{ o[1] }}</option></select>
-                </cfg-row>
-                <cfg-row name="无头模式(本地)" desc="服务器建议开">
-                  <v-switch v-model="form.stagehand.headless"/>
-                </cfg-row>
-                <cfg-row name="并发会话上限" desc="全局同时打开的浏览器数">
-                  <input type="number" class="inp" style="width:90px" min="1" max="10" v-model.number="form.stagehand.maxSessions">
-                </cfg-row>
-                <cfg-row name="每分钟上限" desc="每会员浏览器操作/分钟">
-                  <input type="number" class="inp" style="width:100px" min="1" v-model.number="form.stagehand.maxCallsPerMinute">
-                </cfg-row>
-                <cfg-row name="每日上限" desc="每会员浏览器操作/天">
-                  <input type="number" class="inp" style="width:110px" min="1" v-model.number="form.stagehand.maxCallsPerDay">
-                </cfg-row>
-                <cfg-row name="chrome 路径(本地,可选)" desc="空=默认/CHROME_PATH；可填复用已装 chrome">
-                  <input class="inp mono" style="width:200px" v-model="form.stagehand.executablePath" placeholder="留空=默认">
-                </cfg-row>
-                <cfg-row name="Browserbase apiKey" desc="云模式必填（bb_live_...）">
-                  <input class="inp mono" style="width:200px" v-model="form.stagehand.browserbaseApiKey" placeholder="bb_live_...">
-                </cfg-row>
-                <cfg-row name="云区域(可选)">
-                  <select class="sel" style="width:190px" v-model="form.stagehand.region"><option v-for="o in OPT.shRegion" :value="o[0]">{{ o[1] }}</option></select>
-                </cfg-row>
-                <cfg-row name="Stagehand 原生模型(可选)" desc="已移至 模型配置（功能分配）">
-                  <span class="mut2 mono" style="font-size:12px">{{ form.stagehand?.modelName || '(留空=复用 provider)' }}</span>
-                </cfg-row>
-                <cfg-row name="会话空闲超时(毫秒)">
-                  <input type="number" class="inp" style="width:130px" min="60000" step="60000" v-model.number="form.stagehand.idleTimeoutMs">
-                </cfg-row>
-                <cfg-row name="DOM 稳定等待(毫秒)" desc="domSettleTimeoutMs：页面动作后等待 DOM 稳定">
-                  <input type="number" class="inp" style="width:120px" min="0" step="500" v-model.number="form.stagehand.domSettleTimeoutMs">
-                </cfg-row>
-                <cfg-row class="full" name="额外禁访主机" desc="在默认内网/元数据黑名单之外追加禁访域名（回车添加）">
-                  <tag-editor v-model="form.stagehand.blockedHosts" mono placeholder="如 internal.example.com"/>
-                </cfg-row>
-              </div>
-            </div>
+            <!-- MCP 服务端已拆到独立「MCP 服务」section；浏览器自动化已拆到独立「浏览器自动化」section -->
 
             <div class="full" style="margin-top:4px;padding-top:12px;border-top:1px dashed var(--line2)">
               <div class="mut" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="image"/> 示意图生成（diagram_render · 流程图/架构图/时序图）</div>
@@ -1617,6 +1557,98 @@
               </div>
             </div>
           </div></div>
+        </div>
+
+        <!-- ===== 搜索（独立 section，从「多模态/工具/扩展」拆出）===== -->
+        <div :id="'cfg-search'" class="card cf-sec" :class="{open: open.search}">
+          <div class="cf-sh" @click="open.search = !open.search">
+            <span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="search"/></span>
+            <div><div class="ct-t">搜索</div><div class="ct-s">多源自动路由：Tavily/Exa/Perplexity/Brave → SearXNG → DDG 兜底</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
+          </div>
+          <div class="cf-body" v-show="open.search"><div class="cf-grid">
+            <cfg-row name="Tavily 搜索 Key" desc="任填一个搜索源即启用">
+              <input class="inp mono" style="width:220px" v-model="form.search.tavily.apiKey" placeholder="tvly-...">
+            </cfg-row>
+            <cfg-row class="full" name="Exa / Brave / PPLX Key" desc="其余搜索源密钥(明文)">
+              <div class="row g6 wrap">
+                <input class="inp mono" style="width:150px" v-model="form.search.exa.apiKey" placeholder="Exa">
+                <input class="inp mono" style="width:150px" v-model="form.search.brave.apiKey" placeholder="Brave">
+                <input class="inp mono" style="width:150px" v-model="form.search.perplexity.apiKey" placeholder="Perplexity">
+              </div>
+            </cfg-row>
+            <cfg-row class="full" name="SearXNG 地址 (可选)" desc="自建/公共元搜索，免 key；留空=不启用该源。插件自动带 format=json 请求——需在实例 settings.yml 的 search.formats 里启用 json（默认只回 HTML）">
+              <input class="inp mono" style="width:300px" v-model="form.search.searxng.url" placeholder="http://localhost:8080">
+            </cfg-row>
+            <cfg-row name="DDG 兜底" desc="本地 DuckDuckGo,免 key">
+              <v-switch v-model="form.search.ddg"/>
+            </cfg-row>
+          </div></div>
+        </div>
+
+        <!-- ===== Stagehand 浏览器自动化（独立 section，从「多模态/工具/扩展」拆出）===== -->
+        <div :id="'cfg-stagehand'" class="card cf-sec" :class="{open: open.stagehand}">
+          <div class="cf-sh" @click="open.stagehand = !open.stagehand">
+            <span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="tool"/></span>
+            <div><div class="ct-t">浏览器自动化（Stagehand）</div><div class="ct-s">自然语言操作浏览器 · 会话隔离 · 内网禁访 · 限流</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
+          </div>
+          <div class="cf-body" v-show="open.stagehand">
+            <div class="desc mb10">act/extract/observe 自然语言原语；permission=all 时全部成员可用（act 写动作仍需 <code>#确认</code>）。goto 强制拒绝内网/元数据地址，并按会员限流；会话 per-scope 隔离 + idle 自动关。</div>
+            <div class="cf-grid">
+              <cfg-row name="启用浏览器自动化" desc="依赖 @browserbasehq/stagehand+zod（云崽根 pnpm install）">
+                <v-switch v-model="form.stagehand.enable"/>
+              </cfg-row>
+              <cfg-row name="使用权限" desc="all=全部成员（act 仍需 #确认）| master=仅主人">
+                <select class="sel" style="width:150px" v-model="form.stagehand.permission">
+                  <option value="all">全部成员</option>
+                  <option value="master">仅主人</option>
+                </select>
+              </cfg-row>
+              <cfg-row name="真机化指纹" desc="随机设备 UA/视口/语言/触屏 + 去自动化 flag + 规避脚本（降低被风控拦截概率）">
+                <v-switch v-model="form.stagehand.stealth"/>
+              </cfg-row>
+              <cfg-row name="固定 User-Agent(可选)" desc="留空=按设备指纹池随机；填写则全局固定">
+                <input class="inp mono" style="width:260px" v-model="form.stagehand.userAgent" placeholder="留空=随机设备指纹">
+              </cfg-row>
+              <cfg-row name="浏览器模式">
+                <select class="sel" style="width:190px" v-model="form.stagehand.mode"><option v-for="o in OPT.shMode" :value="o[0]">{{ o[1] }}</option></select>
+              </cfg-row>
+              <cfg-row name="无头模式(本地)" desc="服务器建议开">
+                <v-switch v-model="form.stagehand.headless"/>
+              </cfg-row>
+              <cfg-row name="并发会话上限" desc="全局同时打开的浏览器数">
+                <input type="number" class="inp" style="width:90px" min="1" max="10" v-model.number="form.stagehand.maxSessions">
+              </cfg-row>
+              <cfg-row name="每分钟上限" desc="每会员浏览器操作/分钟">
+                <input type="number" class="inp" style="width:100px" min="1" v-model.number="form.stagehand.maxCallsPerMinute">
+              </cfg-row>
+              <cfg-row name="每日上限" desc="每会员浏览器操作/天">
+                <input type="number" class="inp" style="width:110px" min="1" v-model.number="form.stagehand.maxCallsPerDay">
+              </cfg-row>
+              <cfg-row name="chrome 路径(本地,可选)" desc="空=默认/CHROME_PATH；可填复用已装 chrome">
+                <input class="inp mono" style="width:200px" v-model="form.stagehand.executablePath" placeholder="留空=默认">
+              </cfg-row>
+              <cfg-row name="Browserbase apiKey" desc="云模式必填（bb_live_...）">
+                <input class="inp mono" style="width:200px" v-model="form.stagehand.browserbaseApiKey" placeholder="bb_live_...">
+              </cfg-row>
+              <cfg-row name="云区域(可选)">
+                <select class="sel" style="width:190px" v-model="form.stagehand.region"><option v-for="o in OPT.shRegion" :value="o[0]">{{ o[1] }}</option></select>
+              </cfg-row>
+              <cfg-row name="Stagehand 原生模型(可选)" desc="已移至 模型配置（功能分配）">
+                <span class="mut2 mono" style="font-size:12px">{{ form.stagehand?.modelName || '(留空=复用 provider)' }}</span>
+              </cfg-row>
+              <cfg-row name="会话空闲超时(毫秒)">
+                <input type="number" class="inp" style="width:130px" min="60000" step="60000" v-model.number="form.stagehand.idleTimeoutMs">
+              </cfg-row>
+              <cfg-row name="DOM 稳定等待(毫秒)" desc="domSettleTimeoutMs：页面动作后等待 DOM 稳定">
+                <input type="number" class="inp" style="width:120px" min="0" step="500" v-model.number="form.stagehand.domSettleTimeoutMs">
+              </cfg-row>
+              <cfg-row class="full" name="额外禁访主机" desc="在默认内网/元数据黑名单之外追加禁访域名（回车添加）">
+                <tag-editor v-model="form.stagehand.blockedHosts" mono placeholder="如 internal.example.com"/>
+              </cfg-row>
+            </div>
+          </div>
         </div>
 
         <!-- ===== E2B 沙箱（独立 section，从「多模态/工具/扩展」拆出）===== -->
