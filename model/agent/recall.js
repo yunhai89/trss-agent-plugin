@@ -6,6 +6,8 @@
  * 条目：{ id, level:L2|L3|L4, type, content, confidence, embedding?, createdAt, updatedAt, prev? }
  */
 
+import { createKeyedLock } from './store/lock.js'
+
 function rid() {
   return `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
 }
@@ -133,6 +135,8 @@ export class RecallStore {
     // 关键词召回（jaccard）与向量召回（cosine）分值量纲不同，可由上层按需调大（如向量 0.3）。
     this.minScore = minScore
     this._turns = new Map()
+    this._turnsMax = 5000 // 轮次计数键空间上限（防长进程无界增长）
+    this._lock = createKeyedLock() // 每用户 RMW 串行：抽取在 run 之后异步触发，并发写会丢记忆
   }
 
   _key(userId) { return `${this.prefix}${userId}` }
@@ -182,66 +186,72 @@ export class RecallStore {
     return scored.sort((a, b) => b._score - a._score).slice(0, topK)
   }
 
-  /** 去重感知写入（相似超阈值 → 高置信度覆盖，旧内容进 prev[]） */
+  /** 去重感知写入（相似超阈值 → 高置信度覆盖，旧内容进 prev[]）。每用户加锁，防并发丢更新。 */
   async writeMemory(candidate, userId) {
-    // 威胁扫描：疑似指令注入 → 降置信 + 标 suspect（live 保留原文便于排查，formatForPrompt 屏蔽不喂模型）
-    if (this.scanFn) {
-      try {
-        if (await this.scanFn(candidate.content)) {
-          candidate = { ...candidate, suspect: true, confidence: Math.min((candidate.confidence || 0.5) * 0.3, 0.3) }
-        }
-      } catch { /* 扫描异常保守不标记，照常写入 */ }
-    }
-    const all = await this._all(userId)
-    for (const mem of all) {
-      const haveEmbed = !!(candidate.embedding && mem.embedding)
-      const thresh = haveEmbed ? this.dedup.embed : this.dedup.keyword
-      const sim = this._sim(candidate.content, mem.content, candidate.embedding, mem.embedding)
-      if (sim >= thresh) {
-        if ((candidate.confidence || 0) >= (mem.confidence || 0)) {
-          const idx = all.indexOf(mem)
-          all[idx] = {
-            ...mem,
-            ...candidate,
-            id: mem.id,
-            prev: [...(mem.prev || []), { content: mem.content, confidence: mem.confidence, updatedAt: mem.updatedAt }],
-            createdAt: mem.createdAt,
-            updatedAt: Date.now(),
+    return this._lock.withLock(this._key(userId), async () => {
+      // 威胁扫描：疑似指令注入 → 降置信 + 标 suspect（live 保留原文便于排查，formatForPrompt 屏蔽不喂模型）
+      if (this.scanFn) {
+        try {
+          if (await this.scanFn(candidate.content)) {
+            candidate = { ...candidate, suspect: true, confidence: Math.min((candidate.confidence || 0.5) * 0.3, 0.3) }
           }
-        }
-        await this._save(userId, all)
-        return { action: 'updated', id: mem.id }
+        } catch { /* 扫描异常保守不标记，照常写入 */ }
       }
-    }
-    const entry = {
-      id: candidate.id || rid(),
-      level: candidate.level || 'L3',
-      type: candidate.type || 'fact',
-      content: candidate.content,
-      confidence: candidate.confidence ?? 0.6,
-      ...(candidate.embedding ? { embedding: candidate.embedding } : {}),
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    }
-    all.push(entry)
-    await this._save(userId, all)
-    return { action: 'created', id: entry.id }
+      const all = await this._all(userId)
+      for (const mem of all) {
+        const haveEmbed = !!(candidate.embedding && mem.embedding)
+        const thresh = haveEmbed ? this.dedup.embed : this.dedup.keyword
+        const sim = this._sim(candidate.content, mem.content, candidate.embedding, mem.embedding)
+        if (sim >= thresh) {
+          if ((candidate.confidence || 0) >= (mem.confidence || 0)) {
+            const idx = all.indexOf(mem)
+            all[idx] = {
+              ...mem,
+              ...candidate,
+              id: mem.id,
+              prev: [...(mem.prev || []), { content: mem.content, confidence: mem.confidence, updatedAt: mem.updatedAt }],
+              createdAt: mem.createdAt,
+              updatedAt: Date.now(),
+            }
+          }
+          await this._save(userId, all)
+          return { action: 'updated', id: mem.id }
+        }
+      }
+      const entry = {
+        id: candidate.id || rid(),
+        level: candidate.level || 'L3',
+        type: candidate.type || 'fact',
+        content: candidate.content,
+        confidence: candidate.confidence ?? 0.6,
+        ...(candidate.embedding ? { embedding: candidate.embedding } : {}),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }
+      all.push(entry)
+      await this._save(userId, all)
+      return { action: 'created', id: entry.id }
+    })
   }
 
   async forget(userId, keyword) {
-    const all = await this._all(userId)
-    const next = all.filter((m) => !(m.content || '').includes(keyword))
-    await this._save(userId, next)
-    return all.length - next.length
+    return this._lock.withLock(this._key(userId), async () => {
+      const all = await this._all(userId)
+      const next = all.filter((m) => !(m.content || '').includes(keyword))
+      await this._save(userId, next)
+      return all.length - next.length
+    })
   }
 
   /** 按 id 精确删除单条（Web 面板用；forget 只能按 keyword 模糊删） */
   async removeById(userId, entryId) {
-    const all = await this._all(userId)
-    const next = all.filter((m) => m.id !== entryId)
-    if (next.length === all.length) return 0
-    await this._save(userId, next)
-    return 1
+    return this._lock.withLock(this._key(userId), async () => {
+      const all = await this._all(userId)
+      const next = all.filter((m) => m.id !== entryId)
+      if (next.length === all.length) return 0
+      await this._save(userId, next)
+      return 1
+    })
   }
 
   async clearAll(userId) { await this.kv.del(this._key(userId)) }
@@ -253,6 +263,9 @@ export class RecallStore {
     for (const c of ruleCands) await this.writeMemory(c, userId)
     const turn = (this._turns.get(userId) || 0) + 1
     this._turns.set(userId, turn)
+    if (this._turns.size > this._turnsMax) {
+      for (const k of this._turns.keys()) { if (this._turns.size <= this._turnsMax) break; this._turns.delete(k) }
+    }
     const lastUser = [...messages].reverse().find((m) => m.role === 'user')
     const intent = lastUser && /记住|别忘了|叫我|称呼我/.test(typeof lastUser.content === 'string' ? lastUser.content : '')
     if (llm && (turn % this.extractEvery === 0 || intent)) {

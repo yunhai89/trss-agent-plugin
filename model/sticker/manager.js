@@ -42,8 +42,21 @@ export class StickerManager {
     this._indexCache = null
     this._cooldown = new Map()   // 会话 key -> 上次带图时间戳
     this._lastHad = new Map()    // 会话 key -> 上一条回复是否带了图
+    this._gateMax = 5000         // 频率闸键空间上限：LRU 淘汰，防长期运行无界增长
     this._usageDirty = new Set()
     this._usageTimer = null
+  }
+
+  /** 频率闸 Map 有界化：超限丢最旧的会话键（仅影响该会话下一轮的冷却/防连发判断，无害） */
+  _pruneGates() {
+    if (this._cooldown.size <= this._gateMax) return
+    const drop = this._cooldown.size - this._gateMax
+    let n = 0
+    for (const k of this._cooldown.keys()) {
+      if (n++ >= drop) break
+      this._cooldown.delete(k)
+      this._lastHad.delete(k)
+    }
   }
 
   /** 实时读 sticker 配置（热加载后即生效） */
@@ -218,6 +231,7 @@ export class StickerManager {
       this._cooldown.set(key, Date.now())
       this.bumpUsage([...acceptMap.keys()])
     }
+    this._pruneGates()
   }
 
   /** 本轮一次性门控（含副作用：冷却/防连发/usage）。返回 acceptMap（空=本轮不带图）。回复出口调一次，按实际发送路径 apply。 */

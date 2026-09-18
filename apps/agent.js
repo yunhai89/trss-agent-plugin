@@ -260,6 +260,7 @@ export function makeDeltaStreamer(safeReply, { enabled = false, minIntervalMs = 
 let _runtime = null
 let _runtimePromise = null // in-flight buildRuntime()，并发安全：多调用方共享同一次构建
 let _runtimeFailed = null  // buildRuntime 失败原因缓存；非 null 则 getRuntime 直接抛、不再重试，避免每条消息刷屏重建
+let _runtimeGen = 0        // 运行时代际：invalidateRuntime 递增；在途构建据此丢弃旧配置结果，防止热重载后复活旧运行时
 let _initErrLogged = false // 初始化失败日志限首（防每条消息重复打 ERRO）
 const _initFailNotified = new Set() // 已提示过"初始化失败"的用户(每用户仅提示一次，防刷屏)；runtime 重建时清
 const _clearPending = new Map() // userId → 确认清空的时间戳（2 步确认）
@@ -868,10 +869,23 @@ const getRuntime = async () => {
   // 并发安全：启动期各 apps 构造器 / 首条消息可能并发调 getRuntime，
   // 复用同一个 in-flight buildRuntime()，避免运行时被构建多次（否则 MCP 会重复连接注册、日志打两遍）。
   if (!_runtimePromise) {
+    const gen = _runtimeGen
     _runtimePromise = buildRuntime()
-      .then((rt) => { _runtime = rt; _runtimeFailed = null; return rt })
-      .catch((e) => { _runtimeFailed = e; _runtimePromise = null; throw e })
-      .finally(() => { _runtimePromise = null })
+      .then((rt) => {
+        // 构建期间配置被热重载（invalidateRuntime 递增 gen）→ 丢弃旧配置结果，改用新配置重建
+        if (gen !== _runtimeGen) return getRuntime()
+        _runtime = rt
+        _runtimeFailed = null
+        return rt
+      })
+      .catch((e) => {
+        // 仅在未被 invalidate 时才缓存失败（旧配置的失败不应污染新配置的重试）
+        if (gen === _runtimeGen) _runtimeFailed = e
+        throw e
+      })
+      .finally(() => {
+        if (gen === _runtimeGen) _runtimePromise = null
+      })
   }
   return _runtimePromise
 }
@@ -906,6 +920,7 @@ function invalidateRuntime() {
   _runtime = null
   _runtimePromise = null
   _runtimeFailed = null  // 配置已变更：清失败缓存，下次 getRuntime 用新配置重试
+  _runtimeGen++          // 在途 buildRuntime 据此丢弃旧配置结果，防止旧运行时被复活
   _initErrLogged = false // 允许再次记录初始化失败（若仍失败）
   _initFailNotified.clear() // runtime 重建：重置"已提示"标记，下次失败可再提示用户
 }
@@ -2427,7 +2442,7 @@ export class Chat extends plugin {
         let keyUid = null
         if (parts[0] === 'conv') keyUid = (parts[1] === 'active' || parts[1] === 'seq') ? parts[3] : parts[2]
         else keyUid = parts[1] // 旧 group:user 会话 <gid>:<uid>
-        if (keyUid === uid && keyUid !== '__group__') { await rt.kv.del(k); nSess++ }
+        if (keyUid === uid && keyUid !== '__group__') { await rt.session.clear(k); nSess++ }
       }
       if (nSess) cleared.push(`对话历史(${nSess})`)
       // 召回记忆（按真实 uid：ON=本人 recall；群共享 recall 在 '__group__' 下，不会被误清）

@@ -9,15 +9,18 @@
  * 系统提示每轮重建（不存储）。
  */
 
+import { createKeyedLock } from './store/lock.js'
+
 export class SessionStore {
-  constructor({ kv, prefix = 'Yz:agent:sess:', window = 400, ttl = 86400 } = {}) { // window=绝对安全上限（曾 20 每轮滑窗 bust 缓存）
+  constructor({ kv, prefix = 'Yz:agent:sess:', window = 400, ttl = 86400, cacheMax = 500 } = {}) { // window=绝对安全上限（曾 20 每轮滑窗 bust 缓存）
     if (!kv) throw new Error('SessionStore 需要 kv')
     this.kv = kv
     this.prefix = prefix
     this.window = window
     this.ttl = ttl
     this._cache = new Map()
-    this._locks = new Map() // key -> 队尾 Promise（每键写锁：append/set 为读改写，须串行防丢失更新）
+    this._cacheMax = cacheMax // 内存会话缓存上限：LRU 淘汰，防长期运行无界增长
+    this._lock = createKeyedLock() // 每键写锁：append/set 为读改写，须串行防丢失更新；键空间有界
   }
 
   /**
@@ -26,10 +29,18 @@ export class SessionStore {
    * 同键排队串行；不同键并发；fn 的返回值/异常原样传播。
    */
   _withLock(key, fn) {
-    const prev = this._locks.get(key) || Promise.resolve()
-    const run = prev.then(fn, fn) // 前序无论成败都继续（错误由本次调用方处理）
-    this._locks.set(key, run.then(() => {}, () => {}))
-    return run
+    return this._lock.withLock(key, fn)
+  }
+
+  /** 写缓存并做 LRU 淘汰（Map 插入序：命中时先删再插即移到队尾） */
+  _cacheSet(k, val) {
+    this._cache.delete(k)
+    this._cache.set(k, val)
+    while (this._cache.size > this._cacheMax) {
+      const oldest = this._cache.keys().next().value
+      if (oldest === undefined) break
+      this._cache.delete(oldest)
+    }
   }
 
   // —— group:user 会话（原有）——
@@ -40,7 +51,11 @@ export class SessionStore {
   async get(k) {
     if (!this._cache.has(k)) {
       const val = await this.kv.get(k)
-      this._cache.set(k, unpack(val))
+      this._cacheSet(k, unpack(val))
+    } else {
+      // 命中即移到队尾（LRU）
+      const v = this._cache.get(k)
+      this._cacheSet(k, v)
     }
     return this._cache.get(k).map((m) => ({ ...m }))
   }
@@ -71,7 +86,7 @@ export class SessionStore {
       // DeepSeek 等按整段前缀缓存全灭）。压缩职责移交 Agent 的高低水位滞回（cacheEpoch 分代）；
       // window 仅作绝对安全上限（防无 Agent 压缩路径的 KV 无界膨胀），默认放大到 400。
       const trimmed = next.length > this.window ? trimKeepFirst(next, this.window) : next
-      this._cache.set(k, trimmed)
+      this._cacheSet(k, trimmed)
       await this.kv.set(k, { messages: trimmed, updatedAt: Date.now() }, this.ttl)
       return trimmed
     })
@@ -87,7 +102,7 @@ export class SessionStore {
   async set(k, msgs) {
     return this._withLock(k, async () => {
       const arr = Array.isArray(msgs) ? msgs : []
-      this._cache.set(k, arr)
+      this._cacheSet(k, arr)
       await this.kv.set(k, { messages: arr, updatedAt: Date.now() }, this.ttl)
       return arr
     })
@@ -125,8 +140,12 @@ export class SessionStore {
     return id
   }
 
-  /** 新建对话并设为活跃 */
+  /** 新建对话并设为活跃（加锁：并发首条消息不再生成重复 id/重复对话） */
   async createConversation(userId, groupId, title) {
+    return this._withLock(this.activeKey(userId, groupId), () => this._createConversationLocked(userId, groupId, title))
+  }
+
+  async _createConversationLocked(userId, groupId, title) {
     const id = await this._nextConvId(userId, groupId)
     const conv = {
       id,
@@ -188,17 +207,19 @@ export class SessionStore {
     return out.sort((a, b) => b.updatedAt - a.updatedAt)
   }
 
-  /** 取活跃对话 id；若无则自动创建首个 */
+  /** 取活跃对话 id；若无则自动创建首个（加锁：并发首次不再各建一个对话） */
   async getActiveConversation(userId, groupId) {
-    const v = await this.kv.get(this.activeKey(userId, groupId))
-    if (v) return v
-    const list = await this.listConversations(userId, groupId)
-    if (list.length) {
-      await this.setActiveConversation(userId, groupId, list[0].id)
-      return list[0].id
-    }
-    const c = await this.createConversation(userId, groupId)
-    return c.id
+    return this._withLock(this.activeKey(userId, groupId), async () => {
+      const v = await this.kv.get(this.activeKey(userId, groupId))
+      if (v) return v
+      const list = await this.listConversations(userId, groupId)
+      if (list.length) {
+        await this.setActiveConversation(userId, groupId, list[0].id)
+        return list[0].id
+      }
+      const c = await this._createConversationLocked(userId, groupId)
+      return c.id
+    })
   }
 
   async setActiveConversation(userId, groupId, convId) {

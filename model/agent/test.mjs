@@ -46,6 +46,8 @@ import { presets as openaiPresets } from '../openai/index.js'
 import { createClient as createAnthropicClient } from '../anthropic/index.js'
 import { presets as anthropicPresets } from '../anthropic/index.js'
 import { LoopGovernor, fingerprint } from './loop-governor.js'
+import { createKeyedLock } from './store/lock.js'
+import { KnowledgeStore } from './knowledge.js'
 
 let passed = 0
 let failed = 0
@@ -616,6 +618,60 @@ await test('schedule：add/list/cancel/restore', async () => {
   const { restored, dropped } = await store2.restore(async () => {})
   eq(restored, 1, '重排 1 个未到期')
   eq(dropped, 1, '丢弃 1 个过期')
+})
+
+// ---------- 17b. 并发加固：键锁有界 + 各存储 RMW 无丢失 ----------
+await test('lock：同键串行 / 异键并发 / 键空间有界', async () => {
+  const lock = createKeyedLock({ maxKeys: 3 })
+  const order = []
+  const p1 = lock.withLock('a', async () => { order.push('a1-start'); await delay(20); order.push('a1-end') })
+  const p2 = lock.withLock('a', async () => { order.push('a2-start'); order.push('a2-end') })
+  const p3 = lock.withLock('b', async () => { order.push('b-start') })
+  await Promise.all([p1, p2, p3])
+  eq(order.slice(0, 2), ['a1-start', 'b-start'], '异键并发先于同键排队')
+  ok(order.indexOf('a1-end') < order.indexOf('a2-start'), '同键严格串行')
+  for (let i = 0; i < 12; i++) await lock.withLock('k' + i, async () => {})
+  await delay(1)
+  ok(lock.size <= 4, `键空间有界（size=${lock.size}）`)
+})
+
+await test('session 并发：append 不丢消息 + 并发首次只建一个对话', async () => {
+  const kv = memoryKv()
+  const s = new SessionStore({ kv })
+  const k = s.key('g', 'u')
+  await Promise.all(Array.from({ length: 20 }, (_, i) => s.append(k, [{ role: 'user', content: 'm' + i }])))
+  eq((await s.get(k)).length, 20, '20 条并发 append 全部保留')
+  const ids = await Promise.all(Array.from({ length: 10 }, () => s.getActiveConversation('u9', 'g9')))
+  eq(new Set(ids).size, 1, '并发首次只建一个对话')
+  eq((await s.listConversations('u9', 'g9')).length, 1, '对话列表只有 1 个')
+})
+
+await test('recall 并发：并发写入不丢记忆', async () => {
+  const r = new RecallStore({ kv: memoryKv() })
+  const cands = Array.from({ length: 20 }, (_, i) => ({ content: `entry${i}-${Math.random().toString(36).slice(2, 14)}`, level: 'L3', confidence: 0.9 }))
+  await Promise.all(cands.map((c) => r.writeMemory(c, 'u')))
+  eq((await r.listByUser('u')).length, 20, '20 条并发写入全部保留')
+})
+
+await test('schedule 并发：并发 add 不丢 + 重启后 id 不撞', async () => {
+  const kv = memoryKv()
+  const sched = { scheduleJob: () => ({ cancel() {} }), cancelJob: () => {} }
+  const store = new ScheduleStore({ kv, scheduler: sched })
+  const recs = await Promise.all(Array.from({ length: 15 }, () => store.add({ userId: 'u', at: Date.now() + 60000, message: 'x' }, async () => {})))
+  eq((await store.listAll()).length, 15, '15 个并发 add 全部保留')
+  eq(new Set(recs.map((r) => r.id)).size, 15, 'id 不重复')
+  // 模拟重启：同一 KV 新建 store（_seq 归零）→ 应基于已有 id 续号
+  const store2 = new ScheduleStore({ kv, scheduler: sched })
+  await store2.add({ userId: 'u', at: Date.now() + 60000, message: 'y' }, async () => {})
+  const all = await store2.listAll()
+  eq(all.length, 16, '重启后仍保留全部')
+  eq(new Set(all.map((r) => r.id)).size, 16, '重启后新 id 不与旧撞')
+})
+
+await test('knowledge 并发：并发 ingest 不丢文档', async () => {
+  const kb = new KnowledgeStore({ kv: memoryKv() })
+  await Promise.all(Array.from({ length: 8 }, (_, i) => kb.ingest(`entry${i}-${Math.random().toString(36).slice(2, 16)}`, { title: 'd' + i })))
+  eq((await kb.listDocs()).length, 8, '8 篇并发入库全部保留')
 })
 
 // ---------- 18. 工具：web/notes/clarify ----------

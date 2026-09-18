@@ -28,6 +28,7 @@ import * as H from '../model/humanize/index.js'
 
 let _humanize = null
 let _humanizeFailed = null
+let _humanizePromise = null // in-flight buildHumanize()：并发首次调用共享同一次构建（防重复建 SQLite/服务）
 
 /** 取机器人自身 id 集合（normalizer 用）。 */
 function botSelfIds(e) {
@@ -360,8 +361,13 @@ async function buildHumanize() {
 export async function getHumanize() {
   if (_humanize) return _humanize
   if (_humanizeFailed) throw _humanizeFailed
-  _humanize = await buildHumanize()
-  return _humanize
+  if (!_humanizePromise) {
+    _humanizePromise = buildHumanize()
+      .then((h) => { _humanize = h; _humanizeFailed = null; return h })
+      .catch((e) => { _humanizeFailed = e; throw e })
+      .finally(() => { _humanizePromise = null })
+  }
+  return _humanizePromise
 }
 
 /** 取 SelfStateService（web API 用；未装配/enabled=false → null）。 */

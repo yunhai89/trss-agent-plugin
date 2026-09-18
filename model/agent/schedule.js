@@ -5,6 +5,8 @@
  * 库本体不 import node-schedule（保持离线可测）；apps 用 nodeScheduleAdapter() 装配，测试注入 fake scheduler。
  */
 
+import { createKeyedLock } from './store/lock.js'
+
 export class ScheduleStore {
   constructor({ kv, prefix = 'Yz:agent:rem:', scheduler } = {}) {
     if (!kv) throw new Error('ScheduleStore 需要 kv')
@@ -14,32 +16,48 @@ export class ScheduleStore {
     this.scheduler = scheduler
     this._jobs = new Map()
     this._seq = 0
+    this._lock = createKeyedLock() // 提醒列表是单键 RMW：并发 add/cancel 会丢记录
   }
 
   _key() { return `${this.prefix}jobs` }
   async _load() { const v = await this.kv.get(this._key()); return Array.isArray(v) ? v : [] }
   async _save(arr) { await this.kv.set(this._key(), arr) }
-  _nextId() { this._seq = (this._seq + 1) % 100000; return String(this._seq).padStart(5, '0') }
+
+  /**
+   * 生成下一个 id。传入已加载列表，取「已有 id 最大值 + 1」——`_seq` 不持久化，
+   * 重启后从 0 开始会与 KV 里已有 id 撞号（导致 cancel 错任务）。
+   */
+  _nextId(arr = []) {
+    let max = this._seq
+    for (const r of arr) {
+      const n = parseInt(r?.id, 10)
+      if (Number.isFinite(n) && n > max) max = n
+    }
+    this._seq = (Math.max(this._seq + 1, max + 1)) % 100000
+    return String(this._seq).padStart(5, '0')
+  }
 
   async add(info, fire) {
-    const arr = await this._load()
-    const id = info.id || this._nextId()
-    const atNum = info.at instanceof Date ? info.at.getTime() : Number(info.at)
-    // type: 'reminder'(发静态 message) | 'task'(跑 Agent 任务链 + 发结果)
-    // cron: 有则周期重复（node-schedule.scheduleJob(cron)）；无则用 at 一次性
-    const rec = {
-      id, userId: info.userId, groupId: info.groupId, selfId: info.selfId,
-      at: Number.isFinite(atNum) ? atNum : null,
-      message: info.message,
-      type: info.type || 'reminder',
-      cron: info.cron || null,
-      prompt: info.prompt || null,
-      createdAt: info.createdAt || Date.now(),
-    }
-    arr.push(rec)
-    await this._save(arr)
-    this._schedule(rec, fire)
-    return rec
+    return this._lock.withLock(this._key(), async () => {
+      const arr = await this._load()
+      const id = info.id || this._nextId(arr)
+      const atNum = info.at instanceof Date ? info.at.getTime() : Number(info.at)
+      // type: 'reminder'(发静态 message) | 'task'(跑 Agent 任务链 + 发结果)
+      // cron: 有则周期重复（node-schedule.scheduleJob(cron)）；无则用 at 一次性
+      const rec = {
+        id, userId: info.userId, groupId: info.groupId, selfId: info.selfId,
+        at: Number.isFinite(atNum) ? atNum : null,
+        message: info.message,
+        type: info.type || 'reminder',
+        cron: info.cron || null,
+        prompt: info.prompt || null,
+        createdAt: info.createdAt || Date.now(),
+      }
+      arr.push(rec)
+      await this._save(arr)
+      this._schedule(rec, fire)
+      return rec
+    })
   }
 
   _schedule(rec, fire) {
@@ -55,11 +73,13 @@ export class ScheduleStore {
   }
 
   async cancel(id) {
-    const j = this._jobs.get(id)
-    if (j?.job) this.scheduler.cancelJob(j.job)
-    this._jobs.delete(id)
-    const arr = (await this._load()).filter((r) => r.id !== id)
-    await this._save(arr)
+    return this._lock.withLock(this._key(), async () => {
+      const j = this._jobs.get(id)
+      if (j?.job) this.scheduler.cancelJob(j.job)
+      this._jobs.delete(id)
+      const arr = (await this._load()).filter((r) => r.id !== id)
+      await this._save(arr)
+    })
   }
 
   async listByUser(userId) { return (await this._load()).filter((r) => r.userId === userId).sort(_sortRec) }

@@ -16,6 +16,7 @@
 import { cosine } from './recall.js'
 import { BM25, tokenize, simhash, isNearDup } from '../llm/local-sim.js'
 import { crawlUrl } from '../crawl/index.js' // 网页抓取（ingestUrl/refreshDoc）
+import { createKeyedLock } from './store/lock.js'
 
 const DEFAULT_KEY = 'Yz:agent:kb:__global__'
 
@@ -53,7 +54,7 @@ export class KnowledgeStore {
     // 定时刷新（URL 文档周期 re-crawl）：scheduler 延后注入（见 attachScheduler）
     this.scheduler = null
     this._refreshJobs = new Map() // docId -> job handle
-    this._refreshLock = Promise.resolve() // refreshDoc 串行化（防并发 chromium OOM）
+    this._lock = createKeyedLock() // 单条全局 KV 的 RMW 串行化：并发 ingest/refresh 会互相丢文档
   }
 
   /** 注入 scheduler（供定时刷新注册 job）。knowledge 构造早于 scheduler 创建，故延后注入。 */
@@ -71,31 +72,33 @@ export class KnowledgeStore {
     const chunks = chunkText(text, this.chunkSize, this.chunkOverlap)
     if (!chunks.length) return { error: '空文本，无法入库' }
 
-    const data = await this._load()
-    // SimHash 近似去重（纯代码，hamming≤3 视为近似重复 → 拒绝入库，防重复）
-    const docSim = simhash(await tokenize(text))
-    const nearDup = data.docs.find((d) => d.simhash != null && isNearDup(d.simhash, docSim))
-    if (nearDup) return { error: `与已有文档「${nearDup.title}」(${nearDup.id}) 近似重复，未入库。如确为不同内容，请删除旧文档或调整后重试` }
+    return this._lock.withLock(this.key, async () => {
+      const data = await this._load()
+      // SimHash 近似去重（纯代码，hamming≤3 视为近似重复 → 拒绝入库，防重复）
+      const docSim = simhash(await tokenize(text))
+      const nearDup = data.docs.find((d) => d.simhash != null && isNearDup(d.simhash, docSim))
+      if (nearDup) return { error: `与已有文档「${nearDup.title}」(${nearDup.id}) 近似重复，未入库。如确为不同内容，请删除旧文档或调整后重试` }
 
-    let embeddings = null
-    if (this.embedFn) {
-      try { embeddings = await this.embedFn(chunks) } // 批量一次（embed 支持数组）
-      catch { /* embed 失败 → chunks 照存但无 embedding，检索降级 BM25 */ }
-    }
-    const id = rid()
-    const now = Date.now()
-    data.docs.push({
-      id, title: title || `文档 ${data.docs.length + 1}`, source: source || 'manual',
-      createdAt: now, chunkCount: chunks.length, simhash: docSim,
-      ...(extra || {}), // URL 入库时透传 url/refreshCron/lastCrawled
+      let embeddings = null
+      if (this.embedFn) {
+        try { embeddings = await this.embedFn(chunks) } // 批量一次（embed 支持数组）
+        catch { /* embed 失败 → chunks 照存但无 embedding，检索降级 BM25 */ }
+      }
+      const id = rid()
+      const now = Date.now()
+      data.docs.push({
+        id, title: title || `文档 ${data.docs.length + 1}`, source: source || 'manual',
+        createdAt: now, chunkCount: chunks.length, simhash: docSim,
+        ...(extra || {}), // URL 入库时透传 url/refreshCron/lastCrawled
+      })
+      data.chunks.push(...chunks.map((c, idx) => ({
+        docId: id, idx, text: c,
+        embedding: Array.isArray(embeddings) ? embeddings[idx] : null,
+        createdAt: now,
+      })))
+      await this._save(data)
+      return { id, chunkCount: chunks.length, embedded: !!embeddings }
     })
-    data.chunks.push(...chunks.map((c, idx) => ({
-      docId: id, idx, text: c,
-      embedding: Array.isArray(embeddings) ? embeddings[idx] : null,
-      createdAt: now,
-    })))
-    await this._save(data)
-    return { id, chunkCount: chunks.length, embedded: !!embeddings }
   }
 
   /** 检索：有 embedding → cosine；无 embedding → BM25 纯代码检索（jieba 分词，归一化到 [0,1]） */
@@ -130,26 +133,30 @@ export class KnowledgeStore {
   async removeDoc(docId) {
     // 删前取消定时刷新 job（防野 job 到点对一个已删 doc 跑刷新）
     try { if (this._refreshJobs.has(docId)) await this.cancelRefresh(docId) } catch { /* noop */ }
-    const data = await this._load()
-    const before = data.docs.length
-    data.docs = data.docs.filter((d) => d.id !== docId)
-    data.chunks = data.chunks.filter((c) => c.docId !== docId)
-    await this._save(data)
-    return before - data.docs.length
+    return this._lock.withLock(this.key, async () => {
+      const data = await this._load()
+      const before = data.docs.length
+      data.docs = data.docs.filter((d) => d.id !== docId)
+      data.chunks = data.chunks.filter((c) => c.docId !== docId)
+      await this._save(data)
+      return before - data.docs.length
+    })
   }
 
   /** 重建索引：对所有 chunk 重新批量 embedding（换 embedding 模型后用） */
   async rebuild() {
-    const data = await this._load()
-    if (!data.chunks.length) return { rebuilt: 0 }
-    if (!this.embedFn) return { error: '未配置 embedding（recall.embedProvider），无法重建' }
-    const texts = data.chunks.map((c) => c.text)
-    let embeddings
-    try { embeddings = await this.embedFn(texts) }
-    catch (e) { return { error: `重建失败：${e?.message || e}` } }
-    data.chunks.forEach((c, i) => { c.embedding = Array.isArray(embeddings) ? embeddings[i] : null })
-    await this._save(data)
-    return { rebuilt: data.chunks.length }
+    return this._lock.withLock(this.key, async () => {
+      const data = await this._load()
+      if (!data.chunks.length) return { rebuilt: 0 }
+      if (!this.embedFn) return { error: '未配置 embedding（recall.embedProvider），无法重建' }
+      const texts = data.chunks.map((c) => c.text)
+      let embeddings
+      try { embeddings = await this.embedFn(texts) }
+      catch (e) { return { error: `重建失败：${e?.message || e}` } }
+      data.chunks.forEach((c, i) => { c.embedding = Array.isArray(embeddings) ? embeddings[i] : null })
+      await this._save(data)
+      return { rebuilt: data.chunks.length }
+    })
   }
 
   // ── 网页 URL 入库 + 定时拉取最新内容 ──
@@ -177,7 +184,9 @@ export class KnowledgeStore {
    * 直接操作 chunks —— 删旧 → 重新 chunk + embed → 插回。串行化（防多个 doc 同时到点拉起多个 chromium OOM）。
    */
   async refreshDoc(docId) {
-    const run = async () => {
+    // 与 ingest/removeDoc 共用同一把 key 锁：既串行化多个 refresh（防并发 chromium OOM），
+    // 也避免刷新与入库互相覆盖整份 KB。
+    return this._lock.withLock(this.key, async () => {
       const data = await this._load()
       const doc = data.docs.find((d) => d.id === docId)
       if (!doc || !doc.url) return { error: `文档 ${docId} 无 URL，不可刷新` }
@@ -196,10 +205,7 @@ export class KnowledgeStore {
       try { doc.simhash = simhash(await tokenize(r.markdown)) } catch { /* noop */ }
       await this._save(data)
       return { id: docId, chunkCount: chunks.length, via: r.via }
-    }
-    // 串行化：链式互斥，多个 refreshDoc 排队执行
-    this._refreshLock = this._refreshLock.then(run, run)
-    return this._refreshLock
+    })
   }
 
   /** 刷新所有 URL 文档（串行）。返回 { refreshed, total, details } */

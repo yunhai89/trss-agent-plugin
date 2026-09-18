@@ -92,6 +92,10 @@ export class StickerWatch extends plugin {
       const now = Date.now()
       const last = _seenUrl.get(url) || 0
       if (now - last < URL_DEDUP_MS) continue
+      // 有界化：条目超限时清掉已过期项，防 url 去重表无界增长
+      if (_seenUrl.size > 2000) {
+        for (const [u, t] of _seenUrl) if (now - t > URL_DEDUP_MS) _seenUrl.delete(u)
+      }
       _seenUrl.set(url, now)
       _chain = _chain.then(() => this._discoverOne(manager, vision, url, gid, cfg)).catch((err) => {
         Log.warn('[sticker-watch] discover 异常', err?.message || err)
