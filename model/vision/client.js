@@ -21,7 +21,7 @@ export const DEFAULT_DESCRIBE = [
 ].join('\n')
 
 export class VisionService {
-  constructor({ provider, model, protocol = 'openai', describePrompt, maxTokens = 1024, logger = () => {} } = {}) {
+  constructor({ provider, model, protocol = 'openai', describePrompt, maxTokens = 1024, thinking = null, temperature = null, logger = () => {} } = {}) {
     if (!provider) throw new Error('VisionService 需要 provider')
     if (!model) throw new Error('VisionService 需要 model')
     this.provider = provider
@@ -29,7 +29,17 @@ export class VisionService {
     this.protocol = protocol
     this.describePrompt = describePrompt || DEFAULT_DESCRIBE
     this.maxTokens = maxTokens
+    this.thinking = thinking // 原生 thinking 控制：{type:'enabled'|'disabled'}；来自「模型列表」该模型的 thinking 设置
+    this.temperature = temperature
     this.logger = logger
+  }
+
+  /** 传给 provider.chat 的可选参数（thinking/temperature 仅在显式配置时下发，避免未知字段 400） */
+  _genOpts() {
+    const o = {}
+    if (this.thinking) o.thinking = this.thinking
+    if (this.temperature != null) o.temperature = this.temperature
+    return o
   }
 
   /**
@@ -53,14 +63,13 @@ export class VisionService {
         messages: [{ role: 'user', content }],
         max_tokens: this.maxTokens,
         stream: false,
+        ...this._genOpts(),
       })
     } catch (e) {
       this.logger('warn', `[vision] 图片识别失败 ${name || ''}：${e?.message || e}`)
       return ''
     }
-    const text = (res?.content || '').trim()
-    if (!text) this._warnEmpty('图片识别', name)
-    return text
+    return this._finalText(res, '图片识别', name)
   }
 
   /**
@@ -88,14 +97,13 @@ export class VisionService {
         messages: [{ role: 'user', content }],
         max_tokens: this.maxTokens,
         stream: false,
+        ...this._genOpts(),
       })
     } catch (e) {
       this.logger('warn', `[vision] 视频识别失败 ${name || ''}：${e?.message || e}`)
       return ''
     }
-    const text = (res?.content || '').trim()
-    if (!text) this._warnEmpty('视频识别', name)
-    return text
+    return this._finalText(res, '视频识别', name)
   }
 
   /**
@@ -117,6 +125,7 @@ export class VisionService {
         messages: [{ role: 'user', content }],
         max_tokens: maxTokens || this.maxTokens,
         stream: false,
+        ...this._genOpts(),
       })
     } catch (e) {
       const msg = String(e?.message || e)
@@ -128,8 +137,26 @@ export class VisionService {
       }
       return ''
     }
-    const text = (res?.content || '').trim()
-    if (!text) this._warnEmpty('analyze', name)
+    return this._finalText(res, 'analyze', name)
+  }
+
+  /**
+   * 归一最终文本。两类静默失败必须留痕且不当作结果返回：
+   *  1) content 为空 → 模型/通道没真正处理图片；
+   *  2) provider 把 reasoning_content 当空 content 的占位回填（见 provider/openai.js）——
+   *     此时 text 等于/包含 reasoning，说明模型只产出了思考、没有结果（常见于思考模型 max_tokens 被推理耗尽）。
+   */
+  _finalText(res, kind, name) {
+    const text = String(res?.content || '').trim()
+    if (!text) {
+      this._warnEmpty(kind, name)
+      return ''
+    }
+    const reasoning = String(res?.reasoning || '').trim()
+    if (reasoning && reasoning.includes(text)) {
+      this.logger('warn', `[vision] ${kind} ${name || ''}：模型只返回了思考内容、未产出结果（finish=${res?.finishReason || '?'}）——多为 max_tokens 被推理耗尽；请提高 agent.vision.maxTokens 或换非思考视觉模型`)
+      return ''
+    }
     return text
   }
 

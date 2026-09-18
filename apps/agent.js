@@ -748,6 +748,12 @@ async function buildRuntime() {
         if (!vcfg.model && cfg.model) Log.info('[vision] vision.model 未配，复用支持视觉的主模型', vModel)
         const vPresetMap = vProtocol === 'anthropic' ? anthropicPresets : openaiPresets
         const vPreset = vcfg.preset ? vPresetMap[vcfg.preset] : preset
+        // 视觉模型参数覆盖：vision.model 若在「模型列表」登记且设了 thinking/温度/maxTokens，则同样生效。
+        // 否则在模型列表里给视觉模型关掉思考，视觉调用仍会按默认思考（烧推理预算、易导致判定超预算）。
+        const vReg = (cfg.llmModels || []).find((m) => m && String(m.model) === String(vModel))
+        const vThinking = vReg?.thinking === 'on' ? { type: 'enabled' } : vReg?.thinking === 'off' ? { type: 'disabled' } : null
+        const vTemperature = Number.isFinite(Number(vReg?.temperature)) ? Number(vReg.temperature) : null
+        const vMaxTokens = Number.isFinite(Number(vReg?.maxTokens)) && Number(vReg.maxTokens) > 0 ? Number(vReg.maxTokens) : (vcfg.maxTokens || 1024)
         const vProvider = createProvider({
           protocol: vProtocol,
           ...vPreset,
@@ -762,9 +768,12 @@ async function buildRuntime() {
           model: vModel,
           protocol: vProtocol,
           describePrompt: vcfg.describePrompt || undefined,
-          maxTokens: vcfg.maxTokens || 1024,
+          maxTokens: vMaxTokens,
+          thinking: vThinking,
+          temperature: vTemperature,
           logger: Log.tag('vision'),
         })
+        Log.info(`[vision] 视觉子模型 ${vModel}${vThinking ? `（thinking: ${vThinking.type}）` : ''}${vTemperature != null ? `（temperature: ${vTemperature}）` : ''}`)
       } catch (e) {
         Log.warn('[vision] 视觉子模型装配失败，主模型不支持视觉时图片将降级', e?.message || e)
       }

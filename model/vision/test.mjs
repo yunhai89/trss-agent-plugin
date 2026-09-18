@@ -129,6 +129,38 @@ await test('VisionService：模型返回空内容时告警（不再静默）', a
   ok(logs.filter(([lvl, msg]) => lvl === 'warn' && /返回空/.test(msg)).length >= 2, 'analyze 空返回也告警')
 })
 
+// ---------- 10. 只返回思考内容时不能当作结果 ----------
+await test('VisionService：只返回 reasoning 占位时不当作结果', async () => {
+  const logs = []
+  const reasoning = '首先，用户要求我作为一个表情包库的策展器，判断这张图……'
+  const v = new VisionService({
+    provider: { async chat() { return { content: reasoning, reasoning, finishReason: 'length' } } },
+    model: 'mimo-v2.5',
+    logger: (lvl, msg) => logs.push([lvl, msg]),
+  })
+  eq(await v.analyze({ buffer: PNG, mime: 'image/png', name: 'z.png' }, 'judge'), '', '思考占位 → 空串（不当作结果）')
+  ok(logs.some(([lvl, msg]) => lvl === 'warn' && /只返回了思考内容/.test(msg)), '有明确 warn 指明原因')
+})
+
+// ---------- 11. thinking/temperature 透传（模型列表"禁思考"应对视觉子模型生效）----------
+await test('VisionService：thinking/temperature 透传给 provider', async () => {
+  let got = null
+  const v = new VisionService({
+    provider: { async chat(opts) { got = opts; return { content: 'x' } } },
+    model: 'mimo-v2.5',
+    thinking: { type: 'disabled' },
+    temperature: 0.2,
+  })
+  await v.analyze({ buffer: PNG, mime: 'image/png' }, 'judge')
+  eq(got.thinking, { type: 'disabled' }, 'thinking 透传')
+  eq(got.temperature, 0.2, 'temperature 透传')
+  // 未配置时不下发（避免不支持该字段的端点 400）
+  let got2 = null
+  const v2 = new VisionService({ provider: { async chat(opts) { got2 = opts; return { content: 'x' } } }, model: 'm' })
+  await v2.recognize({ buffer: PNG, mime: 'image/png' })
+  ok(!('thinking' in got2) && !('temperature' in got2), '未配置则不下发')
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

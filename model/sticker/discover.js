@@ -63,8 +63,42 @@ function extractJson(text) {
   return null
 }
 
+/** 判定调用预算：思考型视觉模型（如 mimo-v2.5）会先花 token 在 reasoning_content 上，
+ *  预算过小会导致 content 为空、JSON 根本没产出。给足空间。 */
+export const JUDGE_MAX_TOKENS = 1500
+
+/** 首轮解析失败后的更硬性重试指令：压制推理、只回一行 JSON。 */
+export const JUDGE_TAG_RETRY_PROMPT = `只看图，判断是否适合收藏进群聊表情包库，然后立刻输出一行 JSON。
+禁止任何解释、思考、markdown 代码块或多余文字，第一个字符必须是 {：
+{"isSticker": true或false, "name": "2~4字中文名", "desc": "一句10~30字的含义/用法", "tags": ["标签1","标签2","标签3"]}
+isSticker=false 表示普通照片/文档/截图/二维码/不适内容。`
+
+/** 单次判定调用 → 归一结果（不重试）。 */
+async function judgeOnce(vision, img, prompt) {
+  let raw = ''
+  try {
+    raw = await vision.analyze(img, prompt, { maxTokens: JUDGE_MAX_TOKENS })
+  } catch (e) {
+    return { isSticker: false, name: '', desc: '', tags: [], raw: String(e?.message || e), error: true }
+  }
+  const j = extractJson(raw)
+  if (!j || typeof j !== 'object') {
+    // JSON 解析失败 = LLM 异常（内容审核拒绝 / 超时 / 思考未产出 JSON）：一律拒绝，不入库
+    return { isSticker: false, name: '', desc: '', tags: [], raw: raw.slice(0, 160), parseFailed: true }
+  }
+  const isSticker = j.isSticker !== false && j.isSticker !== 'false'
+  return {
+    isSticker,
+    name: cleanName(j.name) || autoName(img.buffer),
+    desc: String(j.desc || j.description || '').trim().slice(0, 80),
+    tags: normalizeTags(j.tags || j.emotions || []),
+    raw: raw.slice(0, 160),
+  }
+}
+
 /**
- * 视觉判定+打标（一次调用）。
+ * 视觉判定+打标。首轮解析失败（常见于思考型模型把预算花在推理上）时，
+ * 用更硬性的短指令重试一次，避免单次预算/风格问题直接丢弃表情。
  * @param {object} vision VisionService 实例（需已配 agent.vision.model）
  * @param {object} img { buffer, mime, name? }
  * @returns {Promise<{isSticker:boolean, name:string, desc:string, tags:string[], raw?:string}>}
@@ -74,25 +108,11 @@ export async function judgeAndTag(vision, { buffer, mime, name } = {}) {
   if (!vision || typeof vision.analyze !== 'function') {
     return { isSticker: true, name: autoName(buffer), desc: '', tags: [], noVision: true }
   }
-  let raw = ''
-  try {
-    raw = await vision.analyze({ buffer, mime, name }, JUDGE_TAG_PROMPT, { maxTokens: 300 })
-  } catch (e) {
-    return { isSticker: false, name: '', desc: '', tags: [], raw: String(e?.message || e), error: true }
-  }
-  const j = extractJson(raw)
-  if (!j || typeof j !== 'object') {
-    // JSON 解析失败 = LLM 异常（内容审核拒绝/超时/返回非 JSON）：一律拒绝，不入库
-    return { isSticker: false, name: '', desc: '', tags: [], raw: raw.slice(0, 160), parseFailed: true }
-  }
-  const isSticker = j.isSticker !== false && j.isSticker !== 'false'
-  return {
-    isSticker,
-    name: cleanName(j.name) || autoName(buffer),
-    desc: String(j.desc || j.description || '').trim().slice(0, 80),
-    tags: normalizeTags(j.tags || j.emotions || []),
-    raw: raw.slice(0, 160),
-  }
+  const img = { buffer, mime, name }
+  const first = await judgeOnce(vision, img, JUDGE_TAG_PROMPT)
+  if (!first.parseFailed && !first.error) return first
+  const retry = await judgeOnce(vision, img, JUDGE_TAG_RETRY_PROMPT)
+  return { ...retry, retried: true }
 }
 
 /**

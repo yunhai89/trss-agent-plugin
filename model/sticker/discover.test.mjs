@@ -54,6 +54,21 @@ await test('judgeAndTag：非 JSON 含否定词 → 拒绝', async () => {
   ok(r.isSticker === false && r.parseFailed === true, '否定词+不可解析 → 拒绝')
 })
 
+await test('judgeAndTag：首轮只返回思考文本 → 自动重试并接受 JSON', async () => {
+  let n = 0
+  const vision = {
+    analyze: async () => {
+      n++
+      return n === 1
+        ? '首先，用户要求我作为一个表情包库的策展器，判断这张图……这是一只猫，表情疑惑'
+        : '{"isSticker":true,"name":"疑惑","desc":"猫一脸问号时使用","tags":["疑惑","猫"]}'
+    },
+  }
+  const r = await judgeAndTag(vision, { buffer: Buffer.from('x'), mime: 'image/jpeg' })
+  ok(r.isSticker === true && r.name === '疑惑' && r.retried === true, '首轮失败 → 重试成功')
+  eq(n, 2, '确实调用了两次')
+})
+
 await test('judgeAndTag：无 vision → 放行 + noVision + 自动命名', async () => {
   const buf = Buffer.from('abcdef')
   const r = await judgeAndTag(null, { buffer: buf, mime: 'image/png' })
