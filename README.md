@@ -206,7 +206,7 @@ agent:
 | `llmProviders` | `[]` | 厂商清单 `[{ id, name, protocol, preset, baseURL, apiKey }]`；没有“默认厂商”，被 `providerId` 选中的那个就是主接入 |
 | `llmModels` | `[]` | 模型清单 `[{ id, name, providerId, model, temperature, maxTokens, thinking, note }]`；`thinking/温度/maxTokens` 在被主对话链路使用时覆盖全局 |
 | `protocol` / `preset` / `baseURL` / `apiKey` / `model` | 镜像 | 上面引用的**解析结果**，加载时自动回填；勿手改，改厂商 Key / 换模型会自动跟随 |
-| `utilityModel` | 空 | 播报等旁路小模型（留空=沿用主模型）；只能在上面所选厂商的「模型列表」里选，因为旁路任务走主 provider 端点 |
+| `utilityModel` | 空 | 播报等旁路小模型（留空=沿用主模型）；可填任意已注册厂商的模型（运行时按注册表解析端点，不再局限主厂商） |
 | `reasoningFields` | `[]` | 推理字段归一化（如 `["reasoning_content"]`），preset 通常已带 |
 | `maxTurns` | `50` | 单次对话工具调用轮次预算 |
 | `temperature` | 空 | 采样温度 |

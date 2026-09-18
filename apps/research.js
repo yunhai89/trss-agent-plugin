@@ -67,10 +67,13 @@ export class Research extends plugin {
       fetcher: (typeof fetch !== 'undefined' && fetch) || undefined,
       logger: Log.tag('search'),
     })
+    // 研究 worker「功能模型」引用：可落在任意已注册厂商
+    const worker = rt.modelRouter?.resolve(cfg.research?.workerModel || cfg.model) || { provider: rt.provider, model: cfg.model }
     const dr = new DeepResearch({
       provider: rt.provider,
       model: cfg.model,
-      workerModel: cfg.research?.workerModel || cfg.model,
+      workerProvider: worker.provider,
+      workerModel: worker.model || cfg.model,
       searchManager,
       maxRounds: cfg.research?.maxRounds ?? 3,
       maxConcurrent: cfg.research?.maxConcurrent ?? 3,

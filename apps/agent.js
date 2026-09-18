@@ -9,6 +9,7 @@ import {
   Agent,
   STOP_REASON_CN,
   createProvider,
+  createModelRouter,
   ToolRegistry,
   MemoryStore,
   createMemoryTool,
@@ -347,6 +348,10 @@ async function buildRuntime() {
     promptCacheKey: protocol === 'openai' && !cfg.baseURL && (!cfg.preset || cfg.preset === 'openai'),
   }
 
+  // 功能模型路由：让记忆抽取/自进化评审/子代理/伪人/群世界等功能模型可落在任意已注册厂商
+  // （llmProviders），不再局限于主端点。引用按 llmModels[].id 或 model 字符串解析，裸模型名回退主 provider。
+  const modelRouter = createModelRouter({ cfg, mainProvider: provider, mainModel: cfg.model, proxyFetch, providerLog })
+
   // 可选 embedding 函数：填了 recall.embedProvider 才造（OpenAI 兼容 /embeddings 端点），供工具检索 + recall 语义召回共用。
   // 与 groupworld/humanize 共用同一装配 helper（曾两处手写重复——改一处漏一处）
   const { embedFn } = buildEmbed({ provider })
@@ -580,11 +585,11 @@ async function buildRuntime() {
 
   // recall 抽取用的轻量 LLM 通道：复用主 provider、换廉价 model id（utilityModel 降本，留空沿用主模型）
   // llmExtract 已自拼抽取指令+对话，此处只需做「无脑 chat 通道」（recall.js 兼容 llm.run 与函数两种形态）
-  const recallModel = cfg.recall?.model || cfg.utilityModel || cfg.model
+  const recallTarget = modelRouter.resolve(cfg.recall?.model || cfg.utilityModel || cfg.model)
   const recallLlm = {
     run: async (prompt) => {
       try {
-        const res = await provider.chat({ model: recallModel, messages: [{ role: 'user', content: prompt }], stream: false })
+        const res = await recallTarget.provider.chat({ model: recallTarget.model || cfg.model, messages: [{ role: 'user', content: prompt }], stream: false })
         return { content: res?.content || '' }
       } catch (e) {
         Log.warn('[recall] llm 抽取调用失败', e?.message || e)
@@ -613,11 +618,13 @@ async function buildRuntime() {
   let traceStore = null
   try { traceStore = new TraceStore({ dir: traceDir }) } catch (e) { Log.warn('[evolution] TraceStore 初始化失败', e?.message || e) }
   const srCfg = cfg.selfReview || {}
+  // 评审 / 工具进化合成共用同一「功能模型」引用：可落在任意已注册厂商
+  const srTarget = modelRouter.resolve(srCfg.model || cfg.utilityModel || cfg.model)
   let selfReview = null
   if (srCfg.enable !== false) {
     try {
       selfReview = new SelfReviewer({
-        provider, model: srCfg.model || cfg.utilityModel || cfg.model,
+        provider: srTarget.provider, model: srTarget.model || cfg.model,
         traceStore, memory, skills, suggestionDir,
         botName: (typeof Bot !== 'undefined' && (Bot.nickname || Bot.name)) || '',
         every: srCfg.every, autoApplyMemory: srCfg.autoApplyMemory, autoApplyPrompt: srCfg.autoApplyPrompt,
@@ -649,7 +656,7 @@ async function buildRuntime() {
         sideEffects: t.meta?.sideEffects || ['none'], tags: ['builtin'],
       }))
       const seeded = await te.seedBuiltinTools(toolEvoRegistry, builtins).catch((e) => { Log.warn('[toolEvo] seed 失败', e?.message || e); return 0 })
-      const synthesizer = new te.ToolSynthesizer({ provider, model: srCfg.model || cfg.utilityModel || cfg.model, maxRepairAttempts: cfg.toolEvo?.maxRepairAttempts ?? 2, logger: Log.tag('toolEvo') })
+      const synthesizer = new te.ToolSynthesizer({ provider: srTarget.provider, model: srTarget.model || cfg.model, maxRepairAttempts: cfg.toolEvo?.maxRepairAttempts ?? 2, logger: Log.tag('toolEvo') })
       // 候选行为验证同样双档：沙箱可用时在出口全关的一次性 microVM 里跑候选（跑的是不可信代码），
       // 否则本地子进程 + AST 前置门。
       const engine = new te.EvolutionEngine({
@@ -782,6 +789,8 @@ async function buildRuntime() {
   }
 
   // 子代理编排：multiagent.topology 选择拓扑（默认 spawn=异步三件套；orchestrator=同步编排工具 orchestrate）
+  // worker「功能模型」引用：可落在任意已注册厂商；留空 = 主 provider 默认模型
+  const workerTarget = modelRouter.resolve(cfg.multiagent?.workerModel || '')
   let multiagent = null
   if (cfg.multiagent?.enable !== false && cfg.multiagent?.topology === 'orchestrator') {
     try {
@@ -796,8 +805,8 @@ async function buildRuntime() {
         description: '通用子代理：只做被委派的独立子任务，返回精炼结果',
         systemPrompt: '你是独立子任务子代理。只完成被委派的任务，直接给出结果，不解释过程；任务自包含（你看不到主对话）。',
         tools: workerReg.list().length ? workerReg : null,
-        model: cfg.multiagent?.workerModel || null,
-        provider, maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
+        model: workerTarget.model || null,
+        provider: workerTarget.provider, maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
       })
       const orch = new Orchestrator({
         provider, model: cfg.model,
@@ -825,7 +834,7 @@ async function buildRuntime() {
   } else if (cfg.multiagent?.enable !== false) {
     try {
       const subagentTools = makeSpawnSubagentTools({
-        provider, model: cfg.multiagent?.workerModel || null,
+        provider: workerTarget.provider, model: workerTarget.model || null,
         sourceRegistry: tools,
         semaphore: new Semaphore(cfg.multiagent?.maxConcurrent ?? 3),
         maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
@@ -854,7 +863,7 @@ async function buildRuntime() {
     } catch (e) { Log.warn('[multiagent] 子代理工具注册失败', e?.message || e) }
   }
 
-  return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent }
+  return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent }
 }
 
 const getRuntime = async () => {

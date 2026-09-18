@@ -51,7 +51,7 @@ export async function getGroupWorld() {
     const trace = makeTrace()
     const { embedFn, embedModel } = buildEmbed(rt)
     const svc = new GroupWorldService({
-      provider: rt.provider,
+      provider: rt.modelRouter?.resolve(Config.get().agent?.groupWorld?.analysis?.modelProfile)?.provider || rt.provider,
       cfg: () => Config.get().agent?.groupWorld || {},
       dataDir: path.join(Config.path.data, 'groupworld'),
       botId: botSelfIds(null)[0] || null,

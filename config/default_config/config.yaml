@@ -16,7 +16,7 @@ agent:
   baseURL: ""
   apiKey: ""               # API Key（OpenAI/Anthropic 兼容或 Gemini 原生均填此）；★必填：留空则插件不初始化
   model: "deepseek-chat"
-  utilityModel: ""  # 进度播报等旁路任务用的小模型：只能从上面 providerId 厂商的「模型列表」里选（留空=沿用主模型；选便宜小模型可降本）
+  utilityModel: ""  # 旁路小模型（播报等）：填模型条目 id 或模型名，可来自任意厂商（运行时按注册表解析端点）；留空=沿用主模型
 
   # ── 厂商/模型注册表（web 配置中心 → 厂商配置 / 模型列表 两区维护；运行时经上面 providerId/modelId 引用）──
   llmProviders: []  # [{ id, name, protocol, preset, baseURL, apiKey }] LLM 服务商端点（「厂商配置」区维护）
@@ -74,7 +74,7 @@ agent:
   recall:
     cap: 200                # 每用户长期记忆条数上限（超限按价值淘汰，非 FIFO）
     extractEvery: 10        # 每 N 轮触发一次 LLM 抽取（意图词"记住/叫我"等仍即时触发）
-    model: ""               # 抽取用模型 id（留空=utilityModel→主模型）
+    model: ""               # 抽取用模型 id（留空=utilityModel→主模型；可跨厂商）
     embedProvider: ""       # 语义召回 embedding 模型 id（留空=关键词 jaccard；填则走 cosine 语义匹配）
     embedBaseURL: ""        # embedding 接口地址（留空=复用主 baseURL；用专门 embedding 服务时填，如 https://api.openai.com/v1）
     embedApiKey: ""         # embedding apiKey（留空=复用主 apiKey）
@@ -95,7 +95,7 @@ agent:
   selfReview:
     enable: true            # 在线自进化：每 N 轮对话后台异步自我评审，产出改进 suggestion（不阻塞回复）
     every: 20               # 每 N 轮对话触发一次后台自评审（per-scope 计数）
-    model: ""               # 评审用模型 id（留空=utilityModel→主模型；建议用廉价小模型降本）
+    model: ""               # 评审用模型 id（留空=utilityModel→主模型；建议用廉价小模型降本；可跨厂商）
     autoApplyMemory: true   # 记忆类 suggestion 自动应用（有 prev[] 回滚 + 威胁扫描 + 置信度闸兜底）
     autoApplyPrompt: false  # prompt/技能类落盘待审（#审阅进化 人工把关；强烈建议保持 false）
     dailyBudgetTokens: 200000  # 自评审日 token 预算（耗尽则只采迹不评审，防成本失控）
@@ -198,7 +198,7 @@ agent:
     permission: master
     maxRounds: 3
     maxConcurrent: 3
-    workerModel: ""
+    workerModel: ""             # 深度研究 worker 模型：空=主模型；可跨厂商（填模型条目 id 或模型名）
     evaluation: true
   mcp:
     requestTimeout: 60000
@@ -344,7 +344,7 @@ agent:
     maxConcurrent: 3            # 同时运行的子代理数上限
     maxSpawnsPerConversation: 5 # 单次对话最多创建几个子代理（topology=spawn 时生效）
     workerMaxTurns: 10          # 子代理工具循环上限（防失控烧 token）
-    workerModel: ""             # 子代理模型（空=复用主模型；填便宜模型可降本）
+    workerModel: ""             # 子代理模型（空=复用主模型；可跨厂商，填便宜模型可降本）
     defaultTools:               # 子代理默认可用工具（模型未指定时）
       - web_search
       - memory_search
@@ -400,7 +400,7 @@ agent:
       #   【偏好】对 AI/编程/数码话题兴致高；八卦闲聊也会接，但不主动挑起。
       #   【不做】不发长篇大论、不列要点清单、不每次都称呼对方。
     planner:
-      model: ""                    # Planner 模型 id（留空=utilityModel→主模型）
+      model: ""                    # Planner 模型 id（留空=utilityModel→主模型；可跨厂商）
       temperature: 0.2
       maxTokens: 800
       allowedReadTools: []         # Planner 可用的只读工具白名单；写/删/管理/终端/发送类一律拒绝
@@ -451,7 +451,7 @@ agent:
       schedule: "7 * * * *"        # 小时增量分析 cron（每小时 :07）
       minSegmentMessages: 4        # 有效信息量低于此值的片段跳过分析
       maxSegmentsPerRun: 50        # 每轮最多分析片段数
-      modelProfile: ""             # 分析模型 id（留空=主模型/utilityModel）
+      modelProfile: ""             # 分析模型 id（留空=主模型/utilityModel；可跨厂商）
       maxDailyCallsPerGroup: 100   # 每群每日 LLM 调用预算（熔断）
       retryCount: 1                # 模型非法 JSON 重试次数（仍失败→dead_letter）
       maxTokens: 1200

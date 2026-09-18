@@ -15,6 +15,7 @@ import {
   makeRecallTool,
   makeFailingTool,
   createProvider,
+  createModelRouter,
   OpenAIProvider,
   AnthropicProvider,
   GeminiProvider,
@@ -1707,6 +1708,32 @@ await test('usage：观测口径精确到轮（混合流不被整轮剔除，也
   eq(z.observedInput, 0, '未观测流不进分母')
   eq(normalizeUsage(z).cacheObserved, false, '再归一仍是未观测（命中率显示「暂无」而非 0%）')
   eq(normalizeUsage(z).observedInput, 0, '再归一仍不进分母')
+})
+
+// ---------- 20. model-router：功能模型跨厂商解析 ----------
+await test('model-router：功能模型解析到对应厂商（不再局限主端点）', async () => {
+  const cfg = {
+    llmProviders: [
+      { id: 'p1', protocol: 'openai', preset: 'deepseek', baseURL: '', apiKey: 'k1' },
+      { id: 'p2', protocol: 'openai', preset: 'openai', baseURL: 'https://api.openai.com/v1', apiKey: 'k2' },
+    ],
+    llmModels: [
+      { id: 'm1', providerId: 'p1', model: 'deepseek-chat' },
+      { id: 'm2', providerId: 'p2', model: 'gpt-4o-mini' },
+    ],
+  }
+  const mainProvider = { tag: 'main' }
+  const r = createModelRouter({ cfg, mainProvider, mainModel: 'deepseek-chat' })
+  const byId = r.resolve('m2')
+  eq(byId.model, 'gpt-4o-mini', '按条目 id → 正确模型')
+  ok(byId.matched && byId.provider !== mainProvider, '按 id → 非主 provider')
+  const byName = r.resolve('gpt-4o-mini')
+  ok(byName.matched && byName.provider === byId.provider, '按 model 字符串 → 同一 provider')
+  eq(r.resolve('m2').provider, byId.provider, 'provider 按厂商缓存复用')
+  const raw = r.resolve('some-unknown-model')
+  eq(raw.provider, mainProvider, '未注册裸模型名 → 回退主 provider')
+  eq(raw.model, 'some-unknown-model', '裸模型名保留')
+  eq(r.resolve('').model, null, '空引用 → model null（调用方自行回落）')
 })
 
 // ---------- 总结 ----------

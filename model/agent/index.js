@@ -18,6 +18,7 @@ import { Agent } from './Agent.js'
 export { Agent, STOP_REASON_CN, GOVERNOR_STOP } from './Agent.js'
 
 export { createProvider, Provider, mapToolChoice, toolsToList } from './provider/index.js'
+export { createModelRouter } from './model-router.js'
 export { OpenAIProvider } from './provider/openai.js'
 export { AnthropicProvider, toAnthropicMessages } from './provider/anthropic.js'
 export { GeminiProvider, toGeminiSteps } from './provider/gemini.js'

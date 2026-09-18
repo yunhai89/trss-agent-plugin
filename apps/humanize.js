@@ -92,6 +92,8 @@ function buildReadTools(rt, hcfg) {
 async function buildHumanize() {
   const rt = await getRuntime()
   const rawCfgFn = () => Config.get().agent?.humanize || {}
+  // 功能模型可落在任意已注册厂商：按引用解析 provider（留空/未命中回退主 provider）
+  const providerForModel = (ref) => (rt.modelRouter?.resolve(ref)?.provider) || rt.provider
   // 初次校验（过滤危险 allowedReadTools 等；记录错误但不抛）
   const validation = H.validateHumanizeConfig(rawCfgFn(), rt.tools?.list?.().map((t) => t.name) || null)
   if (validation.errors.length) Log.warn('[humanize] 配置校验提示：', validation.errors.join('； '))
@@ -114,7 +116,7 @@ async function buildHumanize() {
   const { embedFn: memEmbedFn, embedModel: memEmbedModel } = buildEmbed(rt)
   const hmem = new H.HumanizeMemoryStore({
     dataDir: Config.path.data + '/humanize',
-    provider: rt.provider,
+    provider: providerForModel(cfgFn().model),
     cfg: cfgFn,
     embedder: memEmbedFn ? makeEmbedder({ embedFn: memEmbedFn, model: memEmbedModel }) : null,
     trace: { record: (event, data = {}) => { try { trace.record(event, data) } catch { /* noop */ } } },
@@ -137,7 +139,7 @@ async function buildHumanize() {
       // 语义检测层 embedder：与 GroupWorld 共用 agent.recall.embedProvider 配置（未配 → 词面/规则兜底）
       const { embedFn, embedModel } = buildEmbed(rt)
       const svc = new SelfStateService({
-        provider: rt.provider,
+        provider: providerForModel(Config.get().agent?.selfState?.eventDetection?.ambiguousIntentModelProfile),
         cfg: () => Config.get().agent?.selfState || {},
         botId: botSelfIdsAll(rt)[0] || 'bot',
         botNames: H.resolvePersonaIdentity(cfgFn(), { botNickname: botNickname() }).identityNames,
@@ -227,7 +229,8 @@ async function buildHumanize() {
   }
 
   // ConversationScene 分析器（规则+LLM 混合；按 groupId+lastMessageId 缓存；失败降级规则不阻塞）
-  const sceneAnalyzer = new H.ConversationSceneAnalyzer({ provider: rt.provider, cfg: cfgFn, trace })
+  // 场景分析复用 Planner 的模型配置（scene.js 内即取 planner.model）
+  const sceneAnalyzer = new H.ConversationSceneAnalyzer({ provider: providerForModel(cfgFn().planner?.model), cfg: cfgFn, trace })
 
   /** 近窗熟悉度代理：目标在近期群聊出现多 = 熟（GW online 时关系数据更准，此处零成本兜底）。 */
   function familiarityProxy(gid, targetUserId, _recentSelfTexts) {
@@ -254,7 +257,7 @@ async function buildHumanize() {
   }
 
   const makePlanner = (gid) => new H.HumanizePlanner({
-    provider: rt.provider, cfg: cfgFn, readTools,
+    provider: providerForModel(cfgFn().planner?.model), cfg: cfgFn, readTools,
     // 独立记忆库检索（替换原 rt.recall 适配——伪人记忆与主 Agent 记忆彻底分离）
     getMemories: async (q, o = {}) => {
       try {
@@ -280,7 +283,7 @@ async function buildHumanize() {
     getGrounding: getGroundingContext,
   })
   const makeReplyer = (gid) => new H.HumanizeReplyer({
-    provider: rt.provider, cfg: cfgFn,
+    provider: providerForModel(cfgFn().replyer?.model), cfg: cfgFn,
     // 角色人设（prompt / fromPersonaId / 内置默认）；恒有值，不再回落主任务 Agent systemPrompt（AI 味来源）
     getPersonaVoice: () => H.buildHumanizePersonaBlock(resolveHumanizePersona(cfgFn(), rt)),
     getRecentBotText: () => {
