@@ -1244,6 +1244,9 @@
             <cfg-row name="防御灵敏度" desc="阈值越低越严格">
               <select class="sel" style="width:150px" v-model="form.guardSensitivity"><option v-for="o in OPT.guardSensitivity" :value="o[0]">{{ o[1] }}</option></select>
             </cfg-row>
+            <cfg-row name="外部内容注入扫描" desc="工具结果/网页/记忆命中注入特征时加边界标注,不阻断">
+              <v-switch v-model="form.untrustedGuard"/>
+            </cfg-row>
             <cfg-row name="回复脱敏" desc="发送前屏蔽密钥/token">
               <v-switch v-model="form.redactSecrets"/>
             </cfg-row>

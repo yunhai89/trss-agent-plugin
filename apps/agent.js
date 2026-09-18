@@ -29,6 +29,7 @@ import {
   noteTools,
   clarifyTool,
   checkInput,
+  screenUntrusted,
   systemHardening,
   createPolicy,
   buildChatListHtml,
@@ -702,9 +703,11 @@ async function buildRuntime() {
     recallLlm, // 接通：让 recall.js 的 llmExtract 真正触发（覆盖"帮我记/以后都/别忘了"等自然说法）
     promptRegistry, // 进化版 prompt：_assembleSystem 优先取 registry.get('agent').system
     skills, // 让 Agent 在 system prompt 注入 <available_skills> 目录
-    guard: { checkInput, systemHardening },
+    // screenUntrusted：间接注入防御——工具结果/网页/MCP/记忆/情境等外部内容命中注入特征时加 <untrusted_data> 边界标注（不阻断）
+    guard: { checkInput, screenUntrusted, systemHardening },
     guardAction: cfg.guardAction || 'flag',
     guardSensitivity: cfg.guardSensitivity || 'medium',
+    untrustedGuard: cfg.untrustedGuard !== false, // 外部内容注入扫描（默认开，可配置关闭）
     policy: createPolicy({ categoryMin: cfg.policy?.categoryMin }),
     confirm, // ConfirmStore 审批器：需确认的工具（terminal 写命令等）经它走主人 #确认/#拒绝
     masterSkipConfirm: cfg.masterSkipConfirm === true, // 主人任务免确认直执行（高危，仅主人；denylist 仍拦）

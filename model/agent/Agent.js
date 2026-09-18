@@ -173,6 +173,8 @@ export class Agent {
     this.guard = config.guard || null
     this.guardSensitivity = config.guardSensitivity || 'medium'
     this.guardAction = config.guardAction || 'flag'
+    // 间接注入防御：外部内容（工具结果/网页/MCP/记忆/情境）命中注入特征时加边界标注，默认开
+    this.untrustedGuard = config.untrustedGuard !== false
     this.blockedMessage = config.blockedMessage || '检测到潜在的指令注入，已拒绝处理。'
     this.policy = config.policy || null
     this.confirm = config.confirm || null
@@ -387,8 +389,9 @@ export class Agent {
     let recalledMemory = ''
     if (this.recall && memories && memories.length) recalledMemory = this.recall.formatForPrompt(memories) || ''
     const dynParts = []
-    if (context) dynParts.push(String(context))
-    if (recalledMemory) dynParts.push(recalledMemory)
+    // 外部内容注入扫描：情境（含群聊历史）与召回记忆均为不可信数据，命中注入特征时加边界标注
+    if (context) dynParts.push(this._screenUntrusted(context, 'context'))
+    if (recalledMemory) dynParts.push(this._screenUntrusted(recalledMemory, 'memory'))
     // 动态情境块并入 user 文本（持久化该形态——下轮前缀与本轮完全一致，缓存不打穿；
     // 明确边界标注，模型不当作用户亲述）
     if (dynParts.length) {
@@ -753,6 +756,26 @@ export class Agent {
     try { return JSON.stringify(input) } catch { return '' }
   }
 
+  /**
+   * 间接注入防御：扫描外部不可信内容（工具结果/网页/MCP/记忆/情境）。
+   * 命中注入特征时加 <untrusted_data source="..."> 边界标注（绝不阻断，避免打断工具链/记忆加载）。
+   * 无 guard 或未提供 screenUntrusted 时原样返回（向后兼容最小 guard 注入）。
+   */
+  _screenUntrusted(text, source) {
+    const raw = String(text ?? '')
+    if (!raw || !this.untrustedGuard) return raw
+    if (!this.guard || typeof this.guard.screenUntrusted !== 'function') return raw
+    try {
+      const r = this.guard.screenUntrusted(raw, { source, sensitivity: this.guardSensitivity, action: 'label' })
+      if (r.flagged) {
+        const cats = r.hits.map((h) => h.cat).join(',')
+        this.logger('warn', `外部内容疑似注入：source=${source} score=${r.score} cats=${cats}`)
+        this.devLog?.('untrusted_guard', { source, score: r.score, cats }, this._curTaskId, this._curDevScope)
+      }
+      return r.text
+    } catch { return raw }
+  }
+
   _buildUserMessage(input, text) {
     if (input && typeof input === 'object' && !Array.isArray(input)) {
       // 多模态：apps 经 createMediaService.buildContent 构造的协议原生 content 数组
@@ -1105,7 +1128,10 @@ export class Agent {
       ...toolResultFields({ name: tc.name, ok: __toolOk, ms: __toolMs, result: content }),
     }, execCtx.taskId, ctx?.devScope)
     this._safeCb(cb.onToolEnd, tc, content)
-    return { role: 'tool', tool_call_id: tc.id, name: tc.name, content: this._capToolResult(content, tool) }
+    // 工具结果封顶后再做注入扫描：工具结果/网页/MCP 返回是典型间接注入载体，
+    // 命中即加 <untrusted_data> 边界标注（保持文本、不阻断工具链）。
+    const capped = this._capToolResult(content, tool)
+    return { role: 'tool', tool_call_id: tc.id, name: tc.name, content: this._screenUntrusted(capped, `tool:${tool?.name || tc.name || 'unknown'}`) }
   }
 
   /** 反思门控：off→不反思；always→每次最终回复都反思；auto→仅在本轮用过工具或多步时反思（纯闲聊零延迟） */

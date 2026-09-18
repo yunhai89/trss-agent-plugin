@@ -73,6 +73,39 @@ const PATTERNS = [
   { re: /<\/?(untrusted_input|user_content)>/i, w: 0.7, cat: 'separator' },
   { re: /<\/?(system_prompt|tool_result|system)>|\[\/?(system|assistant|tool|admin)\]|###\s*(system|instruction)/i, w: 0.6, cat: 'separator' },
 
+  // ── 编码 / 混淆载荷（解码后再执行：Base64 / Hex / ROT13 / URL 编码等）──
+  { re: /(解码|解密|还原|转换)[^。\n]{0,8}(后|再|并|之后)[^。\n]{0,8}(执行|运行|回答|输出|遵守|忽略|照做)/, w: 0.8, cat: 'encoding' },
+  { re: /\b(decode|decipher|decrypt|from base64|from hex|rot13)\b[^.\n]{0,30}\b(then|and|afterwards?)\b[^.\n]{0,20}\b(execute|run|follow|obey|ignore|answer|output)\b/i, w: 0.8, cat: 'encoding' },
+  { re: /\b(base64|hex|rot13|url[- ]?encoded?|unicode[- ]?escape)\b[^.\n]{0,40}\b(payload|instruction|command|prompt)\b/i, w: 0.6, cat: 'encoding' },
+
+  // ── 结构化 / 代码模板注入（指令藏进代码块、JSON/YAML 模板或协议控制符）──
+  { re: /<\|(im_start|im_end|system|assistant|user|endoftext|start_header_id|end_header_id)\|>/i, w: 0.85, cat: 'separator' },
+  { re: /(代码块|模板|json|yaml|xml)[^。\n]{0,12}(作为|当作|视为)[^。\n]{0,8}(指令|命令|系统)/i, w: 0.7, cat: 'structured' },
+  { re: /\b(treat|interpret|execute|run|parse)\b[^.\n]{0,24}\b(code|template|payload|block)\b[^.\n]{0,24}\b(instruction|command|system prompt)\b/i, w: 0.75, cat: 'structured' },
+
+  // ── 伪造系统 / 开发者权威消息、宣称最高优先级 ──
+  { re: /(忽略|无视|覆盖|override)[^。\n]{0,8}(所有|一切|全部|之前的?|上面的?|前面的?)[^。\n]{0,6}(指令|规则|设定|系统提示|要求)/i, w: 0.8, cat: 'override' },
+  { re: /(系统|开发者|管理员|安全)(更新|公告|通知|消息|指令|警告)\s*[:：]/, w: 0.5, cat: 'override' },
+  { re: /\b(system|developer|admin|security)\s+(message|update|notice|directive|alert)\s*[:：]/i, w: 0.5, cat: 'override' },
+  { re: /(最高优先级|优先级最高|highest priority)[^。\n]{0,16}(覆盖|override|高于|优先于)/i, w: 0.65, cat: 'override' },
+  { re: /(覆盖|override)[^。\n]{0,10}(所有|一切|全部|之前的?)(的)?(指令|规则|系统|设定)/, w: 0.7, cat: 'override' },
+
+  // ── 续写 / 跨模型角色迁移（多轮越狱）──
+  { re: /(继续|接着|延续)(上|之前|前)(一|几)?(轮|次|条|个)(模型|助手|回答|对话)?/, w: 0.45, cat: 'continuation' },
+  { re: /\b(as|like)\s+(the\s+)?(previous|prior|other|another)\s+(model|assistant|ai)\b[^.\n]{0,30}\b(ignore|unfiltered|no restrictions?|without limits?)\b/i, w: 0.6, cat: 'continuation' },
+
+  // ── 翻译 / 换语言规避 ──
+  { re: /(翻译|转(成|为)|换(成|用))[^。\n]{0,8}(英文|中文|日文|其他语言|另一种语言|外文)[^。\n]{0,12}(后|再|然后)[^。\n]{0,8}(执行|回答|忽略|遵守|输出)/, w: 0.65, cat: 'evasion' },
+  { re: /\b(translate|rewrite|rephrase)\b[^.\n]{0,30}\b(then|and|afterwards?)\b[^.\n]{0,20}\b(execute|follow|obey|ignore|answer)\b/i, w: 0.65, cat: 'evasion' },
+
+  // ── 虚构 / 角色扮演洗白（DAN 变体：自称无限制、忽略规则）──
+  { re: /\b(roleplay|act as|pretend to be|you are now|from now on you are)\b[^.\n]{0,40}\b(no (rules|restrictions?|limits?|filters?)|unfiltered|uncensored|without (any )?(rules|restrictions?|limits?)|ignore (all )?(rules|instructions?))\b/i, w: 0.85, cat: 'jailbreak' },
+  { re: /(扮演|假装|现在开始你是|从现在起你是)[^。\n]{0,30}(没有(任何)?限制|不受限制|无限制|忽略(所有)?(规则|指令|设定))/i, w: 0.85, cat: 'jailbreak' },
+  { re: /\b(hypothetical|fictional|in a (story|novel|movie)|for educational purposes?|for research purposes?)\b[^.\n]{0,40}\b(how to|instructions?|steps?|without (any )?(rules|restrictions?|limits?|consequences?))\b/i, w: 0.55, cat: 'mode_framing' },
+
+  // ── 隐藏注释 / 不可见指令载体（HTML / Markdown 注释）──
+  { re: /<!--[\s\S]{0,160}?(ignore|system|instruction|prompt|override|忽略|指令|系统|规则)[\s\S]{0,160}?-->/i, w: 0.7, cat: 'hidden' },
+
   // ── 占位符 / 抽象化规避（低权重，仅与其他信号叠加）──
   { re: /(使用|用|以)[^。\n]{0,4}(占位符|placeholder|代号|变量名)[^。\n]{0,12}(替换|代替|表示|指代)/, w: 0.5, cat: 'placeholder' },
   { re: /\b(replace|use)\b[^.\n]{0,20}\bwith (the )?(placeholder|variable|token)\b/i, w: 0.5, cat: 'placeholder' },
@@ -134,8 +167,43 @@ export function analyze(text) {
   return { score, hits }
 }
 
+/** 中和内容中自带的边界标签，防止不可信内容提前闭合隔离边界后伪装成可信指令。 */
+function stripBoundaryTags(text, tagName) {
+  return String(text || '').replace(new RegExp(`</?${tagName}\\b[^>]*>`, 'gi'), '')
+}
+
 export function isolate(text) {
-  return `<untrusted_input>${String(text || '')}</untrusted_input>`
+  return `<untrusted_input>${stripBoundaryTags(text, 'untrusted_input')}</untrusted_input>`
+}
+
+/**
+ * 给外部不可信内容（工具结果 / 网页 / MCP / 记忆 / 情境）加来源标注边界。
+ * 与 isolate 的区别：带 source 便于模型区分数据来源，且同样中和自带的闭合标签。
+ * @param {string} text
+ * @param {string} source 来源标识（如 tool:web_crawl / memory / context）
+ */
+export function tagUntrusted(text, source = 'external') {
+  const src = String(source || 'external').replace(/[^a-zA-Z0-9_:-]/g, '').slice(0, 40) || 'external'
+  return `<untrusted_data source="${src}">${stripBoundaryTags(text, 'untrusted_data')}</untrusted_data>`
+}
+
+/**
+ * 外部不可信内容的注入扫描（间接注入防御）。
+ * 与 checkInput 不同：外部内容永不阻断（否则会打断工具链/记忆加载），命中只加边界标注。
+ * @param {string} text
+ * @param {object} opts { source, sensitivity, action:'label'|'sanitize'|'off' }
+ * @returns {{ text: string, flagged: boolean, score: number, hits: Array }}
+ */
+export function screenUntrusted(text, { source = 'external', sensitivity = 'medium', action = 'label' } = {}) {
+  const raw = String(text ?? '')
+  if (!raw) return { text: raw, flagged: false, score: 0, hits: [] }
+  const { score, hits } = analyze(raw)
+  const thr = SENSITIVITY[sensitivity] ?? 0.7
+  const flagged = score >= thr
+  let out = raw
+  if (flagged && action === 'sanitize') out = checkInput(raw, { sensitivity, action: 'sanitize' }).text
+  else if (flagged && action !== 'off') out = tagUntrusted(raw, source)
+  return { text: out, flagged, score, hits }
 }
 
 export function systemHardening() {

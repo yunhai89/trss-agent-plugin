@@ -116,6 +116,7 @@ agent:
   confirmTimeout: 300
   guardAction: flag
   guardSensitivity: medium
+  untrustedGuard: true         # 间接注入防御：工具结果/网页/MCP/记忆/情境等外部内容命中注入特征时加 <untrusted_data> 边界标注（默认开）
   redactSecrets: true          # 发送前脱敏：屏蔽回复中的 API Key/token 等敏感信息（默认开）
   devLog:
     enable: true             # 生产环境默认开：记录 AI 全链路(缩进 JSON 人工可读)，方便 #上报错误 排查
