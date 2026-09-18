@@ -1286,7 +1286,7 @@
         <div :id="'cfg-ext'" class="card cf-sec" :class="{open: open.ext}">
           <div class="cf-sh" @click="open.ext = !open.ext">
             <span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="tool"/></span>
-            <div><div class="ct-t">多模态 / 工具 / 扩展</div><div class="ct-s">视觉、搜索、Stagehand 与各子系统</div></div>
+            <div><div class="ct-t">多模态 / 工具 / 扩展</div><div class="ct-s">视觉、按需工具与各子系统</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.ext"><div class="cf-grid">
