@@ -181,6 +181,58 @@ await test('工具异常 → 结果 {error}，循环继续', async () => {
   eq(res.content, 'recovered', '循环继续到最终回复')
 })
 
+// ---------- 3b. 工具失败同步：调度层异常也必须回灌给主模型 ----------
+await test('工具失败同步：onToolStart 回调抛错不打断循环', async () => {
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'ok_tool', arguments: { x: 1 } }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const tools = new ToolRegistry().register({ name: 'ok_tool', description: 'd', parameters: { type: 'object' }, async execute() { return { ok: true } } })
+  const agent = new Agent({ provider, tools, maxTurns: 5, reflect: 'off' })
+  const res = await agent.run('x', { onToolStart: () => { throw new Error('ui boom') } })
+  eq(res.content, 'done', '回调抛错后循环继续')
+  eq(res.messages.map((m) => m.role).join(','), 'user,assistant,tool,assistant', 'tool_call 仍有配对结果')
+})
+
+await test('工具失败同步：onBeforeTool 抛错 → 归一为失败结果回灌', async () => {
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'ok_tool', arguments: {} }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const tools = new ToolRegistry().register({ name: 'ok_tool', description: 'd', parameters: { type: 'object' }, async execute() { return { ok: true } } })
+  const agent = new Agent({ provider, tools, maxTurns: 5, reflect: 'off' })
+  const res = await agent.run('x', { onBeforeTool: () => { throw new Error('intercept boom') } })
+  const toolMsg = res.messages.find((m) => m.role === 'tool')
+  ok(toolMsg && /工具调度异常/.test(toolMsg.content), '结果含调度异常')
+  ok(toolMsg.content.includes('_hint'), '带失败回灌提示')
+  eq(res.content, 'done', '循环继续到最终回复')
+})
+
+await test('工具失败同步：参数非 JSON 对象 → 明确回报给模型', async () => {
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'ok_tool', arguments: 'not-json{' }], finishReason: 'tool_calls' },
+    { content: 'retry done', finishReason: 'stop' },
+  ])
+  const tools = new ToolRegistry().register({ name: 'ok_tool', description: 'd', parameters: { type: 'object' }, async execute() { return { ok: true } } })
+  const agent = new Agent({ provider, tools, maxTurns: 5, reflect: 'off' })
+  const res = await agent.run('x')
+  const toolMsg = res.messages.find((m) => m.role === 'tool')
+  ok(toolMsg && /参数不是合法 JSON/.test(toolMsg.content), '参数错误回报')
+  eq(res.content, 'retry done', '循环继续到最终回复')
+})
+
+await test('工具失败同步：工具抛错 → 结果带 _hint', async () => {
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'boom_tool', arguments: {} }], finishReason: 'tool_calls' },
+    { content: 'ok', finishReason: 'stop' },
+  ])
+  const tools = new ToolRegistry().register(makeFailingTool('boom_tool', 'explosion'))
+  const agent = new Agent({ provider, tools, maxTurns: 5, reflect: 'off' })
+  const res = await agent.run('x')
+  const toolMsg = res.messages.find((m) => m.role === 'tool')
+  ok(toolMsg.content.includes('_hint'), '失败结果带 _hint，引导模型据实回复')
+})
+
 // ---------- 4. 预算耗尽 ----------
 await test('maxTurns 耗尽 → stopReason:max_turns', async () => {
   const provider = mockProvider([

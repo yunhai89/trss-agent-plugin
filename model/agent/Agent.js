@@ -968,8 +968,20 @@ export class Agent {
   }
 
   async _executeToolCalls(toolCalls, execCtx, cb, ctx) {
+    // 每个 tool_call 都必须产出一条配对 tool 结果。_executeOne 内部已尽量不抛；
+    // 这里再兜底一次，避免任何回调/策略异常导致循环中断、历史留下孤立 tool_calls（下轮 API 400）。
+    const runOne = async (tc) => {
+      try {
+        return await this._executeOne(tc, execCtx, cb, ctx)
+      } catch (e) {
+        this.logger('warn', 'tool dispatch fatal', tc?.name, e?.message || e)
+        return {
+          role: 'tool', tool_call_id: tc.id, name: tc.name,
+          content: stringifyArgs({ error: `工具调度异常：${e?.message || String(e)}`, _hint: TOOL_FAIL_HINT }),
+        }
+      }
+    }
     const hasInteractive = toolCalls.some((tc) => this.tools?.get?.(tc.name)?.meta?.interactive)
-    const runOne = async (tc) => this._executeOne(tc, execCtx, cb, ctx)
     if (hasInteractive) {
       const results = []
       for (const tc of toolCalls) results.push(await runOne(tc))
@@ -978,26 +990,40 @@ export class Agent {
     return Promise.all(toolCalls.map((tc) => runOne(tc)))
   }
 
+  /** 回调安全调用：进度/审批等 UI 回调抛错不应打断工具循环。 */
+  _safeCb(fn, ...args) {
+    if (typeof fn !== 'function') return
+    try { fn(...args) } catch (e) { this.logger('warn', '回调异常（已忽略）', e?.message || e) }
+  }
+
   async _executeOne(tc, execCtx, cb, ctx) {
     const __t = Date.now()
-    cb.onToolStart?.(tc)
+    this._safeCb(cb.onToolStart, tc)
     const tool = this.tools?.get?.(tc.name) ?? this._metaTools?.[tc.name]
     // 注：工具调用入参/耗时/结果/错误的日志由 ToolRegistry 的 AOP 切面统一打印，
     // 这里只记录调度层关心的 outcome（未注册 / 被策略拦截 / 审批拒绝）。
     let content
 
-    if (!tool) {
-      content = stringifyArgs({ error: `Tool '${tc.name}' not found` })
-      this.logger('warn', 'tool not_found', tc.name)
-    } else {
-      // policy + confirm 门（代码层强制，agent 无法绕过）
+    try {
+      if (!tool) {
+        content = stringifyArgs({ error: `Tool '${tc.name}' not found` })
+        this.logger('warn', 'tool not_found', tc.name)
+      } else if (typeof tool.execute !== 'function') {
+        content = stringifyArgs({ error: `工具 ${tc.name} 未提供 execute 实现（注册有误）` })
+        this.logger('warn', 'tool no_execute', tc.name)
+      } else if (tc.arguments != null && typeof tc.arguments !== 'object') {
+        // 模型给出的参数不是合法 JSON 对象：明确回报，便于它用正确参数重试
+        content = stringifyArgs({ error: '工具参数不是合法 JSON 对象，无法执行', got: String(tc.arguments).slice(0, 200) })
+        this.logger('warn', 'tool bad_args', tc.name, brief(tc.arguments))
+      } else {
+        // policy + confirm 门（代码层强制，agent 无法绕过）
       const alwaysConfirm = tool?.meta?.alwaysConfirm === true
       if (this.policy && ctx) {
         const dec = this.policy.decide(ctx, tool)
         if (dec.decision === 'deny') {
           content = stringifyArgs({ error: 'rejected_by_policy', reason: dec.reason })
           this.logger('mark', 'tool denied', tc.name, 'reason=', dec.reason)
-          cb.onToolEnd?.(tc, content)
+          this._safeCb(cb.onToolEnd, tc, content)
           return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
         }
         // meta.alwaysConfirm（如 terminal）：即便主人/policy 放行，也强制走确认
@@ -1016,7 +1042,7 @@ export class Agent {
           // denylist 仍是硬底线（execute 里拦），不会因免确认而放行灾难命令。
           if (this.masterSkipConfirm && ctx?.isMaster) {
             this.logger('warn', '⚠️ 主人任务免确认自动执行（高危）', tc.name, brief(tc.arguments))
-            cb.onMasterAutoApprove?.(tc)
+            this._safeCb(cb.onMasterAutoApprove, tc)
             needConfirm = false
           }
         }
@@ -1025,14 +1051,14 @@ export class Agent {
             // 需确认但无确认器 → 拒绝（绝不放行危险动作）
             content = stringifyArgs({ error: 'rejected_by_confirm', reason: '该操作需确认但未装配确认器' })
             this.logger('warn', 'tool blocked', tc.name, '需确认但无 ConfirmStore')
-            cb.onToolEnd?.(tc, content)
+            this._safeCb(cb.onToolEnd, tc, content)
             return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
           }
           const approved = await this.confirm.request({ tool: tc.name, args: tc.arguments, ctx, notify: ctx?.notify })
           if (!approved) {
             content = stringifyArgs({ error: 'rejected_by_confirm', reason: '未获批准或超时' })
             this.logger('mark', 'tool rejected', tc.name, '未获批准/超时')
-            cb.onToolEnd?.(tc, content)
+            this._safeCb(cb.onToolEnd, tc, content)
             return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
           }
         }
@@ -1057,6 +1083,12 @@ export class Agent {
           content = stringifyArgs({ error: e?.message || String(e) })
         }
       }
+      }
+    } catch (e) {
+      // 兜底：策略/审批/前置回调等任何未预料异常都归一为工具失败结果，
+      // 既保证模型收到失败、也保证该 tool_call 有配对结果（不留孤立 tool_calls）。
+      content = stringifyArgs({ error: `工具调度异常：${e?.message || String(e)}` })
+      this.logger('warn', 'tool dispatch error', tc.name, e?.message || e)
     }
     // 失败回灌：工具返回/抛出错误时，把"据实回复"提示注入 tool 结果（JSON 字段，保持可 parse）——
     // 让模型据实转告用户真实错误，而非忽略错误去臆测/编造失败原因（杜绝"schema bug"式瞎编）
@@ -1070,7 +1102,7 @@ export class Agent {
       name: tc.name, args: tc.arguments, ok: __toolOk, result: content, ms: __toolMs,
       ...toolResultFields({ name: tc.name, ok: __toolOk, ms: __toolMs, result: content }),
     }, execCtx.taskId, ctx?.devScope)
-    cb.onToolEnd?.(tc, content)
+    this._safeCb(cb.onToolEnd, tc, content)
     return { role: 'tool', tool_call_id: tc.id, name: tc.name, content: this._capToolResult(content, tool) }
   }
 
