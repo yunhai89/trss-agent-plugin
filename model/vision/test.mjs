@@ -115,6 +115,20 @@ await test('端到端：描述媒体经 buildContent 抽为文本（主模型可
   ok(content.includes('Q1 上升'), '主模型拿到描述文本')
 })
 
+// ---------- 9. 空返回必须告警（旧实现静默返回空串，导致"识图/表情打标无反应"无从排查）----------
+await test('VisionService：模型返回空内容时告警（不再静默）', async () => {
+  const logs = []
+  const v = new VisionService({
+    provider: { async chat() { return { content: '' } } },
+    model: 'text-only-model',
+    logger: (lvl, msg) => logs.push([lvl, msg]),
+  })
+  eq(await v.recognize({ buffer: PNG, mime: 'image/png', name: 'x.png' }), '', '空返回 → 空串')
+  ok(logs.some(([lvl, msg]) => lvl === 'warn' && /返回空/.test(msg)), 'recognize 空返回有 warn')
+  eq(await v.analyze({ buffer: PNG, mime: 'image/png', name: 'y.png' }, 'judge'), '', 'analyze 空返回 → 空串')
+  ok(logs.filter(([lvl, msg]) => lvl === 'warn' && /返回空/.test(msg)).length >= 2, 'analyze 空返回也告警')
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

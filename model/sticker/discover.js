@@ -95,9 +95,19 @@ export async function judgeAndTag(vision, { buffer, mime, name } = {}) {
   }
 }
 
+/**
+ * 把 judgeAndTag 结果分类为入库决策原因：区分「确实是普通图」与「视觉调用失败」。
+ * 旧实现把两者都归为 not_sticker，导致视觉失败被静默当成"非表情"丢弃、无从排查。
+ */
+export function classifyJudge(judged) {
+  if (judged?.isSticker) return 'ok'
+  if (judged?.parseFailed) return 'vision_parse_failed'
+  if (judged?.error) return 'vision_error'
+  return 'not_sticker'
+}
+
 /** 名称清洗：去标点/空白，限 10 字。 */
-function cleanName(s) {
-  const t = String(s || '').replace(/[\s\[【】《》""'']+/g, '').trim()
+function cleanName(s) {  const t = String(s || '').replace(/[\s\[【】《》""'']+/g, '').trim()
   if (!t) return ''
   // 去掉常见前缀「表情:」
   return t.replace(/^(表情|sticker|emoji)[::]?/i, '').slice(0, 10) || ''

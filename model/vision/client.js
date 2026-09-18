@@ -59,6 +59,7 @@ export class VisionService {
       return ''
     }
     const text = (res?.content || '').trim()
+    if (!text) this._warnEmpty('图片识别', name)
     return text
   }
 
@@ -92,7 +93,9 @@ export class VisionService {
       this.logger('warn', `[vision] 视频识别失败 ${name || ''}：${e?.message || e}`)
       return ''
     }
-    return (res?.content || '').trim()
+    const text = (res?.content || '').trim()
+    if (!text) this._warnEmpty('视频识别', name)
+    return text
   }
 
   /**
@@ -125,6 +128,13 @@ export class VisionService {
       }
       return ''
     }
-    return (res?.content || '').trim()
+    const text = (res?.content || '').trim()
+    if (!text) this._warnEmpty('analyze', name)
+    return text
+  }
+
+  /** 模型返回成功但内容为空——最常见的静默失败（图片发给纯文本模型 / 通道吞掉 image_url）。必须留痕。 */
+  _warnEmpty(kind, name) {
+    this.logger('warn', `[vision] ${kind} 返回空 ${name || ''}——视觉模型可能不支持图片输入，或代理通道未透传 image_url。请检查 agent.vision.model（需支持视觉）与代理/通道配置`)
   }
 }

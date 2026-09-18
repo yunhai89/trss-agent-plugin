@@ -19,6 +19,7 @@ import { getRuntime } from './agent.js'
 let _chain = Promise.resolve()
 const _seenUrl = new Map() // url → 最近处理时间（短窗去重，10 分钟）
 const URL_DEDUP_MS = 10 * 60 * 1000
+let _noVisionWarned = false // "无视觉模型"只提醒一次，避免每张图刷屏
 
 /** 下载图片 → {buffer, mime}；非 http(s) url 或失败返回 null。 */
 async function fetchImageBuffer(url) {
@@ -101,7 +102,13 @@ export class StickerWatch extends plugin {
 
   async _discoverOne(manager, vision, url, groupId, cfg) {
     // 无视觉模型 → 跳过（避免空标签/自动名的无用入库；配 agent.vision.model 后启用打标）
-    if (!vision) { Log.debug('[sticker-watch] 无视觉模型，跳过（配 agent.vision.model 后启用）'); return }
+    if (!vision) {
+      if (!_noVisionWarned) {
+        _noVisionWarned = true
+        Log.warn('[sticker-watch] 无可用视觉模型，表情包自动发现已跳过（需 agent.vision.enable=true 且 agent.vision.model 为支持视觉的模型）')
+      }
+      return
+    }
     Log.info('[sticker-watch] 开始下载+分析', url.slice(0, 60))
     const fetched = await fetchImageBuffer(url)
     if (!fetched) return // fetchImageBuffer 已打日志说明原因
@@ -110,8 +117,15 @@ export class StickerWatch extends plugin {
       const res = await manager.discover(fetched.buffer, fetched.mime, { vision, maxDiscovered: cfg.maxDiscovered })
       if (res.status === 'added') {
         Log.mark(`[sticker-watch] 新表情入库 群=${groupId} name=${res.name} tags=[${(res.tags || []).join(',')}]`)
-      } else if (res.status === 'rejected' && res.reason === 'not_sticker') {
-        Log.debug(`[sticker-watch] 判定非表情，丢弃 群=${groupId}`)
+      } else if (res.status === 'rejected') {
+        // 关键：把结果显式打出来，避免"下载成功后再无日志"的静默（旧实现 not_sticker 只在 debug）。
+        if (res.reason === 'vision_parse_failed' || res.reason === 'vision_error') {
+          Log.warn(`[sticker-watch] 视觉判定失败（${res.reason}），未入库 群=${groupId} raw=${String(res.raw || '').slice(0, 80)}`)
+        } else if (res.reason === 'not_sticker') {
+          Log.info(`[sticker-watch] 视觉判定为普通图，丢弃 群=${groupId}`)
+        } else {
+          Log.info(`[sticker-watch] 未入库（${res.reason}）群=${groupId}`)
+        }
       }
       // dup / too_large / no_buffer / save_failed：静默
     } catch (e) {

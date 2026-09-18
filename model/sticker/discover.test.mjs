@@ -2,11 +2,12 @@
  * sticker 自动发现离线自检 —— hash / judgeAndTag 解析 / pickByEmotion / index 辅助。
  * 运行：node model/sticker/discover.test.mjs
  */
-import { hashImage, normalizeTags, judgeAndTag, pickByEmotion, JUDGE_TAG_PROMPT } from './discover.js'
+import { hashImage, normalizeTags, judgeAndTag, classifyJudge, pickByEmotion, JUDGE_TAG_PROMPT } from './discover.js'
 import { findByHash, addDiscoveredEntry, evictDiscoveredToCap, buildCatalog } from './index.js'
 
 let passed = 0, failed = 0
 function ok(c, m) { if (c) { passed++; console.log('  ✓', m) } else { failed++; console.error('  ✗ FAIL', m) } }
+function eq(a, b, m) { const s = JSON.stringify(a) === JSON.stringify(b); ok(s, `${m}${s ? '' : `  (got ${JSON.stringify(a)})`}`) }
 async function test(name, fn) { console.log(`\n[${name}]`); try { await fn() } catch (e) { failed++; console.error('  ✗ THROW', e?.message || e); console.error(e?.stack) } }
 
 // ─── hashImage ───
@@ -58,6 +59,13 @@ await test('judgeAndTag：无 vision → 放行 + noVision + 自动命名', asyn
   const r = await judgeAndTag(null, { buffer: buf, mime: 'image/png' })
   ok(r.isSticker === true && r.noVision === true, '无 vision 放行')
   ok(r.name.startsWith('表情_') && r.name.includes(hashImage(buf).slice(0, 6)), '自动命名 表情_<hash6>')
+})
+
+await test('classifyJudge：区分"真非表情"与"视觉失败"（防静默丢弃）', async () => {
+  eq(classifyJudge({ isSticker: true }), 'ok', '入库 → ok')
+  eq(classifyJudge({ isSticker: false }), 'not_sticker', '真非表情 → not_sticker')
+  eq(classifyJudge({ isSticker: false, parseFailed: true }), 'vision_parse_failed', '返回非 JSON → vision_parse_failed')
+  eq(classifyJudge({ isSticker: false, error: true }), 'vision_error', '调用抛错 → vision_error')
 })
 
 // ─── pickByEmotion ───

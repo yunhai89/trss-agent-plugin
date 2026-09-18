@@ -732,33 +732,42 @@ async function buildRuntime() {
   // → 并发 run 不再互相覆盖 this.messages，根治串会话/艾特错人，且不同用户真并发（不排队）
   const makeAgent = () => new Agent(agentConfig)
 
-  // 视觉子模型（A 方案）：主模型不支持视觉时，由它把图片转成文本描述喂给主模型
+  // 视觉子模型（A 方案）：主模型不支持视觉时，由它把图片转成文本描述喂给主模型。
+  // 注意：vision.model 留空时"复用主模型"只对本身支持视觉的主模型成立。主模型若是纯文本模型，
+  // 复用会把图片发给文本模型 → 请求失败/返回空 → 表现为"识图/表情打标无任何反应"，必须直接禁用。
   let vision = null
-  if (cfg.vision?.enable === true && (cfg.vision?.model || cfg.model)) {
-    try {
-      const vcfg = cfg.vision
-      if (!vcfg.model && cfg.model) Log.info('[vision] vision.model 未配，复用主模型', cfg.model)
-      const vProtocol = vcfg.protocol || protocol
-      const vPresetMap = vProtocol === 'anthropic' ? anthropicPresets : openaiPresets
-      const vPreset = vcfg.preset ? vPresetMap[vcfg.preset] : preset
-      const vProvider = createProvider({
-        protocol: vProtocol,
-        ...vPreset,
-        ...(vcfg.baseURL ? { baseURL: vcfg.baseURL } : {}),
-        apiKey: vcfg.apiKey || cfg.apiKey,
-        model: vcfg.model || cfg.model,
-      })
-      vision = new VisionService({
-        provider: vProvider,
-        model: vcfg.model || cfg.model,
-        protocol: vProtocol,
-        describePrompt: vcfg.describePrompt || undefined,
-        maxTokens: vcfg.maxTokens || 1024,
-        logger: Log.tag('vision'),
-        ...(proxyFetch ? { fetch: proxyFetch } : {}),
-      })
-    } catch (e) {
-      Log.warn('[vision] 视觉子模型装配失败，主模型不支持视觉时图片将降级', e?.message || e)
+  if (cfg.vision?.enable === true) {
+    const vcfg = cfg.vision
+    const vProtocol = vcfg.protocol || protocol
+    const vModel = vcfg.model || cfg.model
+    const vCaps = detectCapabilities({ protocol: vProtocol, model: vModel, caps: cfg.media?.caps })
+    if (!vcfg.model && !vCaps.vision) {
+      Log.warn(`[vision] 未配置 agent.vision.model，且主模型 ${vModel} 不支持视觉——视觉子模型已禁用（否则图片会被发给纯文本模型、静默失败）。如需识图/表情打标，请把 agent.vision.model 设为支持视觉的模型（如 qwen-vl-max / glm-4v / gpt-4o / 名称含 omni 的 mimo）`)
+    } else {
+      try {
+        if (!vcfg.model && cfg.model) Log.info('[vision] vision.model 未配，复用支持视觉的主模型', vModel)
+        const vPresetMap = vProtocol === 'anthropic' ? anthropicPresets : openaiPresets
+        const vPreset = vcfg.preset ? vPresetMap[vcfg.preset] : preset
+        const vProvider = createProvider({
+          protocol: vProtocol,
+          ...vPreset,
+          ...(vcfg.baseURL ? { baseURL: vcfg.baseURL } : {}),
+          apiKey: vcfg.apiKey || cfg.apiKey,
+          model: vModel,
+          log: providerLog,
+          ...(proxyFetch ? { fetch: proxyFetch } : {}),
+        })
+        vision = new VisionService({
+          provider: vProvider,
+          model: vModel,
+          protocol: vProtocol,
+          describePrompt: vcfg.describePrompt || undefined,
+          maxTokens: vcfg.maxTokens || 1024,
+          logger: Log.tag('vision'),
+        })
+      } catch (e) {
+        Log.warn('[vision] 视觉子模型装配失败，主模型不支持视觉时图片将降级', e?.message || e)
+      }
     }
   }
 

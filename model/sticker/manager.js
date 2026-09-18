@@ -22,7 +22,7 @@ import {
   findByHash, addDiscoveredEntry, evictDiscoveredToCap,
 } from './index.js'
 import { parseMarkers, composeString, composeSegments } from './parser.js'
-import { hashImage, judgeAndTag, pickByEmotion as pickByEmotionFrom, fuzzyFindByName } from './discover.js'
+import { hashImage, judgeAndTag, classifyJudge, pickByEmotion as pickByEmotionFrom, fuzzyFindByName } from './discover.js'
 
 const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }
 
@@ -98,7 +98,10 @@ export class StickerManager {
     if (findByHash(index, hash)) return { status: 'dup', hash }
     // 视觉判定+打标
     const judged = await judgeAndTag(vision, { buffer, mime })
-    if (!judged.isSticker) return { status: 'rejected', reason: 'not_sticker', hash }
+    if (!judged.isSticker) {
+      const reason = classifyJudge(judged)
+      return { status: 'rejected', reason, hash, raw: judged.raw }
+    }
     // 存盘：images/discovered/<hash>.<ext>
     const ext = mimeToExt(mime)
     const fileRel = `discovered/${hash}.${ext}`
