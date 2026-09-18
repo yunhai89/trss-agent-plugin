@@ -350,11 +350,7 @@
         form.providerId = pid
         const list = (form.llmModels || []).filter((m) => m && m.providerId === pid)
         if (!list.some((m) => m.id === form.modelId)) form.modelId = list[0]?.id || ''
-        // 旁路小模型走主 provider 端点：不属于新厂商的模型 id 会调用失败，清空回落到主模型
-        if (form.utilityModel && !list.some((m) => m.model === form.utilityModel)) {
-          form.utilityModel = ''
-          toast('旁路小模型不属于新厂商，已清空（回落主模型）', 'info')
-        }
+        // 功能模型（旁路/记忆/评审/子代理等）现已支持跨厂商引用，切换主厂商不再清空它们
       }
       const ensureModelEntry = (pid, modelId) => {
         let m = (form.llmModels || []).find((x) => x && x.providerId === pid && x.model === modelId)
@@ -427,20 +423,20 @@
         form.llmModels.splice(i, 1)
       }
 
-      /* 功能分配：槽位 ← 注册表模型。writePath 主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）
-         复用主 provider 端点，只能选与「基础 / 模型」所选厂商同端点的模型；
-         视觉/Embedding 选其它厂商时自动同步其端点；主模型槽位直接写基础模型引用。 */
+      /* 功能分配：槽位 ← 注册表模型。所有功能模型均支持跨厂商引用——选到非主厂商的模型时，
+         运行时按 llmModels[].id / model 字符串解析到对应 llmProviders 端点（model-router）；
+         视觉/Embedding 仍按其专用端点字段同步；主模型槽位直接写基础模型引用。 */
       const FEATURES = [
         { key: 'main', label: '主模型', mainOnly: false, hint: '对话主力：推理/工具调用/复杂任务，建议用强模型', get: () => mainModel.value?.model || '', set: (v) => { if (!v) form.modelId = '' } },
-        { key: 'utility', label: '旁路小模型', mainOnly: true, hint: '高频小任务（意图识别/摘要），推荐便宜快速的小模型', get: () => form.utilityModel, set: (v) => { form.utilityModel = v } },
+        { key: 'utility', label: '旁路小模型', mainOnly: false, hint: '高频小任务（意图识别/摘要），推荐便宜快速的小模型', get: () => form.utilityModel, set: (v) => { form.utilityModel = v } },
         { key: 'vision', label: '视觉模型', mainOnly: false, hint: '看图/多模态理解，必须选支持图片输入的模型', get: () => form.vision?.model || '', set: (v) => { if (!form.vision) form.vision = {}; form.vision.model = v } },
-        { key: 'recall', label: '记忆抽取模型', mainOnly: true, hint: '短文本结构化抽取，小模型即可，量大省钱', get: () => form.recall?.model || '', set: (v) => { if (!form.recall) form.recall = {}; form.recall.model = v } },
+        { key: 'recall', label: '记忆抽取模型', mainOnly: false, hint: '短文本结构化抽取，小模型即可，量大省钱', get: () => form.recall?.model || '', set: (v) => { if (!form.recall) form.recall = {}; form.recall.model = v } },
         { key: 'embed', label: 'Embedding 模型', mainOnly: false, hint: '语义检索/近邻检测用，需厂商有 /embeddings 端点（DeepSeek 无，留空则全部回落词面匹配）', get: () => form.recall?.embedProvider || '', set: (v) => { if (!form.recall) form.recall = {}; form.recall.embedProvider = v } },
-        { key: 'review', label: '自进化评审模型', mainOnly: true, hint: '代码/方案评审，输出结构化结论，中等模型够用', get: () => form.selfReview?.model || '', set: (v) => { if (!form.selfReview) form.selfReview = {}; form.selfReview.model = v } },
-        { key: 'worker', label: '子代理模型', mainOnly: true, hint: '并行子任务执行，性价比优先（可多实例并发）', get: () => form.multiagent?.workerModel || '', set: (v) => { if (!form.multiagent) form.multiagent = {}; form.multiagent.workerModel = v } },
-        { key: 'hzp', label: '伪人 Planner 模型', mainOnly: true, hint: '群聊参与决策（该不该接话），高频调用，小-中模型重速度', get: () => form.humanize?.planner?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.planner) form.humanize.planner = {}; form.humanize.planner.model = v } },
-        { key: 'hzr', label: '伪人 Replyer 模型', mainOnly: true, hint: '写群聊台词要像真人，语感重要，建议与主模型同档', get: () => form.humanize?.replyer?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.replyer) form.humanize.replyer = {}; form.humanize.replyer.model = v } },
-        { key: 'gw', label: '群世界分析模型', mainOnly: true, hint: '批量 JSON 抽取（画像/事件），小模型即可，注意每日预算', get: () => form.groupWorld?.analysis?.modelProfile || '', set: (v) => { if (!form.groupWorld) form.groupWorld = {}; if (!form.groupWorld.analysis) form.groupWorld.analysis = {}; form.groupWorld.analysis.modelProfile = v } },
+        { key: 'review', label: '自进化评审模型', mainOnly: false, hint: '代码/方案评审，输出结构化结论，中等模型够用', get: () => form.selfReview?.model || '', set: (v) => { if (!form.selfReview) form.selfReview = {}; form.selfReview.model = v } },
+        { key: 'worker', label: '子代理模型', mainOnly: false, hint: '并行子任务执行，性价比优先（可多实例并发）', get: () => form.multiagent?.workerModel || '', set: (v) => { if (!form.multiagent) form.multiagent = {}; form.multiagent.workerModel = v } },
+        { key: 'hzp', label: '伪人 Planner 模型', mainOnly: false, hint: '群聊参与决策（该不该接话），高频调用，小-中模型重速度', get: () => form.humanize?.planner?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.planner) form.humanize.planner = {}; form.humanize.planner.model = v } },
+        { key: 'hzr', label: '伪人 Replyer 模型', mainOnly: false, hint: '写群聊台词要像真人，语感重要，建议与主模型同档', get: () => form.humanize?.replyer?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.replyer) form.humanize.replyer = {}; form.humanize.replyer.model = v } },
+        { key: 'gw', label: '群世界分析模型', mainOnly: false, hint: '批量 JSON 抽取（画像/事件），小模型即可，注意每日预算', get: () => form.groupWorld?.analysis?.modelProfile || '', set: (v) => { if (!form.groupWorld) form.groupWorld = {}; if (!form.groupWorld.analysis) form.groupWorld.analysis = {}; form.groupWorld.analysis.modelProfile = v } },
       ]
       const featureVal = (f) => f.get() || ''
       // 下拉候选 = 模型列表注册表 ∪ 配置中已在用的模型（各功能当前值 + 回退链）——已配置未入册的也能直接选
@@ -759,7 +755,8 @@
             <cfg-row full name="厂商" desc="从「厂商配置」选：协议 / 预设 / 接口地址 / Key 都由所选厂商决定（此处不再单独填）">
               <div class="row g6">
                 <select class="sel" style="width:280px" :value="form.providerId" @change="setBaseProvider($event.target.value)">
-                  <option value="">（未选择）</option>
+                  <option v-if="form.llmProviders.length" value="">（未选择）</option>
+                  <option v-else disabled>无数据</option>
                   <option v-for="p in form.llmProviders" :key="p.id" :value="p.id">{{ p.name || '（未命名）' }} · {{ p.baseURL || '未填地址' }}</option>
                 </select>
                 <button type="button" class="btn b-line b-sm" @click="jump('providers')"><v-icon name="edit"/>管理厂商</button>
@@ -768,7 +765,8 @@
             <cfg-row full name="模型" desc="从「模型列表」选该厂商下的模型条目；条目的思考 / 温度 / maxTokens 随之生效">
               <div class="row g6">
                 <select class="sel" style="width:280px" :value="form.modelId" @change="setBaseModel($event.target.value)" :disabled="!form.providerId">
-                  <option value="">{{ mainModels.length ? '（未选择）' : '（该厂商下还没有模型）' }}</option>
+                  <option v-if="mainModels.length" value="">（未选择）</option>
+                  <option v-else disabled>无数据</option>
                   <option v-for="m in mainModels" :key="m.id" :value="m.id">{{ m.name ? m.name + ' · ' : '' }}{{ m.model }}</option>
                 </select>
                 <button type="button" class="btn b-line b-sm" @click="jump('models')"><v-icon name="edit"/>管理模型</button>
@@ -808,7 +806,8 @@
             <cfg-row full name="旁路小模型" desc="进度播报等旁路任务；留空=主模型。只能从当前所选厂商的模型里选（旁路任务走主 provider 端点）">
               <div class="row g6">
                 <select class="sel" style="width:280px" :value="form.utilityModel" @change="form.utilityModel = $event.target.value" :disabled="!form.providerId || !mainModels.length">
-                  <option value="">（留空 = 沿用主模型）</option>
+                  <option v-if="mainModels.length" value="">（留空 = 沿用主模型）</option>
+                  <option v-else disabled>无数据</option>
                   <option v-for="m in mainModels" :key="m.id" :value="m.model">{{ m.name ? m.name + ' · ' : '' }}{{ m.model }}</option>
                   <option v-if="form.utilityModel && !mainModels.some((m) => m.model === form.utilityModel)" :value="form.utilityModel">{{ form.utilityModel }}（不在当前厂商下）</option>
                 </select>
@@ -935,10 +934,11 @@
             <div class="full" style="padding:10px 12px;border:1px dashed var(--line);border-radius:10px;margin-bottom:4px">
               <div class="mut2" style="font-size:12px">从「模型列表」分区选择；留空=该功能默认回落。主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）只能用<b>与基础模型同端点厂商</b>的模型；视觉 / Embedding 选其它厂商时会自动同步其接入信息；<b>主模型</b>槽位等同于「基础 / 模型」的选择。</div>
             </div>
-            <cfg-row v-for="f in FEATURES" :key="f.key" :name="f.label" :desc="(f.hint ? f.hint + '；' : '') + (f.mainOnly ? '仅同端点厂商（与基础模型所选厂商一致）' : '可选任意厂商（自动同步端点）')">
+            <cfg-row v-for="f in FEATURES" :key="f.key" :name="f.label" :desc="(f.hint ? f.hint + '；' : '') + (f.key === 'vision' || f.key === 'embed' ? '可选任意厂商（自动同步端点）' : '可选任意厂商（运行时按注册表解析端点）')">
               <div class="row g6">
                 <select class="sel" style="width:250px" :value="featureSel(f)" @change="onFeatureSel(f, $event.target.value)">
-                  <option value="">（留空 = 默认回落）</option>
+                  <option v-if="knownModels.length" value="">（留空 = 默认回落）</option>
+                  <option v-else disabled>无数据</option>
                   <option v-for="m in knownModels" :key="(m.fromRegistry ? m.id : 'raw:' + m.model)" :value="(m.fromRegistry ? m.id : 'raw:' + m.model)" :disabled="f.mainOnly && m.fromRegistry && !m.main">
                     {{ m.label }}{{ m.provName ? '（' + m.provName + '）' : '' }}
                   </option>
@@ -1786,7 +1786,8 @@
           <div class="row g6 wrap" style="align-items:center;margin-bottom:10px">
             <input class="inp" style="width:150px;font-weight:700" v-model="modelModal.draft.name" placeholder="别名（如 便宜小模型）" :disabled="modelModal.mode === 'view'">
             <select class="sel" style="width:170px" v-model="modelModal.draft.providerId" :disabled="modelModal.mode === 'view'">
-              <option value="">（未挂厂商）</option>
+              <option v-if="form.llmProviders.length" value="">（未挂厂商）</option>
+              <option v-else disabled>无数据</option>
               <option v-for="p in form.llmProviders" :key="p.id" :value="p.id">{{ p.name || p.id }}</option>
             </select>
           </div>
