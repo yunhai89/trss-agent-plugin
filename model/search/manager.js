@@ -21,33 +21,40 @@ export class SearchManager {
   }
 
   async search(query, opts = {}) {
-    let lastErr = null
+    const errs = []
+    let tried = 0
     for (const p of this.providers) {
       if (!p.available()) continue
+      tried++
       try {
         const result = await p.search(query, opts)
         this.logger('debug', `[search] ${p.name} → ${result.results?.length || 0} results`)
         return result
       } catch (e) {
         this.logger('warn', `[search] ${p.name} failed: ${e?.message || e}`)
-        lastErr = e
+        errs.push(`${p.name}: ${e?.message || e}`)
       }
     }
-    throw lastErr || new Error('no search providers available')
+    if (!tried) throw new Error('无可用搜索源（未配置任何搜索 API Key，且未部署 SearXNG）')
+    // 聚合每个源的真实失败原因，避免只抛出最后一个 "fetch failed" 让人无从排查
+    throw new Error(`所有搜索源均失败 → ${errs.join('；')}`)
   }
 
   async extract(urls, opts = {}) {
-    let lastErr = null
+    const errs = []
+    let tried = 0
     for (const p of this.providers) {
       if (!p.available() || !p.extract) continue
+      tried++
       try {
         return await p.extract(urls, opts)
       } catch (e) {
         this.logger('warn', `[extract] ${p.name} failed: ${e?.message || e}`)
-        lastErr = e
+        errs.push(`${p.name}: ${e?.message || e}`)
       }
     }
-    throw lastErr || new Error('no extract providers available')
+    if (!tried) throw new Error('无可用提取源（未配置搜索 API Key，且未部署 SearXNG）')
+    throw new Error(`所有提取源均失败 → ${errs.join('；')}`)
   }
 }
 

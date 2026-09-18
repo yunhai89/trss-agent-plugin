@@ -626,13 +626,35 @@ E2B_INTEGRATION=1 node model/sandbox/e2b.integration.test.mjs
 
 ### 🔍 SearXNG（自建免费搜索后端）安装
 
-搜索（`web_search`/`#研究`）若无 Tavily/Exa 等 key，可自建 SearXNG（免费、无 key、隐私）：
+搜索（`web_search`/`#研究`）若无 Tavily/Exa 等 key，可自建 SearXNG（免费、无 key、隐私）。
+
+> ⚠️ **必须给实例开启 JSON 格式**：SearXNG 默认只输出 HTML，而插件走的是 JSON API。未开启时请求 `format=json` 会被实例拒绝，日志报 `SearXNG HTTP 403`。
 
 ```bash
+# 1) 写一份启用 json 的 settings（挂载进容器）
+mkdir -p /opt/searxng
+cat > /opt/searxng/settings.yml <<'YAML'
+use_default_settings: true
+server:
+  secret_key: "change-me-to-a-random-string"
+  limiter: false
+search:
+  formats:
+    - html
+    - json
+YAML
+
+# 2) 启动
 docker run -d --name searxng --restart=always -p 8080:8080 \
+  -v /opt/searxng/settings.yml:/etc/searxng/settings.yml \
   -e SEARXNG_BASE_URL=http://localhost:8080 \
   docker.m.daocloud.io/searxng/searxng:latest
+
+# 3) 自检：应返回 JSON（不是 403）
+curl -s "http://localhost:8080/search?q=test&format=json" | head -c 200
 ```
+
+> 已有实例补开 json：编辑其 `settings.yml` 的 `search.formats` 加入 `json`，再 `docker restart searxng`（改配置不会热生效）。
 
 配置里填：
 
@@ -642,6 +664,7 @@ search:
 ```
 
 > 生产建议给 SearXNG 加 reverse proxy + auth（见 [SearXNG 文档](https://docs.searxng.org)）。插件按其 JSON API 调用，无需额外适配。
+> 无 key 且未部署 SearXNG 时会回退 DuckDuckGo 抓取；部分网络（如国内）访问不了 DuckDuckGo，此时只能靠 SearXNG 或搜索 API Key。
 
 ---
 

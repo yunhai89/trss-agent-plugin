@@ -10,8 +10,20 @@ export function createSearXNGProvider({ url = 'http://localhost:8080', fetcher, 
       if (options.language) params.set('language', options.language)
       if (options.time_range) params.set('time_range', options.time_range)
       if (options.categories) params.set('categories', options.categories)
-      const res = await f(`${base}/search?${params}`, { signal: AbortSignal.timeout(timeout) })
-      if (!res.ok) throw new Error(`SearXNG HTTP ${res.status}`)
+      const res = await f(`${base}/search?${params}`, {
+        signal: AbortSignal.timeout(timeout),
+        // 带浏览器 UA + Accept：降低部分实例 limiter/botdetection 的拦截概率
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; agents-plugin)', Accept: 'application/json' },
+      })
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        // 403/400 几乎都是实例未开启 json 格式（SearXNG 对未启用的 format 直接 403），
+        // 也可能是实例 limiter 拦截；给出可执行的排查指引，而非干巴巴的 HTTP 码。
+        if (res.status === 403 || res.status === 400) {
+          throw new Error(`SearXNG HTTP ${res.status}——多为实例未在 search.formats 中启用 json（也可能被实例 limiter 拦截）。请编辑实例 settings.yml，在 search.formats 加入 json 后重启实例${body ? `（响应片段：${String(body).replace(/\s+/g, ' ').slice(0, 100)}）` : ''}`)
+        }
+        throw new Error(`SearXNG HTTP ${res.status}${body ? `：${String(body).replace(/\s+/g, ' ').slice(0, 120)}` : ''}`)
+      }
       // SearXNG 默认只返回 HTML；必须带 format=json（上面已带），且实例 settings.yml 的
       // search.formats 需启用 json。若实例未开启，会回 HTML —— 这里给出可执行的报错，而不是 JSON 解析异常。
       const ctype = String(res.headers?.get?.('content-type') || '')

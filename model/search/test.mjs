@@ -102,6 +102,19 @@ await test('provider/searxng：实例只回 HTML → 给出可执行报错（需
   ok(err && /json/i.test(err.message) && /formats|settings\.yml/i.test(err.message), '提示在 settings.yml 开启 json')
 })
 
+await test('provider/searxng：403（实例未开 json）→ 可执行报错', async () => {
+  const f = async () => ({
+    ok: false, status: 403,
+    headers: { get: () => 'text/html' },
+    async text() { return '<html><body>403 Forbidden</body></html>' },
+    async json() { throw new Error('x') },
+  })
+  const p = createSearXNGProvider({ url: 'http://localhost:8080', fetcher: f })
+  let err = null
+  try { await p.search('t') } catch (e) { err = e }
+  ok(err && /403/.test(err.message) && /search\.formats/.test(err.message), '提示在 search.formats 开启 json')
+})
+
 // ---------- 6. DDG provider ----------
 await test('provider/ddg：本地兜底（始终可用）', async () => {
   const html = '<a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com">Example</a><td class="result-snippet">an example site</td>'
@@ -123,6 +136,15 @@ await test('manager：provider 失败 → 自动回退下一个', async () => {
   const r = await mgr.search('test')
   eq(r.provider, 'brave', '回退到 brave')
   eq(r.results[0].title, 'OK', 'brave 结果')
+})
+
+await test('manager：全部失败 → 聚合各源原因（不再只抛最后一个 fetch failed）', async () => {
+  const a = { name: 'searxng', available: () => true, async search() { throw new Error('SearXNG HTTP 403') } }
+  const b = { name: 'ddg', available: () => true, async search() { throw new Error('fetch failed') } }
+  const mgr = new (await import('./manager.js')).SearchManager({ providers: [a, b] })
+  let err = null
+  try { await mgr.search('t') } catch (e) { err = e }
+  ok(err && /searxng: SearXNG HTTP 403/.test(err.message) && /ddg: fetch failed/.test(err.message), '聚合两个源的原因')
 })
 
 // ---------- 8. createSearchManager：无 key → DDG 兜底 ----------
