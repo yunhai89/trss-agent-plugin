@@ -64,6 +64,8 @@ export const presets = {
     baseURL: 'https://opencode.ai/zen',
     version: '2023-06-01',
     authHeader: 'x-api-key',
+    headers: { 'User-Agent': 'trss-agent-plugin/0.3.0' },
+    sessionHeader: 'x-opencode-session',
   },
 
   /** OpenCode Go 订阅制（Anthropic 兼容 /messages：MiniMax / Qwen）。
@@ -74,6 +76,8 @@ export const presets = {
     baseURL: 'https://opencode.ai/zen/go',
     version: '2023-06-01',
     authHeader: 'x-api-key',
+    headers: { 'User-Agent': 'trss-agent-plugin/0.3.0' },
+    sessionHeader: 'x-opencode-session',
   },
 }
 

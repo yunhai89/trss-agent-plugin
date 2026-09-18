@@ -17,9 +17,10 @@ export class OpenAIProvider extends Provider {
   async chat(opts) {
     const {
       model, messages, system, tools, tool_choice, temperature, max_tokens, thinking, top_p,
-      signal, stream, onDelta, onReasoning, cacheControl: _cacheControl, ...rest
+      signal, stream, onDelta, onReasoning, cacheControl: _cacheControl, sessionId, ...rest
     } = opts // cacheControl（Anthropic 专用 prompt 缓存断点）在此吞掉：OpenAI 兼容端为自动前缀缓存，
     // 该字段既无意义、又不能随 ...rest 泄漏进请求体（部分端点对未知字段直接 400）
+    // sessionId：会话级标识（如 OpenCode Go 的 x-opencode-session），走请求头而非请求体
 
     const body = {
       model: model || this.defaultModel,
@@ -53,22 +54,22 @@ export class OpenAIProvider extends Provider {
     }
 
     try {
-      return await this._create(body, { signal, stream, onDelta, onReasoning })
+      return await this._create(body, { signal, stream, onDelta, onReasoning, sessionId })
     } catch (e) {
       // 自适应：API 报 temperature 非法 → 去掉 temperature 用模型默认重试一次，并记住该模型
       if (body.temperature != null && this._isTempError(e)) {
         this._modelsNoTemp.add(body.model)
         delete body.temperature
-        return await this._create(body, { signal, stream, onDelta, onReasoning })
+        return await this._create(body, { signal, stream, onDelta, onReasoning, sessionId })
       }
       throw e
     }
   }
 
   /** 实际发起 create（流式/非流式），供 chat 的 temperature 自适应重试复用 */
-  async _create(body, { signal, stream, onDelta, onReasoning }) {
+  async _create(body, { signal, stream, onDelta, onReasoning, sessionId }) {
     if (stream) {
-      const s = await this.client.chat.completions.create(body, { signal }) // signal 走 opts 第二参（曾 {...body, signal} 并入请求体）
+      const s = await this.client.chat.completions.create(body, { signal, sessionId }) // signal/sessionId 走 opts 第二参（曾 {...body, signal} 并入请求体）
       // 流式 live 旁路：剥掉内联 <think> 推理块，避免中途播报(onDelta)把思考泄漏给用户
       const stripper = onDelta ? createThinkStripper() : null
       for await (const part of s) {
@@ -78,7 +79,7 @@ export class OpenAIProvider extends Provider {
       }
       return this._resultFromStream(s)
     }
-    const res = await this.client.chat.completions.create(body, { signal })
+    const res = await this.client.chat.completions.create(body, { signal, sessionId })
     return this._resultFromResponse(res)
   }
 

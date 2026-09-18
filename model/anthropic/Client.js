@@ -40,6 +40,9 @@ export class AnthropicClient {
 
     // 自定义默认头
     this.headers = { ...(config.headers || {}) }
+    // 会话头（OpenCode Go 等要求每会话稳定标识）；未配置则不发
+    this.sessionHeader = config.sessionHeader || null
+    this._defaultSessionId = config.sessionId || (globalThis.crypto?.randomUUID?.() || `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`)
 
     // 透传其余配置字段到实例（便于钩子读取）
     for (const [k, v] of Object.entries(config)) {
@@ -63,6 +66,8 @@ export class AnthropicClient {
       ...(opts.headers || {}),
     }
     h[this.authHeader] = this.apiKey
+    // 会话头：优先调用方按会话传入，否则实例级稳定 id（保证头始终存在）
+    if (this.sessionHeader) h[this.sessionHeader] = opts.sessionId || this._defaultSessionId
     if (this.beta) {
       h['anthropic-beta'] = Array.isArray(this.beta) ? this.beta.join(',') : this.beta
     }

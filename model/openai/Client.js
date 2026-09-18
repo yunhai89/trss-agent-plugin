@@ -36,6 +36,10 @@ export class OpenAIClient {
 
     // 自定义默认请求头
     this.headers = { ...(config.headers || {}) }
+    // 会话头：某些网关（如 OpenCode Go）要求每会话稳定标识用于路由/缓存。
+    // 未配置 sessionHeader 的 provider 不发该头（保持原行为）。
+    this.sessionHeader = config.sessionHeader || null
+    this._defaultSessionId = config.sessionId || (globalThis.crypto?.randomUUID?.() || `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`)
 
     // 透传其余配置字段到实例（如 azure 的 resource/deployment/apiVersion），供钩子读取
     for (const [k, v] of Object.entries(config)) {
@@ -61,6 +65,8 @@ export class OpenAIClient {
       ...this.headers,
       ...(opts.headers || {}),
     }
+    // 会话头：优先调用方按会话传入的 sessionId，否则用实例级稳定 id（保证头始终存在）
+    if (this.sessionHeader) h[this.sessionHeader] = opts.sessionId || this._defaultSessionId
     if (this.authHeadersHook) {
       Object.assign(h, this.authHeadersHook(this))
     } else if (this.apiKey) {

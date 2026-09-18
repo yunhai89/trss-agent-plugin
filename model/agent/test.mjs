@@ -723,7 +723,18 @@ await test('schedule 并发：并发 add 不丢 + 重启后 id 不撞', async ()
 
 await test('knowledge 并发：并发 ingest 不丢文档', async () => {
   const kb = new KnowledgeStore({ kv: memoryKv() })
-  await Promise.all(Array.from({ length: 8 }, (_, i) => kb.ingest(`entry${i}-${Math.random().toString(36).slice(2, 16)}`, { title: 'd' + i })))
+  // 用固定且彼此差异大的词表，避免随机串偶发触发 SimHash 近似去重导致用例抖动
+  const texts = [
+    'apple banana cherry',
+    'dog elephant frog giraffe',
+    'house igloo jacket kite',
+    'lion monkey nest ocean',
+    'pencil queen rabbit snake',
+    'tiger umbrella violin whale',
+    'xylophone yacht zebra amber',
+    'bronze copper diamond emerald',
+  ]
+  await Promise.all(texts.map((t, i) => kb.ingest(t, { title: 'd' + i })))
   eq((await kb.listDocs()).length, 8, '8 篇并发入库全部保留')
 })
 
@@ -1734,6 +1745,29 @@ await test('model-router：功能模型解析到对应厂商（不再局限主�
   eq(raw.provider, mainProvider, '未注册裸模型名 → 回退主 provider')
   eq(raw.model, 'some-unknown-model', '裸模型名保留')
   eq(r.resolve('').model, null, '空引用 → model null（调用方自行回落）')
+})
+
+// ---------- 21. provider 会话头：OpenCode Go 要求 x-opencode-session + 自报 UA ----------
+await test('provider：x-opencode-session / UA 头部下发（OpenCode Go）', async () => {
+  // 预设带会话头与 UA（OpenAI / Anthropic 两条协议都要）
+  eq(openaiPresets['opencode-go'].sessionHeader, 'x-opencode-session', 'openai 预设带会话头')
+  eq(anthropicPresets['opencode-go'].sessionHeader, 'x-opencode-session', 'anthropic 预设带会话头')
+  ok(/User-Agent/.test(JSON.stringify(openaiPresets['opencode-go'].headers)), 'openai 预设带 UA')
+  ok(/User-Agent/.test(JSON.stringify(anthropicPresets['opencode-go'].headers)), 'anthropic 预设带 UA')
+
+  // client：opts.sessionId 优先，缺省用实例级稳定 id
+  const oc = createOpenAIClient({ baseURL: 'https://opencode.ai/zen/go/v1', apiKey: 'k', sessionHeader: 'x-opencode-session', headers: { 'User-Agent': 'trss-agent-plugin' } })
+  eq(oc.buildHeaders({ sessionId: 'conv-1' })['x-opencode-session'], 'conv-1', 'opts.sessionId → 会话头')
+  ok(oc.buildHeaders()['x-opencode-session'], '无 sessionId 时用实例级稳定 id')
+  eq(oc.buildHeaders()['User-Agent'], 'trss-agent-plugin', 'UA 头透传')
+
+  // provider：sessionId 走 client opts，不泄漏进请求体
+  let cap = null
+  const client = { chat: { completions: { create: async (body, opts) => { cap = { body, opts }; return { choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }], usage: null } } } } }
+  const p = new OpenAIProvider({ client, model: 'm' })
+  await p.chat({ messages: [{ role: 'user', content: 'hi' }], sessionId: 'conv-9' })
+  eq(cap.opts.sessionId, 'conv-9', 'provider → client opts.sessionId')
+  ok(!('sessionId' in cap.body), 'sessionId 不泄漏进请求体')
 })
 
 // ---------- 总结 ----------

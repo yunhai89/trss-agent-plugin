@@ -143,6 +143,9 @@ export const presets = {
     name: 'opencode',
     baseURL: 'https://opencode.ai/zen/v1',
     reasoningFields: [],
+    // OpenCode Go/Zen 要求：真实客户端 UA + 每会话稳定 x-opencode-session（否则路由告警）
+    headers: { 'User-Agent': 'trss-agent-plugin/0.3.0' },
+    sessionHeader: 'x-opencode-session',
   },
 
   /** OpenCode Go（订阅制：首月 $5，之后 $10/月，走 /zen/go/v1 端点）。
@@ -154,6 +157,9 @@ export const presets = {
     name: 'opencode-go',
     baseURL: 'https://opencode.ai/zen/go/v1',
     reasoningFields: [],
+    // Go 明确要求客户端自报 UA + x-opencode-session 会话 id（缺省会被判"无法高效路由"）
+    headers: { 'User-Agent': 'trss-agent-plugin/0.3.0' },
+    sessionHeader: 'x-opencode-session',
   },
 }
 

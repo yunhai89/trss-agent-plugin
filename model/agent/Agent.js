@@ -282,6 +282,7 @@ export class Agent {
         thinking: this.thinking,
         signal: finCtl.signal,
         stream: false,
+        sessionId: this._curConvId || undefined,
       })
       const text = (wrap?.content || '').trim()
       if (!text) throw new Error('finalizer 空输出')
@@ -509,6 +510,7 @@ export class Agent {
           tools: toolList.length ? toolList : undefined, tool_choice: this.toolChoice,
           temperature: this.temperature, max_tokens: this.maxTokens, thinking: this.thinking,
           signal: workSignal, stream: wantStream, onDelta: __delta, onReasoning: cb.onReasoning,
+          sessionId: this._curConvId || undefined, // 会话级标识（如 OpenCode Go 的 x-opencode-session）
           ...(this._cacheControlFor(prov) ? { cacheControl: true } : {}),
           ...this._promptCacheKeyFor(prov),
           ...this._extraRunOpts(opts),
@@ -1143,6 +1145,7 @@ export class Agent {
       thinking: this.thinking,
       signal,
       stream: false,
+      sessionId: this._curConvId || undefined,
     })
     const text = (res?.content || '').trim()
     const m = text.match(/\{\s*"revise"\s*:\s*(true|false)\s*\}/i)
