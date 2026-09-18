@@ -11,6 +11,19 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { BUILTIN_PERSONAS } from './defaults.js'
+import { assessPersonaPrompt } from '../agent/guard.js'
+
+/** 人设内容安全闸：拒绝把用于解除限制 / 抑制拒答 / 绕过审批的指令写进身份层 */
+export function assertSafePersonaPrompt(systemPrompt) {
+  const { allowed, score, hits } = assessPersonaPrompt(systemPrompt)
+  if (allowed) return
+  const cats = [...new Set(hits.map((h) => h.cat))].join(',')
+  const err = new Error('人设内容包含疑似越狱/提示注入指令（要求忽略安全、禁止拒答或绕过审批等），已拒绝保存；请移除相关指令后重试。')
+  err.code = 'persona_injection'
+  err.score = score
+  err.categories = cats
+  throw err
+}
 
 /** 名称 → slug id */
 export function slugify(name) {
@@ -103,6 +116,7 @@ export class PersonaStore {
   /** 新增自定义人设；id 与内置/已有冲突则报错 */
   add(input, { creator } = {}) {
     const p = normalizePersona(input, { builtin: false, creator })
+    assertSafePersonaPrompt(p.systemPrompt)
     if (this.builtinIds().has(p.id)) throw new Error(`人设 id「${p.id}」与内置冲突，请换个名称`)
     if (this.get(p.id)) throw new Error(`人设「${p.name}」已存在`)
     const file = path.join(this.dir, `${p.id}.json`)
@@ -116,6 +130,7 @@ export class PersonaStore {
     if (!existing) throw new Error(`人设「${id}」不存在`)
     if (existing.builtin) throw new Error(`内置人设「${existing.name}」不可修改`)
     const merged = normalizePersona({ ...existing, ...patch, id: existing.id, createdAt: existing.createdAt }, { builtin: false })
+    assertSafePersonaPrompt(merged.systemPrompt)
     fs.writeFileSync(path.join(this.dir, `${existing.id}.json`), JSON.stringify(merged, null, 2))
     return merged
   }
