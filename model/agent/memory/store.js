@@ -39,6 +39,20 @@ export class MemoryLimitError extends Error {
   }
 }
 
+/** 记忆写入威胁拦截：内容命中提示词注入特征（声明式记忆会注入 system，必须先拦）。 */
+export class MemoryThreatError extends Error {
+  constructor({ target, text, score, hits }) {
+    const cats = (hits || []).map((h) => h.cat).filter(Boolean).join(',')
+    super(`记忆写入被拦截：内容疑似提示词注入${cats ? `（${cats}）` : ''}，score=${score ?? '?'}`)
+    this.name = 'MemoryThreatError'
+    this.target = target
+    this.threat = true
+    this.score = score
+    this.hits = hits || []
+    this.snippet = String(text || '').slice(0, 120)
+  }
+}
+
 function joinedLen(entries) {
   return entries.join(SEP).length
 }
@@ -74,11 +88,14 @@ function applyOp(arr, op) {
 }
 
 export class MemoryStore {
-  constructor({ dir, limits, enabled = { memory: true, user: true } } = {}) {
+  constructor({ dir, limits, enabled = { memory: true, user: true }, scan = null } = {}) {
     if (!dir) throw new Error('MemoryStore 需要 dir')
     this.dir = dir
     this.limits = { ...DEFAULT_LIMITS, ...limits }
     this.enabled = { memory: true, user: true, ...enabled }
+    // 写入威胁扫描（可选）：scan(text) → { flagged, score, hits }。声明式记忆注入 system，
+    // 命中即拒写，防止把指令注入持久化进每轮 system。库解耦：由 apps 注入 guard.checkInput。
+    this.scan = typeof scan === 'function' ? scan : null
     /** @type {Map<string, {state:{memory:string[],user:string[]}}>} 按 scopeId 懒加载缓存 */
     this._scopes = new Map()
   }
@@ -222,14 +239,25 @@ export class MemoryStore {
     if (!this.enabled[target]) throw new Error(`记忆 ${target} 已禁用`)
   }
 
-  /** 提交前做超限检查；超限抛 MemoryLimitError（不改状态） */
+  /** 提交前做威胁扫描 + 超限检查；命中注入抛 MemoryThreatError，超限抛 MemoryLimitError（均不改状态） */
   _commit(target, scopeId, newArr) {
+    const sc = this._getScope(scopeId)
+    // 威胁扫描：只扫本轮新增/变更的条目。已存在的条目不再重复扫，避免历史脏数据把后续写入全部锁死
+    // （历史文件被直接编辑/迁移带进来的注入由注入侧 _screenUntrusted 兜底标注）。
+    if (this.scan) {
+      const oldSet = new Set(sc.state[target] || [])
+      for (const entry of newArr) {
+        if (oldSet.has(entry)) continue
+        let r = null
+        try { r = this.scan(String(entry)) } catch { r = null }
+        if (r?.flagged) throw new MemoryThreatError({ target, text: entry, score: r.score, hits: r.hits })
+      }
+    }
     const used = joinedLen(newArr)
     const limit = this.limits[target]
     if (used > limit) {
       throw new MemoryLimitError({ target, used, limit, entries: newArr })
     }
-    const sc = this._getScope(scopeId)
     sc.state[target] = newArr
     this._save(target, scopeId, newArr)
     return { ok: true, target, used, limit, count: newArr.length }

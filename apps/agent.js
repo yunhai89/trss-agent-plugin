@@ -380,10 +380,18 @@ async function buildRuntime() {
   // 一切数据存插件自己目录（Config.path.data 下）；首次运行把旧 TRSS data 目录的数据迁过来
   migratePluginData()
   const memoryDir = Config.path.memories
+  // 记忆威胁扫描（声明式记忆 + 召回记忆共用）：写入前检测指令注入（复用入口 guard.checkInput）。
+  // 声明式记忆会注入 system，命中即拒写（MemoryThreatError），防把注入持久化进每轮 system。
+  const threatScanFn = cfg.memory?.threatScan === false ? null : (text) => {
+    try {
+      return checkInput(String(text || ''), { sensitivity: 'medium', action: 'flag' })
+    } catch { return { flagged: false, score: 0, hits: [] } }
+  }
   const memory = new MemoryStore({
     dir: memoryDir,
     limits: cfg.memoryLimits || undefined, // 接通死配置；null 会覆盖默认 → undefined 回落 DEFAULT_LIMITS
     enabled: cfg.memory?.enable === false ? { memory: false, user: false } : undefined,
+    scan: threatScanFn, // 声明式记忆写入注入扫描
   })
   const personaDir = Config.path.personas
   const personaStore = new PersonaStore({ dir: personaDir })
@@ -391,13 +399,13 @@ async function buildRuntime() {
   // 用量统计采集器：对话/工具用量按本地日聚合写 KV（Web 端 overview 趋势主数据源，替代读日志的不稳定路径）
   const usageStats = createUsageStats({ kv: K, logger: Log })
   const session = new SessionStore({ kv: K })
-  // 记忆威胁扫描：写入前检测指令注入（复用入口 guard.checkInput）。threatScan 关闭则不扫
-  const recallScanFn = cfg.memory?.threatScan === false ? null : (text) => {
+  // 召回记忆威胁扫描：复用同一 threatScanFn，按 0.6 更严阈值判定（召回内容会进上下文）
+  const recallScanFn = threatScanFn ? (text) => {
     try {
-      const g = checkInput(String(text || ''), { sensitivity: 'medium', action: 'flag' })
+      const g = threatScanFn(text)
       return !!g.blocked || (typeof g.score === 'number' && g.score >= 0.6)
     } catch { return false }
-  }
+  } : null
   const recall = new RecallStore({
     kv: K,
     cap: cfg.recall?.cap,

@@ -5,7 +5,7 @@
  * 工具内部捕获 MemoryLimitError / 匹配错误，以 {error, ...} 结构化结果返回（不抛异常），
  * 以便模型在下一轮自行 replace/remove 腾出空间后重试（Hermes 同款语义）。
  */
-export { MemoryStore, MemoryLimitError } from './store.js'
+export { MemoryStore, MemoryLimitError, MemoryThreatError } from './store.js'
 
 /**
  * 构造 memory_search 工具（模型主动召回长期记忆，参考 OpenClaw memory_search）。

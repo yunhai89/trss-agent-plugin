@@ -803,12 +803,14 @@ export class Agent {
     } else if (this.tools && this.tools.list().length) {
       toolCatalog = buildToolCatalogSection(this.tools.list())
     }
-    const skillsSection = this.skills ? buildSkillsPromptSection(this.skills.catalog()) : ''
+    // 技能目录 / 声明式记忆进 system：均为可被污染的内容（skillhub 安装、手改 MEMORY.md），
+    // 命中注入特征时加 <untrusted_data> 边界标注（不阻断注入，只提示模型按数据处理）。
+    const skillsSection = this.skills ? this._screenUntrusted(buildSkillsPromptSection(this.skills.catalog()), 'skills_catalog') : ''
     const stickerSection = this.stickers ? buildStickerPromptSection(this.stickers.catalog()) : ''
     // 声明式记忆按 scopeId 隔离（每群每用户各自一份 MEMORY.md/USER.md）。
     // 注意：recalledMemory / context（每轮必变的动态内容）已移入本轮 user 消息（见 run），
     // system 保持静态前缀以最大化 prompt 缓存命中；此函数的 context/memories 参数仅保留兼容。
-    const memorySnapshot = this.memory ? (this.memory.snapshotAll(scopeId) || '') : ''
+    const memorySnapshot = this.memory ? this._screenUntrusted(this.memory.snapshotAll(scopeId) || '', 'declarative_memory') : ''
     const guardHardening = this.guard ? (this.guard.systemHardening() || '') : ''
     const system = buildAgentSystemPrompt({
       identity,

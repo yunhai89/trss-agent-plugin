@@ -25,7 +25,7 @@ export { GeminiProvider, toGeminiSteps } from './provider/gemini.js'
 
 export { ToolRegistry, ExecutionContext, ddgSearch, parseDDG, stripHtml, noteTools, clarifyTool, makeFailingTool, CLARIFY_TOOL_NAME } from './tools/index.js'
 
-export { MemoryStore, MemoryLimitError, createMemoryTool, makeRecallTool } from './memory/index.js'
+export { MemoryStore, MemoryLimitError, MemoryThreatError, createMemoryTool, makeRecallTool } from './memory/index.js'
 
 // 运营层（yunhai 补齐）
 export { memoryKv, redisKv } from './store/kv.js'
