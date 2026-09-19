@@ -74,10 +74,26 @@ agent:
   recall:
     cap: 200                # 每用户长期记忆条数上限（超限按价值淘汰，非 FIFO）
     extractEvery: 10        # 每 N 轮触发一次 LLM 抽取（意图词"记住/叫我"等仍即时触发）
+    minScore: 0             # 召回最低综合分阈值（0=仅过滤零相关；配 embedding 后可调大如 0.3）
+    diversity:              # 去冗余：候选多于 topK 时按 MMR 兼顾相关与多样
+      enable: true
+      lambda: 0.7           # 1=纯相关排序；越小越鼓励多样（建议 0.5~0.8）
+      perTypeCap: 3         # 同一 type 最多入选条数（选不满 topK 时自动放宽）
+    usage:                  # 使用反馈：反复注入却从未被引用的记忆轻微降权
+      enable: true
+      containment: 0.5      # 最终回复对记忆词元的包含率 ≥ 此值判为"被引用"
+      penalizeAfter: 5      # 注入达此次数且从未被引用 → 降权
+      penalty: 0.5          # 降权系数（0.5=权重减半）
     model: ""               # 抽取用模型 id（留空=utilityModel→主模型；可跨厂商）
     embedProvider: ""       # 语义召回 embedding 模型 id（留空=关键词 jaccard；填则走 cosine 语义匹配）
     embedBaseURL: ""        # embedding 接口地址（留空=复用主 baseURL；用专门 embedding 服务时填，如 https://api.openai.com/v1）
     embedApiKey: ""         # embedding apiKey（留空=复用主 apiKey）
+  profile:                  # 统一用户画像：结构化、带证据、可纠错、会演进的跨会话用户模型
+    enable: true            # 总开关（关则不注入且不采集；#清空所有记录 会一并清除）
+    maxChars: 600           # 注入 system 动态块的字符上限
+    maxPerFacet: 8          # 每分面（身份/偏好/沟通风格…）最多保留条数，低置信先淘汰
+    infer: true             # 从消息统计隐式推断沟通风格（长度/表情/提问率/活跃时段，标"（推断）"）
+    inferAfter: 8           # 累计消息数达到此值后才开始隐式推断（防样本不足误判）
   kb:
     enable: true            # 知识库总开关（关则不注册 kb_search、不入库）
     crawlEnable: true       # 网页抓取开关（web_crawl 工具 + URL 入库/刷新；关则不注册 web_crawl）

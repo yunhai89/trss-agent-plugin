@@ -249,6 +249,19 @@
         if (form.stt.enable == null) form.stt.enable = true
         // 统一模型配置块兜底（recall/selfReview/vision 原有；humanize/groupWorld 为新纳入字段）
         if (!form.recall) form.recall = {}
+        if (!form.recall.diversity) form.recall.diversity = {}
+        if (!form.recall.usage) form.recall.usage = {}
+        if (form.recall.minScore == null) form.recall.minScore = 0
+        if (form.recall.diversity.enable == null) form.recall.diversity.enable = true
+        if (form.recall.diversity.lambda == null) form.recall.diversity.lambda = 0.7
+        if (form.recall.diversity.perTypeCap == null) form.recall.diversity.perTypeCap = 3
+        if (form.recall.usage.enable == null) form.recall.usage.enable = true
+        // 统一用户画像兜底
+        if (!form.profile) form.profile = {}
+        if (form.profile.enable == null) form.profile.enable = true
+        if (form.profile.infer == null) form.profile.infer = true
+        if (form.profile.maxChars == null) form.profile.maxChars = 600
+        if (form.profile.maxPerFacet == null) form.profile.maxPerFacet = 8
         if (!form.selfReview) form.selfReview = {}
         if (!form.vision) form.vision = {}
         if (!form.humanize) form.humanize = {}
@@ -1137,7 +1150,7 @@
         <div :id="'cfg-memory'" class="card cf-sec" :class="{open: open.memory}">
           <div class="cf-sh" @click="open.memory = !open.memory">
             <span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="memory"/></span>
-            <div><div class="ct-t">记忆系统</div><div class="ct-s">声明式记忆 + 长期记忆召回</div></div>
+            <div><div class="ct-t">记忆系统</div><div class="ct-s">声明式记忆 + 长期记忆召回 + 用户画像</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.memory"><div class="cf-grid">
@@ -1158,6 +1171,33 @@
             </cfg-row>
             <cfg-row name="LLM 抽取间隔(轮)" desc="每 N 轮触发一次抽取">
               <input type="number" class="inp" style="width:120px" min="1" v-model.number="form.recall.extractEvery">
+            </cfg-row>
+            <cfg-row name="召回最低分" desc="低于此分不注入(0=仅过滤零相关)">
+              <input type="number" class="inp" style="width:120px" min="0" max="1" step="0.05" v-model.number="form.recall.minScore">
+            </cfg-row>
+            <cfg-row name="召回去冗余(MMR)" desc="候选多时兼顾相关与多样,防同义旧事挤满">
+              <v-switch v-model="form.recall.diversity.enable"/>
+            </cfg-row>
+            <cfg-row name="去冗余相关权重" desc="1=纯相关;越小越鼓励多样(建议0.5~0.8)">
+              <input type="number" class="inp" style="width:120px" min="0" max="1" step="0.05" v-model.number="form.recall.diversity.lambda">
+            </cfg-row>
+            <cfg-row name="同类型最多条数" desc="同一记忆类型最多入选;选不满自动放宽">
+              <input type="number" class="inp" style="width:120px" min="1" max="10" v-model.number="form.recall.diversity.perTypeCap">
+            </cfg-row>
+            <cfg-row name="记忆使用反馈" desc="反复注入却从未被引用的记忆自动降权">
+              <v-switch v-model="form.recall.usage.enable"/>
+            </cfg-row>
+            <cfg-row name="用户画像" desc="跨会话归纳身份/风格/偏好/忌讳,可纠错">
+              <v-switch v-model="form.profile.enable"/>
+            </cfg-row>
+            <cfg-row name="隐式风格推断" desc="从消息长度/表情/提问率/活跃时段推断(标注推断)">
+              <v-switch v-model="form.profile.infer"/>
+            </cfg-row>
+            <cfg-row name="画像注入上限(字符)" desc="注入动态块的字符上限,防膨胀">
+              <input type="number" class="inp" style="width:120px" min="100" max="2000" step="50" v-model.number="form.profile.maxChars">
+            </cfg-row>
+            <cfg-row name="每分面保留条数" desc="身份/偏好/风格等每面上限,低置信先淘汰">
+              <input type="number" class="inp" style="width:120px" min="1" max="20" v-model.number="form.profile.maxPerFacet">
             </cfg-row>
             <div class="full" style="padding:8px 12px;border:1px dashed var(--line);border-radius:10px">
               <div class="mut2" style="font-size:12px"><v-icon name="info"/> 抽取 / Embedding 模型已移至 <b>模型配置（功能分配）</b></div>

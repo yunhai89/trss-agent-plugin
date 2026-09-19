@@ -14,6 +14,7 @@ import {
   MemoryStore,
   createMemoryTool,
   makeRecallTool,
+  ProfileStore,
   SessionStore,
   RecallStore,
   ScheduleStore,
@@ -250,6 +251,7 @@ export const makeDeltaStreamer = (safeReply, { enabled = false, minIntervalMs = 
  *   #聊天列表 / #进入聊天 <id> / #new          多对话管理
  *   #确认/#拒绝/#待确认（master）              审批
  *   #记忆 / #忘掉 <kw>                         长期记忆
+ *   #画像 / #忘记画像 <kw>                      统一用户画像（查看/移除）
  *   #我的提醒 / #取消提醒 <id>                  提醒
  *   #模型切换 <id>（master）                    切换模型
  *   #启用mcp <名> / #停止mcp <名>（master）     MCP 服务端启停
@@ -410,9 +412,20 @@ async function buildRuntime() {
     kv: K,
     cap: cfg.recall?.cap,
     extractEvery: cfg.recall?.extractEvery,
+    minScore: cfg.recall?.minScore,
+    diversity: cfg.recall?.diversity,
+    usage: cfg.recall?.usage,
     scanFn: recallScanFn,
     // embedding（可选）：填了 recall.embedProvider 即走 cosine 语义召回，否则纯关键词 jaccard
     embedFn,
+  })
+  // 统一用户画像（跨会话结构化用户模型）：复用召回威胁扫描；infer:false 关闭隐式偏好推断
+  const profile = cfg.profile?.enable === false ? null : new ProfileStore({
+    kv: K,
+    scanFn: recallScanFn,
+    maxChars: cfg.profile?.maxChars,
+    maxPerFacet: cfg.profile?.maxPerFacet,
+    inferAfter: cfg.profile?.infer === false ? Infinity : cfg.profile?.inferAfter,
   })
   // 知识库（全局共享文档库）：复用 recall 的 embedFn，chunk+向量化存 KV，kb_search 检索（RAG）
   const knowledge = new KnowledgeStore({
@@ -710,6 +723,7 @@ async function buildRuntime() {
     memory,
     session,
     recall,
+    profile, // 统一用户画像（结构化长期归纳；enable:false 时为 null）
     recallLlm, // 接通：让 recall.js 的 llmExtract 真正触发（覆盖"帮我记/以后都/别忘了"等自然说法）
     promptRegistry, // 进化版 prompt：_assembleSystem 优先取 registry.get('agent').system
     skills, // 让 Agent 在 system prompt 注入 <available_skills> 目录
@@ -906,7 +920,7 @@ async function buildRuntime() {
     ['面板', cfg.webApi?.enable !== false ? `:${cfg.webApi?.port || 6098}` : 'off'],
   ])
 
-  return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent }
+  return { agentConfig, makeAgent, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent }
 }
 
 const getRuntime = async () => {
@@ -1163,6 +1177,8 @@ export class Chat extends plugin {
         { reg: '^#new$', fnc: 'newChat' },
         { reg: '^#记忆$', fnc: 'showMemory' },
         { reg: '^#忘掉\\s+(.+)', fnc: 'forget' },
+        { reg: '^#画像$', fnc: 'showProfile' },
+        { reg: '^#忘记画像\\s+(.+)', fnc: 'forgetProfile' },
         { reg: '^#我的提醒$', fnc: 'myReminders' },
         { reg: '^#取消提醒\\s*(\\d+)', fnc: 'cancelReminder' },
         { reg: '^#清空所有记录$', fnc: 'clearMyData' },
@@ -2282,6 +2298,28 @@ export class Chat extends plugin {
     return true
   }
 
+  // 统一用户画像：查看当前 scope 的结构化长期归纳
+  async showProfile() {
+    const rt = await getRuntime()
+    if (!rt.profile) return this.e.reply('用户画像未启用（agent.profile.enable=false）'), true
+    const ctx = ctxOf(this.e)
+    const block = await rt.profile.build(ctx.scopeUserId)
+    await this.e.reply((block || '(画像为空，继续对话会自动积累；可在配置中关闭 agent.profile.enable)').slice(0, 4000))
+    return true
+  }
+
+  // 从画像中移除（标记 superseded，保留审计链）
+  async forgetProfile() {
+    const kw = this.e.msg.replace(/^#忘记画像\s+/, '').trim()
+    if (!kw) return this.e.reply('用法：#忘记画像 <关键词>'), true
+    const rt = await getRuntime()
+    if (!rt.profile) return this.e.reply('用户画像未启用（agent.profile.enable=false）'), true
+    const ctx = ctxOf(this.e)
+    const r = await rt.profile.correct(ctx.scopeUserId, { matchText: kw })
+    await this.e.reply(r.superseded ? `已从画像中移除 ${r.superseded} 条含「${kw}」的内容` : `画像中未找到含「${kw}」的内容`)
+    return true
+  }
+
   // —— 知识库（全局共享文档库，embedding RAG）——
   async addKnowledge() {
     const rt = await getRuntime()
@@ -2505,6 +2543,8 @@ export class Chat extends plugin {
       if (nSess) cleared.push(`对话历史(${nSess})`)
       // 召回记忆（按真实 uid：ON=本人 recall；群共享 recall 在 '__group__' 下，不会被误清）
       await rt.recall.clearAll(uid); cleared.push('长期记忆')
+      // 统一用户画像（按真实 uid，与 recall 同域）
+      if (rt.profile) { await rt.profile.clear(uid); cleared.push('用户画像') }
       // 声明式记忆（按 scopeId 隔离的 MEMORY.md/USER.md；群共享模式跳过）
       if (!sharedGroup) { rt.memory.clear(ctx.scopeId); cleared.push('声明式记忆') }
       // 个人笔记

@@ -120,6 +120,18 @@ export function supportGuoba() {
         { field: 'agent.recall.extractEvery', label: 'LLM 抽取间隔(轮)', bottomHelpMessage: '每 N 轮触发一次 LLM 抽取（意图词"记住/叫我"等仍即时触发）', component: 'InputNumber', componentProps: { min: 1 } },
         { field: 'agent.recall.model', label: '抽取用模型(可选)', bottomHelpMessage: '留空=utilityModel→主模型；可跨厂商（填模型 id 或已注册模型名）', component: 'Input', componentProps: { placeholder: '留空=主模型' } },
         { field: 'agent.recall.embedProvider', label: '语义召回 embedding(可选)', bottomHelpMessage: '填 embedding 模型 id 走 cosine 语义匹配；留空=关键词 jaccard 召回', component: 'Input', componentProps: { placeholder: '留空=关键词召回' } },
+        { field: 'agent.recall.minScore', label: '召回最低分', bottomHelpMessage: '低于此综合分的记忆不注入（0=仅过滤零相关；配 embedding 后可调大如 0.3 更严格）', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
+        { field: 'agent.recall.diversity.enable', label: '召回去冗余(MMR)', bottomHelpMessage: '候选多于要取条数时兼顾相关与多样，避免同义旧事挤满上下文；默认开', component: 'Switch' },
+        { field: 'agent.recall.diversity.lambda', label: '去冗余相关权重', bottomHelpMessage: '1=纯相关排序；越小越鼓励多样（建议 0.5~0.8）', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
+        { field: 'agent.recall.diversity.perTypeCap', label: '同类型最多条数', bottomHelpMessage: '同一记忆类型最多入选条数（选不满时自动放宽）', component: 'InputNumber', componentProps: { min: 1, max: 10 } },
+        { field: 'agent.recall.usage.enable', label: '记忆使用反馈', bottomHelpMessage: '记录注入/被引用；反复注入却从未被引用的记忆自动降权；默认开', component: 'Switch' },
+
+        // —— 用户画像（统一用户模型）——
+        { label: '用户画像（统一用户模型）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.profile.enable', label: '启用用户画像', bottomHelpMessage: '跨会话归纳身份/沟通风格/偏好/忌讳，动态注入；带证据可纠错；默认开', component: 'Switch' },
+        { field: 'agent.profile.infer', label: '隐式风格推断', bottomHelpMessage: '从消息长度/表情/提问率/活跃时段推断沟通风格（标注"推断"）；默认开', component: 'Switch' },
+        { field: 'agent.profile.maxChars', label: '画像注入上限(字符)', bottomHelpMessage: '注入 system 动态块的字符上限，防膨胀', component: 'InputNumber', componentProps: { min: 100, max: 2000, step: 50 } },
+        { field: 'agent.profile.maxPerFacet', label: '每分面保留条数', bottomHelpMessage: '身份/偏好/沟通风格等每个分面最多保留条数，低置信先淘汰', component: 'InputNumber', componentProps: { min: 1, max: 20 } },
 
         // —— 在线自进化 ——
         // —— 工具按需发现 ——

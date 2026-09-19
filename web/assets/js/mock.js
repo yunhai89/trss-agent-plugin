@@ -54,7 +54,12 @@
     reply: { mode: 'image', atSender: true, narrate: true, renderScale: 3 },
     memoryLimits: { memory: 2200, user: 1375 },
     memory: { enable: true, threatScan: true },
-    recall: { cap: 200, extractEvery: 10, model: '', embedProvider: '' },
+    recall: {
+      cap: 200, extractEvery: 10, model: '', embedProvider: '', minScore: 0,
+      diversity: { enable: true, lambda: 0.7, perTypeCap: 3 },
+      usage: { enable: true, containment: 0.5, penalizeAfter: 5, penalty: 0.5 },
+    },
+    profile: { enable: true, infer: true, maxChars: 600, maxPerFacet: 8, inferAfter: 8 },
     selfReview: { enable: true, every: 20, model: '', autoApplyMemory: true, autoApplyPrompt: false, dailyBudgetTokens: 200000 },
     evolution: { traceDir: 'data/evolution/traces', promptDir: 'data/evolution/prompts', suggestionDir: 'data/evolution/suggestions' },
     toolEvo: { enable: true, dbPath: 'data/evolution/tevo.db', artifactsDir: 'data/evolution/tools', maxRepairAttempts: 2 },
@@ -169,6 +174,34 @@
       { id: 'r_11', level: 'L3', type: 'preference', content: '喜欢二次元风格的回复和表情包', confidence: 0.86, createdAt: now - 12 * D, updatedAt: now - 1 * D },
       { id: 'r_12', level: 'L2', type: 'fact', content: '在备战期末考试,晚上 10 点后不在线', confidence: 0.77, createdAt: now - 6 * D, updatedAt: now - 6 * D },
     ],
+  }
+
+  /* ---------- §3.4 统一用户画像(profile) ---------- */
+  const profile = {
+    '2854196310': {
+      stats: { msgs: 96, chars: 2680, emojis: 12, questions: 41, hours: { 23: 21, 0: 14, 22: 9 }, firstSeen: now - 60 * D, lastSeen: now - 2 * H },
+      entries: [
+        { id: 'p_01', facet: 'identity', claim: '希望被称作"云汐"', source: 'observed', confidence: 0.95, evidence: ['r_05'], observedAt: now - 35 * D, updatedAt: now - 4 * D, status: 'active' },
+        { id: 'p_02', facet: 'identity', claim: '是 agents-plugin 的作者，做插件与运维', source: 'observed', confidence: 0.92, evidence: ['r_01'], observedAt: now - 40 * D, updatedAt: now - 2 * D, status: 'active' },
+        { id: 'p_03', facet: 'communication', claim: '偏好简洁直接的回答，不要客套话', source: 'observed', confidence: 0.93, evidence: ['r_02'], observedAt: now - 30 * D, updatedAt: now - 1 * D, status: 'active' },
+        { id: 'p_04', facet: 'communication', claim: '消息通常简短，偏好简洁直接的沟通', source: 'inferred', confidence: 0.5, evidence: ['stats'], observedAt: now - 20 * D, updatedAt: now - 3 * D, status: 'active' },
+        { id: 'p_05', facet: 'communication', claim: '常在 23:00-01:00 活跃', source: 'inferred', confidence: 0.4, evidence: ['stats'], observedAt: now - 18 * D, updatedAt: now - 5 * D, status: 'active' },
+        { id: 'p_06', facet: 'expertise', claim: '技术栈：Node.js / Vue / Docker', source: 'observed', confidence: 0.85, evidence: ['r_03'], observedAt: now - 22 * D, updatedAt: now - 3 * D, status: 'active' },
+        { id: 'p_07', facet: 'preference', claim: '代码风格 ESM、无分号、注释用中文', source: 'observed', confidence: 0.88, evidence: ['r_03'], observedAt: now - 22 * D, updatedAt: now - 3 * D, status: 'active' },
+        { id: 'p_08', facet: 'sensitivity', claim: '不喜欢"很高兴为您服务"式客套', source: 'observed', confidence: 0.8, evidence: ['r_02'], observedAt: now - 30 * D, updatedAt: now - 1 * D, status: 'active' },
+        { id: 'p_09', facet: 'fact', claim: '关注 token 成本', source: 'observed', confidence: 0.7, evidence: ['r_04'], observedAt: now - 12 * D, updatedAt: now - 5 * D, status: 'active' },
+        { id: 'p_10', facet: 'preference', claim: '喜欢深色模式', source: 'corrected', confidence: 0.9, evidence: ['manual'], observedAt: now - 9 * D, updatedAt: now - 2 * D, status: 'active', prev: [{ claim: '喜欢浅色模式', confidence: 0.6, source: 'observed', updatedAt: now - 9 * D }] },
+        { id: 'p_11', facet: 'fact', claim: '旧说法：常驻海外', source: 'observed', confidence: 0.3, evidence: ['r_99'], observedAt: now - 50 * D, updatedAt: now - 8 * D, status: 'superseded' },
+      ],
+    },
+    '1145141919': {
+      stats: { msgs: 34, chars: 720, emojis: 15, questions: 9, hours: { 20: 8, 21: 6 }, firstSeen: now - 25 * D, lastSeen: now - 6 * H },
+      entries: [
+        { id: 'p_21', facet: 'identity', claim: '学生党，周末活跃', source: 'observed', confidence: 0.8, evidence: ['r_11'], observedAt: now - 12 * D, updatedAt: now - 1 * D, status: 'active' },
+        { id: 'p_22', facet: 'preference', claim: '喜欢二次元风格的回复和表情包', source: 'observed', confidence: 0.86, evidence: ['r_11'], observedAt: now - 12 * D, updatedAt: now - 1 * D, status: 'active' },
+        { id: 'p_23', facet: 'communication', claim: '常用表情/颜文字，语气可放松活泼', source: 'inferred', confidence: 0.5, evidence: ['stats'], observedAt: now - 10 * D, updatedAt: now - 2 * D, status: 'active' },
+      ],
+    },
   }
 
   /* ---------- §2.2 人设库 ---------- */
@@ -336,7 +369,7 @@
     { id: 'tv_draft011', tool_id: 'text_normalize', semver: '0.1.0', status: 'draft', source_hash: 'j0k1l2', generator_model: 'deepseek-chat', created_at: now - 30 * M },
   ]
   window.MOCK = Vue.reactive({
-    config, scopes, memories, recall, personas, skills,
+    config, scopes, memories, recall, profile, personas, skills,
     conversations, sessions, logFiles, schedules, confirms,
     suggestions, perceptions, tokenTrend, requestTrend, toolTop,
     totalRequests, totalToolCalls, totalTokens, tevoTools,

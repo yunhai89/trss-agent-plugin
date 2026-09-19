@@ -185,6 +185,7 @@ export class Agent {
     this.recall = config.recall || null
     this.recallTopK = config.recallTopK ?? 5
     this.recallLlm = config.recallLlm || null
+    this.profile = config.profile || null // 统一用户画像（跨会话结构化，动态注入；null=关闭）
     this.promptRegistry = config.promptRegistry || null // 进化版 prompt 注册表：_assembleSystem 优先取 registry.get('agent').system
     this.shortCircuitTools = config.shortCircuitTools || ['clarify']
     // 自我反思/自纠：最终回复交付前自检，发现实质问题则回环修正。off=关 | auto=仅多轮/用工具时(默认) | always=每次都反思
@@ -383,15 +384,25 @@ export class Agent {
     // 使 system 成为纯静态前缀：DeepSeek 等 OpenAI 兼容端按「tools+system+messages」
     // 前缀缓存，system 尾部若有每轮必变的内容（时间/情境），其后全部历史都 miss。
     let memories = null
+    let injectedMemoryIds = []
     if (this.recall && ctx) {
       try { memories = await this.recall.retrieve(rawText, scopeUserId, this.recallTopK) } catch { memories = null }
     }
     let recalledMemory = ''
-    if (this.recall && memories && memories.length) recalledMemory = this.recall.formatForPrompt(memories) || ''
+    if (this.recall && memories && memories.length) {
+      recalledMemory = this.recall.formatForPrompt(memories) || ''
+      injectedMemoryIds = memories.filter((m) => !m.suspect).map((m) => m.id)
+    }
+    // 统一用户画像：结构化长期归纳（身份/沟通风格/偏好/忌讳），只作偏置参考，与召回记忆同走不可信边界
+    let profileBlock = ''
+    if (this.profile && scopeUserId) {
+      try { profileBlock = await this.profile.build(scopeUserId) } catch { profileBlock = '' }
+    }
     const dynParts = []
     // 外部内容注入扫描：情境（含群聊历史）与召回记忆均为不可信数据，命中注入特征时加边界标注
     if (context) dynParts.push(this._screenUntrusted(context, 'context'))
     if (recalledMemory) dynParts.push(this._screenUntrusted(recalledMemory, 'memory'))
+    if (profileBlock) dynParts.push(this._screenUntrusted(profileBlock, 'profile'))
     // 动态情境块并入 user 文本（持久化该形态——下轮前缀与本轮完全一致，缓存不打穿；
     // 明确边界标注，模型不当作用户亲述）
     if (dynParts.length) {
@@ -722,6 +733,15 @@ export class Agent {
         const __t = Date.now()
         try {
           await this.recall.extractAndWrite(snapshot, scopeUserId, { llm })
+          // 使用反馈：记录本轮注入记忆是否被最终回复实际引用（启发式；纠错/降权依据）
+          try { await this.recall.recordUsage(scopeUserId, { injectedIds: injectedMemoryIds, replyText: finalContent || '' }) } catch { /* 反馈失败不影响主流程 */ }
+          // 统一用户画像：更新隐式风格统计 + 合并本轮抽取的显式记忆（一次锁/一次落盘）
+          if (this.profile) {
+            try {
+              const mems = await this.recall.listByUser(scopeUserId)
+              await this.profile.ingest(scopeUserId, { userText: rawText, memories: mems })
+            } catch (e) { this.logger('debug', '[profile] 摄入失败', e?.message || e) }
+          }
           this.logger('debug', `[recall] 异步抽取完成 scope=${scopeUserId} msgs=${snapshot.length} ms=${Date.now() - __t}`)
           this.devLog?.('recall_extract', { scopeUserId, ok: true, msgs: snapshot.length, hasLlm: !!llm, ms: Date.now() - __t }, taskId, ctx?.devScope)
         } catch (e) {

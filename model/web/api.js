@@ -168,6 +168,16 @@ router.get('/recall', asyncHandler(async (req, res) => {
   return ok(res, list)
 }))
 
+// GET /api/profile?userId= —— 统一用户画像（条目 + 统计）
+router.get('/profile', asyncHandler(async (req, res) => {
+  const userId = String(req.query.userId || '')
+  if (!userId) return fail(res, CODE.BAD, '缺少 userId')
+  const r = await getRt(res); if (!r) return
+  if (!r.profile) return ok(res, { entries: [], stats: {}, disabled: true })
+  const d = await r.profile.overview(userId).catch(() => ({ entries: [], stats: {} }))
+  return ok(res, d)
+}))
+
 // GET /api/schedule —— 定时任务
 router.get('/schedule', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
@@ -584,6 +594,34 @@ router.delete('/recall/:userId/:entryId', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
   const removed = await r.recall.removeById(req.params.userId, req.params.entryId)
   return ok(res, { removed })
+}))
+
+// POST /api/profile/:userId —— 手动写入/覆盖画像条目（source=corrected，过威胁扫描）
+router.post('/profile/:userId', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.profile) return fail(res, CODE.BAD, '用户画像未启用（agent.profile.enable=false）')
+  const { facet, claim, confidence } = req.body || {}
+  if (!claim || !String(claim).trim()) return fail(res, CODE.BAD, '缺少 claim')
+  const result = await r.profile.upsert(req.params.userId, {
+    facet, claim: String(claim).trim(), confidence: Number(confidence) || 0.9,
+  })
+  return ok(res, result || {})
+}))
+
+// DELETE /api/profile/:userId/:entryId —— 移除单条画像（标记 superseded，保留审计链）
+router.delete('/profile/:userId/:entryId', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.profile) return fail(res, CODE.BAD, '用户画像未启用')
+  const removed = await r.profile.removeById(req.params.userId, req.params.entryId)
+  return ok(res, { removed })
+}))
+
+// DELETE /api/profile/:userId —— 清空该用户画像
+router.delete('/profile/:userId', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.profile) return fail(res, CODE.BAD, '用户画像未启用')
+  await r.profile.clear(req.params.userId)
+  return ok(res, { cleared: true })
 }))
 
 // ── 知识库（Knowledge Base）──

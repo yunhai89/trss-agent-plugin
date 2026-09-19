@@ -23,6 +23,7 @@ import {
   memoryKv,
   SessionStore,
   RecallStore,
+  ProfileStore,
   ScheduleStore,
   checkInput,
   analyze,
@@ -858,6 +859,41 @@ await test('集成：recall 注入本轮 user 消息（system 保持静态前缀
   ok(String(lastUser?.content || '').includes('简洁回复'), '用户原文保留在【用户消息】段')
   await delay(20)
   ok((await recall.listByUser('u1')).length >= 1, '记忆仍在')
+})
+
+await test('集成：用户画像注入 + 轮后合并 + 记忆使用反馈', async () => {
+  const kv = memoryKv()
+  const recall = new RecallStore({ kv })
+  const profile = new ProfileStore({ kv, inferAfter: 2 })
+  await recall.writeMemory({ content: '用户喜欢简洁回复', level: 'L3', confidence: 0.9 }, 'u1')
+  await profile.consolidate('u1', [{ id: 'seed', type: 'preference', content: '用户喜欢深色模式', confidence: 0.9, status: 'active' }])
+  let msgsSeen = null
+  const provider = { async chat(opts) { msgsSeen = opts.messages; return { content: '好的，简洁回复', finishReason: 'stop' } } }
+  const agent = new Agent({ provider, recall, profile, maxTurns: 5 })
+  await agent.run('回复风格', { ctx: { role: 'member', isMaster: true, userId: 'u1', groupId: 'g1' } })
+  const lastUser = [...(msgsSeen || [])].reverse().find((m) => m.role === 'user')
+  ok(String(lastUser?.content || '').includes('喜欢简洁'), '召回记忆注入本轮 user')
+  ok(String(lastUser?.content || '').includes('喜欢深色模式'), '用户画像注入本轮 user')
+  await delay(80)
+  const prof = await profile.list('u1')
+  ok(prof.some((e) => String(e.claim).includes('喜欢简洁')), '画像合并了显式记忆')
+  const mem = (await recall.listByUser('u1')).find((m) => m.content.includes('简洁'))
+  ok((mem.injected || 0) >= 1, '记忆使用反馈记录注入')
+})
+
+await test('集成：自然语言纠错闭环（旧记忆失效）', async () => {
+  const kv = memoryKv()
+  const recall = new RecallStore({ kv })
+  await recall.writeMemory({ content: '用户住在湖南', level: 'L4', confidence: 0.9 }, 'u1')
+  const provider = { async chat() { return { content: '好的', finishReason: 'stop' } } }
+  const agent = new Agent({ provider, recall, maxTurns: 5 })
+  await agent.run('我住在哪', { ctx: { role: 'member', isMaster: true, userId: 'u1', groupId: 'g1' } })
+  await agent.run('不是湖南，是湖北', { ctx: { role: 'member', isMaster: true, userId: 'u1', groupId: 'g1' } })
+  await delay(80)
+  const all = await recall.listByUser('u1')
+  const old = all.find((m) => m.content.includes('湖南'))
+  eq(old.status, 'corrected', '旧记忆被纠正')
+  ok(all.some((m) => m.content.includes('湖北')), '更正记忆已写入')
 })
 
 // ---------- 11c. SessionStore 多对话 ----------

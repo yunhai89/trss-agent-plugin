@@ -6,6 +6,7 @@
  * 以便模型在下一轮自行 replace/remove 腾出空间后重试（Hermes 同款语义）。
  */
 export { MemoryStore, MemoryLimitError, MemoryThreatError } from './store.js'
+export { ProfileStore, facetOfType } from './profile.js'
 
 /**
  * 构造 memory_search 工具（模型主动召回长期记忆，参考 OpenClaw memory_search）。
