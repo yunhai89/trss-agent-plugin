@@ -26,7 +26,10 @@ const PATTERNS = [
 
   // ── 越狱 / 无限制 / 破甲 ──
   { re: /\b(DAN|jailbreak|developer mode|do anything now|god mode|unfiltered mode|unrestricted mode)\b/i, w: 0.9, cat: 'jailbreak' },
-  { re: /(假装|扮演)(管理员|开发者|无限制|超级?用户|root)|开发者模式|越狱模式|破甲|越狱/, w: 0.9, cat: 'jailbreak' },
+  { re: /(假装|扮演)(管理员|开发者|无限制|超级?用户|root)|开发者模式|越狱模式/, w: 0.9, cat: 'jailbreak' },
+  // 「破甲/越狱」单独出现时是游戏（破甲=armor break）或系统（iOS 越狱）常用词，单用不给高分；
+  // 只在与其他攻击信号组合（多类别加成）时才累加，避免把正常群聊当越狱（get_chat_history 误报）。
+  { re: /(破甲|越狱)/, w: 0.5, cat: 'jailbreak' },
   { re: /(无限制|不受(任何)?限制|没有(任何)?限制|解除(所有)?限制)(模式|状态|回答|输出|运行)?/, w: 0.8, cat: 'jailbreak' },
   { re: /\b(no restrictions?|without restrictions?|free of restrictions?|no limits?)\b/i, w: 0.75, cat: 'jailbreak' },
 
