@@ -39,6 +39,13 @@ if (files.length) {
   }
 }
 
-Log.info(`加载完成 v${Config.version}，已载入 ${Object.keys(apps).length} 个应用`)
+const appNames = files.map((f) => f.replace(/\.js$/i, ''))
+Log.panel(`agents-plugin v${Config.version}`, [
+  ['应用', `${appNames.length} 个 · ${appNames.join(' / ') || '（无）'}`],
+  ['运行时', `Node ${process.version} · ${process.platform} ${process.arch}`],
+  ['插件目录', Config.path.plugin],
+  ['配置文件', Config.path.userConfig],
+  ['数据目录', Config.path.data],
+])
 
 export { apps }

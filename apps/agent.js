@@ -318,6 +318,7 @@ async function makeProxyFetch(proxy) {
 
 async function buildRuntime() {
   const cfg = Config.get().agent || {}
+  const startupInfo = {} // 运行时构建期采集的摘要信息（供末尾统一面板输出）
   // cfg.protocol/preset/baseURL/apiKey/model 是「基础模型引用」的解析镜像（由 Config 按 agent.providerId/modelId 回填）
   if (!cfg.apiKey) throw new Error(`未选定可用的基础模型：请在 Web 配置中心「厂商配置」维护厂商（填 baseURL + API Key）、「模型列表」挂模型，再到「基础 / 模型」选中厂商与模型（等价于 config.yaml 的 agent.providerId / agent.modelId）。当前 agent.apiKey 为空——它是上面引用的解析结果，直接改它会在下次加载被覆盖。`)
 
@@ -439,7 +440,7 @@ async function buildRuntime() {
     logger: Log.tag('search'),
   })
   const enabledSearch = searchManager.availableProviders
-  if (enabledSearch.length) Log.info('[search] 已启用搜索源：' + enabledSearch.join('、'))
+  if (enabledSearch.length) Log.debug('[search] 已启用搜索源：' + enabledSearch.join('、'))
 
   // 无损上下文压缩（Hermes 可逆化）：原文归档按会话分目录落盘（sha256 内容寻址），
   // context_recall 工具按 ref/query 恢复。compaction.enable:false 关闭归档与恢复工具
@@ -487,13 +488,13 @@ async function buildRuntime() {
       .register(reminderCancelTool) // reminder_cancel：取消指定 id 的提醒/定时任务
     // schedule_task：对话设 cron 重复任务链（到点跑 Agent + 发结果）；taskEnabled=false 时不注册
     if (cfg.schedule?.taskEnabled !== false) tools.register(scheduleTaskTool)
-    else Log.info('[schedule] 定时任务已关闭（schedule.taskEnabled=false），schedule_task 工具不注册')
+    else Log.debug('[schedule] 定时任务已关闭（schedule.taskEnabled=false），schedule_task 工具不注册')
   }
 
   // Pixiv（需 refreshToken；未配置则不注册，避免暴露不可用工具）
   if (cfg.pixiv?.enable !== false && cfg.pixiv?.refreshToken) {
     tools.register(...pixivTools) // 搜索/作品(发图)/排行/用户/标签
-    Log.info('[pixiv] 已启用 Pixiv 工具（搜索/作品/排行/用户/标签；图片代理 ' + (cfg.pixiv.imageProxy || 'https://i.yuki.sh') + '）')
+    Log.debug('[pixiv] 已启用 Pixiv 工具（搜索/作品/排行/用户/标签；图片代理 ' + (cfg.pixiv.imageProxy || 'https://i.yuki.sh') + '）')
   }
 
   // 自定义工具包：扫描插件根 tools/ 目录自动加载（TRSS-Yunzai apps 风格）
@@ -502,13 +503,13 @@ async function buildRuntime() {
   for (const t of loaded.tools) {
     try { tools.register(t) } catch (e) { Log.warn('[toolkit] 注册失败', t.name, e?.message || e) }
   }
-  if (loaded.packs.length) Log.info('[toolkit] 已加载工具包：', loaded.packs.map((p) => `${p.name}(${p.count})`).join(', '))
+  if (loaded.packs.length) Log.debug('[toolkit] 已加载工具包：', loaded.packs.map((p) => `${p.name}(${p.count})`).join(', '))
 
   // 终端执行能力（沙箱内核；mode=off 或沙箱不可用 → 本工具不注册，宿主无 shell 执行面）
   if (sandbox.manager) {
     try {
       tools.register(makeTerminalTool({ manager: sandbox.manager }))
-      Log.info('[terminal] 已启用沙箱终端执行工具（全员可用；命令在 E2B microVM 内执行）')
+      Log.debug('[terminal] 已启用沙箱终端执行工具（全员可用；命令在 E2B microVM 内执行）')
     } catch (e) {
       Log.warn('[terminal] 注册失败（本工具不可用，不影响其它功能）', e?.message || e)
     }
@@ -530,7 +531,7 @@ async function buildRuntime() {
         try { tools.register(t) } catch (e) { Log.warn('[stagehand] 注册失败', t.name, e?.message || e) }
       }
       stagehand = { sessionMgr }
-      Log.info(`[stagehand] 已启用浏览器自动化工具（${cfg.stagehand.mode || 'local'} 模式；4 个工具 stagehand__goto/observe/extract/act）`)
+      Log.debug(`[stagehand] 已启用浏览器自动化工具（${cfg.stagehand.mode || 'local'} 模式；4 个工具 stagehand__goto/observe/extract/act）`)
     } catch (e) { Log.warn('[stagehand] 初始化失败（@browserbasehq/stagehand 未装或浏览器不可用？）', e?.message || e) }
   }
 
@@ -553,7 +554,8 @@ async function buildRuntime() {
       diagram = new DiagramService(cfg.diagram, { logger: Log.tag('diagram'), devLog })
       tools.register(makeDiagramTool(diagram))
       const eng = diagram.cfg.renderer + (diagram.cfg.fallbackRenderer !== 'none' ? `+${diagram.cfg.fallbackRenderer}` : '')
-      Log.info(`[diagram] 已启用示意图工具 diagram_render（引擎 ${eng}；endpoint=${diagram.kroki?.endpointId || '-'}）`)
+      startupInfo.diagram = eng
+      Log.debug(`[diagram] 已启用示意图工具 diagram_render（引擎 ${eng}；endpoint=${diagram.kroki?.endpointId || '-'}）`)
     } catch (e) { Log.warn('[diagram] 初始化失败，工具不注册', e?.message || e) }
   }
 
@@ -618,7 +620,7 @@ async function buildRuntime() {
           if (tpl && tpl.id) promptRegistry.register(new PromptTemplate(tpl))
         } catch (e) { Log.warn('[prompt] 加载进化产出失败', f, e?.message || e) }
       }
-      if (promptRegistry.size > 0) Log.info('[evolution] PromptRegistry 已加载进化覆盖')
+      if (promptRegistry.size > 0) Log.debug('[evolution] PromptRegistry 已加载进化覆盖')
     }
   } catch (e) { Log.warn('[evolution] prompts 目录加载失败', e?.message || e) }
   let traceStore = null
@@ -683,7 +685,8 @@ async function buildRuntime() {
         }
       } catch (e) { Log.warn('[toolEvo] stable 注入失败', e?.message || e) }
       toolEvo = { registry: toolEvoRegistry, engine, runner, closeDb: te.closeDb, flushNow: te.flushNow }
-      Log.info(`[toolEvo] 已初始化（内置 ${builtins.length} 个 · 本次 seed ${seeded}（已入库则跳过）· stable 进化 ${stableCount} 经隔离执行面 ${runner.backend === 'sandbox' ? 'E2B 沙箱' : '本地 fork'}）`)
+      startupInfo.toolEvo = { builtins: builtins.length, stable: stableCount, backend: runner.backend === 'sandbox' ? 'E2B 沙箱' : '本地 fork' }
+      Log.debug(`[toolEvo] 已初始化（内置 ${builtins.length} 个 · 本次 seed ${seeded}（已入库则跳过）· stable 进化 ${stableCount} 经隔离执行面 ${startupInfo.toolEvo.backend}）`)
     } catch (e) { Log.warn('[toolEvo] 初始化失败（sqlite3 未装？）', e?.message || e) }
   }
 
@@ -761,7 +764,7 @@ async function buildRuntime() {
       Log.warn(`[vision] 未配置 agent.vision.model，且主模型 ${vModel} 不支持视觉——视觉子模型已禁用（否则图片会被发给纯文本模型、静默失败）。如需识图/表情打标，请把 agent.vision.model 设为支持视觉的模型（如 qwen-vl-max / glm-4v / gpt-4o / 名称含 omni 的 mimo）`)
     } else {
       try {
-        if (!vcfg.model && cfg.model) Log.info('[vision] vision.model 未配，复用支持视觉的主模型', vModel)
+        if (!vcfg.model && cfg.model) Log.debug('[vision] vision.model 未配，复用支持视觉的主模型', vModel)
         const vPresetMap = vProtocol === 'anthropic' ? anthropicPresets : openaiPresets
         const vPreset = vcfg.preset ? vPresetMap[vcfg.preset] : preset
         // 视觉模型参数覆盖：vision.model 若在「模型列表」登记且设了 thinking/温度/maxTokens，则同样生效。
@@ -789,7 +792,8 @@ async function buildRuntime() {
           temperature: vTemperature,
           logger: Log.tag('vision'),
         })
-        Log.info(`[vision] 视觉子模型 ${vModel}${vThinking ? `（thinking: ${vThinking.type}）` : ''}${vTemperature != null ? `（temperature: ${vTemperature}）` : ''}`)
+        startupInfo.visionModel = vModel
+        Log.debug(`[vision] 视觉子模型 ${vModel}${vThinking ? `（thinking: ${vThinking.type}）` : ''}${vTemperature != null ? `（temperature: ${vTemperature}）` : ''}`)
       } catch (e) {
         Log.warn('[vision] 视觉子模型装配失败，主模型不支持视觉时图片将降级', e?.message || e)
       }
@@ -837,7 +841,8 @@ async function buildRuntime() {
           return { result: r?.content || '', turns: r?.turns, stopReason: r?.stopReason }
         },
       })
-      Log.info('[multiagent] 编排模式（topology=orchestrator）：orchestrate 工具已注册')
+      startupInfo.multiagent = 'orchestrator'
+      Log.debug('[multiagent] 编排模式（topology=orchestrator）：orchestrate 工具已注册')
     } catch (e) { Log.warn('[multiagent] 编排模式装配失败', e?.message || e) }
   } else if (cfg.multiagent?.enable !== false) {
     try {
@@ -867,9 +872,37 @@ async function buildRuntime() {
       })
       for (const t of subagentTools) tools.register(t)
       multiagent = subagentTools // 暴露 shutdown()：热重载/退出时终止在跑子代理
-      Log.info('[multiagent] spawn_subagent + check_subagent + extend_subagent 已注册（异步委派 + 预算控制）')
+      startupInfo.multiagent = 'spawn'
+      Log.debug('[multiagent] spawn_subagent + check_subagent + extend_subagent 已注册（异步委派 + 预算控制）')
     } catch (e) { Log.warn('[multiagent] 子代理工具注册失败', e?.message || e) }
   }
+
+  // ── 启动摘要面板：把散落的模块初始化结果汇总成一份对齐清单（各模块细节日志已降为 debug 级，
+  // 需要排查时把日志级别调到 debug 即可查看）。仅在运行时构建成功时输出一次。
+  const searchLabel = enabledSearch.length ? enabledSearch.join('、') : '未启用'
+  const sandboxLabel = sandbox.manager ? (cfg.sandbox?.mode || 'e2b') : (sandbox.enabled ? '未就绪' : 'off')
+  const evolutionBits = []
+  if (promptRegistry.size > 0) evolutionBits.push(`prompt 覆盖 ${promptRegistry.size}`)
+  if (startupInfo.toolEvo) evolutionBits.push(`toolEvo ${startupInfo.toolEvo.builtins}/${startupInfo.toolEvo.stable}（${startupInfo.toolEvo.backend}）`)
+  const extras = []
+  if (cfg.pixiv?.enable !== false && cfg.pixiv?.refreshToken) extras.push('Pixiv')
+  if (stagehand) extras.push('浏览器自动化')
+  if (startupInfo.diagram) extras.push(`示意图(${startupInfo.diagram})`)
+  if (cfg.sticker?.enable) extras.push('表情包')
+  if (cfg.stt?.enable !== false) extras.push('STT')
+  if (cfg.multiagent?.enable !== false) extras.push(`多代理(${startupInfo.multiagent || 'spawn'})`)
+  const mcpNames = Object.keys(cfg.mcp?.servers || {})
+  Log.panel(`运行时就绪 · ${cfg.model}`, [
+    ['模型', `${cfg.model} · ${protocol}${fallbackProviders.length ? ` · 回退 ${fallbackProviders.length}` : ''}`],
+    ['工具', `${tools.list().length} 个 · 技能 ${skills.list().length} 个`],
+    ['搜索', searchLabel],
+    ['视觉', startupInfo.visionModel || 'off'],
+    ['沙箱', sandboxLabel],
+    ['进化', evolutionBits.join(' · ') || 'off'],
+    ['MCP', mcpNames.length ? `${mcpNames.length} 个（${mcpNames.join('、')}）` : 'none'],
+    ['其他', extras.join(' / ') || '-'],
+    ['面板', cfg.webApi?.enable !== false ? `:${cfg.webApi?.port || 6098}` : 'off'],
+  ])
 
   return { agentConfig, makeAgent, tools, session, recall, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent }
 }
