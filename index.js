@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 
 import Config from './utils/Config.js'
 import Log from './utils/Log.js'
+import { isPluginClass } from './utils/plugin-class.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const appsDir = path.join(__dirname, 'apps')
@@ -23,7 +24,9 @@ const files = fs
   .filter(name => name.endsWith('.js') && name !== 'index.js')
 
 let apps = {}
+let skippedExports = 0
 
+// 只把 class 交给 Yunzai（工具函数/常量等非 class 导出不外传）——详见 utils/plugin-class.js。
 if (files.length) {
   const results = await Promise.allSettled(
     files.map(file => import(`./apps/${file}`)),
@@ -35,8 +38,12 @@ if (files.length) {
       Log.error('应用载入失败', files[i], res.reason)
       continue
     }
-    apps = { ...apps, ...res.value }
+    for (const [key, value] of Object.entries(res.value || {})) {
+      if (isPluginClass(value)) apps[key] = value
+      else skippedExports++
+    }
   }
+  if (skippedExports) Log.debug(`[loader] 已跳过 ${skippedExports} 个非 class 导出（不作为插件类加载）`)
 }
 
 const appNames = files.map((f) => f.replace(/\.js$/i, ''))

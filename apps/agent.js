@@ -218,7 +218,9 @@ function makeReplyStream(e, {
  * 累积 provider 的 onDelta 增量，按时间/字数节流，只发送【新增】文本（多条气泡=打字机效果）。
  * rawFull 供调用方在 run 结束后与最终正文比对：一致则跳过重复的整段最终回复。
  */
-export function makeDeltaStreamer(safeReply, { enabled = false, minIntervalMs = 1200, minChars = 24 } = {}) {
+// 注意：必须是箭头函数（无 prototype）。Yunzai 加载器会把带 prototype 的导出当插件类 new，
+// 函数声明会因此被误当插件并触发 collectTask(undefined).cron 报错（index.js 也做了 class 过滤兜底）。
+export const makeDeltaStreamer = (safeReply, { enabled = false, minIntervalMs = 1200, minChars = 24 } = {}) => {
   let raw = ''
   let sentLen = 0
   let lastAt = 0
