@@ -31,28 +31,34 @@ test('strWidth：CJK / ASCII 显示宽度', () => {
   ok(strWidth('') === 0, '空串 0')
 })
 
-test('renderPanel：对齐、跳过空值、统一边框', () => {
+test('renderPanel 默认 flat：每行自包含、不依赖对齐', () => {
   const out = renderPanel('测试面板', [
     ['应用', '2 个'],
     ['运行时', 'Node v20'],
     ['空', ''],
     ['缺', null],
     ['长标签', 'x'],
-  ], { minWidth: 20 })
+  ])
+  const lines = out.split('\n')
+  ok(lines[0] === `${'─'.repeat(20)} 测试面板`, '标题行带下划线')
+  ok(lines[1] === '· 应用：2 个', '标签：值 自包含（无需补齐）')
+  ok(lines[2] === '· 运行时：Node v20', '第二行独立成形')
+  ok(lines[3] === '· 长标签：x', '标签长短不影响排版')
+  ok(!out.includes('空') && !out.includes('缺'), '空/缺值行被跳过')
+  ok(lines.length === 4, '仅有效行 + 标题')
+})
+
+test('renderPanel flat：无有效行时仅标题', () => {
+  const out = renderPanel('仅标题', [], { rule: 6 })
+  ok(out === '────── 仅标题', '仅标题行')
+})
+
+test('renderPanel box（可选）：保留盒式排版', () => {
+  const out = renderPanel('测试面板', [['应用', '2 个'], ['运行时', 'Node v20']], { style: 'box', minWidth: 20 })
   const lines = out.split('\n')
   ok(lines[0].startsWith('┌─ 测试面板'), '含标题顶边')
   ok(lines[lines.length - 1].startsWith('└'), '含底边')
-  ok(lines.some((l) => l === '│ 应用    2 个'), 'CJK 标签按显示宽度补齐')
-  ok(lines.some((l) => l === '│ 运行时  Node v20'), '最长标签零补齐')
-  ok(lines.some((l) => l === '│ 长标签  x'), '等宽标签对齐')
-  ok(!out.includes('空') && !out.includes('缺'), '空/缺值行被跳过')
-})
-
-test('renderPanel：空行时仍输出完整边框', () => {
-  const out = renderPanel('仅标题', [], { minWidth: 20 })
-  const lines = out.split('\n')
-  ok(lines.length === 2, '仅顶边+底边')
-  ok(lines[0].startsWith('┌─ 仅标题') && lines[1].startsWith('└'), '边框完整')
+  ok(lines.some((l) => l.startsWith('│ ')), '含内容行')
 })
 
 console.log(`\n========================================`)

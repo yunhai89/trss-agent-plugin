@@ -74,32 +74,40 @@ export function strWidth(s) {
   return w
 }
 
-/**
- * 渲染对齐面板（纯函数，便于离线测试）：
- *   ┌─ title ─────────────
- *   │ 标签  值
- *   └─────────────────────
- * 值为 null/undefined/空串的行自动跳过；标签按最宽项对齐。
- * @param {string} title
- * @param {Array<[string, any]>} rows
- */
-export function renderPanel(title, rows = [], { minWidth = 44, separator = '  ' } = {}) {
-  const pairs = (rows || []).filter((r) => Array.isArray(r) && r.length >= 2 && r[1] != null && String(r[1]) !== '')
+/** 收集有效行（过滤 null/undefined/空串） */
+function panelRows(rows) {
+  return (rows || []).filter((r) => Array.isArray(r) && r.length >= 2 && r[1] != null && String(r[1]) !== '')
+}
+
+/** 盒式面板（依赖等宽字体与 CJK 宽度对齐；窄屏/比例字体下会错位，仅作可选 style） */
+function renderBox(title, pairs, { minWidth = 44 } = {}) {
   const labelW = pairs.reduce((m, [k]) => Math.max(m, strWidth(k)), 0)
   const valueW = pairs.reduce((m, [, v]) => Math.max(m, strWidth(v)), 0)
   const head = `─ ${title} `
-  const width = Math.max(minWidth, 2 + labelW + separator.length + valueW, 1 + strWidth(head))
-  const lines = []
-  lines.push('┌' + head + '─'.repeat(Math.max(0, width - 1 - strWidth(head))))
+  const width = Math.max(minWidth, 4 + labelW + valueW, 1 + strWidth(head))
+  const lines = ['┌' + head + '─'.repeat(Math.max(0, width - 1 - strWidth(head)))]
   for (const [k, v] of pairs) {
-    const pad = ' '.repeat(Math.max(0, labelW - strWidth(k)))
-    lines.push(`│ ${k}${pad}${separator}${v}`)
+    lines.push(`│ ${k}${' '.repeat(Math.max(0, labelW - strWidth(k)))}  ${v}`)
   }
   lines.push('└' + '─'.repeat(width - 1))
   return lines.join('\n')
 }
 
-/** 输出对齐面板（整块单次日志，避免逐行 logger 前缀打断排版） */
+/**
+ * 渲染面板（纯函数，便于离线测试）。
+ * 默认 flat 样式：每行自包含 `· 标签：值`，**不依赖等宽字体与跨行对齐**——手机比例字体 / 窄屏换行也不会乱。
+ * 如需桌面盒式排版可传 { style: 'box' }（依赖等宽字体）。
+ * @param {string} title
+ * @param {Array<[string, any]>} rows
+ * @param {object} [opts] { style:'flat'|'box', rule:标题下划线长度, minWidth:盒式最小宽度 }
+ */
+export function renderPanel(title, rows = [], { style = 'flat', rule = 20, minWidth = 44 } = {}) {
+  const pairs = panelRows(rows)
+  if (style === 'box') return renderBox(title, pairs, { minWidth })
+  return [`${'─'.repeat(rule)} ${title}`, ...pairs.map(([k, v]) => `· ${k}：${v}`)].join('\n')
+}
+
+/** 输出面板（整块单次日志，避免逐行 logger 前缀打断排版） */
 Log.panel = function panel(title, rows, opts) {
   return log('info', renderPanel(title, rows, opts))
 }
