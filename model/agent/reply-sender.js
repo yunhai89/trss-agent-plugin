@@ -14,6 +14,36 @@
  * 库零依赖；send 函数由 apps 注入（(payload) => e.reply(payload)）。
  */
 
+/** 发送超时错误：适配器迟迟不返回（如 NapCat 60s 不回 echo），与适配器 rejection 区分便于日志归因。 */
+export class SendTimeoutError extends Error {
+  constructor(ms, tag) {
+    super(`发送超时：${ms}ms 内未返回（tag=${tag}）`)
+    this.name = 'SendTimeoutError'
+    this.timeout = true
+    this.ms = ms
+    this.tag = tag
+  }
+}
+
+/**
+ * 进度/旁白节流闸（框架无关）：限制单轮出站进度消息的间隔与总条数，降低撞 QQ 限流概率。
+ * @returns {{ allow(now?:number): boolean, count:number }}
+ */
+export function makeProgressGate({ minIntervalMs = 1500, maxMsgs = 6 } = {}) {
+  let lastAt = -Infinity
+  let count = 0
+  return {
+    allow(now = Date.now()) {
+      if (count >= maxMsgs) return false
+      if (now - lastAt < minIntervalMs) return false
+      lastAt = now
+      count++
+      return true
+    },
+    get count() { return count },
+  }
+}
+
 /** 判定适配器返回值是否算发送成功：null/undefined=假定成功；{retcode} 非 0=失败；其余（消息 id 等）=成功 */
 export function isSendOk(ret) {
   if (ret == null) return true
@@ -29,14 +59,40 @@ export class ReplySender {
    * @param {object} opts
    * @param {function} opts.send 实际发送函数（返回 Promise；适配器返回值/抛错都由本类归一）
    * @param {function} [opts.onSendError] (error, payload, tag) 发送失败回调（记日志/devLog 用）
+   * @param {number} [opts.timeoutMs=0] 非 final 发送（进度/旁白）超时毫秒；0=不超时。
+   *   一条卡住的进度发送默认会阻塞串行队列到适配器超时（如 60s），设短超时可快速失败、不堵后续。
+   * @param {number} [opts.finalTimeoutMs=0] final 发送超时毫秒；0=不超时（最终回复宁可多等，避免误报失败）
    */
-  constructor({ send, onSendError } = {}) {
+  constructor({ send, onSendError, timeoutMs = 0, finalTimeoutMs = 0 } = {}) {
     if (typeof send !== 'function') throw new Error('ReplySender 需要 send 函数')
     this._send = send
     this._onSendError = onSendError || null
+    this._timeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 0
+    this._finalTimeoutMs = Number.isFinite(finalTimeoutMs) && finalTimeoutMs > 0 ? finalTimeoutMs : 0
     this._tail = Promise.resolve()
     this._depth = 0
     this.outcomes = [] // { tag, ok, ret?, error? }
+  }
+
+  _timeoutFor(tag) {
+    return tag === 'final' ? this._finalTimeoutMs : this._timeoutMs
+  }
+
+  /** 调 send 并按 tag 施加超时；超时后原始 promise 仍挂 catch，避免其后续 rejection 变 unhandledRejection。 */
+  async _call(payload, tag) {
+    const ms = this._timeoutFor(tag)
+    const p = Promise.resolve().then(() => this._send(payload))
+    if (!ms) return p
+    let timer
+    try {
+      return await Promise.race([
+        p,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new SendTimeoutError(ms, tag)), ms) }),
+      ])
+    } finally {
+      clearTimeout(timer)
+      p.catch(() => {})
+    }
   }
 
   /** 队列中排队+发送中的条数（含正在发送的 1 条；0=空闲） */
@@ -60,7 +116,7 @@ export class ReplySender {
   async _one(payload, tag) {
     let ret
     try {
-      ret = await this._send(payload)
+      ret = await this._call(payload, tag)
     } catch (e) {
       const outcome = { tag, ok: false, error: e?.message || String(e) }
       this.outcomes.push(outcome)

@@ -56,7 +56,7 @@ import { getStickerManager } from '../model/sticker/manager.js'
 import { redactSecrets } from '../model/agent/redact.js'
 import { randomUUID } from 'node:crypto'
 import devLog from '../utils/DevLog.js'
-import { ReplySender, createRunQueues } from '../model/agent/reply-sender.js'
+import { ReplySender, createRunQueues, makeProgressGate } from '../model/agent/reply-sender.js'
 import { SkillRegistry, loadSkillPack, makeSkillTool } from '../model/skill/index.js'
 import { PromptRegistry, PromptTemplate, evolveTemplate, regressionGate, TEMPLATES } from '../model/prompt/index.js'
 import { TraceStore } from '../model/evolution/trace.js'
@@ -181,33 +181,30 @@ function extractArgHint(args, name) {
 /**
  * 构造进度反馈回调集合。
  * @param {object} e Yunzai 事件
- * @param {object} opts { progress, recall, shortCircuitTools, replyQueue }
+ * @param {object} opts { progress, recall, shortCircuitTools, replyQueue, gate }
  *   replyQueue：受控串行发送队列（长任务稳定性审计 P0-5）——进度消息经它发送，
  *   rejection 归一为 outcome 记日志，绝不产生 unhandledRejection。
+ *   gate：与旁白共享的节流闸（同一 run 内进度+旁白总条数/频率受限，降低撞 QQ 限流概率）。
  */
 function makeReplyStream(e, {
-  progress = true, recall = 3, shortCircuitTools = ['clarify'], replyQueue = null,
+  progress = true, recall = 3, shortCircuitTools = ['clarify'], replyQueue = null, gate = null,
 } = {}) {
   if (!progress) return {}
-  let lastAt = 0
   let lastTool = null
-  let count = 0
-  const MIN_INTERVAL = 1500 // ms：节流，防刷屏
-  const MAX_MSGS = 8 // 单轮最多 8 条进度，防病态循环刷屏
+  let lastAt = 0
+  const g = gate || makeProgressGate()
 
   return {
     onToolStart(tc) {
-      if (count >= MAX_MSGS) return
-      const now = Date.now()
       const name = tc?.name
       if (!name) return
       // 短路工具（如 clarify）：参数本身就是最终回复，发进度=与最终回复重复，跳过
       if (shortCircuitTools.includes(name)) return
+      const now = Date.now()
       if (name === lastTool && now - lastAt < 5000) return
-      if (now - lastAt < MIN_INTERVAL) return
-      lastAt = now
+      if (!g.allow(now)) return
       lastTool = name
-      count++
+      lastAt = now
       const label = PROGRESS_LABELS[name] || `🔧 调用 ${name}`
       const hint = extractArgHint(tc?.arguments, name)
       const msg = hint ? `${label}：${hint}` : `${label}…`
@@ -1485,10 +1482,15 @@ export class Chat extends plugin {
         return this.e.reply(...args)
       },
       onSendError: (err, _p, tag) => Log.warn(`[reply:${tag}] 消息发送失败`, err?.message || err),
+      // 发送超时保护：进度/旁白一条卡住时快速失败，不再把串行队列堵到适配器超时（默认 60s）。
+      // final 不设超时（finalTimeoutMs=0）——宁可多等，也不把可能已送达的最终回复误判为失败。
+      timeoutMs: 15000,
     })
     const safeReply = (msg, quote, opts) => replyQueue.enqueue({ msg, quote, opts })
     if (wantProgress) safeReply('思考中…') // best effort：发送失败只记日志，绝不阻塞 Agent 执行
-    const rs = makeReplyStream(this.e, { progress: wantProgress, recall: cfg.progressRecall ?? 3, shortCircuitTools: ['clarify'], replyQueue })
+    // 同一 run 内进度与旁白共享节流闸：总条数与频率受限，降低短时间连发撞 QQ 限流概率。
+    const progressGate = makeProgressGate({ minIntervalMs: 1800, maxMsgs: 6 })
+    const rs = makeReplyStream(this.e, { progress: wantProgress, recall: cfg.progressRecall ?? 3, shortCircuitTools: ['clarify'], replyQueue, gate: progressGate })
     // 流式：仅文本回复模式下逐字发增量（图片模式需整段渲染，不流式）；onDelta 始终用于观测计数
     const replyModeEarly = cfg.reply?.mode || 'image'
     const streamer = makeDeltaStreamer(safeReply, { enabled: wantStream && replyModeEarly === 'text' })
@@ -1538,7 +1540,8 @@ export class Chat extends plugin {
         // OpenClaw 式中途播报：模型在调工具时附带的中途文本（思路/进展）实时转发给用户，不丢弃。
         // 经受控发送队列（P0-5）：rejection 记日志，不产生 unhandledRejection，也不阻塞 Agent。
         onAssistant: (res) => {
-          if (res?.toolCalls?.length && res?.content && cfg.reply?.narrate !== false) {
+          // 旁白与工具进度共享节流闸：短时间内的多条旁白只发第一条，防刷屏 / 撞限流
+          if (res?.toolCalls?.length && res?.content && cfg.reply?.narrate !== false && progressGate.allow()) {
             safeReply(redactSecrets(res.content))
           }
         },
