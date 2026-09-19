@@ -18,10 +18,26 @@ const ABSENCE_MS = 6 * 60 * 60 * 1000 // 6 小时未发言视为"久离"
 
 const WEEK = ['日', '一', '二', '三', '四', '五', '六']
 
-function nowStr() {
-  const d = new Date()
+/** 时段标签（按本地小时精确划分；用于自然语言时间描述，勿四舍五入） */
+export function periodOfDay(h) {
+  const hour = Number(h) || 0
+  if (hour < 5) return '凌晨'
+  if (hour < 9) return '早上'
+  if (hour < 12) return '上午'
+  if (hour < 13) return '中午'
+  if (hour < 18) return '下午'
+  if (hour < 23) return '晚上'
+  return '深夜'
+}
+
+/** 当前本地时间字符串（精确到分钟，带星期与时段）。可注入 Date 便于测试/复现。 */
+export function formatNow(d = new Date()) {
   const pad = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())} 周${WEEK[d.getDay()]}`
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())} 周${WEEK[d.getDay()]}（${periodOfDay(d.getHours())}）`
+}
+
+function nowStr() {
+  return formatNow(new Date())
 }
 
 function roleLabel(ctx) {
@@ -183,7 +199,7 @@ async function recentHistory({ ctx, e, kv, bot, historyCount }) {
  */
 export async function buildSituationalContext({ ctx, runtime, e, kv, cfg, bot, historyCount = 15, sessionLen } = {}) {
   const parts = []
-  parts.push(`【当前时间】${nowStr()}`)
+  parts.push(`【当前时间】${nowStr()}。这是系统提供的准确时间——用户问"现在几点/几号/周几"或需要相对时间判断时，直接据此回答（精确到分钟），不要凭感觉估算或四舍五入。`)
   // Bot 自身信息（用 Yunzai e.bot/e.self_id 获取，AI 需要知道自己是谁）
   const b = bot || ctx?.bot || e?.bot
   const selfId = e?.self_id || ctx?.bot?.uin || b?.uin || ''

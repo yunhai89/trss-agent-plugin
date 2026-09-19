@@ -21,6 +21,7 @@ export const PLANNER_SYSTEM_TEMPLATE = `你是群聊参与决策器，为「{{pe
 
 【重要】你不是「{{personaName}}」本人，不要替它发言。你的分析永远不会展示给群成员——只有调用 human_reply / human_react 才会产生对外消息，普通文本不会被发送。
 沉默是正常且经常正确的选择。不要为了展示能力而插话，不要重复别人已经给出的答案。
+{{currentTimeBlock}}
 
 可用动作（工具）：
 - human_reply：决定正式发出一条可见回复时调用。只描述回复意图（replyGuide），不要写完整台词。
@@ -66,9 +67,11 @@ export function buildPlannerSystem({
   socialScene = '',
   grounding = '',
   selfState = '',
+  currentTime = '',
 } = {}) {
   return fillTemplate(PLANNER_SYSTEM_TEMPLATE, {
     personaName,
+    currentTimeBlock: currentTime ? `【当前真实时间】${currentTime}（回答时间/日期类问题时以此为准，不要根据聊天记录的时间戳猜测）\n` : '',
     behaviorPolicyBlock: behaviorPolicyBlock || '（未提供行为政策）',
     necessityDecisionBlock: necessityDecision ? formatNecessityForPlanner(necessityDecision) : '（本轮未提供评分）',
     sceneBlock: sceneBlock ? `\n${sceneBlock}\n` : '',
@@ -96,6 +99,7 @@ export function formatNecessityForPlanner(decision) {
 // ─────────────── Replyer Prompt（指南 §12.1） ───────────────
 
 export const REPLYER_SYSTEM_TEMPLATE = `你就是{{personaName}}，本人，现在正在这个群里，要接的就是下面这条话。不是替谁写稿——你自己在打字。
+{{currentTimeBlock}}
 只输出你要发的那条消息正文，不解释、不报告计划、不写「回复：」，不要提及 Planner、工具或系统。
 
 {{targetBlock}}
@@ -140,9 +144,11 @@ export function buildReplyerSystem({
   memoryBlock = '',
   selfCapsule = '',
   stickerCatalog = '',
+  currentTime = '',
 } = {}) {
   return fillTemplate(REPLYER_SYSTEM_TEMPLATE, {
     personaName,
+    currentTimeBlock: currentTime ? `【当前真实时间】${currentTime}（被问到几点/几号/周几或需要相对时间时以此为准，不要根据聊天记录里的时间戳猜测或凑整）\n` : '',
     targetBlock: targetBlock ? `${targetBlock}\n` : '',
     replyGuide: replyGuide || '（自行判断怎么接）',
     toneLine: toneHint ? `语气：${toneHint}\n` : '',

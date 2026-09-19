@@ -42,7 +42,10 @@ await test('queryLogFiles：日期按事件时间命中（长会话跨天——�
   fs.writeFileSync(path.join(TMP, '960179589-3891977697-1-' + fmt(day13) + '090000.log'),
     JSON.stringify({ level: 'info', time: day13.toISOString(), event: 'run_end', usage: { input: 100, output: 10 } }) + '\n'
     + JSON.stringify({ level: 'info', time: new Date().toISOString(), event: 'run_end', usage: { input: 200, output: 20 } }) + '\n')
-  const todayStr = new Date().toISOString().slice(0, 10)
+  // queryLogFiles 的 from/to 走本地日（Date.parse 无时区=本地）；这里必须同样用本地日，
+  // 否则本地 00:00~08:00 时 UTC 日期还在昨天，"今天"过滤会漏掉当前事件（既有测试的时段性缺陷）。
+  const f = fmt(new Date())
+  const todayStr = `${f.slice(0, 4)}-${f.slice(4, 6)}-${f.slice(6, 8)}`
   const hit = queryLogFiles(TMP, { from: todayStr, to: todayStr })
   ok(hit.items.some((x) => x.file.startsWith('960179589-3891977697-1-')), `筛今天 → 命中跨天长会话（实际 ${hit.total}）`)
   const old = queryLogFiles(TMP, { from: '2020-01-01', to: '2020-01-02' })

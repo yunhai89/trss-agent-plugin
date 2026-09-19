@@ -242,9 +242,9 @@ function buildSceneUserPrompt(messages = []) {
       if (m.isCommand) rels.push('（命令）')
     }
     const t = new Date(Number(m.timestamp) || 0)
+    const hh = String(t.getHours()).padStart(2, '0')
     const mm = String(t.getMinutes()).padStart(2, '0')
-    const ss = String(t.getSeconds()).padStart(2, '0')
-    return `[${m.id}] ${m.isSelf ? '我' : (m.displayName || m.userId)}{${rels.join(' ')}} ${mm}:${ss}: ${String(m.text || '').slice(0, 100)}`
+    return `[${m.id}] ${m.isSelf ? '我' : (m.displayName || m.userId)}{${rels.join(' ')}} ${hh}:${mm}: ${String(m.text || '').slice(0, 100)}`
   })
   return `最近消息（旧→新）：\n${lines.join('\n')}\n\n请输出 JSON。`
 }

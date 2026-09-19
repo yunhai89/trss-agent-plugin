@@ -18,6 +18,7 @@ import { whitelistViolations } from './grounding.js'
 import { textSim, textFeatures } from '../groupworld/embedding.js'
 import { formatSceneBlock, sceneLengthHint } from './scene.js'
 import { resolvePersonaIdentity } from './default-config.js'
+import { formatNow } from '../perception.js'
 
 const REPLY_LEAK_PATTERNS = [
   /作为一个\s*(AI|人工智能|语言模型)/, /根据系统(指令|提示|设定)/, /我(?:将|会)(?:调用|使用)工具/,
@@ -200,6 +201,7 @@ export class HumanizeReplyer {
     const { name: identityName } = resolvePersonaIdentity(c)
     const system = buildReplyerSystem({
       personaName: identityName,
+      currentTime: formatNow(),
       replyGuide: action.replyGuide || '',
       referenceInfo: action.referenceInfo || '',
       toneHint: action.toneHint || '',

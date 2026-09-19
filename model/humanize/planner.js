@@ -16,6 +16,7 @@ import Log, { ANSI } from '../../utils/Log.js'
 import { ACTION_TOOLS, pickSingleAction, TERMINAL_ACTIONS } from './action-tools.js'
 import { buildPlannerSystem, formatGroupContext, highlightTarget } from './prompts.js'
 import { formatSceneBlock } from './scene.js'
+import { formatNow } from '../perception.js'
 
 const LEAK_PATTERNS = [
   /作为一个\s*(AI|人工智能)/, /根据系统(指令|提示)/, /我将(调用|使用)工具/,
@@ -154,6 +155,7 @@ export class HumanizePlanner {
 
     const system = buildPlannerSystem({
       personaName: this.getPersonaName(),
+      currentTime: formatNow(),
       sceneBlock: formatSceneBlock(scene, { role: 'planner' }),
       behaviorPolicyBlock: this.getBehaviorPolicyBlock(),
       necessityDecision: decision,

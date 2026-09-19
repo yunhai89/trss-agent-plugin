@@ -5,7 +5,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { buildSituationalContext, formatHistory, messageToText, MET_PREFIX, ACTIVE_PREFIX } from './perception.js'
+import { buildSituationalContext, formatHistory, messageToText, formatNow, periodOfDay, MET_PREFIX, ACTIVE_PREFIX } from './perception.js'
 import { memoryKv } from './agent/store/kv.js'
 
 let passed = 0
@@ -115,6 +115,22 @@ await test('久未发言（>6h）：补取近期对话', async () => {
   const out = await buildSituationalContext({ ctx, runtime: mockRuntime(), e, kv, cfg: {}, bot: null })
   ok(out.includes('久未发言补课'), '触发补课')
   ok(out.includes('刚才聊到哪'), '含近期对话')
+})
+
+await test('formatNow / periodOfDay：本地精确时间 + 时段不四舍五入', async () => {
+  ok(periodOfDay(0) === '凌晨', '00 点=凌晨')
+  ok(periodOfDay(4) === '凌晨', '04 点=凌晨')
+  ok(periodOfDay(5) === '早上', '05 点=早上')
+  ok(periodOfDay(12) === '中午', '12 点=中午')
+  ok(periodOfDay(13) === '下午', '13 点=下午')
+  ok(periodOfDay(18) === '晚上', '18 点=晚上')
+  ok(periodOfDay(23) === '深夜', '23 点=深夜')
+  const s = formatNow(new Date(2026, 8, 20, 0, 32, 0))
+  ok(s.startsWith('2026-09-20 00:32'), '精确到分钟不四舍五入（0:32≠1:00）')
+  ok(s.includes('（凌晨）'), '带时段标注')
+  const out = await buildSituationalContext({ ctx: { userId: 'u' }, runtime: mockRuntime(), e: {}, kv: memoryKv(), cfg: {}, bot: null })
+  ok(out.includes('这是系统提供的准确时间'), '时间行含"据实回答勿估算"指令')
+  ok(out.includes('四舍五入'), '时间行明示勿凑整')
 })
 
 // ---------- 总结 ----------

@@ -261,6 +261,12 @@ await test('prompts：槽位替换 + Planner 含红线、无任务措辞', async
   const rsys = buildReplyerSystem({ replyGuide: '赞同', recentMessages: '甲: hi' })
   ok(rsys.includes("你就是") && rsys.includes("本人"), 'Replyer 第一人称临场表达（你就是这个人，不是代写）')
   ok(rsys.includes("正文"), "Replyer 仍约束只输出正文")
+  // 时间 grounding：Planner/Replyer 必须能吃注入的真实时间，且无时间时不虚构
+  const psysT = buildPlannerSystem({ personaName: '小猫', groupContext: '甲: hi', currentTime: '2026-09-20 00:32 周日（凌晨）' })
+  ok(psysT.includes('2026-09-20 00:32') && psysT.includes('当前真实时间'), 'Planner 注入当前时间')
+  const rsysT = buildReplyerSystem({ replyGuide: '现在几点', currentTime: '2026-09-20 00:32 周日（凌晨）' })
+  ok(rsysT.includes('2026-09-20 00:32') && rsysT.includes('不要根据聊天记录里的时间戳猜测'), 'Replyer 注入当前时间 + 禁止猜测')
+  ok(!buildReplyerSystem({ replyGuide: 'x' }).includes('当前真实时间'), '未传时间时不注入（零影响）')
   const ctx = formatGroupContext([mkMsg('hi', false, {}, 'm1', '甲')])
   ok(ctx.includes('甲') && ctx.includes('[m1]'), 'formatGroupContext 含 id')
 })
