@@ -99,12 +99,46 @@ export class ScheduleStore {
   }
 }
 
+/**
+ * 从全量调度中挑出「#定时任务列表」应展示的条目（纯函数，便于离线测试）：
+ *  - 所有任务链（type='task'，群级、prompt 非私密）；
+ *  - 仅该用户本人的其余条目（提醒等，避免把他人私聊提醒内容暴露给所有人）。
+ * 去重，任务链在前。修复「AI 建了提醒、web 看得到、#定时任务列表 返回暂无」。
+ */
+export function selectScheduleForList(all = [], { userId = '', scopeUserId = '' } = {}) {
+  const uid = String(userId)
+  const suid = String(scopeUserId || '')
+  const isMine = (r) => { const u = String(r?.userId); return !!r && (u === uid || (!!suid && u === suid)) }
+  const tasks = (all || []).filter((r) => r?.type === 'task')
+  const mine = (all || []).filter(isMine)
+  const seen = new Set()
+  const out = []
+  for (const r of [...tasks, ...mine]) { if (r && !seen.has(r.id)) { seen.add(r.id); out.push(r) } }
+  return out
+}
+
 /** 列表排序：cron 重复任务排前（按 createdAt），一次性按 at 升序 */
 function _sortRec(a, b) {
   if (a.cron && !b.cron) return -1
   if (!a.cron && b.cron) return 1
   if (a.cron && b.cron) return (a.createdAt || 0) - (b.createdAt || 0)
   return (a.at || 0) - (b.at || 0)
+}
+
+/**
+ * 调度记录 → 可读行（#定时任务列表 / #我的提醒 / 复用）。
+ * 明确标注类型，避免"AI 创建了但列表看不到"的歧义：
+ *  - [周期 cron] 周期任务链；[一次性任务 时间] 带 prompt 的一次性任务链；[提醒 时间] 静态提醒。
+ */
+export function formatScheduleList(list = []) {
+  return (list || []).filter(Boolean).map((r) => {
+    const id = `#${r.id}`
+    const text = String(r.prompt || r.message || '').slice(0, 50)
+    if (r.cron) return `${id} [周期 ${r.cron}] ${text}`
+    const at = r.at ? new Date(r.at).toLocaleString('zh-CN') : '待定'
+    if (r.type === 'task' || r.prompt) return `${id} [一次性任务 ${at}] ${text}`
+    return `${id} [提醒 ${at}] ${text}`
+  })
 }
 
 // ── 自然语言 → cron 解析（全时间段；失败返回 null）──
@@ -191,7 +225,7 @@ export async function nodeScheduleAdapter() {
  */
 export const reminderSetTool = {
   name: 'reminder_set',
-  description: '设置一次性定时任务（N分钟后/3点/明天X点 触发一次）。两种模式：① 只填 message → 到点发静态提醒消息；② 填 prompt → 到点跑 Agent 任务链（自主调工具完成，如联网搜索/查知识库）+ 发结果。用户说"N分钟后提醒我XX"或"N分钟后帮我搜索YY/做ZZ"时用。at 是未来时间、ISO 8601 带时区（如 2026-08-06T15:05:00+08:00），由你根据用户措辞 + 当前时间（见【运行能力盘点】）推算。',
+  description: '设置【一次性】提醒（只触发一次，不是周期任务）：N分钟后/3点/明天X点。① 只填 message → 到点发静态提醒；② 填 prompt → 到点跑一次 Agent 任务并把结果发回。若用户要“每天/每周/每N小时”这类【周期重复】需求，不要用本工具——先用 tool_search 找到 schedule_task 并用它创建 cron 任务。at 是未来时间、ISO 8601 带时区（如 2026-08-06T15:05:00+08:00），由你根据用户措辞 + 当前时间（见【运行能力盘点】）推算。',
   category: 'personal',
   parameters: {
     type: 'object',

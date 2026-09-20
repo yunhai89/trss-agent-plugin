@@ -32,7 +32,7 @@ function shortHash(str) {
 }
 
 /** 按需发现默认常驻工具（不经过搜索；config.toolDiscovery.alwaysOn 留空时兜底）。tool_search 始终由元工具注入。 */
-const DEFAULT_ALWAYS_ON = ['tool_search', 'clarify', 'memory_search', 'web_search', 'kb_search', 'skill', 'get_chat_history', 'reminder_set', 'context_recall', 'diagram_render', 'get_group_file', 'list_group_files'] // context_recall 常驻：压缩档案消息直接引用它恢复原文，不能等 tool_search；diagram_render 常驻：解释流程/架构时随时可用（不等 tool_search 检索）；get_group_file/list_group_files 常驻：否则主代理不知道有此能力，会用 terminal/find/curl 瞎找群文件
+const DEFAULT_ALWAYS_ON = ['tool_search', 'clarify', 'memory_search', 'web_search', 'kb_search', 'skill', 'get_chat_history', 'reminder_set', 'schedule_task', 'context_recall', 'diagram_render', 'get_group_file', 'list_group_files'] // context_recall 常驻：压缩档案消息直接引用它恢复原文，不能等 tool_search；diagram_render 常驻：解释流程/架构时随时可用（不等 tool_search 检索）；get_group_file/list_group_files 常驻：否则主代理不知道有此能力，会用 terminal/find/curl 瞎找群文件；schedule_task 常驻：否则"每天/每周"类周期需求只能看到 reminder_set，被当一次性提醒处理（#定时任务列表 里就看不到）
 
 /** 紧凑用量日志：兼容 per-turn(prompt/completion_tokens) 与 mergeUsage(input/output/total) 两种形态 */
 function fmtUsage(u) {

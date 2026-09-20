@@ -222,6 +222,21 @@ export const renderPdf = async (html, { path: outPath, format = 'A4' } = {}) => 
  * @param {object} opts { scale=2, imgType='png', width=820 }
  * @returns {Promise<Buffer|null>}
  */
+/**
+ * 把自包含 HTML 渲染为「卡片图」：优先独立 puppeteer 高清渲染（截 #container，3x JPEG），
+ * 再降级 Yunzai 渲染器（dsf 1）。用于帮助图/列表图等非 markdown 场景。
+ * 返回 segment.image 或 Yunzai 渲染结果；全部失败返回 null（调用方降级文本）。
+ */
+export const renderCardImage = async (html, { scale = 3, name = 'agents-plugin/card' } = {}) => {
+  const sc = Math.min(Math.max(Number(scale) || 3, 1), 4) // clamp [1,4]，防 Chromium OOM
+  let img = await renderHighQuality(html, { scale: sc })
+  if (img) return img
+  Log.debug('[render] 卡片图独立浏览器渲染失败，降级 Yunzai 渲染器…')
+  img = await screenshot(name, html)
+  if (img) return img
+  return screenshot(name, html)
+}
+
 export const renderHd = async (name, html, { scale = 2, imgType = 'png', width = 820 } = {}) => {
   const buff = await withPage(html, async (page) => {
     await page.setViewport({ width, height: 1200, deviceScaleFactor: scale })

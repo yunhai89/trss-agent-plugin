@@ -1,7 +1,7 @@
 import plugin from '../../../lib/plugins/plugin.js'
 import Config from '../utils/Config.js'
 import { buildHelpHtml } from '../model/agent/index.js'
-import { screenshot } from './render.js'
+import { renderCardImage } from './render.js'
 
 const SECTIONS = [
   {
@@ -50,7 +50,7 @@ const SECTIONS = [
     title: '定时任务',
     commands: [
       { cmd: '#定时任务 +时间 +任务', desc: '主人：cron 重复任务链（到点跑任务+发结果）。时间：每天8点/每2小时/工作日9点/每周一8点30' },
-      { cmd: '#定时任务列表', desc: '查看所有定时任务' },
+      { cmd: '#定时任务列表', desc: '查看所有周期/一次性任务 + 你本人的提醒（AI 设的提醒也会显示）' },
       { cmd: '#取消定时任务 +id', desc: '主人：取消定时任务' },
     ],
   },
@@ -148,7 +148,7 @@ export class Help extends plugin {
 
   async help() {
     const html = buildHelpHtml({ title: 'agents-plugin 帮助', subtitle: 'AI Agent · 工具 · 记忆 · MCP', sections: SECTIONS })
-    const img = await screenshot('agents-plugin/help', html)
+    const img = await renderCardImage(html, { name: 'agents-plugin/help' })
     if (img) return this.e.reply(img), true
     // 文本回退（puppeteer 不可用时）
     const lines = ['#agents帮助']

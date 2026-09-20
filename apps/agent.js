@@ -23,6 +23,8 @@ import {
   reminderCancelTool,
   parseCron,
   scheduleTaskTool,
+  formatScheduleList,
+  selectScheduleForList,
   ConfirmStore,
   nodeScheduleAdapter,
   memoryKv,
@@ -2451,10 +2453,13 @@ export class Chat extends plugin {
 
   async listCronTask() {
     const rt = await getRuntime()
-    const tasks = (await rt.schedule.listAll()).filter((r) => r.type === 'task')
-    if (!tasks.length) return this.e.reply('暂无定时任务（#定时任务 <时间> <任务> 创建）'), true
-    const lines = tasks.map((r) => `#${r.id} | ${r.cron} | ${String(r.prompt).slice(0, 40)}`)
-    await this.e.reply(`定时任务（${tasks.length}）：\n${lines.join('\n')}`)
+    const ctx = ctxOf(this.e)
+    const all = await rt.schedule.listAll()
+    // 展示：所有任务链（群级）+ 仅本人的提醒。修复「AI 用 reminder_set 建了提醒、web 看得到、
+    // #定时任务列表 却返回暂无」——此前只 filter(type==='task')，把 type='reminder' 的记录全漏掉。
+    const list = selectScheduleForList(all, { userId: ctx.userId, scopeUserId: ctx.scopeUserId })
+    if (!list.length) return this.e.reply('暂无定时任务/提醒（#定时任务 <时间> <任务> 创建；或用 AI 帮你设）'), true
+    await this.e.reply(`定时任务 / 提醒（${list.length}）：\n${formatScheduleList(list).join('\n')}`)
     return true
   }
 
@@ -2488,10 +2493,10 @@ export class Chat extends plugin {
   async myReminders() {
     const rt = await getRuntime()
     const ctx = ctxOf(this.e)
-    const list = await rt.schedule.listByUser(ctx.userId)
+    const all = await rt.schedule.listAll()
+    const list = all.filter((r) => String(r?.userId) === String(ctx.userId) || String(r?.userId) === String(ctx.scopeUserId))
     if (!list.length) return this.e.reply('暂无提醒'), true
-    const lines = list.map((r) => `#${r.id} ${new Date(r.at).toLocaleString()}：${r.message}`)
-    await this.e.reply(lines.join('\n'))
+    await this.e.reply(`我的提醒 / 任务（${list.length}）：\n${formatScheduleList(list).join('\n')}`)
     return true
   }
 

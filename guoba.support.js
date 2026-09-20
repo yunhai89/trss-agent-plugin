@@ -137,7 +137,7 @@ export function supportGuoba() {
         // —— 工具按需发现 ——
         { label: '工具按需发现（Tool Discovery）', component: 'SOFT_GROUP_BEGIN' },
         { field: 'agent.toolDiscovery.enable', label: '启用按需发现', bottomHelpMessage: 'LLM 只常驻少数核心工具，其余经 tool_search 检索后动态注入（省 token）；默认开，关则回退全量常驻', component: 'Switch' },
-        { field: 'agent.toolDiscovery.alwaysOn', label: '常驻工具(每行一个)', bottomHelpMessage: '不经过搜索、始终可用的工具名；留空用内置默认：tool_search / clarify / memory_search / web_search / skill / get_chat_history', component: 'InputTextArea' },
+        { field: 'agent.toolDiscovery.alwaysOn', label: '常驻工具(每行一个)', bottomHelpMessage: '不经过搜索、始终可用的工具名；留空用内置默认（含 tool_search / clarify / memory_search / web_search / skill / get_chat_history / reminder_set / schedule_task / 群文件工具等）', component: 'InputTextArea' },
         { field: 'agent.toolDiscovery.topK', label: 'tool_search 返回数', component: 'InputNumber', componentProps: { min: 1, max: 20 } },
         { field: 'agent.toolDiscovery.minScore', label: '最低相似度', bottomHelpMessage: '低于此值不返回；jaccard 下 0.1 较宽松', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
 

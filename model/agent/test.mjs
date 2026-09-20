@@ -25,6 +25,8 @@ import {
   RecallStore,
   ProfileStore,
   ScheduleStore,
+  formatScheduleList,
+  selectScheduleForList,
   checkInput,
   analyze,
   isolate,
@@ -674,6 +676,35 @@ await test('schedule：add/list/cancel/restore', async () => {
   eq(dropped, 1, '丢弃 1 个过期')
 })
 
+await test('schedule：formatScheduleList 标注类型（周期/一次性任务/提醒）', async () => {
+  const now = Date.now()
+  const lines = formatScheduleList([
+    { id: '1', cron: '0 8 * * *', prompt: '每天8点摘要', type: 'task' },
+    { id: '2', type: 'task', prompt: '明天查资料', at: now + 3600000, cron: null },
+    { id: '3', type: 'reminder', message: '喝水', at: now + 60000, cron: null },
+  ])
+  eq(lines.length, 3, '三条都列出（此前 #定时任务列表 只认 type=task，提醒全丢）')
+  ok(lines[0].includes('[周期 0 8 * * *]') && lines[0].includes('每天8点摘要'), '周期任务标注')
+  ok(lines[1].includes('[一次性任务') && lines[1].includes('明天查资料'), '一次性任务标注')
+  ok(lines[2].includes('[提醒') && lines[2].includes('喝水'), '提醒标注')
+  eq(formatScheduleList([]).length, 0, '空列表')
+  eq(formatScheduleList(null).length, 0, 'null 安全')
+  // 命令实际用的选择逻辑：所有任务链 + 本人提醒；他人提醒不外泄
+  const all = [
+    { id: 't1', type: 'task', cron: '0 8 * * *', prompt: '群任务', userId: 'u2' },
+    { id: 'rmine', type: 'reminder', message: '我的提醒', at: now, userId: 'u1' },
+    { id: 'rother', type: 'reminder', message: '别人提醒', at: now, userId: 'u2' },
+    { id: 'rgroup', type: 'reminder', message: '群共享', at: now, userId: '__group__' },
+  ]
+  const vis = selectScheduleForList(all, { userId: 'u1', scopeUserId: 'u1' })
+  ok(vis.some((r) => r.id === 't1'), '含所有任务链')
+  ok(vis.some((r) => r.id === 'rmine'), '含本人提醒（本次 bug：此前漏掉 → 返回暂无）')
+  ok(!vis.some((r) => r.id === 'rother'), '不含他人提醒（隐私）')
+  eq(vis.length, 2, '去重后 2 条')
+  const visG = selectScheduleForList(all, { userId: 'u1', scopeUserId: '__group__' })
+  ok(visG.some((r) => r.id === 'rgroup'), '群共享模式含 __group__ 条目')
+})
+
 // ---------- 17b. 并发加固：键锁有界 + 各存储 RMW 无丢失 ----------
 await test('lock：同键串行 / 异键并发 / 键空间有界', async () => {
   const lock = createKeyedLock({ maxKeys: 3 })
@@ -919,13 +950,17 @@ await test('SessionStore conversation：新建/列出/切换/历史/删除', asy
 })
 
 // ---------- 11d. render HTML（浅色清晰）----------
-await test('render：buildHelpHtml / buildChatListHtml', async () => {
+await test('render：buildHelpHtml（液态玻璃）/ buildChatListHtml', async () => {
   const h = buildHelpHtml({ title: '帮助', subtitle: '副标题', sections: [{ title: 'T', commands: [{ cmd: '#x', desc: '描述' }] }] })
   ok(h.startsWith('<!doctype html>'), 'help 完整 html')
   ok(h.includes('#x') && h.includes('描述'), 'help 含命令与描述')
-  ok(h.includes('#ffffff'), 'help 含白色卡片背景（浅色）')
-  ok(h.includes('linear-gradient'), 'help 有渐变样式')
-  ok(h.includes('#3b82f6'), 'help 蓝色强调（非暗色）')
+  ok(h.includes('backdrop-filter') && h.includes('-webkit-backdrop-filter'), '液态玻璃：玻璃层 backdrop-filter')
+  ok(h.includes('.help-section') && h.includes('.cmd-cell') && h.includes('.help-ico'), '玻璃面板/指令卡/图标结构')
+  ok(h.includes('#container::before') && /blur\(/.test(h), '流体光斑 + 模糊层')
+  ok(h.includes('linear-gradient'), '含渐变（玻璃高光/背景）')
+  ok(h.includes('#3b82f6'), '蓝色强调（非暗色）')
+  ok(h.includes('条指令') && h.includes('个分类'), '含指令总数 meta')
+  ok(!/background:\s*#0[0-9a-f]{5}/i.test(h), '非暗色背景')
 
   const cl = buildChatListHtml({ user: 'u1', conversations: [{ id: '1', title: '对话 1', count: 3, updatedAt: Date.now(), preview: '你好' }], activeId: '1' })
   ok(cl.includes('#1') && cl.includes('对话 1') && cl.includes('当前'), 'chatlist 含对话与当前标记')
@@ -1676,10 +1711,11 @@ await test('工具按需发现：未配 alwaysOn 时默认常驻含群文件工�
   let sent = null
   const provider = { async chat(opts) { sent = (opts.tools || []).map((t) => t.name); return { role: 'assistant', content: 'ok', toolCalls: [], finishReason: 'stop', usage: null } } }
   const mk = (name, category) => ({ name, category, description: 'd', parameters: { type: 'object' }, async execute() { return 'x' } })
-  const tools = new ToolRegistry().register(mk('get_group_file', 'group_manage'), mk('list_group_files', 'group_manage'), mk('web_search', 'query'))
+  const tools = new ToolRegistry().register(mk('get_group_file', 'group_manage'), mk('list_group_files', 'group_manage'), mk('web_search', 'query'), mk('reminder_set', 'personal'), mk('schedule_task', 'system'))
   const agent = new Agent({ provider, tools, maxTurns: 1, reflect: 'off', toolDiscovery: { enable: true } })
   await agent.run('看看群文件')
   ok(sent && sent.includes('get_group_file') && sent.includes('list_group_files'), `默认常驻含群文件工具（实际 ${JSON.stringify(sent)}）`)
+  ok(sent && sent.includes('schedule_task'), `默认常驻含 schedule_task（周期需求不再被当一次性提醒，实际 ${JSON.stringify(sent)}）`)
 })
 
 // ---------- 跨协议 usage 归一化（P0：缓存统计失真源头） ----------
