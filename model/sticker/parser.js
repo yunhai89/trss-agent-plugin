@@ -25,6 +25,17 @@ export function parseMarkers(text) {
 }
 
 /**
+ * 整条文本是否只由表情标记组成（剥除标记后为空）。
+ * 用于回复出口：这类"只有表情"的回复若被频率门控挡下，会变成一条空白消息——
+ * 应强制发出，绝不落空。
+ */
+export function isStickerOnly(text) {
+  const s = String(text || '')
+  if (!parseMarkers(s).length) return false
+  return composeString(s, new Map(), () => '').trim() === ''
+}
+
+/**
  * 图片模式：把通过门控的标记替换为 onImage(file) 返回串，未通过的剥除 → 返回新字符串。
  * @param acceptMap Map(name → 图片绝对路径)
  */

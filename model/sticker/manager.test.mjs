@@ -9,6 +9,7 @@
  *  - maxPerReply 限流。
  */
 import { StickerManager } from './manager.js'
+import { isStickerOnly } from './parser.js'
 
 let passed = 0
 let failed = 0
@@ -37,6 +38,14 @@ await test('标记剥除：未通过门控的 [sticker:x] 不留字面量', asyn
   eq(m.applyImage('[sticker:开心]', new Map()), '', '纯标记 → 空串（图片模式此前漏字面量的根因）')
   eq(m.applyImage('你好 [sticker:不存在] 呀', new Map()), '你好  呀', '未通过标记被剥除、正文保留')
   eq(m.applyImage('你好 [sticker:开心] 呀', new Map()), '你好  呀', 'applyImage 空 map 一律剥除')
+})
+
+await test('isStickerOnly：识别"只有表情"的回复（用于强制发出，避免空白）', async () => {
+  eq(isStickerOnly('[sticker:叼花少女]'), true, '纯标记 → true')
+  eq(isStickerOnly('  [sticker:开心] [sticker:无奈]  '), true, '多标记纯空 → true')
+  eq(isStickerOnly('[sticker:开心] 你好'), false, '带正文 → false')
+  eq(isStickerOnly('你好'), false, '无标记 → false')
+  eq(isStickerOnly(''), false, '空串 → false')
 })
 
 await test('频率闸：冷却 / 防连发 / 概率 默认生效', async () => {

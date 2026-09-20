@@ -68,9 +68,10 @@ export const renderReplyImage = async (content, { scale = 3, footer, extraCss, c
       const userAvatar = await fa(chat.userAvatar)
       const aiAvatar = await fa(chat.aiAvatar)
       // 多气泡：用户问 + AI 正文 + 每个表情包独立一条（类似微信多消息）
+      // 正文为空（如"只有表情包"的回复）时不渲染空气泡，避免出现空白气泡
       const messages = [
         { role: 'user', text: chat.userText, avatar: userAvatar },
-        { role: 'ai', html: bodyHtml, avatar: aiAvatar, name: chat.aiName },
+        ...(String(bodyHtml || '').trim() ? [{ role: 'ai', html: bodyHtml, avatar: aiAvatar, name: chat.aiName }] : []),
         // 修复：stickerImgs 的元素已是完整 <img class="sticker" src="data:..."> 标签（manager._imgDataUri 产物，
         // .sticker 样式在 theme.js）——此前误当 URL 再包一层 src="${u}" → 嵌套 HTML 解析崩 → 卡片里只剩空气泡
         ...((chat.stickerImgs || []).map((tag) => ({ role: 'ai', html: String(tag), avatar: aiAvatar, name: chat.aiName }))),

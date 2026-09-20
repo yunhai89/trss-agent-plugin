@@ -56,6 +56,7 @@ import { createSearchManager, makeSearchTools } from '../model/search/index.js'
 import { PersonaStore, PersonaService } from '../model/persona/index.js'
 import { VisionService, describeImages } from '../model/vision/index.js'
 import { getStickerManager } from '../model/sticker/manager.js'
+import { isStickerOnly } from '../model/sticker/parser.js'
 import { redactSecrets } from '../model/agent/redact.js'
 import { randomUUID } from 'node:crypto'
 import devLog from '../utils/DevLog.js'
@@ -1619,8 +1620,10 @@ export class Chat extends plugin {
       // （用户以为任务正常完成）。文案复用 Agent 的确定性兜底表，保持单一真源。
       const suffix = STOP_REASON_CN[stopReason] ? `（${STOP_REASON_CN[stopReason]}）` : ''
       // 表情包：本轮一次性门控（决定带哪些图 + 记冷却/防连发/usage），图片/文本模式共用结果，避免双计。
-      // 用户明确索要表情包 → force 绕过 sendRate/cooldown/防连发/近期去重（要了就必须发，否则"要了却不发"）
-      const forceSticker = /表情包|表情|斗图|贴个表情|发个表情|来个表情|sticker/i.test(text || '')
+      // force 场景：① 用户明确索要表情包；② 整条回复只有表情标记（剥除后为空）——否则被频率闸
+      // 挡下会变成一条空白消息（曾把 [sticker:x] 剥掉后什么都不剩）。这两种都必须真的发出表情。
+      const explicitSticker = /表情包|表情|斗图|贴个表情|发个表情|来个表情|sticker/i.test(text || '')
+      const forceSticker = explicitSticker || isStickerOnly(body)
       const acceptMap = (rt.sticker && body) ? rt.sticker.decide(body, ctx, { force: forceSticker }) : null
       // 群聊回复艾特发言人（agent.reply.atSender，默认开；私聊不艾特）
       const atSender = (ctx.isGroup && cfg.reply?.atSender !== false && ctx.userId && typeof segment !== 'undefined') ? segment.at(ctx.userId) : null
