@@ -20,6 +20,7 @@ import { tokenBreakdown, toolResultFields } from './trace/events.js'
 import { LoopGovernor } from './loop-governor.js'
 import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
+import { detectScheduleIntent } from './schedule.js'
 
 const DEFAULT_IDENTITY = TEMPLATES.agent.system
 
@@ -339,6 +340,8 @@ export class Agent {
     const context = opts.context || null
 
     const rawText = this._inputText(input)
+    // 调度意图（周期 vs 一次性）确定性识别：供路由提示 + reminder_set 硬门（见 _executeOne）
+    this._scheduleIntent = detectScheduleIntent(rawText)
 
     // guard：入口注入防御
     let userText = rawText
@@ -403,6 +406,10 @@ export class Agent {
     if (context) dynParts.push(this._screenUntrusted(context, 'context'))
     if (recalledMemory) dynParts.push(this._screenUntrusted(recalledMemory, 'memory'))
     if (profileBlock) dynParts.push(this._screenUntrusted(profileBlock, 'profile'))
+    // 周期意图路由提示：本轮明确是"每N小时/每天/每周…"的重复需求 → 必须用 schedule_task，勿用一次性提醒
+    if (this._scheduleIntent === 'recurring' && this.tools?.get?.('schedule_task')) {
+      dynParts.push('【调度意图·系统判定】用户本轮要的是【周期重复】任务：请调用 `schedule_task`（when 用自然语言周期，如"每2小时"，prompt 填任务描述）创建 cron 任务；不要用 `reminder_set` 建一次性提醒。若当前用户无权限，请如实说明周期任务需要管理员。')
+    }
     // 动态情境块并入 user 文本（持久化该形态——下轮前缀与本轮完全一致，缓存不打穿；
     // 明确边界标注，模型不当作用户亲述）
     if (dynParts.length) {
@@ -1063,6 +1070,18 @@ export class Agent {
         content = stringifyArgs({ error: '工具参数不是合法 JSON 对象，无法执行', got: String(tc.arguments).slice(0, 200) })
         this.logger('warn', 'tool bad_args', tc.name, brief(tc.arguments))
       } else {
+        // 调度意图硬门：本轮用户明确要"周期重复"，不得创建一次性提醒（确定性拦截，防模型选错工具）。
+        // 仅在 schedule_task 已注册时拦截，避免"周期任务被关闭"时把用户堵死。
+        if (tc.name === 'reminder_set' && this._scheduleIntent === 'recurring' && this.tools?.get?.('schedule_task')) {
+          content = stringifyArgs({
+            error: 'recurring_intent',
+            reason: '用户要求的是【周期重复】任务，不能用 reminder_set 创建一次性提醒',
+            next: '请改用 schedule_task（when 填自然语言周期，如"每2小时"；prompt 填任务描述）。若无权限，请如实告知用户周期任务需要管理员。',
+          })
+          this.logger('mark', 'tool rerouted', 'reminder_set → schedule_task（周期意图）')
+          this._safeCb(cb.onToolEnd, tc, content)
+          return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
+        }
         // policy + confirm 门（代码层强制，agent 无法绕过）
       const alwaysConfirm = tool?.meta?.alwaysConfirm === true
       if (this.policy && ctx) {

@@ -27,6 +27,7 @@ import {
   ScheduleStore,
   formatScheduleList,
   selectScheduleForList,
+  detectScheduleIntent,
   checkInput,
   analyze,
   isolate,
@@ -703,6 +704,55 @@ await test('schedule：formatScheduleList 标注类型（周期/一次性任务/
   eq(vis.length, 2, '去重后 2 条')
   const visG = selectScheduleForList(all, { userId: 'u1', scopeUserId: '__group__' })
   ok(visG.some((r) => r.id === 'rgroup'), '群共享模式含 __group__ 条目')
+})
+
+await test('detectScheduleIntent：周期 vs 一次性', async () => {
+  eq(detectScheduleIntent('每2小时给我最新网络热点'), 'recurring', '每2小时 → 周期')
+  eq(detectScheduleIntent('每天8点提醒我买早餐'), 'recurring', '每天+提醒 → 周期')
+  eq(detectScheduleIntent('工作日9点推送AI资讯'), 'recurring', '工作日+推送 → 周期')
+  eq(detectScheduleIntent('中秋提醒我买斐济北'), null, '一次性（斐济北）→ null')
+  eq(detectScheduleIntent('明天下午3点提醒我开会'), null, '一次性明天 → null')
+  eq(detectScheduleIntent('每天都很累，提醒我早点睡'), null, '含周期词但非周期任务（跨句读断开）→ null')
+  eq(detectScheduleIntent('定时提醒我喝水'), null, '无周期节律词 → null（不强行判周期）')
+  eq(detectScheduleIntent(''), null, '空文本')
+})
+
+await test('调度硬门：周期意图下 reminder_set 被拦截并引导 schedule_task', async () => {
+  let reminderRan = false
+  let taskRan = 0
+  const mk = (name, category, fn) => ({ name, category, description: 'd', parameters: { type: 'object' }, async execute() { fn(); return { ok: true } } })
+  const tools = new ToolRegistry().register(
+    mk('reminder_set', 'personal', () => { reminderRan = true }),
+    mk('schedule_task', 'system', () => { taskRan++ }),
+  )
+  // 第一轮：模型错选 reminder_set → 硬门拦截，未执行
+  const p1 = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'reminder_set', arguments: { at: '2026-09-20T10:00:00+08:00', message: '最新网络热点' } }], finishReason: 'tool_calls' },
+    { content: '好的', finishReason: 'stop' },
+  ])
+  const a1 = new Agent({ provider: p1, tools, maxTurns: 3, reflect: 'off' })
+  await a1.run('每2小时给我最新网络热点', { ctx: { role: 'member', isMaster: true, userId: 'u1' } })
+  eq(reminderRan, false, '周期意图下 reminder_set 未执行')
+  ok(p1.calls.history.some((h) => JSON.stringify(h.messages || []).includes('recurring_intent')), '模型收到 recurring_intent 引导')
+
+  // 第二轮：模型改调 schedule_task → 正常执行
+  const p2 = mockProvider([
+    { toolCalls: [{ id: 'c2', name: 'schedule_task', arguments: { when: '每2小时', prompt: '最新网络热点' } }], finishReason: 'tool_calls' },
+    { content: '好的', finishReason: 'stop' },
+  ])
+  const a2 = new Agent({ provider: p2, tools, maxTurns: 3, reflect: 'off' })
+  await a2.run('每2小时给我最新网络热点', { ctx: { role: 'member', isMaster: true, userId: 'u1' } })
+  ok(taskRan >= 1, 'schedule_task 正常执行')
+
+  // 一次性场景：不得拦截 reminder_set
+  reminderRan = false
+  const p3 = mockProvider([
+    { toolCalls: [{ id: 'c3', name: 'reminder_set', arguments: { at: '2026-09-24T09:00:00+08:00', message: '买斐济水' } }], finishReason: 'tool_calls' },
+    { content: '好的', finishReason: 'stop' },
+  ])
+  const a3 = new Agent({ provider: p3, tools, maxTurns: 3, reflect: 'off' })
+  await a3.run('中秋提醒我买斐济北', { ctx: { role: 'member', isMaster: true, userId: 'u1' } })
+  eq(reminderRan, true, '一次性场景 reminder_set 正常执行（不误伤）')
 })
 
 // ---------- 17b. 并发加固：键锁有界 + 各存储 RMW 无丢失 ----------

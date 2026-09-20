@@ -31,7 +31,7 @@ export { MemoryStore, MemoryLimitError, MemoryThreatError, createMemoryTool, mak
 export { memoryKv, redisKv } from './store/kv.js'
 export { SessionStore } from './session.js'
 export { RecallStore, tokenize, jaccard, cosine } from './recall.js'
-export { ScheduleStore, nodeScheduleAdapter, reminderSetTool, reminderListTool, reminderCancelTool, parseCron, scheduleTaskTool, formatScheduleList, selectScheduleForList } from './schedule.js'
+export { ScheduleStore, nodeScheduleAdapter, reminderSetTool, reminderListTool, reminderCancelTool, parseCron, scheduleTaskTool, formatScheduleList, selectScheduleForList, detectScheduleIntent } from './schedule.js'
 export { checkInput, analyze, isolate, tagUntrusted, screenUntrusted, systemHardening, normalizeForScan, assessPersonaPrompt, PERSONA_FORBIDDEN_CATS, PATTERNS, SENSITIVITY } from './guard.js'
 export { decide, roleRank, categoryMinRole, visibleCategories, roleLabel, createPolicy, RANK, CATEGORY_MIN } from './policy.js'
 export { ConfirmStore } from './confirm.js'

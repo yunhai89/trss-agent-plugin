@@ -141,6 +141,24 @@ export function formatScheduleList(list = []) {
   })
 }
 
+/**
+ * 调度意图识别（纯函数，供 Agent 做"周期 vs 一次性"路由硬门）：
+ * 命中「周期节律词 + 邻近调度动词」才判为 recurring——避免"每天都很累，提醒我早点睡"
+ * 这类含周期词但并非周期任务请求的误判（逗号/句读处断开，不跨句匹配）。
+ * 例：「每2小时给我最新网络热点」→ recurring；「中秋提醒我买斐济北」→ null。
+ * @returns {'recurring'|null}
+ */
+const _CADENCE = '(?:每天|每日|每周|每星期|每月|每个?月|每年|每工作日|工作日|每\\s*隔?\\s*(?:\\d+|[一二两三四五六七八九十]+)?\\s*(?:秒|分钟|分|小时|钟头|天|日|周|星期|个月|月))'
+const _SCHED_CUE = '(?:提醒|通知|发给我|发我|发送|发给|推送|播报|告诉我|给我|汇报|总结|同步|更新|监控|定时|任务|叫我|别忘|记得)'
+const _RE_CAD_THEN_CUE = new RegExp(`${_CADENCE}[^，。；;！!？?\\n]{0,24}?${_SCHED_CUE}`)
+const _RE_CUE_THEN_CAD = new RegExp(`${_SCHED_CUE}[^，。；;！!？?\\n]{0,24}?${_CADENCE}`)
+export function detectScheduleIntent(text) {
+  const s = String(text || '').trim()
+  if (!s) return null
+  if (_RE_CAD_THEN_CUE.test(s) || _RE_CUE_THEN_CAD.test(s)) return 'recurring'
+  return null
+}
+
 // ── 自然语言 → cron 解析（全时间段；失败返回 null）──
 const _CN_NUM = { '一': 1, '两': 2, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10 }
 const _WEEK = { '日': 0, '天': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6 }
