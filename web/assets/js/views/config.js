@@ -134,6 +134,8 @@
       const dirty = ref(false)
       let dirtySuppressed = true
       watch(form, () => { if (!dirtySuppressed) dirty.value = true }, { deep: true })
+      // 思考自动决策开启时，自动关闭手动「深度思考」（agent.thinking=null），两者互斥
+      watch(() => form.thinkingAuto && form.thinkingAuto.enable, (v) => { if (v) form.thinking = null })
       // preset → baseURL 自动联动：选厂商预设时自动填对应 baseURL（syncForm 加载时不覆盖，保留 config 已有值）
       const PRESET_URLS = {
         deepseek: 'https://api.deepseek.com',
@@ -242,6 +244,7 @@
         if (form.thinkingAuto.budgets.low == null) form.thinkingAuto.budgets.low = 4096
         if (form.thinkingAuto.budgets.medium == null) form.thinkingAuto.budgets.medium = 8192
         if (form.thinkingAuto.budgets.high == null) form.thinkingAuto.budgets.high = 16384
+        if (form.thinkingAuto.enable) form.thinking = null // 互斥：自动决策开启时关闭手动深度思考（载入即归一）
         if (!form.devLog) form.devLog = {}
         if (!form.humanize) form.humanize = {}
         if (!form.humanize.memory) form.humanize.memory = {}
@@ -1077,11 +1080,11 @@
             <cfg-row name="收尾宽限(ms)" desc="预算耗尽后收尾总结的独立时间窗">
               <input type="number" class="inp" style="width:120px" min="1000" step="1000" v-model.number="form.loop.finalizeGraceMs">
             </cfg-row>
-            <cfg-row name="深度思考" desc="模型先思考再作答(更慢更耗 token)">
-              <v-switch v-model="thinkingOn"/>
+            <cfg-row name="深度思考" :desc="form.thinkingAuto.enable ? '已由「思考自动决策」接管（手动深度思考已关闭）' : '模型先思考再作答(更慢更耗 token)'">
+              <v-switch v-model="thinkingOn" :disabled="form.thinkingAuto.enable"/>
             </cfg-row>
             <cfg-row name="思考预算 tokens" desc="thinking.budget_tokens">
-              <input type="number" class="inp" style="width:130px" min="1024" step="1024" :disabled="!form.thinking" v-model.number="form.thinking.budget_tokens">
+              <input type="number" class="inp" style="width:130px" min="1024" step="1024" :disabled="!form.thinking || form.thinkingAuto.enable" v-model.number="form.thinking.budget_tokens">
             </cfg-row>
             <cfg-row name="思考自动决策" desc="按提问复杂度自动决定是否思考与深度(覆盖手动 thinking；模型级覆盖仍优先)">
               <v-switch v-model="form.thinkingAuto.enable"/>
@@ -1094,7 +1097,11 @@
               </select>
             </cfg-row>
             <cfg-row name="判档小模型" desc="留空=utilityModel→主模型；建议廉价小模型">
-              <input type="text" class="inp" style="width:180px" :disabled="!form.thinkingAuto.enable || form.thinkingAuto.classifier==='off'" v-model="form.thinkingAuto.model" placeholder="留空=utilityModel">
+              <select class="sel" style="width:220px" :disabled="!form.thinkingAuto.enable || form.thinkingAuto.classifier==='off'" v-model="form.thinkingAuto.model">
+                <option value="">（留空 = utilityModel → 主模型）</option>
+                <option v-for="m in knownModels" :key="(m.fromRegistry ? m.id : 'raw:' + m.model)" :value="m.model">{{ m.label }}</option>
+                <option v-if="form.thinkingAuto.model && !knownModels.some((x) => x.model === form.thinkingAuto.model)" :value="form.thinkingAuto.model">{{ form.thinkingAuto.model }}（不在列表）</option>
+              </select>
             </cfg-row>
             <cfg-row name="判档超时(ms)" desc="小模型超时/失败自动回退规则">
               <input type="number" class="inp" style="width:130px" min="500" step="500" :disabled="!form.thinkingAuto.enable || form.thinkingAuto.classifier==='off'" v-model.number="form.thinkingAuto.timeoutMs">

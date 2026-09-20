@@ -316,6 +316,8 @@ export function supportGuoba() {
           }
           setPath(cfg, p, val)
         }
+        // 互斥：开启「思考自动决策」时自动关闭手动「深度思考」（agent.thinking=null），避免两套并存
+        if (cfg.agent?.thinkingAuto?.enable === true) cfg.agent.thinking = null
         Config.save(cfg)
         // save 已预更新内存 _data，文件监听的 reload 看不到变化、不会通知；
         // 故显式强制 reload(true) 触发热加载（运行时重建）并打日志。
