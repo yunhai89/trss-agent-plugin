@@ -19,10 +19,12 @@
 #
 # 用法：
 #   sh plugins/agents-plugin/scripts/install-kroki.sh
+#   sh scripts/install-kroki.sh -y                                     # 无人值守（缺 docker 直接装）
 # 常用覆盖：
 #   KROKI_IMAGE=yuzutech/kroki@sha256:…  sh scripts/install-kroki.sh    # 指定镜像（默认为 compose 锚定 digest）
 #   KROKI_PULL_PROXIES="a.example/ b.example/" sh scripts/install-kroki.sh  # 自定义代理前缀（空格分隔）
 #   KROKI_HEALTH_TIMEOUT=120 sh scripts/install-kroki.sh               # 健康等待上限（秒）
+#   DOCKER_AUTO_INSTALL=0 sh scripts/install-kroki.sh                  # 缺 docker 时只报错、不自动安装
 # ----------------------------------------------------------------------------
 set -e
 
@@ -36,12 +38,15 @@ DEFAULT_IMAGE="yuzutech/kroki@sha256:6980bfb218b48b74ea14b888d9c7e8c032d1cb6325f
 EXPECT_DIGEST="sha256:6980bfb218b48b74ea14b888d9c7e8c032d1cb6325f3292277abdf62483abd9d"
 HEALTH_TIMEOUT="${KROKI_HEALTH_TIMEOUT:-60}"
 
-echo "[1/5] 检查 docker"
-command -v docker > /dev/null || { echo "错误：未找到 docker。先安装 Docker（国内服务器可用阿里云/清华源 apt 仓库）。" >&2; exit 1; }
-if docker compose version > /dev/null 2>&1; then COMPOSE="docker compose"
-elif command -v docker-compose > /dev/null 2>&1; then COMPOSE="docker-compose"
-else echo "错误：未找到 docker compose 插件/独立二进制。" >&2; exit 1; fi
-echo "    docker + compose 就绪（$COMPOSE）"
+# -y/--yes → 允许无人值守自动安装 docker
+for _a in "$@"; do case "$_a" in -y|--yes) DOCKER_ASSUME_YES=1 ;; esac; done
+
+# shellcheck source=lib-ensure-docker.sh
+. "$SCRIPT_DIR/lib-ensure-docker.sh"
+
+echo "[1/5] 检查 docker（缺失则自动安装）"
+ensure_docker || { echo "错误：docker 不可用（可设 DOCKER_AUTO_INSTALL=0 关闭自动安装，或手动安装后重跑）。" >&2; exit 1; }
+COMPOSE="$DOCKER_COMPOSE"
 
 echo "[2/5] 拉取 Kroki 镜像（国内加速三级策略）"
 TARGET_IMAGE="${KROKI_IMAGE:-$DEFAULT_IMAGE}"

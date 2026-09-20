@@ -322,9 +322,16 @@ search:
 **部署 Kroki 容器**（默认引擎依赖，一次性）：
 
 ```bash
+# 推荐：一键脚本（缺 Docker 自动安装、镜像国内加速、健康检查）
+sh plugins/agents-plugin/scripts/install-kroki.sh
+
+# 或手动（已装 Docker）：
 docker compose -f docs/deploy/kroki-compose.yaml up -d
 # 然后保持 agent.diagram.kroki.endpoint: http://127.0.0.1:8000
 ```
+
+> 脚本默认在缺少 Docker 时用发行版包管理器自动安装并启动（apt/dnf/yum/apk）；
+> 非交互环境需显式 `-y` 或 `DOCKER_ASSUME_YES=1`，`DOCKER_AUTO_INSTALL=0` 可关闭自动安装只做检测。
 
 ```yaml
 diagram:

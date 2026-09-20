@@ -4,7 +4,7 @@
 #
 # 做什么：
 #   ① preflight 硬前提检查（KVM / 嵌套虚拟化 / 内存 / 磁盘 / 页大小 / 端口 / 发行版）
-#   ② 按需装 docker + 基础依赖（apt）
+#   ② 按需装 docker（无则自动安装，apt/dnf/yum/apk 自适应）+ 基础依赖
 #   ③ 克隆官方 e2b-dev/runtime（可锁 tag）→ embed/compose 起栈（宿主准备由官方脚本负责）
 #   ④ 跑官方 smoke 自检 → 导出 sdk.env 三要素
 #   ⑤ 打印可直接粘贴的插件配置，并可选 --write-config 直接写进插件 config.yaml
@@ -30,6 +30,10 @@
 #    本脚本会在 preflight 阶段明确拒绝，不会"装一半"。
 # =============================================================================
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib-ensure-docker.sh
+. "$SCRIPT_DIR/lib-ensure-docker.sh"
 
 E2B_REPO="https://github.com/e2b-dev/runtime.git"
 E2B_REF="${E2B_REF:-main}"
@@ -159,23 +163,26 @@ preflight() {
 # =============================================================================
 install_deps() {
   step "安装依赖（docker / git / make / qemu-kvm…）"
-  local pkgs="git make curl ca-certificates docker.io docker-compose-v2 qemu-kvm"
-  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    ok "docker 与 compose v2 已就绪（$(docker --version)）"
-  else
-    command -v apt-get >/dev/null 2>&1 || die "无 apt-get：请手动安装 docker + compose v2 后重跑" 2
-    confirm "将用 apt 安装：$pkgs（会改动系统包与 /etc，可能重启 docker 服务）" || die "已取消" 2
+  # docker + compose v2：缺失则按发行版自动安装并启动（共享 lib-ensure-docker.sh，
+  # 与 install-kroki.sh 同一实现；-y 时 DOCKER_ASSUME_YES 透传跳过确认）
+  DOCKER_ASSUME_YES="$ASSUME_YES" ensure_docker \
+    || die "docker 不可用：请手动安装 docker + compose v2 后重跑（或 DOCKER_AUTO_INSTALL=0 关闭自动安装）" 2
+  ok "docker 依赖就绪（compose：$DOCKER_COMPOSE）"
+
+  # 其余基础依赖（docker 已由 ensure_docker 处理，这里不重复）
+  local pkgs="git make curl ca-certificates qemu-kvm"
+  if command -v apt-get >/dev/null 2>&1; then
+    confirm "将用 apt 安装：$pkgs（会改动系统包与 /etc）" || die "已取消" 2
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     # shellcheck disable=SC2086
     apt-get install -y $pkgs
-    ok "依赖安装完成"
+    ok "基础依赖安装完成"
+  else
+    local miss=""
+    for c in git curl make; do command -v "$c" >/dev/null 2>&1 || miss="$miss $c"; done
+    [ -n "$miss" ] && warn "无 apt-get，请自行确保已安装：$miss 以及 qemu-kvm"
   fi
-  if ! docker info >/dev/null 2>&1; then
-    warn "docker 守护进程未运行，尝试启动"
-    (systemctl enable --now docker || service docker start) >/dev/null 2>&1 || die "docker 启动失败，请手动处理后重跑" 2
-  fi
-  ok "docker 守护进程运行中"
 }
 
 # =============================================================================
