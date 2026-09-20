@@ -1618,8 +1618,10 @@ export class Chat extends plugin {
       // 异常停止必须以可见标记落到回复上：否则预算耗尽 / 空转 / 连续失败与普通回复外形完全一致
       // （用户以为任务正常完成）。文案复用 Agent 的确定性兜底表，保持单一真源。
       const suffix = STOP_REASON_CN[stopReason] ? `（${STOP_REASON_CN[stopReason]}）` : ''
-      // 表情包：本轮一次性门控（决定带哪些图 + 记冷却/防连发/usage），图片/文本模式共用结果，避免双计
-      const acceptMap = (rt.sticker && body) ? rt.sticker.decide(body, ctx) : null
+      // 表情包：本轮一次性门控（决定带哪些图 + 记冷却/防连发/usage），图片/文本模式共用结果，避免双计。
+      // 用户明确索要表情包 → force 绕过 sendRate/cooldown/防连发/近期去重（要了就必须发，否则"要了却不发"）
+      const forceSticker = /表情包|表情|斗图|贴个表情|发个表情|来个表情|sticker/i.test(text || '')
+      const acceptMap = (rt.sticker && body) ? rt.sticker.decide(body, ctx, { force: forceSticker }) : null
       // 群聊回复艾特发言人（agent.reply.atSender，默认开；私聊不艾特）
       const atSender = (ctx.isGroup && cfg.reply?.atSender !== false && ctx.userId && typeof segment !== 'undefined') ? segment.at(ctx.userId) : null
       // 回复渲染：默认图片（markdown→图片，失败退文本）；replyMode 已在上方 run 前计算
@@ -1629,15 +1631,18 @@ export class Chat extends plugin {
       devLog('send_start', { mode: replyMode, replyLen: (body || '').length, stopReason, turns, streamed: streamedFinal }, traceId, ctx.devScope)
       if (replyMode === 'image' && body) {
         try {
-          // 拆 sticker：正文剥标记（无图，applyImage 空 map）+ 图独立成气泡（stickerImgs）
+          // 拆 sticker：正文始终剥除标记（未通过的也剥，防 [sticker:x] 字面量漏进图片——
+          // 文本模式本就如此；此前图片模式仅在 acceptMap 非空时才剥，被频率闸挡下时标记会漏进图里）；
+          // 通过门控的图独立成气泡（stickerImgs）
           let stickerImgs = []
           let cleanBody = body
-          if (acceptMap && acceptMap.size) {
+          if (rt.sticker) {
             try {
               cleanBody = rt.sticker.applyImage(body, new Map()).replace(/[\s\n]+$/, '')
-              // 修复：acceptMap 的 value 是图片绝对路径字符串（此前误当对象取 .abs/.path → undefined
-              // → _imgDataUri 读文件失败被吞 → stickerImgs 恒空，图片回复从未渲染出表情包）
-              stickerImgs = [...acceptMap.values()].map((abs) => rt.sticker._imgDataUri(abs)).filter(Boolean)
+              if (acceptMap && acceptMap.size) {
+                // acceptMap 的 value 是图片绝对路径字符串；_imgDataUri 读文件转 data URI
+                stickerImgs = [...acceptMap.values()].map((abs) => rt.sticker._imgDataUri(abs)).filter(Boolean)
+              }
             } catch { cleanBody = body }
           }
           const img = await renderReplyImage(cleanBody, {

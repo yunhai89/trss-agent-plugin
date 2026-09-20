@@ -169,8 +169,9 @@ export class StickerManager {
   /**
    * 多层频率闸 → acceptMap(name → 图片绝对路径)。空 map 表示本轮不带图（标记全剥除）。
    * 顺序：启用检查 → groupOnly → 冷却 → 防连发 → 概率 → 合法性+数量。
+   * force=true（用户明确要表情）→ 跳过冷却/防连发/概率/近期去重，并在无匹配时兜底任选一张。
    */
-  _decide(content, ctx) {
+  _decide(content, ctx, { force = false } = {}) {
     const acceptMap = new Map()
     if (!this.enabled()) return acceptMap
     // 多样性硬闸（独立于 sendRate/cooldown 配置）：最近发过的表情（近 3 张）不再发——
@@ -179,13 +180,15 @@ export class StickerManager {
     const c = this.cfg
     if (c.groupOnly && !ctx?.isGroup) return acceptMap
     const key = this._key(ctx)
-    if ((c.cooldown ?? 0) > 0) {
-      const last = this._cooldown.get(key) || 0
-      if (Date.now() - last < (c.cooldown | 0) * 1000) return acceptMap
+    if (!force) {
+      if ((c.cooldown ?? 0) > 0) {
+        const last = this._cooldown.get(key) || 0
+        if (Date.now() - last < (c.cooldown | 0) * 1000) return acceptMap
+      }
+      if (c.antiConsecutive !== false && this._lastHad.get(key)) return acceptMap
+      const rate = Math.min(1, Math.max(0, Number(c.sendRate) ?? 1))
+      if (rate < 1 && Math.random() > rate) return acceptMap
     }
-    if (c.antiConsecutive !== false && this._lastHad.get(key)) return acceptMap
-    const rate = Math.min(1, Math.max(0, Number(c.sendRate) ?? 1))
-    if (rate < 1 && Math.random() > rate) return acceptMap
     const stickers = this.getIndex()?.stickers || {}
     const max = Math.max(0, (c.maxPerReply | 0) || 0)
     let count = 0
@@ -207,15 +210,37 @@ export class StickerManager {
         }
       }
       if (!entry || entry.nsfw) continue
-      if (recent.has(usedName)) continue // 最近发过：本轮不发（标记剥除，streak 打断）
-      const abs = imageAbsOf(entry)
-      if (!fs.existsSync(abs)) continue
+      if (!force && recent.has(usedName)) continue // 最近发过：本轮不发（标记剥除，streak 打断）
+      const abs = this._absOf(entry)
+      if (!this._exists(abs)) continue
       if (acceptMap.has(usedName)) continue
       acceptMap.set(usedName, abs)
       count++
     }
+    // 显式请求兜底：用户明确要表情，但标记无匹配（LLM 编了名）/全被近期去重挡掉 → 任选（优先非近期）
+    if (force && acceptMap.size === 0) this._fillFallback(acceptMap, stickers, max, recent)
     return acceptMap
   }
+
+  /** 兜底选图（仅 force 且无匹配时）：先避开近 3 张，仍无则放开近期限制。 */
+  _fillFallback(acceptMap, stickers, max, recent) {
+    const pick = (skipRecent) => {
+      for (const [name, entry] of Object.entries(stickers)) {
+        if (max > 0 && acceptMap.size >= max) return
+        if (!entry || entry.nsfw || acceptMap.has(name)) continue
+        if (skipRecent && recent.has(name)) continue
+        const abs = this._absOf(entry)
+        if (!this._exists(abs)) continue
+        acceptMap.set(name, abs)
+      }
+    }
+    pick(true)
+    if (acceptMap.size === 0) pick(false)
+  }
+
+  /** 图片绝对路径 / 存在性（可被子类/测试覆盖） */
+  _absOf(entry) { return imageAbsOf(entry) }
+  _exists(abs) { try { return fs.existsSync(abs) } catch { return false } }
 
   /** 记录实际发送的表情（多样性去重用；由 composer/主Agent 发送成功后调用）。 */
   noteSent(names = []) {
@@ -234,9 +259,10 @@ export class StickerManager {
     this._pruneGates()
   }
 
-  /** 本轮一次性门控（含副作用：冷却/防连发/usage）。返回 acceptMap（空=本轮不带图）。回复出口调一次，按实际发送路径 apply。 */
-  decide(content, ctx) {
-    const acceptMap = this._decide(content, ctx)
+  /** 本轮一次性门控（含副作用：冷却/防连发/usage）。返回 acceptMap（空=本轮不带图）。回复出口调一次，按实际发送路径 apply。
+   *  opts.force=true（用户明确要表情）→ 走强制路径见 _decide。 */
+  decide(content, ctx, opts = {}) {
+    const acceptMap = this._decide(content, ctx, { force: !!opts.force })
     this._afterDecide(this._key(ctx), acceptMap)
     return acceptMap
   }
