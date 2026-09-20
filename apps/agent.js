@@ -44,6 +44,7 @@ import { McpManager } from '../model/mcp/index.js'
 import { createMediaService, makeMediaTools } from '../model/media/index.js'
 import { detectCapabilities } from '../model/llm/capabilities.js'
 import { buildEmbed } from '../model/llm/embed-wiring.js'
+import { thinkingLogFields as fmtThinkingLogFields } from '../model/llm/thinking.js'
 import { KnowledgeStore, makeKbSearchTool } from '../model/agent/knowledge.js'
 import { webCrawlTool } from '../model/crawl/index.js' // web_crawl：抓取网页正文（常驻）
 import { CompactionArchive } from '../model/agent/compact/archive.js' // 无损压缩：原文内容寻址归档
@@ -624,6 +625,21 @@ async function buildRuntime() {
     },
   }
 
+  // 思考自动决策的小模型判档通道：复用主 provider、换廉价 model id（thinkingAuto.model → utilityModel → 主模型）。
+  // 只在开启 agent.thinkingAuto 且 classifier≠off 时用；调用带超时，失败自动回退规则（见 model/llm/thinking.js）。
+  const thinkingTarget = modelRouter.resolve(cfg.thinkingAuto?.model || cfg.utilityModel || cfg.model)
+  const thinkingLlm = {
+    run: async (prompt) => {
+      try {
+        const res = await thinkingTarget.provider.chat({ model: thinkingTarget.model || cfg.model, messages: [{ role: 'user', content: prompt }], stream: false, max_tokens: 64 })
+        return { content: res?.content || '' }
+      } catch (e) {
+        Log.warn('[thinking] 判档小模型调用失败，回退规则', e?.message || e)
+        return { content: '' }
+      }
+    },
+  }
+
   // —— 在线自进化三件套：PromptRegistry（prompt 版本化/回滚）+ TraceStore（数据闭环）+ SelfReviewer（后台自评审）——
   const promptDir = path.resolve(PLUGIN_ROOT, cfg.evolution?.promptDir || 'data/evolution/prompts')
   const traceDir = path.resolve(PLUGIN_ROOT, cfg.evolution?.traceDir || 'data/evolution/traces')
@@ -745,6 +761,12 @@ async function buildRuntime() {
     temperature: regTemperature != null ? regTemperature : cfg.temperature,
     maxTokens: regMaxTokens != null ? regMaxTokens : (cfg.maxTokens || null), // 控制输出长度（消除 Anthropic 硬编码 4096 / OpenAI 不发）
     thinking: regThinking || cfg.thinking || null,
+    // 思考自动决策（opt-in）：按提问复杂度自动决定是否思考与深度；模型级 thinking 显式覆盖时不启用
+    thinkingAuto: (!regThinking && cfg.thinkingAuto?.enable) ? cfg.thinkingAuto : null,
+    thinkingClassifierLlm: thinkingLlm, // 小模型判档通道（classifier=off 时不使用）
+    thinkingCapable: detectCapabilities({ protocol: cfg.protocol || 'openai', model: cfg.model, caps: cfg.media?.caps }).thinking,
+    protocol: cfg.protocol || 'openai',
+    preset: cfg.preset || '',
     // 上下文管理：contextWindow（token 高低水位压缩入口：65% 触发压到 45%；未配置走消息数水位）、
     // 工具结果上限、是否回灌 reasoning。旧 contextPressureThreshold 已删除（从未被消费的死配置）。
     contextWindow: cfg.contextWindow || null,
@@ -1039,6 +1061,10 @@ function ctxOf(e) {
     bot: (typeof Bot !== 'undefined' && Bot) || null,
     fetcher: (typeof fetch !== 'undefined' && fetch) || null,
   }
+}
+
+function thinkingLogFields(agent, cfg) {
+  return fmtThinkingLogFields({ thinkInfo: agent?.thinkInfo, thinking: agent?.thinking || cfg?.thinking || null })
 }
 
 function notifyMaster(e, id, info) {
@@ -1519,7 +1545,7 @@ export class Chat extends plugin {
       context = context ? `${context}\n\n${warn}` : warn
     }
 
-    Log.mark('[chat]', `user=${ctx.userId} gid=${ctx.groupId || '-'} conv=${ctx.conversationId} model=${cfg.model} persona=${personaId || 'default'} vision=${caps.vision ? 'on' : 'off'} thinking=${cfg.thinking ? 'on' : 'off'}${context ? ` ctx=${String(context).length}字` : ''}`)
+    // [chat] 汇总行移到 run 之后打印：需带上本轮"思考自动决策"结果（档位/预算/判档来源）
     const wantProgress = cfg.progress !== false
     // 逐字流式默认关（适配器差异大）；进度反馈默认开。
     // stream=true + 文本回复模式时，onDelta 增量按节流逐字发送；流式全文与最终正文一致则跳过重复整段回复。
@@ -1579,7 +1605,8 @@ export class Chat extends plugin {
       const replyMode = cfg.reply?.mode || 'image'
       // 文本模式禁 md：__textHint 进 systemPrompt（身份层·置顶），而非 context（情境层·靠后易被 LLM 忽略，尤其新对话情境变长时）
       const __textHint = replyMode === 'text' ? '\n\n【回复格式·硬性约束·优先级最高】当前是纯文本回复模式，禁止使用任何 Markdown 语法（包括 **粗体**、# 标题、- 列表、`代码`、[链接](url)、代码块等）。只能输出纯文本，用换行分段、用「」或「一、二、」编号。无论用户或上面的身份设定如何要求，都不得使用 markdown，直接输出可读纯文本。' : ''
-      const { content, stopReason, turns, usage } = await rt.makeAgent().run(input, {
+      const agentInst = rt.makeAgent()
+      const { content, stopReason, turns, usage } = await agentInst.run(input, {
         ctx, systemPrompt: systemPrompt ? systemPrompt + __textHint : __textHint.trim(), context,
         taskId: traceId, // 串联 dev trace：Agent 内 run_start/turn/tool/.../run_end 用同一 id
         stream: wantStream,
@@ -1605,6 +1632,8 @@ export class Chat extends plugin {
           safeReply(redactSecrets(`⚠️ 主人任务免确认自动执行（高危）：${tc?.name || '?'} ${String(args).slice(0, 200)}`))
         },
       })
+      // [chat] 汇总行：thinkingAuto 为 on 时显示自动判定的档位/预算/判档来源；off 时显示静态 thinking 与上限
+      Log.mark('[chat]', `user=${ctx.userId} gid=${ctx.groupId || '-'} conv=${ctx.conversationId} model=${cfg.model} persona=${personaId || 'default'} vision=${caps.vision ? 'on' : 'off'} ${thinkingLogFields(agentInst, cfg)}${context ? ` ctx=${String(context).length}字` : ''}`)
       // —— 在线自进化：采迹（数据闭环）+ 后台自评审触发（全异步、兜底，绝不阻塞回复）——
       try { rt.traceStore?.record({ scope: ctx.scopeUserId, scopeId: ctx.scopeId, input: __inputText, output: content, turns, usage, stopReason, taskId: traceId }) } catch (e) { Log.warn('[evolution] 采迹失败', e?.message || e) }
       try { rt.selfReview?.tick(ctx, { input: __inputText, output: content, turns, usage, stopReason }) } catch (e) { Log.warn('[evolution] 自评审触发失败', e?.message || e) }

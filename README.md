@@ -221,7 +221,8 @@ agent:
 | `reply.atSender` | `true` | 群聊回复时艾特发言人（私聊不艾特） |
 | `reply.narrate` | `true` | 中途播报：模型调工具时附带的思路/进展文本自动转发给用户（参考 OpenClaw） |
 | `reply.renderScale` | `2` | 回复图片渲染倍率（deviceScaleFactor，2=高清；越大越清晰但越耗内存/体积） |
-| `thinking` | 空 | 思考模式，如 `{ type: "enabled", budget_tokens: 16000 }` |
+| `thinking` | 空 | 思考模式（手动），如 `{ type: "enabled", budget_tokens: 16000 }` |
+| `thinkingAuto` | 关 | 思考自动决策：`{ enable, classifier, model, timeoutMs, maxBudget, budgets:{low,medium,high}, style }`。判档方式 `classifier`：`auto`=规则不确定时用小模型判（省调用）/`always`=总是小模型/`off`=纯规则；小模型带超时、缓存，失败自动回退规则，不阻塞对话。档位→厂商原生字段（MiMo/Kimi/GLM/豆包→`thinking`、DeepSeek→`thinking`+`reasoning_effort`、Qwen→`enable_thinking`+`thinking_budget`、MiniMax→`adaptive`、Anthropic→`budget_tokens`、o/GPT→`reasoning_effort`、Gemini→`thinking_level`）。模型级 `thinking` 显式覆盖仍优先 |
 | `memoryLimits` | 空 | 声明式记忆字符上限，如 `{ memory: 2200, user: 1375 }` |
 | `systemPrompt` | 空 | 默认身份 system prompt（留空用富默认身份；被人设覆盖时失效） |
 | `chatPermission` | `master` | `#ai` 命令权限：`master`/`admin`/`owner`/`all` |

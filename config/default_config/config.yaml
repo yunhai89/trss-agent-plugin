@@ -49,6 +49,17 @@ agent:
     finalizeGraceMs: 45000   # 收尾宽限：预算/时间耗尽后，收尾总结调用可用的独立时间窗（只受用户取消约束）
   temperature: 0.2  # 工具调用稳定性（建议 0.1~0.3；勿设 0 避免复读式回复）
   thinking:
+  thinkingAuto:            # 思考自动决策（opt-in）：按提问复杂度自动决定是否思考与深度；开启后覆盖上面的手动 thinking（模型级 thinking 覆盖仍优先）
+    enable: false          # 打开后 Agent 每轮判定：闲聊/简单问题不思考，复杂问题按深度思考
+    classifier: auto       # 判档方式：auto=规则不确定时用小模型判（省调用）/ always=总是小模型 / off=纯规则
+    model: ""              # 判档小模型（留空=utilityModel→主模型；建议廉价小模型）
+    timeoutMs: 2500        # 小模型判档超时（超时/失败自动回退规则，不阻塞对话）
+    maxBudget: 32768       # 自动思考预算硬顶（tokens；防单轮烧太多）
+    budgets:               # 各深度预算（tokens；质量优先，取值偏宽松）
+      low: 4096
+      medium: 8192
+      high: 16384
+    style: ""              # 传输风格覆盖（留空=按厂商预设自动；如 reasoning_effort / thinking_toggle / enable_thinking / deepseek / minimax / anthropic_budget / gemini_level）
   maxTokens:              # 单次回复最大 token（留空=厂商默认；Anthropic 默认 4096）
   contextWindow:          # 模型上下文窗口 token 数（如 32000）；配置后启用 token 高低水位压缩（超 65% 压到 45%、保留首条意图、cacheEpoch 分代），未配置按消息条数水位（30→18）压缩
   compaction:               # 无损上下文压缩（Hermes 四阶段可逆化）：被移出窗口的原文整块归档（sha256 校验），

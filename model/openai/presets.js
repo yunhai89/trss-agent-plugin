@@ -15,6 +15,7 @@
 export const presets = {
   openai: {
     name: 'openai',
+    thinkingStyle: 'reasoning_effort',
     baseURL: 'https://api.openai.com/v1',
     reasoningFields: [],
   },
@@ -24,18 +25,21 @@ export const presets = {
    *  Anthropic 协议入口：https://api.deepseek.com/anthropic */
   deepseek: {
     name: 'deepseek',
+    thinkingStyle: 'deepseek',
     baseURL: 'https://api.deepseek.com',
     reasoningFields: ['reasoning_content'],
   },
 
   gemini: {
     name: 'gemini',
+    thinkingStyle: 'reasoning_effort',
     baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai',
     reasoningFields: ['reasoning'],
   },
 
   dashscope: {
     name: 'dashscope',
+    thinkingStyle: 'enable_thinking',
     baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     reasoningFields: ['reasoning_content'],
   },
@@ -47,12 +51,14 @@ export const presets = {
    *  深度思考模型返回 reasoning_content。 */
   doubao: {
     name: 'doubao',
+    thinkingStyle: 'thinking_toggle',
     baseURL: 'https://ark.cn-beijing.volces.com/api/v3',
     reasoningFields: ['reasoning_content'],
   },
 
   zhipu: {
     name: 'zhipu',
+    thinkingStyle: 'thinking_toggle',
     baseURL: 'https://open.bigmodel.cn/api/paas/v4',
     reasoningFields: ['reasoning_content'],
   },
@@ -63,6 +69,7 @@ export const presets = {
    *  官方文档未限制 temperature，默认 0.3，本库原样透传。 */
   moonshot: {
     name: 'moonshot',
+    thinkingStyle: 'thinking_toggle',
     baseURL: 'https://api.moonshot.ai/v1',
     reasoningFields: ['reasoning_content', 'reasoning'],
   },
@@ -74,6 +81,7 @@ export const presets = {
    *  余额不足返回 402（非重试）。Anthropic 协议入口：https://api.xiaomimimo.com/anthropic */
   mimo: {
     name: 'mimo',
+    thinkingStyle: 'thinking_toggle',
     baseURL: 'https://api.xiaomimimo.com/v1',
     reasoningFields: ['reasoning_content'],
   },
@@ -86,6 +94,7 @@ export const presets = {
    *  建议配合 agent.thinking:{type:'adaptive'}（自适应思考）。Anthropic 协议入口见 model/anthropic/presets.js。 */
   minimax: {
     name: 'minimax',
+    thinkingStyle: 'minimax',
     baseURL: 'https://api.minimaxi.com/v1',
     reasoningFields: ['reasoning_content'],
     prepareBody(body) {
@@ -101,6 +110,7 @@ export const presets = {
    */
   azure: {
     name: 'azure',
+    thinkingStyle: 'reasoning_effort',
     baseURL: '',
     reasoningFields: [],
     buildURL(client, path) {
@@ -123,6 +133,7 @@ export const presets = {
    *  可选 client.httpReferer / client.appTitle（经 config 透传）注入排行榜头。 */
   openrouter: {
     name: 'openrouter',
+    thinkingStyle: 'reasoning_effort',
     baseURL: 'https://openrouter.ai/api/v1',
     reasoningFields: ['reasoning'],
     authHeaders(client) {
@@ -141,6 +152,7 @@ export const presets = {
    *  另有 /messages（Anthropic 兼容，Claude/Qwen）、/responses（GPT/Grok）——选 openai 协议走 chat/completions 即可。 */
   opencode: {
     name: 'opencode',
+    thinkingStyle: 'auto',
     baseURL: 'https://opencode.ai/zen/v1',
     reasoningFields: [],
     // OpenCode Go/Zen 要求：真实客户端 UA + 每会话稳定 x-opencode-session（否则路由告警）
@@ -155,6 +167,7 @@ export const presets = {
    *  额度用完后可回退 Zen 按量余额（控制台开启 Use balance）。 */
   'opencode-go': {
     name: 'opencode-go',
+    thinkingStyle: 'auto',
     baseURL: 'https://opencode.ai/zen/go/v1',
     reasoningFields: [],
     // Go 明确要求客户端自报 UA + x-opencode-session 会话 id（缺省会被判"无法高效路由"）

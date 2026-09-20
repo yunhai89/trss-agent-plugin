@@ -17,10 +17,12 @@ export class OpenAIProvider extends Provider {
   async chat(opts) {
     const {
       model, messages, system, tools, tool_choice, temperature, max_tokens, thinking, top_p,
+      reasoning_effort, enable_thinking, thinking_budget,
       signal, stream, onDelta, onReasoning, cacheControl: _cacheControl, sessionId, ...rest
     } = opts // cacheControl（Anthropic 专用 prompt 缓存断点）在此吞掉：OpenAI 兼容端为自动前缀缓存，
     // 该字段既无意义、又不能随 ...rest 泄漏进请求体（部分端点对未知字段直接 400）
     // sessionId：会话级标识（如 OpenCode Go 的 x-opencode-session），走请求头而非请求体
+    // reasoning_effort / enable_thinking / thinking_budget：各厂商思考档位的原生字段（见 model/llm/thinking.js）
 
     const body = {
       model: model || this.defaultModel,
@@ -48,11 +50,16 @@ export class OpenAIProvider extends Provider {
     if (top_p != null) body.top_p = top_p
     if (max_tokens != null) body.max_tokens = max_tokens
     if (thinking) body.thinking = thinking
+    if (reasoning_effort != null) body.reasoning_effort = reasoning_effort
+    if (enable_thinking != null) body.enable_thinking = enable_thinking
+    if (thinking_budget != null) body.thinking_budget = thinking_budget
     if (stream) {
       body.stream = true
       body.stream_options = { include_usage: true }
     }
 
+    // 记录本轮的"思考类"字段名，供"厂商不认该字段"时剥离重试
+    const reasoningKeys = ['thinking', 'reasoning_effort', 'enable_thinking', 'thinking_budget'].filter((k) => body[k] !== undefined)
     try {
       return await this._create(body, { signal, stream, onDelta, onReasoning, sessionId })
     } catch (e) {
@@ -60,6 +67,11 @@ export class OpenAIProvider extends Provider {
       if (body.temperature != null && this._isTempError(e)) {
         this._modelsNoTemp.add(body.model)
         delete body.temperature
+        return await this._create(body, { signal, stream, onDelta, onReasoning, sessionId })
+      }
+      // 自适应：厂商不认思考字段（不同兼容端字段名/支持度不一）→ 剥离思考参数重试一次（降级为不思考，不阻断对话）
+      if (reasoningKeys.length && this._isUnsupportedParam(e)) {
+        for (const k of reasoningKeys) delete body[k]
         return await this._create(body, { signal, stream, onDelta, onReasoning, sessionId })
       }
       throw e
@@ -87,6 +99,14 @@ export class OpenAIProvider extends Provider {
   _isTempError(e) {
     const m = String(e?.message || e).toLowerCase()
     return m.includes('temperature') || m.includes('only 1 is allowed')
+  }
+
+  /** 是否"厂商不认某思考字段"类错误：报错点名思考相关字段，或 4xx 参数非法 */
+  _isUnsupportedParam(e) {
+    const m = String(e?.message || e).toLowerCase()
+    const named = /thinking|reasoning_effort|enable_thinking|thinking_budget|reasoning/.test(m)
+    const param = /unknown|unsupported|unrecognized|invalid|not supported|extra|unexpected|400/.test(m)
+    return named && param
   }
 
   _toMessages(messages, system) {

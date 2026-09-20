@@ -162,25 +162,57 @@ export class AnthropicProvider extends Provider {
       const tc = mapToolChoice(tool_choice, 'anthropic')
       if (tc) body.tool_choice = tc
     }
-    if (temperature != null) body.temperature = temperature
+    if (temperature != null && !(thinking && thinking.type === 'enabled')) body.temperature = temperature
     if (top_p != null) body.top_p = top_p
     if (top_k != null) body.top_k = top_k
     if (stop_sequences) body.stop_sequences = stop_sequences
     if (thinking) body.thinking = thinking
+    // Anthropic 扩展思考约束：budget_tokens 必须 < max_tokens（否则 400）。自动预算可能高于默认 4096，需抬高上限。
+    if (thinking && thinking.type === 'enabled') {
+      const budget = Number(thinking.budget_tokens) || 0
+      if (budget > 0 && (body.max_tokens == null || body.max_tokens <= budget)) body.max_tokens = budget + 2048
+    }
     if (stream) body.stream = true
 
-    if (stream) {
-      const s = await this.client.messages.create(body, { signal, sessionId }) // signal 走 opts 第二参（曾 {...body, signal} 并入请求体）
-      // 流式 live 旁路：剥掉内联 <think>，避免中途播报(onDelta)泄漏思考
-      const stripper = onDelta ? createThinkStripper() : null
-      for await (const ev of s) {
-        if (ev.text && onDelta) { const c = stripper.feed(ev.text); if (c) onDelta(c) }
-        if (ev.thinking && onReasoning) onReasoning(ev.thinking)
-      }
-      return resultFromStream(s)
+    const stripThinking = () => {
+      if (!body.thinking) return false
+      delete body.thinking
+      if (temperature != null && body.temperature == null) body.temperature = temperature // 关思考后 temperature 恢复可用
+      return true
     }
+    try {
+      if (stream) {
+        const s = await this.client.messages.create(body, { signal, sessionId }) // signal 走 opts 第二参（曾 {...body, signal} 并入请求体）
+        // 流式 live 旁路：剥掉内联 <think>，避免中途播报(onDelta)泄漏思考
+        const stripper = onDelta ? createThinkStripper() : null
+        for await (const ev of s) {
+          if (ev.text && onDelta) { const c = stripper.feed(ev.text); if (c) onDelta(c) }
+          if (ev.thinking && onReasoning) onReasoning(ev.thinking)
+        }
+        return resultFromStream(s)
+      }
+      const res = await this.client.messages.create(body, { signal, sessionId })
+      return resultFromResponse(res)
+    } catch (e) {
+      // 兼容端不认 thinking 字段 → 剥离重试一次（降级为不思考，不阻断）
+      if (this._isUnsupportedParam(e) && stripThinking()) {
+        if (stream) {
+          const s = await this.client.messages.create(body, { signal, sessionId })
+          const stripper = onDelta ? createThinkStripper() : null
+          for await (const ev of s) {
+            if (ev.text && onDelta) { const c = stripper.feed(ev.text); if (c) onDelta(c) }
+            if (ev.thinking && onReasoning) onReasoning(ev.thinking)
+          }
+          return resultFromStream(s)
+        }
+        return resultFromResponse(await this.client.messages.create(body, { signal, sessionId }))
+      }
+      throw e
+    }
+  }
 
-    const res = await this.client.messages.create(body, { signal, sessionId })
-    return resultFromResponse(res)
+  _isUnsupportedParam(e) {
+    const m = String(e?.message || e).toLowerCase()
+    return /thinking|budget_tokens|reasoning/.test(m) && /unknown|unsupported|unrecognized|invalid|not supported|400/.test(m)
   }
 }

@@ -21,6 +21,7 @@ import { LoopGovernor } from './loop-governor.js'
 import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 import { detectScheduleIntent } from './schedule.js'
+import { decideThinkingSmart, encodeThinking } from '../llm/thinking.js'
 
 const DEFAULT_IDENTITY = TEMPLATES.agent.system
 
@@ -144,6 +145,13 @@ export class Agent {
     this.temperature = config.temperature
     this.maxTokens = config.max_tokens ?? config.maxTokens ?? null
     this.thinking = config.thinking || null
+    // 思考自动决策：按提问复杂度决定是否思考与深度/预算（opt-in；见 model/llm/thinking.js）
+    this.thinkingAuto = config.thinkingAuto || null
+    this.thinkingCapable = config.thinkingCapable !== false
+    this.thinkingClassifierLlm = config.thinkingClassifierLlm || null // 小模型判档通道（可选；缺省走规则）
+    this.providerProtocol = config.protocol || 'openai'
+    this.providerPreset = config.preset || ''
+    this._turnReasoning = null
     this.toolChoice = config.tool_choice ?? config.toolChoice ?? null
 
     this.estimateTokens = config.estimateTokens || null
@@ -283,7 +291,7 @@ export class Agent {
         ...(this._promptCacheKeyFor(this.provider)),
         temperature: this.temperature,
         max_tokens: Math.min(this.maxTokens ?? 1024, 1024), // 收尾只需简短总结，防吞掉预留
-        thinking: this.thinking,
+        ...this._finalizeReasoningOpts(),
         signal: finCtl.signal,
         stream: false,
         sessionId: this._curConvId || undefined,
@@ -342,6 +350,35 @@ export class Agent {
     const rawText = this._inputText(input)
     // 调度意图（周期 vs 一次性）确定性识别：供路由提示 + reminder_set 硬门（见 _executeOne）
     this._scheduleIntent = detectScheduleIntent(rawText)
+    // 思考自动决策：按本轮提问复杂度决定是否思考、深度与预算（opt-in，覆盖静态 this.thinking）
+    this._turnReasoning = null
+    this.thinkInfo = null
+    if (this.thinkingAuto?.enable && this.thinkingCapable) {
+      this.thinkInfo = { auto: true, depth: '-', budget: null, source: '-', style: this.thinkingAuto.style || '' }
+      try {
+        // hybrid：小模型优先（灰区/always 才调用，带超时+缓存），失败自动回退规则
+        this._turnReasoning = await decideThinkingSmart(rawText, {
+          llm: this.thinkingClassifierLlm,
+          classifier: this.thinkingAuto.classifier || 'auto',
+          timeoutMs: this.thinkingAuto.timeoutMs || 2500,
+          context: this._thinkingContext(),
+          protocol: this.providerProtocol, preset: this.providerPreset, model: this.model,
+          style: this.thinkingAuto.style, budgets: this.thinkingAuto.budgets, maxBudget: this.thinkingAuto.maxBudget,
+        })
+        this.logger('debug', `[thinking] auto depth=${this._turnReasoning.depth} (${this._turnReasoning.source}) budget=${this._turnReasoning.budget} style=${this._turnReasoning.style} score=${this._turnReasoning.score}`)
+        this.thinkInfo = {
+          auto: true, depth: this._turnReasoning.depth, budget: this._turnReasoning.budget,
+          source: this._turnReasoning.source, style: this._turnReasoning.style,
+        }
+        this.devLog?.('thinking_auto', {
+          depth: this._turnReasoning.depth, source: this._turnReasoning.source, score: this._turnReasoning.score,
+          budget: this._turnReasoning.budget, style: this._turnReasoning.style, reasons: this._turnReasoning.reasons,
+        }, taskId, ctx?.devScope)
+      } catch (e) {
+        this._turnReasoning = null
+        this.logger('warn', '[thinking] 自动决策失败，回退静态配置', e?.message || e)
+      }
+    }
 
     // guard：入口注入防御
     let userText = rawText
@@ -529,7 +566,7 @@ export class Agent {
         const __chatWith = (prov, m) => prov.chat({
           model: m, messages: this.messages, system,
           tools: toolList.length ? toolList : undefined, tool_choice: this.toolChoice,
-          temperature: this.temperature, max_tokens: this.maxTokens, thinking: this.thinking,
+          temperature: this.temperature, max_tokens: this.maxTokens, ...this._reasoningOpts(),
           signal: workSignal, stream: wantStream, onDelta: __delta, onReasoning: cb.onReasoning,
           sessionId: this._curConvId || undefined, // 会话级标识（如 OpenCode Go 的 x-opencode-session）
           ...(this._cacheControlFor(prov) ? { cacheControl: true } : {}),
@@ -765,7 +802,12 @@ export class Agent {
       // 统一口径（曾有 governor 88k / run_end 102k 分裂）：governor 全量记账快照随 run_end 落盘对账
       ...(this.governor ? { governor: this.governor.snapshot() } : {}),
     }, taskId, ctx?.devScope)
-    return { content: finalContent || '', messages: this.messages, usage, turns, taskId, stopReason, ...(finalizedVia ? { finalized: finalizedVia } : {}) }
+    return {
+      content: finalContent || '', messages: this.messages, usage, turns, taskId, stopReason,
+      ...(finalizedVia ? { finalized: finalizedVia } : {}),
+      // 本轮思考决策（供应用层日志/观测）：auto 生效时有 depth/budget/source/style
+      ...(this.thinkInfo ? { think: this.thinkInfo } : {}),
+    }
   }
 
   _inputText(input) {
@@ -1012,6 +1054,39 @@ export class Agent {
    * 泄漏进请求体：多付一倍 token、部分严格端点直接拒收未知字段。新增 provider 参数
    * 必须显式登记到这里。
    */
+  /** 给小模型判档的轻量上下文（最近几轮，帮助消解指代；有界长度） */
+  _thinkingContext() {
+    try {
+      const msgs = (this.messages || [])
+        .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
+      return msgs.slice(-4).map((m) => `${m.role}: ${String(m.content).slice(0, 200)}`).join('\n').slice(0, 800)
+    } catch { return '' }
+  }
+
+  /** 本轮思考参数（provider 原生字段）：自动决策优先于静态 this.thinking */
+  _reasoningOpts() {
+    if (this._turnReasoning) {
+      const { thinking, reasoning_effort, enable_thinking, thinking_budget } = this._turnReasoning
+      const out = {}
+      if (thinking !== undefined) out.thinking = thinking
+      if (reasoning_effort !== undefined) out.reasoning_effort = reasoning_effort
+      if (enable_thinking !== undefined) out.enable_thinking = enable_thinking
+      if (thinking_budget !== undefined) out.thinking_budget = thinking_budget
+      return out
+    }
+    return this.thinking ? { thinking: this.thinking } : {}
+  }
+
+  /** 收尾/自反思等短任务：自动模式下强制关思考（省 token 提速）；否则沿用静态配置 */
+  _finalizeReasoningOpts() {
+    if (this.thinkingAuto?.enable && this.thinkingCapable) {
+      try {
+        return encodeThinking({ depth: 'off', protocol: this.providerProtocol, preset: this.providerPreset, model: this.model, style: this.thinkingAuto.style })
+      } catch { return {} }
+    }
+    return this.thinking ? { thinking: this.thinking } : {}
+  }
+
   _extraRunOpts(opts) {
     const ALLOWED = ['model', 'system', 'tools', 'tool_choice', 'temperature', 'max_tokens',
       'thinking', 'top_p', 'top_k', 'stop_sequences', 'cacheControl', 'prompt_cache_key',
@@ -1209,7 +1284,7 @@ export class Agent {
       ...this._promptCacheKeyFor(this.provider),
       temperature: this.temperature,
       max_tokens: this.maxTokens,
-      thinking: this.thinking,
+      ...this._finalizeReasoningOpts(),
       signal,
       stream: false,
       sessionId: this._curConvId || undefined,

@@ -40,6 +40,7 @@
     loop: { maxSameAction: 2, maxConsecutiveFailures: 3, noProgressWindow: 4, timeBudgetMs: 300000, tokenBudget: 240000, finalizeGraceMs: 45000 },
     temperature: 0.2,
     thinking: { type: 'enabled', budget_tokens: 16000 },
+    thinkingAuto: { enable: false, classifier: 'auto', model: '', timeoutMs: 2500, maxBudget: 32768, budgets: { low: 4096, medium: 8192, high: 16384 }, style: '' },
     maxTokens: null,
     contextWindow: 32000,
     compaction: { enable: true, archiveDir: 'data/context-archive' },

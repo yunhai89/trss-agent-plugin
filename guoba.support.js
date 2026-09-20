@@ -158,6 +158,14 @@ export function supportGuoba() {
         { label: '深度思考（Thinking）', component: 'SOFT_GROUP_BEGIN' },
         { field: 'agent.thinking.enable', label: '开启深度思考', bottomHelpMessage: 'Anthropic 等支持的扩展思考：模型先思考再作答（更慢、更耗 token，但复杂问题质量更高）', component: 'Switch' },
         { field: 'agent.thinking.budget_tokens', label: '思考预算(tokens)', component: 'InputNumber', componentProps: { min: 1024, max: 64000, step: 1024 } },
+        { field: 'agent.thinkingAuto.enable', label: '思考自动决策', bottomHelpMessage: '按提问复杂度自动决定是否思考与深度（闲聊不思考、复杂问题深度思考）；开启后覆盖上面的手动 thinking（模型级覆盖仍优先）', component: 'Switch' },
+        { field: 'agent.thinkingAuto.classifier', label: '判档方式', bottomHelpMessage: 'auto=规则不确定时用小模型判（省调用）/ always=总是小模型 / off=纯规则', component: 'Select', componentProps: { options: [{ label: 'auto（小模型+规则）', value: 'auto' }, { label: 'always（总是小模型）', value: 'always' }, { label: 'off（纯规则）', value: 'off' }] } },
+        { field: 'agent.thinkingAuto.model', label: '判档小模型(可选)', bottomHelpMessage: '留空=utilityModel→主模型；建议用廉价小模型降本', component: 'Input', componentProps: { placeholder: '留空=utilityModel' } },
+        { field: 'agent.thinkingAuto.timeoutMs', label: '判档超时(ms)', bottomHelpMessage: '小模型判档超时/失败自动回退规则', component: 'InputNumber', componentProps: { min: 500, max: 15000, step: 500 } },
+        { field: 'agent.thinkingAuto.maxBudget', label: '自动预算上限(tokens)', bottomHelpMessage: '自动模式单轮思考预算硬顶，防烧太多', component: 'InputNumber', componentProps: { min: 1024, max: 128000, step: 1024 } },
+        { field: 'agent.thinkingAuto.budgets.low', label: '低深度预算', component: 'InputNumber', componentProps: { min: 1024, max: 64000, step: 1024 } },
+        { field: 'agent.thinkingAuto.budgets.medium', label: '中深度预算', component: 'InputNumber', componentProps: { min: 1024, max: 64000, step: 1024 } },
+        { field: 'agent.thinkingAuto.budgets.high', label: '高深度预算', component: 'InputNumber', componentProps: { min: 1024, max: 128000, step: 1024 } },
 
         // —— 安全与审批 ——
         { label: '安全与审批', component: 'SOFT_GROUP_BEGIN' },

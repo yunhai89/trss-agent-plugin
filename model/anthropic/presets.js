@@ -15,6 +15,7 @@ export const presets = {
   /** Anthropic 官方 */
   anthropic: {
     name: 'anthropic',
+    thinkingStyle: 'anthropic_budget',
     baseURL: 'https://api.anthropic.com',
     version: '2023-06-01',
     authHeader: 'x-api-key',
@@ -23,6 +24,7 @@ export const presets = {
   /** DeepSeek（Anthropic 兼容端点，模型用 deepseek-v4-pro / deepseek-v4-flash） */
   deepseek: {
     name: 'deepseek',
+    thinkingStyle: 'anthropic_budget',
     baseURL: 'https://api.deepseek.com/anthropic',
     version: '2023-06-01',
     authHeader: 'x-api-key',
@@ -36,6 +38,7 @@ export const presets = {
    */
   mimo: {
     name: 'mimo',
+    thinkingStyle: 'anthropic_budget',
     baseURL: 'https://api.xiaomimimo.com/anthropic',
     version: '2023-06-01',
     authHeader: 'api-key',
@@ -49,6 +52,7 @@ export const presets = {
    *  建议配合 agent.thinking:{type:'adaptive'}。Token Plan 与按量 key 同一端点，仅 key 不同。 */
   minimax: {
     name: 'minimax',
+    thinkingStyle: 'minimax',
     baseURL: 'https://api.minimaxi.com/anthropic',
     version: '2023-06-01',
     authHeader: 'x-api-key',
@@ -61,6 +65,7 @@ export const presets = {
    *  注意：DeepSeek/GLM/Kimi 走 OpenAI /chat/completions（用 model/openai/presets.js 的 opencode）。 */
   opencode: {
     name: 'opencode',
+    thinkingStyle: 'auto',
     baseURL: 'https://opencode.ai/zen',
     version: '2023-06-01',
     authHeader: 'x-api-key',
@@ -73,6 +78,7 @@ export const presets = {
    *  首月 $5 / 之后 $10 月，走额度（5h/周/月），零 Zen 余额也能用。 */
   'opencode-go': {
     name: 'opencode-go',
+    thinkingStyle: 'auto',
     baseURL: 'https://opencode.ai/zen/go',
     version: '2023-06-01',
     authHeader: 'x-api-key',

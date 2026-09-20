@@ -231,6 +231,17 @@
         if (!form.tools) form.tools = {}
         if (!form.skill) form.skill = {}
         if (!form.compaction) form.compaction = {}
+        // 思考自动决策兜底（UI 绑定需完整对象树）
+        if (!form.thinkingAuto) form.thinkingAuto = {}
+        if (form.thinkingAuto.enable == null) form.thinkingAuto.enable = false
+        if (form.thinkingAuto.classifier == null) form.thinkingAuto.classifier = 'auto'
+        if (form.thinkingAuto.model == null) form.thinkingAuto.model = ''
+        if (form.thinkingAuto.timeoutMs == null) form.thinkingAuto.timeoutMs = 2500
+        if (form.thinkingAuto.maxBudget == null) form.thinkingAuto.maxBudget = 32768
+        if (!form.thinkingAuto.budgets) form.thinkingAuto.budgets = {}
+        if (form.thinkingAuto.budgets.low == null) form.thinkingAuto.budgets.low = 4096
+        if (form.thinkingAuto.budgets.medium == null) form.thinkingAuto.budgets.medium = 8192
+        if (form.thinkingAuto.budgets.high == null) form.thinkingAuto.budgets.high = 16384
         if (!form.devLog) form.devLog = {}
         if (!form.humanize) form.humanize = {}
         if (!form.humanize.memory) form.humanize.memory = {}
@@ -1071,6 +1082,34 @@
             </cfg-row>
             <cfg-row name="思考预算 tokens" desc="thinking.budget_tokens">
               <input type="number" class="inp" style="width:130px" min="1024" step="1024" :disabled="!form.thinking" v-model.number="form.thinking.budget_tokens">
+            </cfg-row>
+            <cfg-row name="思考自动决策" desc="按提问复杂度自动决定是否思考与深度(覆盖手动 thinking；模型级覆盖仍优先)">
+              <v-switch v-model="form.thinkingAuto.enable"/>
+            </cfg-row>
+            <cfg-row name="判档方式" desc="auto=规则不确定时用小模型/ always=总是小模型/ off=纯规则">
+              <select class="sel" style="width:150px" :disabled="!form.thinkingAuto.enable" v-model="form.thinkingAuto.classifier">
+                <option value="auto">auto（小模型+规则）</option>
+                <option value="always">always（总是小模型）</option>
+                <option value="off">off（纯规则）</option>
+              </select>
+            </cfg-row>
+            <cfg-row name="判档小模型" desc="留空=utilityModel→主模型；建议廉价小模型">
+              <input type="text" class="inp" style="width:180px" :disabled="!form.thinkingAuto.enable || form.thinkingAuto.classifier==='off'" v-model="form.thinkingAuto.model" placeholder="留空=utilityModel">
+            </cfg-row>
+            <cfg-row name="判档超时(ms)" desc="小模型超时/失败自动回退规则">
+              <input type="number" class="inp" style="width:130px" min="500" step="500" :disabled="!form.thinkingAuto.enable || form.thinkingAuto.classifier==='off'" v-model.number="form.thinkingAuto.timeoutMs">
+            </cfg-row>
+            <cfg-row name="自动预算上限" desc="单轮思考预算硬顶(tokens)">
+              <input type="number" class="inp" style="width:130px" min="1024" step="1024" :disabled="!form.thinkingAuto.enable" v-model.number="form.thinkingAuto.maxBudget">
+            </cfg-row>
+            <cfg-row name="低深度预算" desc="简单问题">
+              <input type="number" class="inp" style="width:130px" min="1024" step="1024" :disabled="!form.thinkingAuto.enable" v-model.number="form.thinkingAuto.budgets.low">
+            </cfg-row>
+            <cfg-row name="中深度预算" desc="常规解释/编程">
+              <input type="number" class="inp" style="width:130px" min="1024" step="1024" :disabled="!form.thinkingAuto.enable" v-model.number="form.thinkingAuto.budgets.medium">
+            </cfg-row>
+            <cfg-row name="高深度预算" desc="复杂多步/架构/数学">
+              <input type="number" class="inp" style="width:130px" min="1024" step="1024" :disabled="!form.thinkingAuto.enable" v-model.number="form.thinkingAuto.budgets.high">
             </cfg-row>
             <cfg-row name="单次回复最大 token" desc="留空=厂商默认">
               <input type="number" class="inp" style="width:130px" min="1" v-model.number="form.maxTokens" placeholder="null">

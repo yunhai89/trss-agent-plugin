@@ -977,6 +977,51 @@ await test('集成：自然语言纠错闭环（旧记忆失效）', async () =>
   ok(all.some((m) => m.content.includes('湖北')), '更正记忆已写入')
 })
 
+await test('集成：思考自动决策（复杂度 → 厂商原生字段）', async () => {
+  const mk = () => {
+    const hist = []
+    return { hist, async chat(opts) { hist.push(opts); return { content: 'ok', finishReason: 'stop' } } }
+  }
+  const auto = { enable: true, maxBudget: 32768, budgets: { low: 4096, medium: 8192, high: 16384 } }
+  // 闲聊 → 关闭思考（MiMo：thinking:{type:'disabled'}）
+  const p1 = mk()
+  await new Agent({ provider: p1, maxTurns: 2, reflect: 'off', thinkingAuto: auto, thinkingCapable: true, protocol: 'openai', preset: 'mimo' })
+    .run('在吗', { ctx: { userId: 'u1', groupId: 'g1' } })
+  eq(p1.hist[0].thinking, { type: 'disabled' }, '闲聊 → thinking disabled')
+  // 复杂问题 → 开启思考（enabled）
+  const p2 = mk()
+  await new Agent({ provider: p2, maxTurns: 2, reflect: 'off', thinkingAuto: auto, thinkingCapable: true, protocol: 'openai', preset: 'mimo' })
+    .run('请帮我设计一个分布式系统的架构，分析一致性与容错，并给出完整实现方案', { ctx: { userId: 'u1', groupId: 'g1' } })
+  eq(p2.hist[0].thinking, { type: 'enabled' }, '复杂问题 → thinking enabled')
+  // DeepSeek：thinking + reasoning_effort
+  const p3 = mk()
+  await new Agent({ provider: p3, maxTurns: 2, reflect: 'off', thinkingAuto: auto, thinkingCapable: true, protocol: 'openai', preset: 'deepseek' })
+    .run('请帮我设计一个分布式系统的架构，分析一致性与容错，并给出完整实现方案', { ctx: { userId: 'u1', groupId: 'g1' } })
+  ok(p3.hist[0].thinking?.type === 'enabled' && ['low', 'high'].includes(p3.hist[0].reasoning_effort), 'DeepSeek → thinking + reasoning_effort')
+  // 关闭自动 / 不支持思考 → 不传自动字段（沿用静态）
+  const p4 = mk()
+  await new Agent({ provider: p4, maxTurns: 2, reflect: 'off', thinkingAuto: { ...auto, enable: false } })
+    .run('请设计一个分布式架构', { ctx: { userId: 'u1', groupId: 'g1' } })
+  eq(p4.hist[0].thinking, undefined, '未开启自动 → 不注入 thinking')
+  const p5 = mk()
+  await new Agent({ provider: p5, maxTurns: 2, reflect: 'off', thinkingAuto: auto, thinkingCapable: false })
+    .run('请设计一个分布式架构', { ctx: { userId: 'u1', groupId: 'g1' } })
+  eq(p5.hist[0].thinking, undefined, '模型不支持思考 → 不注入')
+
+  // 小模型判档：闲聊文本但模型判 high → 采用模型（覆盖规则）
+  const pCls = mk()
+  const clsLlm = { run: async () => ({ content: '{"depth":"high","reason":"需要推理"}' }) }
+  await new Agent({ provider: pCls, maxTurns: 2, reflect: 'off', thinkingAuto: { ...auto, classifier: 'always' }, thinkingCapable: true, protocol: 'openai', preset: 'mimo', thinkingClassifierLlm: clsLlm })
+    .run('帮我看看这个', { ctx: { userId: 'u1', groupId: 'g1' } })
+  eq(pCls.hist[0].thinking, { type: 'enabled' }, '小模型判 high → 开启思考')
+  // 小模型失败 → 回退规则
+  const pFb = mk()
+  const badLlm = { run: async () => '' }
+  await new Agent({ provider: pFb, maxTurns: 2, reflect: 'off', thinkingAuto: { ...auto, classifier: 'always' }, thinkingCapable: true, protocol: 'openai', preset: 'mimo', thinkingClassifierLlm: badLlm })
+    .run('在吗', { ctx: { userId: 'u1', groupId: 'g1' } })
+  eq(pFb.hist[0].thinking, { type: 'disabled' }, '小模型失败 → 回退规则（闲聊 off）')
+})
+
 // ---------- 11c. SessionStore 多对话 ----------
 await test('SessionStore conversation：新建/列出/切换/历史/删除', async () => {
   const kv = memoryKv()
