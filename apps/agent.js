@@ -68,6 +68,7 @@ import { TraceStore } from '../model/evolution/trace.js'
 import { SelfReviewer, listPendingSuggestions, removeSuggestion } from '../model/evolution/review.js'
 import { buildSituationalContext } from '../model/perception.js'
 import { makeTerminalTool } from '../model/terminal/index.js'
+import { createJevClient, makeJevTool, JEV_MODEL_DEFAULT, resolveThresholds } from '../model/agent/jev/index.js'
 import { createSandboxRuntime, sessionKeyOf } from '../model/sandbox/index.js'
 import { makeStagehand } from '../model/stagehand/index.js'
 import { makeDownloadTool } from '../model/download/index.js'
@@ -734,6 +735,32 @@ async function buildRuntime() {
   const regTemperature = Number.isFinite(Number(regEntry?.temperature)) ? Number(regEntry.temperature) : null
   const regMaxTokens = Number.isFinite(Number(regEntry?.maxTokens)) && Number(regEntry.maxTokens) > 0 ? Number(regEntry.maxTokens) : null
 
+  // ── Jev（TypeSafe AI）判断模型：opt-in 决策层（默认关；未配置/失败/低置信一律回退现有方案）──
+  // 安全：会把用户对话/命令内容发往第三方 typesafe.ai——默认关闭，需显式开启并自行评估数据外发风险。
+  // apiKey 已纳入 redactSecrets 脱敏、绝不入日志；Web 面板仅显示掩码。
+  let jev = null
+  if (cfg.jev?.enable === true) {
+    const client = createJevClient(cfg.jev, { logger: Log.tag('jev') })
+    if (client) {
+      const decisions = cfg.jev.decisions || {}
+      jev = {
+        client,
+        decisions,
+        thresholds: resolveThresholds(cfg.jev.thresholds),
+        toolSelectionMaxTools: Number(cfg.jev.toolSelectionMaxTools) > 0 ? Number(cfg.jev.toolSelectionMaxTools) : 80,
+        allowDestructive: cfg.jev.allowDestructive === true, // shell 风险：破坏性命令默认拒绝，显式开启才允许高置信放行
+      }
+      if (decisions.llmTool) {
+        try { tools.register(makeJevTool({ client, maxStateChars: cfg.jev.maxStateChars })) } catch (e) { Log.warn('[jev] jev 工具注册失败', e?.message || e) }
+      }
+      const on = Object.keys(decisions).filter((k) => decisions[k])
+      startupInfo.jev = { model: cfg.jev.model || JEV_MODEL_DEFAULT, decisions: on }
+      Log.mark(`[jev] 已启用（model=${cfg.jev.model || JEV_MODEL_DEFAULT}；决策点：${on.join(',') || '无'}）。⚠️ 对话/命令内容将发往第三方 ${cfg.jev.baseURL || 'api.typesafe.ai'}`)
+    } else {
+      Log.warn('[jev] 已开启但缺少 apiKey，所有 Jev 决策回退现有方案（规则/tool_search/现有终端行为）')
+    }
+  }
+
   const agentConfig = {
     provider,
     model: cfg.model,
@@ -761,9 +788,14 @@ async function buildRuntime() {
     temperature: regTemperature != null ? regTemperature : cfg.temperature,
     maxTokens: regMaxTokens != null ? regMaxTokens : (cfg.maxTokens || null), // 控制输出长度（消除 Anthropic 硬编码 4096 / OpenAI 不发）
     thinking: regThinking || cfg.thinking || null,
-    // 思考自动决策（opt-in）：按提问复杂度自动决定是否思考与深度；模型级 thinking 显式覆盖时不启用
-    thinkingAuto: (!regThinking && cfg.thinkingAuto?.enable) ? cfg.thinkingAuto : null,
+    // 思考自动决策（opt-in）：按提问复杂度自动决定是否思考与深度；模型级 thinking 显式覆盖时不启用。
+    // Jev 判档（jev.decisions.thinking）独立生效：即便未开 thinkingAuto.enable，也启用自动判档路径，
+    // 由 Jev 判档、失败/低置信回退「规则+小模型」hybrid（预算取 thinkingAuto 或内置默认）。
+    thinkingAuto: (!regThinking && (cfg.thinkingAuto?.enable || jev?.decisions?.thinking === true))
+      ? { ...(cfg.thinkingAuto || {}), enable: true }
+      : null,
     thinkingClassifierLlm: thinkingLlm, // 小模型判档通道（classifier=off 时不使用）
+    jev, // Jev 判断模型决策层（null=未启用；见 model/agent/jev/）
     thinkingCapable: detectCapabilities({ protocol: cfg.protocol || 'openai', model: cfg.model, caps: cfg.media?.caps }).thinking,
     protocol: cfg.protocol || 'openai',
     preset: cfg.preset || '',

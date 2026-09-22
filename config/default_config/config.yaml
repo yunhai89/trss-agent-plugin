@@ -60,6 +60,33 @@ agent:
       medium: 8192
       high: 16384
     style: ""              # 传输风格覆盖（留空=按厂商预设自动；如 reasoning_effort / thinking_toggle / enable_thinking / deepseek / minimax / anthropic_budget / gemini_level）
+  # ── Jev（TypeSafe AI 判断模型，opt-in，默认关）──
+  # ⚠️ 安全警告：启用后会把**用户对话内容 / shell 命令**发往第三方 TypeSafe（typesafe.ai）做结构化判断，
+  #    属新增数据外发面。默认关闭；仅在明确知晓并接受该风险时开启。apiKey 已纳入 redactSecrets 脱敏、绝不入日志；
+  #    Web 面板仅显示掩码。所有决策点失败/低置信一律无感回退现有方案（思考→规则+小模型；工具→tool_search；
+  #    shell→现有行为），不阻塞对话、不 500。问题/阈值/模型 ID 集中在 model/agent/jev/spec.js 一起版本化。
+  jev:
+    enable: false          # 总开关（opt-in；关闭时下列 decisions 全部不生效，零影响）
+    apiKey: ""             # TypeSafe API Key（tsk_...；★敏感：已接入 redactSecrets 脱敏，Web 仅掩码）
+    baseURL: "https://api.typesafe.ai"  # 端点（可指向代理/网关）
+    model: "jev-latest"    # 模型 ID（调优阈值后建议固定版本化 ID 如 jev-1.13.0，并在日志记录响应 model）
+    timeoutMs: 4000        # 单请求超时（毫秒；超时/失败自动回退。Jev 典型延迟 ~100-300ms，4s 已很宽松）
+    maxRetries: 1          # 408/429/5xx 重试次数（401/422 不重试；遵守 Retry-After）。连续失败 3 次熔断 30s
+    maxStateChars: 32000   # LLM jev 工具单次 state 字符上限（防上下文/计费失控）
+    toolSelectionMaxTools: 80  # 工具选择最多发给 Jev 的候选工具数（64k 上下文保护）
+    decisions:             # 各决策点是否走 Jev（未开启的走现有方案）
+      thinking: false      # 思考自动决策：Jev 判定是否思考与深度（回退：规则+小模型；开启即启用自动判档，无需另开 thinkingAuto）
+      toolSelection: false # 工具选择：Jev 从全量工具目录选本轮激活工具（回退：tool_search）
+      llmTool: false       # 注册 jev 工具供主 LLM 主动调用（把 state+questions 发给 Jev 取结构化答案）
+      terminalRisk: false  # shell 命令执行前用 Jev 判定风险（破坏性默认拒绝；回退：现有行为）
+    allowDestructive: false  # shell 风险：是否允许"高置信破坏性"命令执行。false=破坏性一律拒绝（fail-closed，推荐）；
+                             # true=仅当 Jev 置信度 ≥ thresholds.terminalRiskFloor 才放行（终端无审批，请谨慎）
+    thresholds:            # 置信度门控阈值（集中可配；按"答错的代价"校准）
+      lowConfidence: 0.5       # 通用低置信边界（低→回退）
+      highConfidence: 0.9      # 通用高置信边界（高→才允许破坏性动作）
+      thinkingMinConfidence: 0.5  # 思考档位低于此值回退规则判档
+      toolNoulFloor: 0.6       # 工具 noul 概率达此值才激活
+      terminalRiskFloor: 0.75  # 破坏性命令需达此置信度才允许执行
   maxTokens:              # 单次回复最大 token（留空=厂商默认；Anthropic 默认 4096）
   contextWindow:          # 模型上下文窗口 token 数（如 32000）；配置后启用 token 高低水位压缩（超 65% 压到 45%、保留首条意图、cacheEpoch 分代），未配置按消息条数水位（30→18）压缩
   compaction:               # 无损上下文压缩（Hermes 四阶段可逆化）：被移出窗口的原文整块归档（sha256 校验），

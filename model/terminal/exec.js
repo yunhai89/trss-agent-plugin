@@ -34,6 +34,7 @@ export function makeTerminalTool({ manager = null } = {}) {
     meta: {
       interactive: true, // 沙箱命令不与其他工具并行（顺序执行，避免同一会话内互相干扰）
       dangerous: true,
+      shell: true, // 声明为 shell 执行面：Jev 命令风险决策（agent.jev.decisions.terminalRisk）据此生效
     },
     parameters: {
       type: 'object',

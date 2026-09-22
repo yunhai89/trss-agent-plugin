@@ -245,6 +245,22 @@
         if (form.thinkingAuto.budgets.medium == null) form.thinkingAuto.budgets.medium = 8192
         if (form.thinkingAuto.budgets.high == null) form.thinkingAuto.budgets.high = 16384
         if (form.thinkingAuto.enable) form.thinking = null // 互斥：自动决策开启时关闭手动深度思考（载入即归一）
+        // Jev（TypeSafe 判断模型，opt-in）兜底：UI 绑定需完整对象树
+        if (!form.jev) form.jev = {}
+        if (form.jev.enable == null) form.jev.enable = false
+        if (form.jev.apiKey == null) form.jev.apiKey = ''
+        if (form.jev.baseURL == null) form.jev.baseURL = 'https://api.typesafe.ai'
+        if (form.jev.model == null) form.jev.model = 'jev-latest'
+        if (form.jev.timeoutMs == null) form.jev.timeoutMs = 8000
+        if (form.jev.maxRetries == null) form.jev.maxRetries = 2
+        if (!form.jev.decisions) form.jev.decisions = {}
+        for (const k of ['thinking', 'toolSelection', 'llmTool', 'terminalRisk']) {
+          if (form.jev.decisions[k] == null) form.jev.decisions[k] = false
+        }
+        if (!form.jev.thresholds) form.jev.thresholds = {}
+        if (form.jev.thresholds.toolNoulFloor == null) form.jev.thresholds.toolNoulFloor = 0.6
+        if (form.jev.thresholds.terminalRiskFloor == null) form.jev.thresholds.terminalRiskFloor = 0.75
+        if (form.jev.allowDestructive == null) form.jev.allowDestructive = false
         if (!form.devLog) form.devLog = {}
         if (!form.humanize) form.humanize = {}
         if (!form.humanize.memory) form.humanize.memory = {}
@@ -525,6 +541,7 @@
         { id: 'features', name: '功能分配', icon: 'zap', grad: 'var(--grad-honey)' },
         { id: 'selfstate', name: '自我状态', icon: 'bot', grad: 'var(--grad-rose)' },
         { id: 'reason', name: '推理参数', icon: 'zap', grad: 'var(--grad-sky)' },
+        { id: 'jev', name: 'Jev 判断模型', icon: 'cpu', grad: 'var(--grad-vio)' },
         { id: 'reply', name: '进度 / 回复渲染', icon: 'send', grad: 'var(--grad-mint)' },
         { id: 'memory', name: '记忆系统', icon: 'memory', grad: 'var(--grad-honey)' },
         { id: 'evolution', name: '自进化', icon: 'evolution', grad: 'var(--grad-rose)' },
@@ -1159,6 +1176,63 @@
               </cfg-row>
             </div></div>
           </div></div>
+        </div>
+
+        <!-- ===== Jev 判断模型（TypeSafe，opt-in）===== -->
+        <div :id="'cfg-jev'" class="card cf-sec" :class="{open: open.jev}">
+          <div class="cf-sh" @click="open.jev = !open.jev">
+            <span class="ct-ico" style="background:var(--grad-vio)"><v-icon name="cpu"/></span>
+            <div><div class="ct-t">Jev 判断模型</div><div class="ct-s">TypeSafe 系统一判断：思考/工具/shell 风险决策（默认关，可回退）</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
+          </div>
+          <div class="cf-body" v-show="open.jev">
+            <div class="note n-rose full" style="margin:0 0 10px">
+              <v-icon name="shield"/>
+              <div style="flex:1"><b>⚠️ 数据外发警告：</b>启用后会把<b>用户对话内容 / shell 命令</b>发往第三方 TypeSafe（typesafe.ai）做结构化判断。默认关闭；所有决策点失败/低置信都会<b>无感回退</b>现有方案（思考→规则+小模型；工具→tool_search；shell→现有行为），不阻塞对话。shell 风险为 fail-closed：<b>破坏性命令默认拒绝</b>。API Key 仅显示掩码、已接入回复脱敏。</div>
+            </div>
+            <div class="cf-grid">
+              <cfg-row name="启用 Jev" desc="opt-in 总开关（关闭时下列决策点全部不生效）">
+                <v-switch v-model="form.jev.enable"/>
+              </cfg-row>
+              <cfg-row name="Jev 模型 ID" desc="默认 jev-latest；调优后建议固定版本化 ID">
+                <input class="inp mono" style="width:180px" v-model="form.jev.model" placeholder="jev-latest">
+              </cfg-row>
+              <cfg-row class="full" name="API Key" desc="tsk_...（★仅显示掩码；留空/不改则保留原值）">
+                <input class="inp mono" style="width:100%" type="password" autocomplete="new-password" v-model="form.jev.apiKey" placeholder="tsk_...（留空=保留原值）">
+              </cfg-row>
+              <cfg-row name="接口地址" desc="baseURL（可指向代理/网关）">
+                <input class="inp mono" style="width:220px" v-model="form.jev.baseURL" placeholder="https://api.typesafe.ai">
+              </cfg-row>
+              <cfg-row name="超时(ms)" desc="超时/失败自动回退">
+                <input type="number" class="inp" style="width:110px" min="500" step="500" :disabled="!form.jev.enable" v-model.number="form.jev.timeoutMs">
+              </cfg-row>
+              <cfg-row name="重试次数" desc="408/429/5xx 退避重试；401/422 不重试">
+                <input type="number" class="inp" style="width:90px" min="0" max="5" :disabled="!form.jev.enable" v-model.number="form.jev.maxRetries">
+              </cfg-row>
+              <div class="full" style="font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)">各决策点：走 Jev 还是本地方案（本地为回退默认）</div>
+              <cfg-row name="思考自动决策" desc="Jev 判是否思考与深度（开启即启用自动判档，无需另开 thinkingAuto）；回退：规则+小模型判档">
+                <v-switch v-model="form.jev.decisions.thinking" :disabled="!form.jev.enable"/>
+              </cfg-row>
+              <cfg-row name="工具选择" desc="Jev 从全量工具目录选本轮激活工具；回退：tool_search">
+                <v-switch v-model="form.jev.decisions.toolSelection" :disabled="!form.jev.enable"/>
+              </cfg-row>
+              <cfg-row name="注册 jev 工具" desc="主 LLM 可主动把 state+questions 发给 Jev 取结构化答案">
+                <v-switch v-model="form.jev.decisions.llmTool" :disabled="!form.jev.enable"/>
+              </cfg-row>
+              <cfg-row name="shell 命令风险" desc="terminal 执行前判只读/可逆/破坏性；破坏性默认拒绝；回退：现有行为">
+                <v-switch v-model="form.jev.decisions.terminalRisk" :disabled="!form.jev.enable"/>
+              </cfg-row>
+              <cfg-row name="允许破坏性命令" desc="⚠️ 关闭=破坏性一律拒绝（推荐）；开启=仅高置信破坏性放行（终端无审批，谨慎）">
+                <v-switch v-model="form.jev.allowDestructive" :disabled="!form.jev.enable || !form.jev.decisions.terminalRisk"/>
+              </cfg-row>
+              <cfg-row name="工具激活阈值" desc="toolNoulFloor：noul 概率达标才激活（0~1）">
+                <input type="number" class="inp" style="width:110px" min="0" max="1" step="0.05" :disabled="!form.jev.enable" v-model.number="form.jev.thresholds.toolNoulFloor">
+              </cfg-row>
+              <cfg-row name="破坏性命令阈值" desc="terminalRiskFloor：仅「允许破坏性命令」开启时用于高置信放行判定">
+                <input type="number" class="inp" style="width:110px" min="0" max="1" step="0.05" :disabled="!form.jev.enable || !form.jev.allowDestructive" v-model.number="form.jev.thresholds.terminalRiskFloor">
+              </cfg-row>
+            </div>
+          </div>
         </div>
 
         <!-- ===== §1.3 进度 / 回复渲染 ===== -->

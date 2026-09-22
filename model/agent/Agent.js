@@ -16,12 +16,13 @@ import { randomUUID } from 'node:crypto'
 import { ExecutionContext } from './tools/context.js'
 import { makeToolSearchTool } from './tools/tool_search.js'
 import { stringifyArgs, estimateMessages, mergeUsage } from './messages.js'
-import { tokenBreakdown, toolResultFields } from './trace/events.js'
+import { tokenBreakdown, toolResultFields, decisionFields } from './trace/events.js'
 import { LoopGovernor } from './loop-governor.js'
 import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 import { detectScheduleIntent } from './schedule.js'
-import { decideThinkingSmart, encodeThinking } from '../llm/thinking.js'
+import { decideThinkingSmart, encodeThinking, classifyComplexity } from '../llm/thinking.js'
+import { decideThinkingWithJev, selectToolsWithJev, assessShellRiskWithJev, evaluateShellRisk } from './jev/index.js'
 
 const DEFAULT_IDENTITY = TEMPLATES.agent.system
 
@@ -149,6 +150,11 @@ export class Agent {
     this.thinkingAuto = config.thinkingAuto || null
     this.thinkingCapable = config.thinkingCapable !== false
     this.thinkingClassifierLlm = config.thinkingClassifierLlm || null // 小模型判档通道（可选；缺省走规则）
+    // Jev（TypeSafe AI）判断模型：opt-in 决策层（thinking/toolSelection/terminalRisk/llmTool）。
+    // 形如 { client, decisions, thresholds, toolSelectionMaxTools, allowDestructive }；未配置/失败/低置信一律回退现有方案。
+    this.jev = config.jev || null
+    this._jevSelectedNames = new Set() // 本轮由 Jev 激活的工具（默认不跨轮持久化，防工具集膨胀）
+    this._ranTools = new Set() // 本轮实际执行过的工具（持久化时保留，保证历史 tool_use 仍有对应 schema）
     this.providerProtocol = config.protocol || 'openai'
     this.providerPreset = config.preset || ''
     this._turnReasoning = null
@@ -356,15 +362,21 @@ export class Agent {
     if (this.thinkingAuto?.enable && this.thinkingCapable) {
       this.thinkInfo = { auto: true, depth: '-', budget: null, source: '-', style: this.thinkingAuto.style || '' }
       try {
-        // hybrid：小模型优先（灰区/always 才调用，带超时+缓存），失败自动回退规则
-        this._turnReasoning = await decideThinkingSmart(rawText, {
-          llm: this.thinkingClassifierLlm,
+        const thinkOpts = {
           classifier: this.thinkingAuto.classifier || 'auto',
           timeoutMs: this.thinkingAuto.timeoutMs || 2500,
           context: this._thinkingContext(),
           protocol: this.providerProtocol, preset: this.providerPreset, model: this.model,
           style: this.thinkingAuto.style, budgets: this.thinkingAuto.budgets, maxBudget: this.thinkingAuto.maxBudget,
-        })
+        }
+        // Jev 优先（opt-in）：低置信/失败/未配置返回 null → 回退「小模型+规则」hybrid
+        let jevReasoning = null
+        if (this.jev?.client?.configured && this.jev.decisions?.thinking) {
+          jevReasoning = await decideThinkingWithJev({
+            client: this.jev.client, text: rawText, thresholds: this.jev.thresholds, ...thinkOpts,
+          })
+        }
+        this._turnReasoning = jevReasoning || await decideThinkingSmart(rawText, { llm: this.thinkingClassifierLlm, ...thinkOpts })
         this.logger('debug', `[thinking] auto depth=${this._turnReasoning.depth} (${this._turnReasoning.source}) budget=${this._turnReasoning.budget} style=${this._turnReasoning.style} score=${this._turnReasoning.score}`)
         this.thinkInfo = {
           auto: true, depth: this._turnReasoning.depth, budget: this._turnReasoning.budget,
@@ -373,6 +385,8 @@ export class Agent {
         this.devLog?.('thinking_auto', {
           depth: this._turnReasoning.depth, source: this._turnReasoning.source, score: this._turnReasoning.score,
           budget: this._turnReasoning.budget, style: this._turnReasoning.style, reasons: this._turnReasoning.reasons,
+          // Jev 判档时附实际应答模型与输入 token（文档要求记录）
+          ...(jevReasoning ? { confidence: jevReasoning.confidence, jevModel: jevReasoning.jevModel, jevUsage: jevReasoning.jevUsage } : {}),
         }, taskId, ctx?.devScope)
       } catch (e) {
         this._turnReasoning = null
@@ -457,6 +471,8 @@ export class Agent {
     this.messages.push(this._buildUserMessage(input, userText))
 
     this._pendingReflect = null // 每 run 重置反思反馈（防跨 run 串）
+    this._jevSelectedNames = new Set() // 每 run 重置：Jev 激活集默认不跨轮持久化
+    this._ranTools = new Set() // 每 run 重置：本轮实际执行过的工具名
     this.governor?.reset()
     let usage = null
     let turns = 0
@@ -487,6 +503,8 @@ export class Agent {
     if (discoveryOn) {
       this.activeTools = new Set(td.alwaysOn?.length ? td.alwaysOn : DEFAULT_ALWAYS_ON)
       this._metaTools = { tool_search: makeToolSearchTool(this.tools, this, td) }
+      // Jev 的 LLM 工具（opt-in）常驻：否则按需发现模式下主 LLM 看不到它
+      if (this.jev?.client?.configured && this.jev.decisions?.llmTool && this.tools.has?.('jev')) this.activeTools.add('jev')
       // 跨轮恢复上一对话扩充过的工具集（会话级持久）：tools 数组参与请求前缀缓存——
       // 若每轮重置回 alwaysOn，上一轮 tool_search 扩充过的对话本轮 tools 缩水 → 前缀在
       // tools 处断裂，system+messages 全部 cache miss；且历史中的 tool_use 工具不在列表
@@ -494,6 +512,11 @@ export class Agent {
       if (this._pendingRestoreTools) {
         for (const n of this._pendingRestoreTools) if (this.tools.has?.(n) && !this.activeTools.has(n)) this.activeTools.add(n)
         this._pendingRestoreTools = null
+      }
+      // Jev 工具选择（opt-in）：把全量工具目录（仅 name/summary）发给 Jev 选本轮激活集；
+      // 失败/未配置无感回退——tool_search 仍常驻可用。选中项追加进 activeTools（保前缀稳定）。
+      if (this.jev?.client?.configured && this.jev.decisions?.toolSelection) {
+        await this._jevSelectTools(rawText, taskId, ctx, signal)
       }
     } else {
       this.activeTools = null
@@ -757,7 +780,12 @@ export class Agent {
     // 反思草稿已 pop、反馈走 system 不进 messages，历史天然干净（无需额外过滤）
     // 持久化：普通轮次 append 增量；发生压缩的轮次全量覆写（压缩改写了中段，slice(sessStart)
     // 起点已错位——曾持久化出错切分段，重启后历史缺块且顺序错乱，Ledger 模式下暴露）
-    const extra = { cacheEpoch: this.cacheEpoch, ...(this._compactLedger ? { compactLedger: this._compactLedger } : {}), ...(discoveryOn && this.activeTools ? { activeTools: [...this.activeTools] } : {}) }
+    // Jev 本轮自动激活但从未真正调用的工具不跨轮持久化（防长会话 activeTools 只增不减）；
+    // 实际调用过的仍保留，保证历史 tool_use 在下一轮 tools 数组里仍有对应 schema。
+    const persistedTools = this.activeTools
+      ? [...this.activeTools].filter((n) => !this._jevSelectedNames.has(n) || this._ranTools.has(n))
+      : null
+    const extra = { cacheEpoch: this.cacheEpoch, ...(this._compactLedger ? { compactLedger: this._compactLedger } : {}), ...(discoveryOn && persistedTools ? { activeTools: persistedTools } : {}) }
     if (useConv) {
       try {
         if (compactedThisRun) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
@@ -1063,6 +1091,87 @@ export class Agent {
     } catch { return '' }
   }
 
+  /**
+   * Jev 工具选择（opt-in）：state 只发工具名/摘要（不发完整 schema），每工具一个 noul 由代码按
+   * 阈值聚合（文档 §9.2 语义计数）。选中项追加进 activeTools；失败/空结果不改变现状（回退 tool_search）。
+   */
+  async _jevSelectTools(request, taskId, ctx, signal = null) {
+    try {
+      // 高价值轮次门：纯寒暄/空消息不调用 Jev（省延迟与成本）；有实际诉求的照常判工具。
+      const c = classifyComplexity(request)
+      const casual = !String(request || '').trim() || (c.reasons || []).includes('casual')
+      if (casual) {
+        this.devLog?.('jev_tool_select', { ok: true, skipped: true, reason: 'casual_or_empty' }, taskId, ctx?.devScope)
+        return
+      }
+      const catalog = []
+      for (const t of this.tools.list()) {
+        if (!t || t.name === 'tool_search' || this.activeTools.has(t.name)) continue
+        catalog.push({
+          name: t.name,
+          category: t.category || 'query',
+          summary: String(t.meta?.summary || t.description || '').replace(/\s+/g, ' ').slice(0, 200),
+          required: t.parameters?.required || [],
+        })
+      }
+      const r = await selectToolsWithJev({
+        client: this.jev.client, catalog, request,
+        thresholds: this.jev.thresholds, maxTools: this.jev.toolSelectionMaxTools ?? 80, signal,
+      })
+      if (!r || !r.selected.length) {
+        this.devLog?.('jev_tool_select', { ok: !!r, selected: [], candidateCount: r?.candidateCount ?? catalog.length, model: r?.model || null }, taskId, ctx?.devScope)
+        return
+      }
+      // 确定性顺序（按名排序）——同一选择下 tools 前缀稳定，减少缓存抖动
+      const fresh = []
+      for (const n of [...r.selected].sort()) {
+        if (this.tools.has?.(n) && !this.activeTools.has(n)) {
+          this.activeTools.add(n)
+          this._jevSelectedNames.add(n) // 标记：默认不跨轮持久化（防工具集只增不减）
+          fresh.push(n)
+        }
+      }
+      this.logger('debug', `[jev] 工具选择激活 ${fresh.length} 个：${fresh.join(',') || '（无）'}`)
+      this.devLog?.('jev_tool_select', {
+        ok: true, selected: fresh, candidateCount: r.candidateCount, model: r.model, usage: r.usage,
+        ...decisionFields({
+          query: request,
+          available: r.probabilities.map((x) => ({ name: x.name, score: x.p })),
+          selected: fresh, threshold: this.jev.thresholds?.toolNoulFloor ?? 0.6,
+        }),
+      }, taskId, ctx?.devScope)
+    } catch (e) {
+      this.logger('warn', '[jev] 工具选择失败，回退 tool_search', e?.message || e)
+    }
+  }
+
+  /** Jev shell 风险判定（opt-in）：破坏性默认拒绝；不可用/只读/可逆 → 按现有行为放行 */
+  async _jevShellRisk(tc, ctx, signal = null) {
+    try {
+      const command = String(tc.arguments?.command || '')
+      if (!command) return null
+      const r = await assessShellRiskWithJev({
+        client: this.jev.client, command, cwd: tc.arguments?.cwd || '', thresholds: this.jev.thresholds, signal,
+      })
+      const verdict = evaluateShellRisk(r, this.jev.thresholds, { allowDestructive: this.jev.allowDestructive === true })
+      this.devLog?.('jev_shell_risk', {
+        command: command.slice(0, 200), risk: verdict.risk, confidence: verdict.confidence,
+        blocked: !verdict.allow, fallback: !!verdict.fallback, model: r?.model || null, usage: r?.usage || null,
+      }, this._curTaskId, ctx?.devScope)
+      if (verdict.allow) return { blocked: false }
+      return {
+        blocked: true,
+        result: {
+          error: 'rejected_by_jev_risk', reason: verdict.reason, risk: verdict.risk, confidence: verdict.confidence,
+          _hint: '该命令被 Jev 判定为破坏性，已拒绝执行。请改用更安全、可逆的方式，或先向用户确认后再试。',
+        },
+      }
+    } catch (e) {
+      this.logger('warn', '[jev] shell 风险判定失败，回退现有行为', e?.message || e)
+      return null
+    }
+  }
+
   /** 本轮思考参数（provider 原生字段）：自动决策优先于静态 this.thinking */
   _reasoningOpts() {
     if (this._turnReasoning) {
@@ -1204,6 +1313,18 @@ export class Agent {
           }
         }
       }
+      // Jev shell 风险决策（opt-in）：放在 policy/confirm 之后、执行之前——被拒/未获批准的命令
+      // 不会发往第三方。仅对声明 shell 的工具（terminal）。破坏性且置信度不足 → 结构化拒绝
+      // （不静默放行）；不可用/只读/可逆 → 按现有行为放行（不静默阻断正常命令）。
+      if (this.jev?.client?.configured && this.jev.decisions?.terminalRisk && (tc.name === 'terminal' || tool?.meta?.shell === true)) {
+        const risk = await this._jevShellRisk(tc, ctx, execCtx?.signal)
+        if (risk?.blocked) {
+          content = stringifyArgs(risk.result)
+          this.logger('mark', 'tool blocked by jev risk', tc.name, risk.result.reason)
+          this._safeCb(cb.onToolEnd, tc, content)
+          return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
+        }
+      }
       // onBeforeTool 拦截（扩展点）
       let intercepted
       if (cb.onBeforeTool) intercepted = await cb.onBeforeTool(tc, execCtx)
@@ -1216,6 +1337,7 @@ export class Agent {
         const toolCtx = ctx
           ? Object.assign({}, ctx, { signal: execCtx.signal, taskId: execCtx.taskId, executionContext: execCtx })
           : execCtx
+        this._ranTools?.add(tc.name) // 记录实际执行过的工具（持久化时保留其 schema）
         try {
           const raw = await tool.execute(tc.arguments ?? {}, toolCtx)
           content = typeof raw === 'string' ? raw : stringifyArgs(raw)

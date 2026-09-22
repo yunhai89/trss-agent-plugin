@@ -247,6 +247,23 @@ export function shouldAskModel(text, c, mode = 'auto') {
 }
 
 /**
+ * 由已定的 depth 组装完整决策对象（预算 + provider 原生字段 + 风格）。
+ * 供规则/小模型/Jev 三条判档来源共用，保证输出结构一致（Jev 决策见 model/agent/jev/decisions.js）。
+ * @param {object} o { depth, source, reasons, score, confidence, protocol, preset, model, style, budgets, maxBudget }
+ */
+export function buildThinkingDecision(depth, {
+  source = 'rule', reasons = [], score = null, confidence = null,
+  protocol, preset, model, style, budgets, maxBudget,
+} = {}) {
+  const budget = clampBudget(depth, budgets, maxBudget)
+  const encoded = encodeThinking({ depth, budget, protocol, preset, model, style })
+  return {
+    depth, reasons, source, score, confidence, budget,
+    ...encoded, style: resolveThinkingStyle({ protocol, preset, model, presetStyle: style }),
+  }
+}
+
+/**
  * 小模型优先、规则兜底、缓存加速的自动决策（Agent 调用）。
  * @param {object} o { text, llm, classifier:'auto'|'off'|'always', timeoutMs, context, protocol, preset, model, style, budgets, maxBudget }
  */
@@ -266,10 +283,8 @@ export async function decideThinkingSmart(text, {
     if (m) { chosen = { depth: m.depth, reasons: m.reasons, source: 'model' }; if (key) _cacheSet(key, chosen) }
   }
   if (!chosen) chosen = { depth: rule.depth, reasons: rule.reasons, source: classifier === 'off' ? 'rule' : 'rule-fallback' }
-  const budget = clampBudget(chosen.depth, budgets, maxBudget)
-  const encoded = encodeThinking({ depth: chosen.depth, budget, protocol, preset, model, style })
-  return {
-    ...chosen, score: rule.score, budget,
-    ...encoded, style: resolveThinkingStyle({ protocol, preset, model, presetStyle: style }),
-  }
+  return buildThinkingDecision(chosen.depth, {
+    source: chosen.source, reasons: chosen.reasons, score: rule.score,
+    protocol, preset, model, style, budgets, maxBudget,
+  })
 }

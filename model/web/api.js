@@ -15,7 +15,7 @@ import { presets as anthropicPresets } from '../anthropic/presets.js'
 import { getRuntime, fireReminder, makeFireDispatch } from '../../apps/agent.js'
 import { getGroupWorld } from '../../apps/groupworld.js'
 import { parseCron } from '../agent/schedule.js'
-import { redactConfig } from './redact.js'
+import { redactConfig, JEV_KEY_MASK } from './redact.js'
 import { listLogFiles, readLogFile, aggregateStats, queryLogFiles, buildCachePayload } from './logs.js'
 import { mergeTrend, summarizeKvDays } from '../agent/store/usage-stats.js'
 import { ok, fail, asyncHandler, CODE } from './response.js'
@@ -553,7 +553,15 @@ router.put('/config', asyncHandler(async (req, res) => {
   let n = 0
   for (const [p, v] of Object.entries(changes)) {
     if (!p.startsWith('agent.')) continue // 仅允许 agent.* 命名空间
-    setPath(cfg, p, v)
+    // Jev Key 掩码 = 用户未修改：跳过，避免把掩码写进配置（redactConfig 只掩码展示）
+    if (p === 'agent.jev.apiKey' && v === JEV_KEY_MASK) continue
+    let val = v
+    // 整块 agent.jev 提交时同样过滤掩码（否则掩码会被当作真实 key 写入）
+    if (p === 'agent.jev' && val && typeof val === 'object' && !Array.isArray(val) && val.apiKey === JEV_KEY_MASK) {
+      val = { ...val }
+      delete val.apiKey
+    }
+    setPath(cfg, p, val)
     n++
   }
   Config.save(cfg)

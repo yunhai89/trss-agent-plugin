@@ -38,6 +38,7 @@ function collectSecrets() {
   for (const p of cfg.llmProviders || []) push(p?.apiKey)
   for (const m of cfg.llmModels || []) push(m?.apiKey)
   push(cfg.vision?.apiKey)
+  push(cfg.jev?.apiKey) // TypeSafe Jev API Key（发往第三方判断模型；绝不入日志/回复）
   push(cfg.sandbox?.apiKey) // E2B（云/自托管）团队 key：与 LLM key 同等敏感，必须脱敏
   push(cfg.recall?.embedApiKey)
   push(cfg.kb?.embedApiKey)

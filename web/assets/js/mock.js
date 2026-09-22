@@ -41,6 +41,13 @@
     temperature: 0.2,
     thinking: { type: 'enabled', budget_tokens: 16000 },
     thinkingAuto: { enable: false, classifier: 'auto', model: '', timeoutMs: 2500, maxBudget: 32768, budgets: { low: 4096, medium: 8192, high: 16384 }, style: '' },
+    jev: {
+      enable: false, apiKey: '', baseURL: 'https://api.typesafe.ai', model: 'jev-latest',
+      timeoutMs: 4000, maxRetries: 1, maxStateChars: 32000, toolSelectionMaxTools: 80,
+      decisions: { thinking: false, toolSelection: false, llmTool: false, terminalRisk: false },
+      allowDestructive: false,
+      thresholds: { lowConfidence: 0.5, highConfidence: 0.9, thinkingMinConfidence: 0.5, toolNoulFloor: 0.6, terminalRiskFloor: 0.75 },
+    },
     maxTokens: null,
     contextWindow: 32000,
     compaction: { enable: true, archiveDir: 'data/context-archive' },

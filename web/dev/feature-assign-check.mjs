@@ -110,5 +110,24 @@ if (mainOnlyFeature) {
   ok(sel === 'm2', `mainOnly 功能已配同端点 mimo 模型 → 下拉回显注册条目（实际 ${JSON.stringify(sel)}）`)
 }
 
+// Jev 卡片字段与配置同步（跨文件一致性）：Web 视图分区 / 默认配置 / 锅巴 schema 三处都有同一组开关。
+// 说明：本 harness 不执行 onMounted→syncForm，故不校验 form 归一，只校验三处声明同步，防字段漂移。
+ok(!!bindings.sections?.some((s) => s.id === 'jev'), '配置中心已注册「Jev 判断模型」分区')
+const defYaml = read('../config/default_config/config.yaml')
+ok(/^\s*jev:/m.test(defYaml), '默认配置含 agent.jev 块')
+for (const f of ['thinking', 'toolSelection', 'llmTool', 'terminalRisk']) {
+  ok(new RegExp(`^\\s+${f}: false`, 'm').test(defYaml), `默认配置 agent.jev.decisions.${f}=false（opt-in）`)
+}
+ok(/^\s*enable: false/m.test(defYaml.slice(defYaml.indexOf('  jev:'))), '默认配置 agent.jev.enable=false')
+ok(/^\s*allowDestructive: false/m.test(defYaml.slice(defYaml.indexOf('  jev:'))), '默认配置 agent.jev.allowDestructive=false（破坏性默认拒绝）')
+const guobaSrc = read('../guoba.support.js')
+for (const field of ['agent.jev.enable', 'agent.jev.apiKey', 'agent.jev.decisions.thinking', 'agent.jev.decisions.toolSelection', 'agent.jev.decisions.llmTool', 'agent.jev.decisions.terminalRisk', 'agent.jev.allowDestructive', 'agent.jev.thresholds.toolNoulFloor', 'agent.jev.thresholds.terminalRiskFloor']) {
+  ok(guobaSrc.includes(`'${field}'`), `锅巴 schema 含字段 ${field}`)
+}
+const viewSrc = read('assets/js/views/config.js')
+for (const f of ['form.jev.decisions.thinking', 'form.jev.decisions.toolSelection', 'form.jev.decisions.llmTool', 'form.jev.decisions.terminalRisk', 'form.jev.allowDestructive']) {
+  ok(viewSrc.includes(f), `Web 视图绑定字段 ${f}`)
+}
+
 console.log(`\n通过 ${passed}，失败 ${failed}`)
 process.exit(failed ? 1 : 0)

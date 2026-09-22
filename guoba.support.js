@@ -14,6 +14,7 @@
 import Config from './utils/Config.js'
 import Log from './utils/Log.js'
 import { setPath } from './utils/path.js'
+import { JEV_KEY_MASK } from './model/web/redact.js'
 
 /** setPath 已提取到 utils/path.js（web 路由与 guoba 共用） */
 
@@ -167,6 +168,31 @@ export function supportGuoba() {
         { field: 'agent.thinkingAuto.budgets.medium', label: '中深度预算', component: 'InputNumber', componentProps: { min: 1024, max: 64000, step: 1024 } },
         { field: 'agent.thinkingAuto.budgets.high', label: '高深度预算', component: 'InputNumber', componentProps: { min: 1024, max: 128000, step: 1024 } },
 
+        // —— Jev（TypeSafe 判断模型，opt-in）——
+        {
+          label: 'Jev 判断模型（TypeSafe）',
+          component: 'SOFT_GROUP_BEGIN',
+        },
+        {
+          field: 'agent.jev.enable',
+          label: '启用 Jev',
+          helpMessage: '⚠️ 会把用户对话内容与 shell 命令发往第三方 TypeSafe（typesafe.ai）做结构化判断，属新增数据外发面。',
+          bottomHelpMessage: '默认关闭。开启后按下方决策点分别生效；任何决策点失败/低置信一律无感回退现有方案（思考→规则+小模型；工具→tool_search；shell→现有行为）。仅在你明确知晓并接受数据外发风险时开启。',
+          component: 'Switch',
+        },
+        { field: 'agent.jev.apiKey', label: 'Jev API Key', bottomHelpMessage: 'tsk_...（★敏感：仅显示掩码；留空/不改则保留原值。已接入回复脱敏，绝不入日志）', component: 'Input', componentProps: { placeholder: 'tsk_...（留空=保留原值）' } },
+        { field: 'agent.jev.baseURL', label: 'Jev 接口地址', bottomHelpMessage: '默认 https://api.typesafe.ai；可指向代理/网关', component: 'Input', componentProps: { placeholder: 'https://api.typesafe.ai' } },
+        { field: 'agent.jev.model', label: 'Jev 模型 ID', bottomHelpMessage: '默认 jev-latest；调优阈值后建议固定版本化 ID（如 jev-1.13.0）', component: 'Input', componentProps: { placeholder: 'jev-latest' } },
+        { field: 'agent.jev.timeoutMs', label: 'Jev 超时(ms)', bottomHelpMessage: '超时/失败自动回退现有方案', component: 'InputNumber', componentProps: { min: 500, max: 60000, step: 500 } },
+        { field: 'agent.jev.maxRetries', label: 'Jev 重试次数', bottomHelpMessage: '408/429/5xx 指数退避重试（401/422 不重试；遵守 Retry-After）', component: 'InputNumber', componentProps: { min: 0, max: 5 } },
+        { field: 'agent.jev.decisions.thinking', label: '决策：思考自动决策', bottomHelpMessage: '由 Jev 判定是否思考与深度（开启即启用自动判档，无需另开 thinkingAuto）；回退：规则+小模型判档', component: 'Switch' },
+        { field: 'agent.jev.decisions.toolSelection', label: '决策：工具选择', bottomHelpMessage: '把全量工具目录发给 Jev 选本轮激活工具（回退：tool_search 按需检索）', component: 'Switch' },
+        { field: 'agent.jev.decisions.llmTool', label: '决策：注册 jev 工具', bottomHelpMessage: '让主 LLM 在需要判断时主动把 state+questions 发给 Jev 取结构化答案', component: 'Switch' },
+        { field: 'agent.jev.decisions.terminalRisk', label: '决策：shell 命令风险', bottomHelpMessage: 'terminal 执行前用 Jev 判只读/可逆/破坏性；破坏性默认拒绝（回退：现有行为）', component: 'Switch' },
+        { field: 'agent.jev.allowDestructive', label: 'shell：允许破坏性命令', bottomHelpMessage: '⚠️ 关闭=破坏性一律拒绝（fail-closed，推荐）；开启=仅当 Jev 置信度≥破坏性阈值才放行（终端无审批，谨慎）', component: 'Switch' },
+        { field: 'agent.jev.thresholds.toolNoulFloor', label: '工具激活阈值', bottomHelpMessage: '工具 noul 概率达到此值才激活（0~1）', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
+        { field: 'agent.jev.thresholds.terminalRiskFloor', label: '破坏性命令置信阈值', bottomHelpMessage: '仅「允许破坏性命令」开启时用于高置信放行判定（0~1）', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
+
         // —— 安全与审批 ——
         { label: '安全与审批', component: 'SOFT_GROUP_BEGIN' },
         { field: 'agent.guardAction', label: '注入防御动作', component: 'Select', componentProps: { options: OPT.guardAction } },
@@ -256,6 +282,8 @@ export function supportGuoba() {
         // thinking：provider 原生 {type,budget_tokens}|null → 面板友好 {enable,budget_tokens}
         const tk = data?.agent?.thinking
         data.agent.thinking = { enable: !!tk && tk?.type !== 'disabled', budget_tokens: tk?.budget_tokens || 16000 }
+        // Jev API Key：只显示掩码（安全要求）；保存时掩码视为"未修改"跳过
+        if (data?.agent?.jev && data.agent.jev.apiKey) data.agent.jev.apiKey = JEV_KEY_MASK
         // mcp.servers（对象 map）→ 标准 mcpServers JSON 文本（serversJson 虚拟字段，textarea 展示/编辑）
         try {
           const servers = unwrapServers(data?.agent?.mcp?.servers || {})
@@ -307,6 +335,13 @@ export function supportGuoba() {
         }
         for (const [p, v] of Object.entries(data || {})) {
           let val = v
+          // Jev Key 掩码 = 用户未修改：跳过，避免把掩码写进配置
+          if (p === 'agent.jev.apiKey' && val === JEV_KEY_MASK) continue
+          // 整块 agent.jev 提交时同样过滤掩码（否则掩码会被当作真实 key 写入）
+          if (p === 'agent.jev' && val && typeof val === 'object' && !Array.isArray(val) && val.apiKey === JEV_KEY_MASK) {
+            val = { ...val }
+            delete val.apiKey
+          }
           if (p === 'agent.masters' && typeof val === 'string') {
             val = val.split('\n').map((s) => String(s).trim()).filter(Boolean)
           }
