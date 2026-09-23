@@ -80,6 +80,14 @@ for (const [n, d] of Object.entries(collected)) {
   try { Vue.compile(d.template); ok(`compile component <${n}>`) } catch (e) { bad(`compile component <${n}>`, e) }
 }
 
+/* 3b. 编译各视图内定义的局部组件模板（CfgRow/ModelPicker 等） */
+for (const [vname, def] of Object.entries(VIEWS)) {
+  for (const [cn, cdef] of Object.entries(def.components || {})) {
+    if (!cdef || !cdef.template) continue
+    try { Vue.compile(cdef.template); ok(`compile <${cn}> (in ${vname})`) } catch (e) { bad(`compile <${cn}> (in ${vname})`, e) }
+  }
+}
+
 /* 4. App 外壳:拦截 createApp 拿到根组件后编译其模板 */
 try {
   let rootDef = null

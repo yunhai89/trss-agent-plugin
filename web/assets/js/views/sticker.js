@@ -6,19 +6,8 @@
 (function () {
   window.VIEWS = window.VIEWS || {}
 
-  /* 行容器:左名称/说明,右控件（与 humanize.js 同构，本页自包含） */
-  const CfgRow = {
-    name: 'CfgRow',
-    props: { name: String, desc: { type: String, default: '' }, danger: Boolean, full: Boolean },
-    template: `
-    <div class="cf-item" :class="{full: full, dg: danger}">
-      <div class="info">
-        <div class="name">{{ name }}<span v-if="danger" class="pill p-rose" style="margin-left:7px;font-size:10px;padding:3px 8px">高危</span></div>
-        <div class="desc" v-if="desc">{{ desc }}</div>
-      </div>
-      <div class="ctl"><slot/></div>
-    </div>`,
-  }
+  /* 行容器（共享实现见 components.js UI.makeCfgRow） */
+  const CfgRow = window.UI.makeCfgRow()
 
   /* 标签编辑器（数组字段：discoverGroups） */
   const TagEditor = {

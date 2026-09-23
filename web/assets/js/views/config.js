@@ -2,19 +2,8 @@
 (function () {
   window.VIEWS = window.VIEWS || {}
 
-  /* 行容器:左名称/说明,右控件 */
-  const CfgRow = {
-    name: 'CfgRow',
-    props: { name: String, desc: { type: String, default: '' }, danger: Boolean, full: Boolean },
-    template: `
-    <div class="cf-item" :class="{full: full, dg: danger}">
-      <div class="info">
-        <div class="name">{{ name }}<span v-if="danger" class="pill p-rose" style="margin-left:7px;font-size:10px;padding:3px 8px">高危</span></div>
-        <div class="desc" v-if="desc">{{ desc }}</div>
-      </div>
-      <div class="ctl"><slot/></div>
-    </div>`,
-  }
+  /* 行容器（共享实现见 components.js UI.makeCfgRow）：左名称(+「?」说明气泡)/右控件 */
+  const CfgRow = window.UI.makeCfgRow()
 
   /* 标签编辑器 */
   const TagEditor = {
@@ -890,7 +879,7 @@
             <cfg-row name="启用 Jev" desc="opt-in 总开关：关闭时各卡片的 jev 决策选项不显示、不生效">
               <v-switch v-model="form.jev.enable"/>
             </cfg-row>
-            <cfg-row name="Jev 厂商" desc="仅列出 preset=jev / OpenRouter / 地址含 typesafe 的厂商">
+            <cfg-row name="Jev 厂商" :desc="'仅列出 preset=jev / OpenRouter / 地址含 typesafe 的厂商。' + (jevProviders.length ? '' : '还没有 Jev 厂商：去「厂商配置」添加一个预设为 Jev(TypeSafe) 的厂商（或 OpenRouter）。')">
               <div class="row g6">
                 <select class="sel" style="width:280px" v-model="form.jev.providerId" :disabled="!form.jev.enable" @change="form.jev.modelId = ''">
                   <option value="">（未选择）</option>
@@ -898,7 +887,6 @@
                 </select>
                 <button type="button" class="btn b-line b-sm" @click="jump('providers')"><v-icon name="edit"/>管理厂商</button>
               </div>
-              <div v-if="!jevProviders.length" class="mut2" style="font-size:12px;margin-top:4px">还没有 Jev 厂商：去「厂商配置」添加一个预设为 <b>Jev(TypeSafe)</b> 的厂商（或 OpenRouter）。</div>
             </cfg-row>
             <cfg-row name="Jev 模型" desc="从该 Jev 厂商下的模型条目选（在「模型列表」添加，如 jev-latest）">
               <div class="row g6">

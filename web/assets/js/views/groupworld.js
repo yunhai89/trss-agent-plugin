@@ -6,18 +6,8 @@
 (function () {
   window.VIEWS = window.VIEWS || {}
 
-  const CfgRow = {
-    name: 'CfgRow',
-    props: { name: String, desc: { type: String, default: '' }, danger: Boolean, full: Boolean },
-    template: `
-    <div class="cf-item" :class="{full: full, dg: danger}">
-      <div class="info">
-        <div class="name">{{ name }}<span v-if="danger" class="pill p-rose" style="margin-left:7px;font-size:10px;padding:3px 8px">高危</span></div>
-        <div class="desc" v-if="desc">{{ desc }}</div>
-      </div>
-      <div class="ctl"><slot/></div>
-    </div>`,
-  }
+  /* 行容器（共享实现见 components.js UI.makeCfgRow） */
+  const CfgRow = window.UI.makeCfgRow()
 
   const TagEditor = {
     name: 'TagEditor',
