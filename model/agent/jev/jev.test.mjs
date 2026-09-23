@@ -4,7 +4,7 @@
  */
 import { JevClient, JevError, createJevClient } from './client.js'
 import {
-  decideThinkingWithJev, selectToolsWithJev, assessShellRiskWithJev, evaluateShellRisk,
+  decideThinkingWithJev, selectToolsWithJev, assessShellRiskWithJev, decideReflectWithJev, evaluateShellRisk,
 } from './decisions.js'
 import { makeJevTool, validateJevInput } from './tool.js'
 import { THRESHOLDS, resolveThresholds } from './spec.js'
@@ -285,6 +285,45 @@ await test('Agent 集成：Jev 判档失败 → 回退规则；工具选择写�
   const persisted = store.extra.activeTools
   ok(persisted.includes('web_search'), '实际调用过的工具跨轮持久化')
   ok(!persisted.includes('terminal'), 'Jev 激活但未调用的工具不跨轮持久化')
+})
+
+await test('decideReflectWithJev：按 noul 阈值判定，失败回退 null', async () => {
+  const mk = (body) => new JevClient({ apiKey: 'k', fetch: async () => res(200, body) })
+  const yes = await decideReflectWithJev({ client: mk(okBody({ reflect: { type: 'noul', noul: 0.9 } })), request: 'q', draft: 'd' })
+  eq(yes.revise, true, '高概率 → 需要反思')
+  const no = await decideReflectWithJev({ client: mk(okBody({ reflect: { type: 'noul', noul: 0.1 } })), request: 'q', draft: 'd' })
+  eq(no.revise, false, '低概率 → 不需要反思')
+  eq(await decideReflectWithJev({ client: null, request: 'q', draft: 'd' }), null, '未配置 → null')
+  eq(await decideReflectWithJev({ client: mk(okBody({})), request: 'q', draft: '' }), null, '空草稿 → null')
+})
+
+await test('Agent：shell 自定义拦截命中即拒绝（确定性，不执行、不调 Jev）', async () => {
+  const tools = new ToolRegistry()
+  let executed = 0
+  tools.register({ name: 'terminal', description: '沙箱执行', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] }, meta: { shell: true }, async execute() { executed++; return 'ran' } })
+  let jevCalled = 0
+  const provider = { async chat() { return { content: '', finishReason: 'tool_calls', toolCalls: [{ id: '1', name: 'terminal', arguments: { command: 'rm -rf /data' } }] } } }
+  const jev = { client: { configured: true, async systemOne() { jevCalled++; return { answers: {}, model: 'm', usage: {} } } }, decisions: { terminalRisk: true }, thresholds: {} }
+  const agent = new Agent({ provider, tools, maxTurns: 2, reflect: 'off', shellIntercept: ['rm -rf /'], jev })
+  await agent.run('清理一下数据', { ctx: { userId: 'u', groupId: 'g' } })
+  eq(executed, 0, '命中拦截的命令不执行')
+  eq(jevCalled, 0, '本地拦截优先于 Jev（不发往第三方）')
+  const toolMsg = agent.messages.find((m) => m.role === 'tool' && m.name === 'terminal')
+  ok(/rejected_by_shell_intercept/.test(toolMsg?.content || ''), '返回结构化拦截错误')
+})
+
+await test('Agent：reflect=jev 由 Jev 判定是否反思', async () => {
+  const tools = new ToolRegistry()
+  tools.register({ name: 'noop', description: 'x', parameters: { type: 'object', properties: {}, required: [] }, async execute() { return 'r' } })
+  const mkAgent = (noul) => {
+    const provider = { async chat() { return { content: '草稿回复', finishReason: 'stop' } } }
+    const jev = { client: { configured: true, async systemOne() { return { answers: { reflect: { type: 'noul', noul } }, model: 'm', usage: {} } } }, decisions: { reflect: true }, thresholds: {} }
+    return new Agent({ provider, tools, maxTurns: 2, reflect: 'jev', jev })
+  }
+  const a1 = mkAgent(0.9)
+  eq(await a1._shouldReflect(false, 1, 'draft'), true, 'Jev 高概率 → 反思')
+  const a2 = mkAgent(0.1)
+  eq(await a2._shouldReflect(false, 1, 'draft'), false, 'Jev 低概率 → 不反思（闲聊也不反思）')
 })
 
 await test('resolveThresholds：默认值兜底 + 用户覆盖', async () => {

@@ -736,13 +736,27 @@ async function buildRuntime() {
   const regMaxTokens = Number.isFinite(Number(regEntry?.maxTokens)) && Number(regEntry.maxTokens) > 0 ? Number(regEntry.maxTokens) : null
 
   // ── Jev（TypeSafe AI）判断模型：opt-in 决策层（默认关；未配置/失败/低置信一律回退现有方案）──
-  // 安全：会把用户对话/命令内容发往第三方 typesafe.ai——默认关闭，需显式开启并自行评估数据外发风险。
-  // apiKey 已纳入 redactSecrets 脱敏、绝不入日志；Web 面板仅显示掩码。
+  // Jev 作为「厂商 + 模型」注册：厂商配置里选 jev 预设（或 OpenRouter 承载 jev 模型），模型列表挂模型，
+  // 在「基础 / 模型」卡片打开开关并选择。安全：会把用户对话/命令内容发往第三方——默认关闭。
   let jev = null
   if (cfg.jev?.enable === true) {
-    const client = createJevClient(cfg.jev, { logger: Log.tag('jev') })
+    // 解析 Jev 厂商/模型；兼容旧的直填 jev.apiKey/baseURL/model
+    const prov = (cfg.llmProviders || []).find((p) => p && p.id === cfg.jev.providerId)
+    const mdl = (cfg.llmModels || []).find((m) => m && m.id === cfg.jev.modelId)
+    const apiKey = prov?.apiKey || cfg.jev.apiKey || ''
+    const baseURL = prov?.baseURL || cfg.jev.baseURL || ''
+    const model = mdl?.model || cfg.jev.model || ''
+    const client = createJevClient({ ...cfg.jev, apiKey, baseURL, model }, { logger: Log.tag('jev') })
     if (client) {
-      const decisions = cfg.jev.decisions || {}
+      // 决策点：thinking/reflect/toolSelection 由对应卡片的选择器派生；terminalRisk/llmTool 由 Jev 子块开关。
+      const d = cfg.jev.decisions || {}
+      const decisions = {
+        thinking: cfg.thinkingAuto?.classifier === 'jev',
+        reflect: cfg.reflect === 'jev',
+        toolSelection: cfg.toolDiscovery?.method === 'jev',
+        terminalRisk: d.terminalRisk === true,
+        llmTool: d.llmTool === true,
+      }
       jev = {
         client,
         decisions,
@@ -754,10 +768,10 @@ async function buildRuntime() {
         try { tools.register(makeJevTool({ client, maxStateChars: cfg.jev.maxStateChars })) } catch (e) { Log.warn('[jev] jev 工具注册失败', e?.message || e) }
       }
       const on = Object.keys(decisions).filter((k) => decisions[k])
-      startupInfo.jev = { model: cfg.jev.model || JEV_MODEL_DEFAULT, decisions: on }
-      Log.mark(`[jev] 已启用（model=${cfg.jev.model || JEV_MODEL_DEFAULT}；决策点：${on.join(',') || '无'}）。⚠️ 对话/命令内容将发往第三方 ${cfg.jev.baseURL || 'api.typesafe.ai'}`)
+      startupInfo.jev = { model: model || JEV_MODEL_DEFAULT, decisions: on }
+      Log.mark(`[jev] 已启用（model=${model || JEV_MODEL_DEFAULT}；决策点：${on.join(',') || '无'}）。⚠️ 对话/命令内容将发往第三方 ${baseURL || 'api.typesafe.ai'}`)
     } else {
-      Log.warn('[jev] 已开启但缺少 apiKey，所有 Jev 决策回退现有方案（规则/tool_search/现有终端行为）')
+      Log.warn('[jev] 已开启但未解析到可用 API Key（请检查 Jev 厂商配置），所有 Jev 决策回退现有方案')
     }
   }
 
@@ -789,7 +803,7 @@ async function buildRuntime() {
     maxTokens: regMaxTokens != null ? regMaxTokens : (cfg.maxTokens || null), // 控制输出长度（消除 Anthropic 硬编码 4096 / OpenAI 不发）
     thinking: regThinking || cfg.thinking || null,
     // 思考自动决策（opt-in）：按提问复杂度自动决定是否思考与深度；模型级 thinking 显式覆盖时不启用。
-    // Jev 判档（jev.decisions.thinking）独立生效：即便未开 thinkingAuto.enable，也启用自动判档路径，
+    // 判档方式=jev（jev.decisions.thinking）独立生效：即便未开 thinkingAuto.enable，也启用自动判档路径，
     // 由 Jev 判档、失败/低置信回退「规则+小模型」hybrid（预算取 thinkingAuto 或内置默认）。
     thinkingAuto: (!regThinking && (cfg.thinkingAuto?.enable || jev?.decisions?.thinking === true))
       ? { ...(cfg.thinkingAuto || {}), enable: true }
@@ -808,10 +822,12 @@ async function buildRuntime() {
     // 工具按需发现：LLM 只常驻少数核心工具，其余经 tool_search 检索后动态注入（默认开；关则回退全量常驻）
     toolDiscovery: {
       enable: cfg.toolDiscovery?.enable !== false,
+      method: cfg.toolDiscovery?.method === 'jev' ? 'jev' : 'llm',
       alwaysOn: Array.isArray(cfg.toolDiscovery?.alwaysOn) ? cfg.toolDiscovery.alwaysOn : undefined,
       topK: cfg.toolDiscovery?.topK ?? 8,
       minScore: cfg.toolDiscovery?.minScore ?? 0.3,
     },
+    shellIntercept: Array.isArray(cfg.shell?.intercept) ? cfg.shell.intercept : [],
     reflect: cfg.reflect ?? 'auto',
     cacheControl: cfg.cacheControl === true ? 'explicit' : (cfg.cacheControl === 'auto' || cfg.cacheControl === 'explicit' ? String(cfg.cacheControl) : 'off'), // Anthropic 断点三态：auto=官方端点默认开 / explicit=强制 / off（默认，兼容网关安全）
     promptCacheKey: cfg.promptCacheKey === true, // OpenAI 官方 prompt_cache_key 稳定会话路由（仅官方 preset 下发）

@@ -7,7 +7,7 @@
 export { JevClient, JevError, createJevClient, DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS, DEFAULT_MAX_RETRIES, DEFAULT_RETRY, DEFAULT_CIRCUIT } from './client.js'
 export {
   JEV_SPEC_VERSION, JEV_MODEL_DEFAULT, THRESHOLDS, resolveThresholds,
-  THINKING_QUESTION, SHELL_RISK_QUESTION, toolActiveQuestion, noul, choice, score,
+  THINKING_QUESTION, SHELL_RISK_QUESTION, REFLECT_QUESTION, toolActiveQuestion, noul, choice, score,
 } from './spec.js'
-export { decideThinkingWithJev, selectToolsWithJev, assessShellRiskWithJev, evaluateShellRisk } from './decisions.js'
+export { decideThinkingWithJev, selectToolsWithJev, assessShellRiskWithJev, decideReflectWithJev, evaluateShellRisk } from './decisions.js'
 export { makeJevTool, validateJevInput } from './tool.js'

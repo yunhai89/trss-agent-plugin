@@ -38,7 +38,11 @@ export class JevError extends Error {
   }
 }
 
-const joinUrl = (baseURL, path) => String(baseURL || DEFAULT_BASE_URL).replace(/\/+$/, '') + path
+// 拼接端点：避免 baseURL 已带 /v1 时拼成 /v1/v1/systemone（OpenRouter 等 baseURL 带 /v1）
+const joinUrl = (baseURL, path) => {
+  const b = String(baseURL || DEFAULT_BASE_URL).replace(/\/+$/, '').replace(/\/v1$/i, '')
+  return b + path
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const retriableStatus = (s) => s === 408 || s === 429 || (s >= 500 && s <= 599)
 

@@ -522,6 +522,16 @@ router.get('/models', asyncHandler(async (req, res) => {
       }
       const data = await r.json().catch(() => null)
       list = (data?.data || data?.models || []).map((m) => ({ id: m.id || m.name, name: m.display_name || m.name }))
+    } else if (preset === 'jev') {
+      // Jev（TypeSafe）：GET {baseURL}/v1/models（ModelCard[]：{ name, description }）
+      const r = await fetch(`${baseURL}/v1/models`, { headers: { Authorization: `Bearer ${apiKey}` }, signal: timeout() }).catch(() => null)
+      if (!r?.ok) {
+        const t = await r?.text().catch(() => '')
+        return fail(res, CODE.INTERNAL, `Jev 模型列表获取失败（HTTP ${r?.status || '网络错误'}）${t ? '：' + t.slice(0, 120) : ''}`)
+      }
+      const data = await r.json().catch(() => null)
+      const arr = Array.isArray(data) ? data : (data?.data || data?.models || [])
+      list = arr.map((m) => ({ id: m.id || m.name, name: m.description || m.name || m.id }))
     } else {
       // OpenAI 兼容（deepseek/dashscope/zhipu/moonshot/mimo/minimax/openrouter/opencode 等）：GET {baseURL}/models
       const r = await fetch(`${baseURL}/models`, { headers: { Authorization: `Bearer ${apiKey}` }, signal: timeout() }).catch(() => null)

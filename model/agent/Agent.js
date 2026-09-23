@@ -22,7 +22,7 @@ import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 import { detectScheduleIntent } from './schedule.js'
 import { decideThinkingSmart, encodeThinking, classifyComplexity } from '../llm/thinking.js'
-import { decideThinkingWithJev, selectToolsWithJev, assessShellRiskWithJev, evaluateShellRisk } from './jev/index.js'
+import { decideThinkingWithJev, selectToolsWithJev, assessShellRiskWithJev, decideReflectWithJev, evaluateShellRisk } from './jev/index.js'
 
 const DEFAULT_IDENTITY = TEMPLATES.agent.system
 
@@ -155,6 +155,8 @@ export class Agent {
     this.jev = config.jev || null
     this._jevSelectedNames = new Set() // 本轮由 Jev 激活的工具（默认不跨轮持久化，防工具集膨胀）
     this._ranTools = new Set() // 本轮实际执行过的工具（持久化时保留，保证历史 tool_use 仍有对应 schema）
+    this.shellIntercept = Array.isArray(config.shellIntercept) ? config.shellIntercept : [] // 自定义拦截指令（子串匹配）
+    this._lastUserText = '' // 本轮用户原始文本（反思 Jev 判定用）
     this.providerProtocol = config.protocol || 'openai'
     this.providerPreset = config.preset || ''
     this._turnReasoning = null
@@ -354,6 +356,7 @@ export class Agent {
     const context = opts.context || null
 
     const rawText = this._inputText(input)
+    this._lastUserText = rawText // 本轮用户原始文本（反思 Jev 判定用）
     // 调度意图（周期 vs 一次性）确定性识别：供路由提示 + reminder_set 硬门（见 _executeOne）
     this._scheduleIntent = detectScheduleIntent(rawText)
     // 思考自动决策：按本轮提问复杂度决定是否思考、深度与预算（opt-in，覆盖静态 this.thinking）
@@ -658,7 +661,7 @@ export class Agent {
 
         if (!result.toolCalls?.length) {
           // 反思门：交付前自检，发现实质问题则回环修正（自我纠正）
-          if (reflectIter < this.reflectMaxIterations && this._shouldReflect(usedTools, turns)) {
+          if (reflectIter < this.reflectMaxIterations && await this._shouldReflect(usedTools, turns, result.content, workSignal)) {
             const verdict = await this._reflect({ system, signal: workSignal }).catch((e) => {
               this.logger('warn', '[reflect] 自检异常，跳过（直接交付）', e?.message || e)
               return null
@@ -1145,6 +1148,18 @@ export class Agent {
     }
   }
 
+  /** 自定义 shell 拦截：大小写不敏感子串匹配，命中返回该规则，否则 null */
+  _shellInterceptHit(command) {
+    const cmd = String(command || '')
+    if (!cmd || !this.shellIntercept?.length) return null
+    const low = cmd.toLowerCase()
+    for (const raw of this.shellIntercept) {
+      const p = String(raw || '').trim()
+      if (p && low.includes(p.toLowerCase())) return p
+    }
+    return null
+  }
+
   /** Jev shell 风险判定（opt-in）：破坏性默认拒绝；不可用/只读/可逆 → 按现有行为放行 */
   async _jevShellRisk(tc, ctx, signal = null) {
     try {
@@ -1313,6 +1328,20 @@ export class Agent {
           }
         }
       }
+      // shell 自定义拦截（确定性，与 Jev 是否开启无关）：命中即拒绝执行，命令不发往第三方
+      if ((tc.name === 'terminal' || tool?.meta?.shell === true) && this.shellIntercept.length) {
+        const hit = this._shellInterceptHit(tc.arguments?.command)
+        if (hit) {
+          content = stringifyArgs({
+            error: 'rejected_by_shell_intercept',
+            reason: `命令命中拦截规则「${hit}」，已拒绝执行`,
+            _hint: '该指令被安全策略拦截。请改用其它方式；如需放行请让管理员调整 agent.shell.intercept。',
+          })
+          this.logger('mark', 'tool blocked by shell intercept', tc.name, hit)
+          this._safeCb(cb.onToolEnd, tc, content)
+          return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
+        }
+      }
       // Jev shell 风险决策（opt-in）：放在 policy/confirm 之后、执行之前——被拒/未获批准的命令
       // 不会发往第三方。仅对声明 shell 的工具（terminal）。破坏性且置信度不足 → 结构化拒绝
       // （不静默放行）；不可用/只读/可逆 → 按现有行为放行（不静默阻断正常命令）。
@@ -1372,12 +1401,26 @@ export class Agent {
     return { role: 'tool', tool_call_id: tc.id, name: tc.name, content: this._screenUntrusted(capped, `tool:${tool?.name || tc.name || 'unknown'}`) }
   }
 
-  /** 反思门控：off→不反思；always→每次最终回复都反思；auto→仅在本轮用过工具或多步时反思（纯闲聊零延迟） */
-  _shouldReflect(usedTools, turns) {
+  /**
+   * 反思门控（异步，因 jev 模式要调判断模型）：
+   *   off→不反思；always→每次最终回复都反思；auto→仅在本轮用过工具或多步时反思（纯闲聊零延迟）；
+   *   jev→由 Jev 判定该草稿是否需要反思（失败/低置信回退 auto 启发式）。
+   */
+  async _shouldReflect(usedTools, turns, draft = '', signal = null) {
+    const autoGuess = () => !!(usedTools || turns > 1)
     const mode = this.reflect
     if (!mode || mode === 'off') return false
     if (mode === 'always') return true
-    return !!(usedTools || turns > 1) // 'auto'
+    if (mode === 'jev' && this.jev?.client?.configured && this.jev.decisions?.reflect) {
+      const r = await decideReflectWithJev({
+        client: this.jev.client, request: this._lastUserText, draft,
+        context: this._thinkingContext(), thresholds: this.jev.thresholds, signal,
+      })
+      if (!r) return autoGuess()
+      this.devLog?.('jev_reflect', { revise: r.revise, probability: r.probability, model: r.model, usage: r.usage }, this._curTaskId, this._curDevScope)
+      return r.revise
+    }
+    return autoGuess()
   }
 
   /**

@@ -7,7 +7,7 @@
  */
 
 import { DEPTHS, buildThinkingDecision } from '../../llm/thinking.js'
-import { THINKING_QUESTION, SHELL_RISK_QUESTION, toolActiveQuestion, resolveThresholds } from './spec.js'
+import { THINKING_QUESTION, SHELL_RISK_QUESTION, REFLECT_QUESTION, toolActiveQuestion, resolveThresholds } from './spec.js'
 
 /** Jev 判定结果只取结构合法的字段（类型正确 ≠ 语义正确，仍需门控） */
 const SHELL_RISKS = ['readonly', 'reversible', 'destructive']
@@ -87,6 +87,25 @@ export async function assessShellRiskWithJev({ client, command, cwd = '', signal
     const confidence = Number(ans?.confidence)
     if (!SHELL_RISKS.includes(risk) || !Number.isFinite(confidence)) return null
     return { risk, confidence, model, usage }
+  } catch { return null }
+}
+
+/**
+ * 用 Jev 判定是否需要反思。失败 → null（调用方回退 auto 启发式）。
+ * @returns {Promise<null|{revise:boolean, probability:number, model, usage}>}
+ */
+export async function decideReflectWithJev({
+  client, request = '', draft = '', context = '', thresholds = {}, signal = null,
+} = {}) {
+  if (!client?.configured || !draft) return null
+  const th = resolveThresholds(thresholds)
+  try {
+    const state = { user_request: request || '', draft_reply: draft }
+    if (context) state.recent_dialogue = context
+    const { answers, model, usage } = await client.systemOne({ state, questions: { reflect: REFLECT_QUESTION }, signal })
+    const p = Number(answers?.reflect?.noul)
+    if (!Number.isFinite(p)) return null
+    return { revise: p >= th.reflectFloor, probability: p, model, usage }
   } catch { return null }
 }
 

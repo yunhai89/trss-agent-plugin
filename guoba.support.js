@@ -168,7 +168,7 @@ export function supportGuoba() {
         { field: 'agent.thinkingAuto.budgets.medium', label: '中深度预算', component: 'InputNumber', componentProps: { min: 1024, max: 64000, step: 1024 } },
         { field: 'agent.thinkingAuto.budgets.high', label: '高深度预算', component: 'InputNumber', componentProps: { min: 1024, max: 128000, step: 1024 } },
 
-        // —— Jev（TypeSafe 判断模型，opt-in）——
+        // —— Jev（TypeSafe 判断模型，opt-in，作为「厂商 + 模型」注册）——
         {
           label: 'Jev 判断模型（TypeSafe）',
           component: 'SOFT_GROUP_BEGIN',
@@ -176,22 +176,26 @@ export function supportGuoba() {
         {
           field: 'agent.jev.enable',
           label: '启用 Jev',
-          helpMessage: '⚠️ 会把用户对话内容与 shell 命令发往第三方 TypeSafe（typesafe.ai）做结构化判断，属新增数据外发面。',
-          bottomHelpMessage: '默认关闭。开启后按下方决策点分别生效；任何决策点失败/低置信一律无感回退现有方案（思考→规则+小模型；工具→tool_search；shell→现有行为）。仅在你明确知晓并接受数据外发风险时开启。',
+          bottomHelpMessage: '⚠️ 会把用户对话内容与 shell 命令发往第三方 TypeSafe（typesafe.ai）做结构化判断，属新增数据外发面。默认关闭；失败/低置信一律无感回退现有方案。需先在「厂商配置」添加 preset=jev 的厂商（或 OpenRouter）、在「模型列表」给它挂 jev 模型。语言/工具/失败路径见 Web 配置中心。',
           component: 'Switch',
         },
-        { field: 'agent.jev.apiKey', label: 'Jev API Key', bottomHelpMessage: 'tsk_...（★敏感：仅显示掩码；留空/不改则保留原值。已接入回复脱敏，绝不入日志）', component: 'Input', componentProps: { placeholder: 'tsk_...（留空=保留原值）' } },
-        { field: 'agent.jev.baseURL', label: 'Jev 接口地址', bottomHelpMessage: '默认 https://api.typesafe.ai；可指向代理/网关', component: 'Input', componentProps: { placeholder: 'https://api.typesafe.ai' } },
-        { field: 'agent.jev.model', label: 'Jev 模型 ID', bottomHelpMessage: '默认 jev-latest；调优阈值后建议固定版本化 ID（如 jev-1.13.0）', component: 'Input', componentProps: { placeholder: 'jev-latest' } },
-        { field: 'agent.jev.timeoutMs', label: 'Jev 超时(ms)', bottomHelpMessage: '超时/失败自动回退现有方案', component: 'InputNumber', componentProps: { min: 500, max: 60000, step: 500 } },
-        { field: 'agent.jev.maxRetries', label: 'Jev 重试次数', bottomHelpMessage: '408/429/5xx 指数退避重试（401/422 不重试；遵守 Retry-After）', component: 'InputNumber', componentProps: { min: 0, max: 5 } },
-        { field: 'agent.jev.decisions.thinking', label: '决策：思考自动决策', bottomHelpMessage: '由 Jev 判定是否思考与深度（开启即启用自动判档，无需另开 thinkingAuto）；回退：规则+小模型判档', component: 'Switch' },
-        { field: 'agent.jev.decisions.toolSelection', label: '决策：工具选择', bottomHelpMessage: '把全量工具目录发给 Jev 选本轮激活工具（回退：tool_search 按需检索）', component: 'Switch' },
-        { field: 'agent.jev.decisions.llmTool', label: '决策：注册 jev 工具', bottomHelpMessage: '让主 LLM 在需要判断时主动把 state+questions 发给 Jev 取结构化答案', component: 'Switch' },
-        { field: 'agent.jev.decisions.terminalRisk', label: '决策：shell 命令风险', bottomHelpMessage: 'terminal 执行前用 Jev 判只读/可逆/破坏性；破坏性默认拒绝（回退：现有行为）', component: 'Switch' },
-        { field: 'agent.jev.allowDestructive', label: 'shell：允许破坏性命令', bottomHelpMessage: '⚠️ 关闭=破坏性一律拒绝（fail-closed，推荐）；开启=仅当 Jev 置信度≥破坏性阈值才放行（终端无审批，谨慎）', component: 'Switch' },
+        { field: 'agent.jev.providerId', label: 'Jev 厂商 id', bottomHelpMessage: '引用 llmProviders[].id（preset=jev 或 openrouter）；推荐用 Web 配置中心下拉选择', component: 'Input' },
+        { field: 'agent.jev.modelId', label: 'Jev 模型条目 id', bottomHelpMessage: '引用 llmModels[].id（挂在上面厂商下）', component: 'Input' },
+        { field: 'agent.jev.model', label: 'Jev 模型 ID（手填）', bottomHelpMessage: '留空=用 modelId 指向的注册模型；可直接填 jev-latest / jev-1.13.0', component: 'Input', componentProps: { placeholder: 'jev-latest' } },
+        { field: 'agent.jev.timeoutMs', label: 'Jev 超时(ms)', bottomHelpMessage: '超时/失败自动回退现有方案；Jev 典型延迟 ~100-300ms', component: 'InputNumber', componentProps: { min: 500, max: 60000, step: 500 } },
+        { field: 'agent.jev.maxRetries', label: 'Jev 重试次数', bottomHelpMessage: '408/429/5xx 指数退避重试（401/422 不重试）；连续失败 3 次熔断 30s', component: 'InputNumber', componentProps: { min: 0, max: 5 } },
+        { field: 'agent.jev.decisions.llmTool', label: '注册 jev 工具', bottomHelpMessage: '让主 LLM 在需要判断时主动把 state+questions 发给 Jev 取结构化答案', component: 'Switch' },
+        { field: 'agent.jev.decisions.terminalRisk', label: 'shell：Jev 风险检查', bottomHelpMessage: 'terminal 执行前用 Jev 判只读/可逆/破坏性；破坏性默认拒绝（回退：现有行为）', component: 'Switch' },
+        { field: 'agent.jev.allowDestructive', label: 'shell：允许破坏性命令', bottomHelpMessage: '⚠️ 关闭=破坏性一律拒绝（fail-closed，推荐）；开启=仅当 Jev 置信度≥破坏性阈值才放行', component: 'Switch' },
         { field: 'agent.jev.thresholds.toolNoulFloor', label: '工具激活阈值', bottomHelpMessage: '工具 noul 概率达到此值才激活（0~1）', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
         { field: 'agent.jev.thresholds.terminalRiskFloor', label: '破坏性命令置信阈值', bottomHelpMessage: '仅「允许破坏性命令」开启时用于高置信放行判定（0~1）', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
+        { field: 'agent.jev.thresholds.thinkingMinConfidence', label: '思考档位置信阈值', bottomHelpMessage: 'thinkingMinConfidence：低于则回退规则判档（0~1）', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
+        { field: 'agent.jev.thresholds.reflectFloor', label: '反思触发阈值', bottomHelpMessage: 'reflectFloor：noul 概率达标才反思（0~1）', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
+
+        // —— Shell 命令安全 + 工具选择方法 ——
+        { label: 'Shell 命令安全', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.shell.intercept', label: '自定义拦截指令', bottomHelpMessage: '大小写不敏感子串匹配，命中即拒绝 terminal 执行；每行一条（如 rm -rf /）。留空=不拦截。推荐用 Web 配置中心编辑', component: 'InputTextArea', componentProps: { rows: 3, placeholder: '每行一条，如：\nrm -rf /\nmkfs' } },
+        { field: 'agent.toolDiscovery.method', label: '工具选择方法', bottomHelpMessage: 'llm=主 LLM 经 tool_search 自主发现（默认）/ jev=由 Jev 从全量工具目录选择（需开启 Jev）', component: 'Select', componentProps: { options: [{ label: 'llm 自主发现和选择', value: 'llm' }, { label: 'jev 决策', value: 'jev' }] } },
 
         // —— 安全与审批 ——
         { label: '安全与审批', component: 'SOFT_GROUP_BEGIN' },
@@ -279,6 +283,7 @@ export function supportGuoba() {
         // masters 数组 → 多行文本（textarea 展示）
         if (Array.isArray(data?.agent?.masters)) data.agent.masters = data.agent.masters.join('\n')
         if (Array.isArray(data?.agent?.toolDiscovery?.alwaysOn)) data.agent.toolDiscovery.alwaysOn = data.agent.toolDiscovery.alwaysOn.join('\n')
+        if (Array.isArray(data?.agent?.shell?.intercept)) data.agent.shell.intercept = data.agent.shell.intercept.join('\n')
         // thinking：provider 原生 {type,budget_tokens}|null → 面板友好 {enable,budget_tokens}
         const tk = data?.agent?.thinking
         data.agent.thinking = { enable: !!tk && tk?.type !== 'disabled', budget_tokens: tk?.budget_tokens || 16000 }
@@ -347,6 +352,9 @@ export function supportGuoba() {
           }
           if (p === 'agent.masters') val = val.map((x) => String(x))
           if (p === 'agent.toolDiscovery.alwaysOn' && typeof val === 'string') {
+            val = val.split('\n').map((s) => String(s).trim()).filter(Boolean)
+          }
+          if (p === 'agent.shell.intercept' && typeof val === 'string') {
             val = val.split('\n').map((s) => String(s).trim()).filter(Boolean)
           }
           setPath(cfg, p, val)

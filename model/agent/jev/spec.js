@@ -65,11 +65,24 @@ export function toolActiveQuestion(i, name) {
 }
 
 /**
+ * 反思必要性判定（noul）：交付前是否需要自检回环。state 含 user_request 与 draft_reply。
+ * 措辞成"高值=需要反思"，避免双重否定（文档 §13）。
+ */
+export const REFLECT_QUESTION = noul(
+  'Does `draft_reply` need a careful self-review pass before being delivered to the user, given `user_request`?',
+  {
+    true: 'The reply may be incomplete, inaccurate, inconsistent with the request, or risky; a review could catch and fix a real problem.',
+    false: 'The reply is short, simple and clearly correct; a review would waste time and tokens.',
+  },
+)
+
+/**
  * 置信度三段式门控阈值（文档 §2.4/§10.2）。边界值按"答错的代价"校准，集中可配。
  *  - lowConfidence/highConfidence：通用三段（低→回退；中→保守；高→才碰破坏性）
  *  - thinkingMinConfidence：思考档位低于此值回退规则判档（thinking 非破坏性，保守回退即可）
  *  - toolNoulFloor：noul 概率达到此值才激活该工具（语义计数阈值）
- *  - terminalRiskFloor：破坏性命令需达到此置信度才允许执行（否则拒绝）
+ *  - terminalRiskFloor：破坏性命令需达到此置信度才允许执行（仅 allowDestructive=true 时）
+ *  - reflectFloor：反思必要性 noul 概率达到此值才触发反思
  */
 export const THRESHOLDS = {
   lowConfidence: 0.5,
@@ -77,6 +90,7 @@ export const THRESHOLDS = {
   thinkingMinConfidence: 0.5,
   toolNoulFloor: 0.6,
   terminalRiskFloor: 0.75,
+  reflectFloor: 0.5,
 }
 
 /** 合并用户覆盖（保留默认值兜底，防止配置缺字段导致门控失效） */
