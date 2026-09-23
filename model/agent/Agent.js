@@ -375,9 +375,18 @@ export class Agent {
         // Jev 优先（opt-in）：低置信/失败/未配置返回 null → 回退「小模型+规则」hybrid
         let jevReasoning = null
         if (this.jev?.client?.configured && this.jev.decisions?.thinking) {
+          const __jt = Date.now()
           jevReasoning = await decideThinkingWithJev({
             client: this.jev.client, text: rawText, thresholds: this.jev.thresholds, ...thinkOpts,
           })
+          if (jevReasoning) {
+            this._jevLog('thinking', {
+              depth: jevReasoning.depth, confidence: jevReasoning.confidence, model: jevReasoning.jevModel,
+              usage: jevReasoning.jevUsage, ms: Date.now() - __jt,
+            }, taskId, ctx?.devScope)
+          } else {
+            this._jevLog('thinking', { fallback: true, ms: Date.now() - __jt }, taskId, ctx?.devScope)
+          }
         }
         this._turnReasoning = jevReasoning || await decideThinkingSmart(rawText, { llm: this.thinkingClassifierLlm, ...thinkOpts })
         this.logger('debug', `[thinking] auto depth=${this._turnReasoning.depth} (${this._turnReasoning.source}) budget=${this._turnReasoning.budget} style=${this._turnReasoning.style} score=${this._turnReasoning.score}`)
@@ -1095,16 +1104,67 @@ export class Agent {
   }
 
   /**
+   * Jev 决策统一日志：控制台以 info 等级打印 `[jev] ...`（含置信度/概率/模型/用量/耗时等关键信息），
+   * 同时写入 devLog 的 `jev` 事件（web 时间线按 kind 展示）。日志异常绝不影响主流程。
+   * @param {string} kind thinking|tool_select|shell_risk|reflect|llm_tool
+   * @param {object} data 事件数据（confidence/probability/depth/risk/selected/... ）
+   */
+  _jevLog(kind, data = {}, taskId = null, scope = null) {
+    const d = data || {}
+    try {
+      const bits = [`kind=${kind}`]
+      if (d.depth) bits.push(`depth=${d.depth}`)
+      if (d.risk) bits.push(`risk=${d.risk}`)
+      if (d.confidence != null && Number.isFinite(Number(d.confidence))) bits.push(`conf=${Number(d.confidence).toFixed(2)}`)
+      if (d.probability != null && Number.isFinite(Number(d.probability))) bits.push(`p=${Number(d.probability).toFixed(2)}`)
+      if (d.revise != null) bits.push(`revise=${d.revise}`)
+      if (d.blocked != null) bits.push(`blocked=${d.blocked}`)
+      if (Array.isArray(d.selected)) bits.push(`selected=${d.selected.length}${d.selected.length ? '[' + d.selected.slice(0, 6).join(',') + ']' : ''}`)
+      if (d.candidateCount != null) bits.push(`cand=${d.candidateCount}`)
+      if (d.threshold != null) bits.push(`thr=${d.threshold}`)
+      if (d.fallback) bits.push('fallback')
+      if (d.error) bits.push(`err=${String(d.error).slice(0, 80)}`)
+      if (d.ms != null) bits.push(`${d.ms}ms`)
+      if (d.model) bits.push(`model=${d.model}`)
+      if (d.usage?.input_tokens != null) bits.push(`in=${d.usage.input_tokens}tok`)
+      this.logger('info', `[jev] ${bits.join(' ')}`)
+    } catch { /* 日志失败不影响主流程 */ }
+    try { this.devLog?.('jev', { kind, ...d }, taskId || this._curTaskId, scope || this._curDevScope) } catch { /* noop */ }
+  }
+
+  /** E2B 沙箱执行日志：控制台（失败升 warn）+ devLog `sandbox` 事件（web 时间线） */
+  _logSandbox(tc, content, ms) {
+    let o = null
+    try { o = typeof content === 'string' ? JSON.parse(content) : content } catch { /* 非 JSON 结果忽略 */ }
+    if (!o || typeof o !== 'object') return
+    const failed = o.ok === false || !!o.sandboxError || !!o.error || o.timedOut === true || o.aborted === true
+    const data = {
+      command: String(o.command || tc?.arguments?.command || '').slice(0, 200),
+      exitCode: o.exitCode ?? null,
+      ok: o.ok ?? null,
+      timedOut: !!o.timedOut,
+      aborted: !!o.aborted,
+      sandboxError: o.sandboxError?.kind || (typeof o.sandboxError === 'string' ? o.sandboxError : null),
+      duration: Number.isFinite(ms) ? ms : (o.duration ?? null),
+    }
+    try {
+      this.logger(failed ? 'warn' : 'info', `[sandbox] exit=${data.exitCode ?? '-'}${data.timedOut ? ' timeout' : ''}${data.sandboxError ? ' ' + data.sandboxError : ''} ${data.duration ?? '-'}ms $ ${data.command.slice(0, 80)}`)
+    } catch { /* noop */ }
+    try { this.devLog?.('sandbox', data, this._curTaskId, this._curDevScope) } catch { /* noop */ }
+  }
+
+  /**
    * Jev 工具选择（opt-in）：state 只发工具名/摘要（不发完整 schema），每工具一个 noul 由代码按
    * 阈值聚合（文档 §9.2 语义计数）。选中项追加进 activeTools；失败/空结果不改变现状（回退 tool_search）。
    */
   async _jevSelectTools(request, taskId, ctx, signal = null) {
+    const __t0 = Date.now()
     try {
       // 高价值轮次门：纯寒暄/空消息不调用 Jev（省延迟与成本）；有实际诉求的照常判工具。
       const c = classifyComplexity(request)
       const casual = !String(request || '').trim() || (c.reasons || []).includes('casual')
       if (casual) {
-        this.devLog?.('jev_tool_select', { ok: true, skipped: true, reason: 'casual_or_empty' }, taskId, ctx?.devScope)
+        this._jevLog('tool_select', { skipped: true, reason: 'casual_or_empty' }, taskId, ctx?.devScope)
         return
       }
       const catalog = []
@@ -1121,8 +1181,9 @@ export class Agent {
         client: this.jev.client, catalog, request,
         thresholds: this.jev.thresholds, maxTools: this.jev.toolSelectionMaxTools ?? 80, signal,
       })
+      const ms = Date.now() - __t0
       if (!r || !r.selected.length) {
-        this.devLog?.('jev_tool_select', { ok: !!r, selected: [], candidateCount: r?.candidateCount ?? catalog.length, model: r?.model || null }, taskId, ctx?.devScope)
+        this._jevLog('tool_select', { selected: [], candidateCount: r?.candidateCount ?? catalog.length, model: r?.model || null, usage: r?.usage || null, fallback: !r, ms }, taskId, ctx?.devScope)
         return
       }
       // 确定性顺序（按名排序）——同一选择下 tools 前缀稳定，减少缓存抖动
@@ -1134,9 +1195,9 @@ export class Agent {
           fresh.push(n)
         }
       }
-      this.logger('debug', `[jev] 工具选择激活 ${fresh.length} 个：${fresh.join(',') || '（无）'}`)
-      this.devLog?.('jev_tool_select', {
-        ok: true, selected: fresh, candidateCount: r.candidateCount, model: r.model, usage: r.usage,
+      this._jevLog('tool_select', {
+        selected: fresh, candidateCount: r.candidateCount, model: r.model, usage: r.usage, ms,
+        threshold: this.jev.thresholds?.toolNoulFloor ?? 0.6,
         ...decisionFields({
           query: request,
           available: r.probabilities.map((x) => ({ name: x.name, score: x.p })),
@@ -1144,7 +1205,8 @@ export class Agent {
         }),
       }, taskId, ctx?.devScope)
     } catch (e) {
-      this.logger('warn', '[jev] 工具选择失败，回退 tool_search', e?.message || e)
+      try { this.logger('warn', '[jev] 工具选择失败，回退 tool_search', e?.message || e) } catch { /* noop */ }
+      this._jevLog('tool_select', { fallback: true, error: e?.message || String(e), ms: Date.now() - __t0 }, taskId, ctx?.devScope)
     }
   }
 
@@ -1162,6 +1224,7 @@ export class Agent {
 
   /** Jev shell 风险判定（opt-in）：破坏性默认拒绝；不可用/只读/可逆 → 按现有行为放行 */
   async _jevShellRisk(tc, ctx, signal = null) {
+    const __t0 = Date.now()
     try {
       const command = String(tc.arguments?.command || '')
       if (!command) return null
@@ -1169,9 +1232,10 @@ export class Agent {
         client: this.jev.client, command, cwd: tc.arguments?.cwd || '', thresholds: this.jev.thresholds, signal,
       })
       const verdict = evaluateShellRisk(r, this.jev.thresholds, { allowDestructive: this.jev.allowDestructive === true })
-      this.devLog?.('jev_shell_risk', {
-        command: command.slice(0, 200), risk: verdict.risk, confidence: verdict.confidence,
+      this._jevLog('shell_risk', {
+        command: command.slice(0, 120), risk: verdict.risk, confidence: verdict.confidence,
         blocked: !verdict.allow, fallback: !!verdict.fallback, model: r?.model || null, usage: r?.usage || null,
+        ms: Date.now() - __t0,
       }, this._curTaskId, ctx?.devScope)
       if (verdict.allow) return { blocked: false }
       return {
@@ -1182,7 +1246,8 @@ export class Agent {
         },
       }
     } catch (e) {
-      this.logger('warn', '[jev] shell 风险判定失败，回退现有行为', e?.message || e)
+      try { this.logger('warn', '[jev] shell 风险判定失败，回退现有行为', e?.message || e) } catch { /* noop */ }
+      this._jevLog('shell_risk', { fallback: true, error: e?.message || String(e), ms: Date.now() - __t0 }, this._curTaskId, ctx?.devScope)
       return null
     }
   }
@@ -1370,9 +1435,11 @@ export class Agent {
         try {
           const raw = await tool.execute(tc.arguments ?? {}, toolCtx)
           content = typeof raw === 'string' ? raw : stringifyArgs(raw)
+          if (tool?.meta?.shell === true) this._logSandbox(tc, content, Date.now() - __t)
         } catch (e) {
           // 错误日志已由 AOP 切面打印；这里归一为 {error} 结果供模型下一轮重试
           content = stringifyArgs({ error: e?.message || String(e) })
+          if (tool?.meta?.shell === true) this._logSandbox(tc, content, Date.now() - __t)
         }
       }
       }
@@ -1412,12 +1479,16 @@ export class Agent {
     if (!mode || mode === 'off') return false
     if (mode === 'always') return true
     if (mode === 'jev' && this.jev?.client?.configured && this.jev.decisions?.reflect) {
+      const __t0 = Date.now()
       const r = await decideReflectWithJev({
         client: this.jev.client, request: this._lastUserText, draft,
         context: this._thinkingContext(), thresholds: this.jev.thresholds, signal,
       })
-      if (!r) return autoGuess()
-      this.devLog?.('jev_reflect', { revise: r.revise, probability: r.probability, model: r.model, usage: r.usage }, this._curTaskId, this._curDevScope)
+      if (!r) {
+        this._jevLog('reflect', { fallback: true, ms: Date.now() - __t0 }, this._curTaskId, this._curDevScope)
+        return autoGuess()
+      }
+      this._jevLog('reflect', { revise: r.revise, probability: r.probability, model: r.model, usage: r.usage, ms: Date.now() - __t0 }, this._curTaskId, this._curDevScope)
       return r.revise
     }
     return autoGuess()

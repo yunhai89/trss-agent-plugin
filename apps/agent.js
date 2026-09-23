@@ -765,7 +765,7 @@ async function buildRuntime() {
         allowDestructive: cfg.jev.allowDestructive === true, // shell 风险：破坏性命令默认拒绝，显式开启才允许高置信放行
       }
       if (decisions.llmTool) {
-        try { tools.register(makeJevTool({ client, maxStateChars: cfg.jev.maxStateChars })) } catch (e) { Log.warn('[jev] jev 工具注册失败', e?.message || e) }
+        try { tools.register(makeJevTool({ client, maxStateChars: cfg.jev.maxStateChars, logger: Log.tag('jev') })) } catch (e) { Log.warn('[jev] jev 工具注册失败', e?.message || e) }
       }
       const on = Object.keys(decisions).filter((k) => decisions[k])
       startupInfo.jev = { model: model || JEV_MODEL_DEFAULT, decisions: on }

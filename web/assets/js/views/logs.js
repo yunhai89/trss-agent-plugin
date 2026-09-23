@@ -51,6 +51,16 @@
     ss_privacy: { name: 'SS 控制', icon: 'shield', color: 'var(--rose)', bg: 'var(--rose-bg)' },
     // —— 示意图 diagram_render 事件（data.event 区分 validate/render/compile/fallback/svg/send/kroki 子阶段） ——
     diagram: { name: '示意图', icon: 'image', color: 'var(--vio)', bg: 'var(--vio-bg)' },
+    // —— Jev（TypeSafe 系统一判断）决策事件：kind=thinking|tool_select|shell_risk|reflect|llm_tool ——
+    jev: { name: 'Jev 判断', icon: 'zap', color: 'var(--vio)', bg: 'var(--vio-bg)' },
+    // —— E2B 沙箱执行事件（terminal） ——
+    sandbox: { name: 'E2B 沙箱', icon: 'tool', color: 'var(--mint)', bg: 'var(--mint-bg)' },
+    thinking_auto: { name: '思考判档', icon: 'cpu', color: 'var(--sky)', bg: 'var(--sky-bg)' },
+    finalize_start: { name: '收尾开始', icon: 'play', color: 'var(--honey)', bg: 'var(--honey-bg)' },
+    finalize_end: { name: '收尾完成', icon: 'check', color: 'var(--honey)', bg: 'var(--honey-bg)' },
+    governor_stop: { name: '循环终止', icon: 'warn', color: 'var(--rose)', bg: 'var(--rose-bg)' },
+    cache_compact: { name: '上下文压缩', icon: 'refresh', color: 'var(--mint)', bg: 'var(--mint-bg)' },
+    deadline: { name: '预算到点', icon: 'clock', color: 'var(--rose)', bg: 'var(--rose-bg)' },
   }
   /* 未知 event 兜底：后端新增 event 类型时不再让 EV[e.event].color 崩掉整页 */
   const EV_FALLBACK = { name: '其他', icon: 'info', color: 'var(--ink3)', bg: 'var(--honey-bg)' }
@@ -176,6 +186,24 @@
           case 'ss_maint': return `衰减${e.decayed ?? 0} 过期${e.expired ?? 0} 残留衰减${e.residueDecay ?? 0}${e.recoveries ? ' 恢复' + e.recoveries : ''}`
           case 'ss_project': return `${e.role || '?'} · ${e.mood || ''}${e.stance ? ' · ' + e.stance : ''}${e.tone ? ' · ' + e.tone : ''}`
           case 'ss_privacy': return `${e.action || ''}`
+          case 'jev': {
+            const conf = e.confidence != null ? ` conf=${Number(e.confidence).toFixed(2)}` : (e.probability != null ? ` p=${Number(e.probability).toFixed(2)}` : '')
+            const byKind = {
+              thinking: `判档 depth=${e.depth ?? '?'}${conf}`,
+              tool_select: `选工具 激活 ${(e.selected || []).length}/${e.candidateCount ?? '?'}${conf}`,
+              shell_risk: `指令风险 ${e.risk ?? '?'}${conf}${e.blocked ? ' · 已拒绝' : ''}`,
+              reflect: `反思 ${e.revise ? '需修正' : '通过'}${conf}`,
+              llm_tool: `LLM 调用 ${e.questions ?? '?'} 问`,
+            }[e.kind] || `${e.kind || ''}${conf}`
+            return `${byKind}${e.fallback ? ' · 回退' : ''}${e.error ? ' · ' + e.error : ''}${e.ms != null ? ' · ' + e.ms + 'ms' : ''}`
+          }
+          case 'sandbox': return `exit=${e.exitCode ?? '-'}${e.timedOut ? ' · 超时' : ''}${e.sandboxError ? ' · ' + e.sandboxError : ''}${e.duration != null ? ' · ' + e.duration + 'ms' : ''} $ ${(e.command || '').slice(0, 60)}`
+          case 'thinking_auto': return `depth=${e.depth ?? '?'} by=${e.source ?? '?'} budget=${e.budget ?? '?'}${e.confidence != null ? ' conf=' + Number(e.confidence).toFixed(2) : ''}${e.jevModel ? ' · ' + e.jevModel : ''}`
+          case 'finalize_start': return `预算/循环终止后收尾 · ${e.reason || ''}`
+          case 'finalize_end': return e.ok === false ? `收尾失败:${e.error || ''}` : `收尾完成（${e.via || '?'}）· ${e.contentLen ?? '?'} 字`
+          case 'governor_stop': return `${e.reason || '?'} · ${e.phase || ''}`
+          case 'cache_compact': return `压缩 est=${e.est}→${e.dropped} 条 · ${e.msgsAfter ?? '?'} 条 · epoch ${e.cacheEpoch ?? '?'}`
+          case 'deadline': return `时间预算 ${e.budgetMs}ms 到点，进入收尾`
           default: return ''
         }
       }
@@ -273,6 +301,40 @@
                       <span v-for="(h, j) in e.hits" :key="h.name" class="tchip" :style="{'--i': j}">{{ h.name }} · {{ h.score }}</span>
                       <span v-for="(a, j) in e.activated" :key="a" class="tchip" :style="{'--i': j + 2, background: 'var(--mint-bg)', color: 'var(--mint)', borderColor: 'rgba(11,163,148,.24)'}">+{{ a }}</span>
                     </div>
+                  </div>
+                  <div v-if="e.event === 'jev'" class="mb12">
+                    <div class="tchip-f">
+                      <span v-if="e.kind" class="tchip">kind: {{ e.kind }}</span>
+                      <span v-if="e.depth" class="tchip">depth {{ e.depth }}</span>
+                      <span v-if="e.risk" class="tchip">risk {{ e.risk }}</span>
+                      <span v-if="e.blocked != null" class="tchip" :style="e.blocked ? {background:'var(--rose-bg)',color:'var(--rose)',borderColor:'rgba(229,52,95,.24)'} : {background:'var(--mint-bg)',color:'var(--mint)',borderColor:'rgba(11,163,148,.24)'}">{{ e.blocked ? '已拒绝' : '放行' }}</span>
+                      <span v-if="e.revise != null" class="tchip">{{ e.revise ? '需修正' : '通过' }}</span>
+                      <span v-if="e.fallback" class="tchip" style="background:var(--honey-bg);color:var(--honey)">回退现有方案</span>
+                      <span v-if="e.model" class="tchip">{{ e.model }}</span>
+                      <span v-if="e.usage && e.usage.input_tokens != null" class="tchip">{{ e.usage.input_tokens }} tok</span>
+                      <span v-if="e.ms != null" class="tchip">{{ e.ms }}ms</span>
+                    </div>
+                    <div v-if="e.confidence != null" style="margin-top:8px">
+                      <div class="row-b" style="font-size:11.5px;margin-bottom:4px"><span class="mut">置信度 confidence</span><span class="num">{{ Number(e.confidence).toFixed(2) }}</span></div>
+                      <div class="meter m-mint"><i :style="{width: Math.min(100, Math.round((e.confidence || 0) * 100)) + '%'}"></i></div>
+                    </div>
+                    <div v-if="e.probability != null" style="margin-top:8px">
+                      <div class="row-b" style="font-size:11.5px;margin-bottom:4px"><span class="mut">概率 probability</span><span class="num">{{ Number(e.probability).toFixed(2) }}</span></div>
+                      <div class="meter m-mint"><i :style="{width: Math.min(100, Math.round((e.probability || 0) * 100)) + '%'}"></i></div>
+                    </div>
+                    <div v-if="e.selected && e.selected.length" class="tchip-f" style="margin-top:8px">
+                      <span v-for="(s, j) in e.selected" :key="s" class="tchip" :style="{'--i': j, background:'var(--mint-bg)',color:'var(--mint)',borderColor:'rgba(11,163,148,.24)'}">+{{ s }}</span>
+                    </div>
+                  </div>
+                  <div v-if="e.event === 'sandbox'" class="mb12">
+                    <div class="tchip-f">
+                      <span class="tchip">exit={{ e.exitCode ?? '-' }}</span>
+                      <span v-if="e.timedOut" class="tchip" style="background:var(--rose-bg);color:var(--rose)">超时</span>
+                      <span v-if="e.aborted" class="tchip" style="background:var(--honey-bg);color:var(--honey)">已取消</span>
+                      <span v-if="e.sandboxError" class="tchip" style="background:var(--rose-bg);color:var(--rose)">{{ e.sandboxError }}</span>
+                      <span v-if="e.duration != null" class="tchip">{{ e.duration }}ms</span>
+                    </div>
+                    <div class="mono mut2" style="font-size:12px;margin-top:6px;word-break:break-all">$ {{ e.command }}</div>
                   </div>
                   <json-block :data="e"/>
                 </div>

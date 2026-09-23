@@ -34,10 +34,10 @@ export function validateJevInput(state, questions, { maxStateChars = 32000, maxQ
 }
 
 /**
- * @param {object} o { client, maxStateChars?, maxQuestions? }
+ * @param {object} o { client, maxStateChars?, maxQuestions?, logger? }
  * @returns 工具契约
  */
-export function makeJevTool({ client, maxStateChars = 32000, maxQuestions = 20 } = {}) {
+export function makeJevTool({ client, maxStateChars = 32000, maxQuestions = 20, logger = null } = {}) {
   return {
     name: 'jev',
     description: [
@@ -61,14 +61,25 @@ export function makeJevTool({ client, maxStateChars = 32000, maxQuestions = 20 }
       },
       required: ['state', 'questions'],
     },
-    async execute({ state, questions, model } = {}) {
+    async execute({ state, questions, model } = {}, ctx) {
       if (!client?.configured) return { error: 'Jev 未配置或不可用（需 agent.jev.enable + apiKey）' }
       const invalid = validateJevInput(state, questions, { maxStateChars, maxQuestions })
       if (invalid) return { error: invalid }
+      const __t0 = Date.now()
+      // 统一日志出口：优先经由 Agent（控制台 [jev] + devLog jev 事件），无 Agent 时用注入 logger
+      const log = (data) => {
+        const agent = ctx?.executionContext?.agent
+        if (agent && typeof agent._jevLog === 'function') {
+          try { agent._jevLog('llm_tool', data); return } catch { /* 退化到 logger */ }
+        }
+        try { logger?.('info', `[jev] kind=llm_tool ${Object.entries(data).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' ')}`) } catch { /* noop */ }
+      }
       try {
         const r = await client.systemOne({ state, questions, model: model || undefined })
+        log({ questions: Object.keys(questions || {}).length, model: r.model, usage: r.usage, ms: Date.now() - __t0 })
         return { model: r.model, usage: r.usage, answers: r.answers }
       } catch (e) {
+        log({ error: e?.message || String(e), ms: Date.now() - __t0 })
         return { error: `Jev 调用失败：${e?.message || e}`, kind: e?.kind || 'error' }
       }
     },

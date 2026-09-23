@@ -326,6 +326,42 @@ await test('Agent：reflect=jev 由 Jev 判定是否反思', async () => {
   eq(await a2._shouldReflect(false, 1, 'draft'), false, 'Jev 低概率 → 不反思（闲聊也不反思）')
 })
 
+await test('Agent：Jev 决策写入 devLog（jev 事件）并打印 [jev] info 日志', async () => {
+  const events = []
+  const logs = []
+  const tools = new ToolRegistry()
+  tools.register({ name: 'web_search', description: '搜索', parameters: { type: 'object', properties: {}, required: [] }, async execute() { return 'r' } })
+  const provider = { async chat() { return { content: 'ok', finishReason: 'stop' } } }
+  const jev = {
+    client: { configured: true, async systemOne() { return { answers: { tool_0: { type: 'noul', noul: 0.9 } }, model: 'jev-1.3.0', usage: { input_tokens: 12 } } } },
+    decisions: { toolSelection: true, thinking: true }, thresholds: {}, toolSelectionMaxTools: 10,
+  }
+  const agent = new Agent({
+    provider, tools, maxTurns: 1, reflect: 'off',
+    logger: (lvl, ...a) => logs.push([lvl, ...a]),
+    devLog: (e, d) => events.push({ event: e, ...d }),
+    toolDiscovery: { enable: true, alwaysOn: ['tool_search'] },
+    thinkingAuto: { enable: true }, thinkingCapable: true, protocol: 'openai', preset: 'mimo', jev,
+  })
+  await agent.run('帮我搜一下今天的新闻', { ctx: { userId: 'u', groupId: 'g' } })
+  const jevEvents = events.filter((e) => e.event === 'jev')
+  ok(jevEvents.some((e) => e.kind === 'tool_select' && (e.selected || []).includes('web_search')), 'devLog 含 jev tool_select（含 selected）')
+  ok(jevEvents.some((e) => e.kind === 'thinking'), 'devLog 含 jev thinking')
+  ok(logs.some(([lvl, msg]) => lvl === 'info' && String(msg).startsWith('[jev]')), '控制台 info 打印 [jev] 日志')
+})
+
+await test('Agent：shell 工具执行写入 devLog sandbox 事件', async () => {
+  const events = []
+  const tools = new ToolRegistry()
+  tools.register({ name: 'terminal', description: 'x', meta: { shell: true }, parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] }, async execute() { return { command: 'ls', exitCode: 0, ok: true, stdout: 'a' } } })
+  let n = 0
+  const provider = { async chat() { n++; if (n === 1) return { content: '', finishReason: 'tool_calls', toolCalls: [{ id: '1', name: 'terminal', arguments: { command: 'ls' } }] }; return { content: 'done', finishReason: 'stop' } } }
+  const agent = new Agent({ provider, tools, maxTurns: 3, reflect: 'off', devLog: (e, d) => events.push({ event: e, ...d }) })
+  await agent.run('执行 ls', { ctx: { userId: 'u', groupId: 'g' } })
+  const sb = events.find((e) => e.event === 'sandbox')
+  ok(sb && sb.command === 'ls' && sb.exitCode === 0, 'devLog 含 sandbox 事件（命令/退出码）')
+})
+
 await test('resolveThresholds：默认值兜底 + 用户覆盖', async () => {
   eq(resolveThresholds({}).toolNoulFloor, THRESHOLDS.toolNoulFloor, '空覆盖 → 默认')
   eq(resolveThresholds({ toolNoulFloor: 0.8 }).toolNoulFloor, 0.8, '数值覆盖生效')
