@@ -310,15 +310,17 @@
      说明收进「?」气泡：PC 悬停/点击、移动端点击均可显示，避免长文案把 PC/移动端排版挤乱。
      各视图统一用 UI.makeCfgRow() 取用，避免多处副本漂移。 */
   function makeCfgRow() {
+    const DESC_INLINE_MAX = 40 // 说明短于此长度直接展示；更长（会挤乱排版）才收进「?」气泡
     return {
       name: 'CfgRow',
       props: { name: String, desc: { type: String, default: '' }, danger: Boolean, full: Boolean },
       setup(props) {
-        const { ref, onMounted, onUnmounted } = Vue
+        const { ref, computed, onMounted, onUnmounted } = Vue
         const show = ref(false)
         const pinned = ref(false)
         const iconEl = ref(null)
         const pos = ref({ top: 0, left: 0, width: 0 })
+        const isLong = computed(() => String(props.desc || '').trim().length > DESC_INLINE_MAX)
         let hideTimer = null
         const updatePos = () => {
           const el = iconEl.value
@@ -344,7 +346,7 @@
         const onDoc = () => { pinned.value = false; show.value = false }
         const onViewport = () => { if (show.value) updatePos() }
         onMounted(() => {
-          if (!props.desc) return // 无说明不挂全局监听（避免上百行空监听）
+          if (!isLong.value) return // 短说明直接展示、无气泡，不挂全局监听（避免上百行空监听）
           document.addEventListener('click', onDoc)
           window.addEventListener('scroll', onViewport, true)
           window.addEventListener('resize', onViewport)
@@ -355,21 +357,22 @@
           window.removeEventListener('scroll', onViewport, true)
           window.removeEventListener('resize', onViewport)
         })
-        return { show, pos, iconEl, doShow, doHide, toggle }
+        return { show, pos, iconEl, isLong, doShow, doHide, toggle }
       },
       template: `
       <div class="cf-item" :class="{full: full, dg: danger}">
         <div class="info">
           <div class="name">
             {{ name }}<span v-if="danger" class="pill p-rose" style="margin-left:7px;font-size:10px;padding:3px 8px">高危</span>
-            <span v-if="desc" ref="iconEl" class="cf-help" role="button" tabindex="0" aria-label="说明"
+            <span v-if="desc && isLong" ref="iconEl" class="cf-help" role="button" tabindex="0" aria-label="说明"
                   @mouseenter="doShow" @mouseleave="doHide" @click.stop="toggle"
                   @keydown.enter.prevent="toggle" @keydown.space.prevent="toggle">?</span>
           </div>
+          <div class="desc" v-if="desc && !isLong">{{ desc }}</div>
         </div>
         <div class="ctl"><slot/></div>
         <Teleport to="body">
-          <div v-if="desc && show" class="cf-tip" :style="{ top: pos.top + 'px', left: pos.left + 'px', width: pos.width + 'px' }"
+          <div v-if="desc && isLong && show" class="cf-tip" :style="{ top: pos.top + 'px', left: pos.left + 'px', width: pos.width + 'px' }"
                @mouseenter="doShow" @mouseleave="doHide">{{ desc }}</div>
         </Teleport>
       </div>`,
