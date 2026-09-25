@@ -677,6 +677,24 @@ await test('schedule：add/list/cancel/restore', async () => {
   eq(dropped, 1, '丢弃 1 个过期')
 })
 
+await test('schedule：restore 幂等 + shutdown（防重复注册并发触发）', async () => {
+  const kv = memoryKv()
+  const jobs = []
+  const sched = {
+    scheduleJob: () => { const j = { active: true, cancel() { this.active = false } }; jobs.push(j); return j },
+    cancelJob: (j) => j?.cancel?.(),
+  }
+  await kv.set('Yz:agent:rem:jobs', [{ id: '1', userId: 'u1', cron: '0 9 * * *', type: 'task', prompt: 'x' }])
+  const store = new ScheduleStore({ kv, scheduler: sched })
+  await store.restore(async () => {})
+  eq(jobs.filter((j) => j.active).length, 1, '首次 restore 只排 1 个 job')
+  await store.restore(async () => {}) // 模拟插件热重载 / 重复 getRuntime 再次 restore
+  eq(jobs.filter((j) => j.active).length, 1, '重复 restore 不叠加（旧 job 已取消）')
+  ok(jobs.length >= 2, '确实重复排过 job（验证取消路径生效）')
+  store.shutdown()
+  eq(jobs.filter((j) => j.active).length, 0, 'shutdown 取消全部 job')
+})
+
 await test('schedule：formatScheduleList 标注类型（周期/一次性任务/提醒）', async () => {
   const now = Date.now()
   const lines = formatScheduleList([

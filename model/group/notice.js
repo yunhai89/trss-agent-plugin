@@ -6,11 +6,20 @@
  * 经 toolkit.sendApi 走 e.bot.sendApi(action, params)。
  */
 
-import { defineTool, param, groupIdOf, sendApi } from '../toolkit/index.js'
+import { defineTool, param, groupIdOf, sendApi, botGroupRole } from '../toolkit/index.js'
 
 function needGid(ctx, groupId) {
   const gid = groupIdOf(ctx, groupId)
   return gid || null
+}
+
+/** 机器人自身群管权限预检：返回可读错误或 null（查询失败不阻断，交给协议端最终判定） */
+async function botRoleGuard(ctx, gid) {
+  const role = await botGroupRole(ctx, gid)
+  if (role && role !== 'admin' && role !== 'owner') {
+    return `机器人账号在本群的角色是「${role}」，发送/删除群公告需要群管或群主权限——请先把机器人设为群管理员`
+  }
+  return null
 }
 
 /** send_group_notice：发送群公告（可选图片/置顶/需确认） */
@@ -29,6 +38,8 @@ export const sendGroupNoticeTool = defineTool({
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
+    const noPerm = await botRoleGuard(ctx, gid)
+    if (noPerm) return { error: noPerm }
     const r = await sendApi(ctx, '_send_group_notice', {
       group_id: gid,
       content: String(p.content || ''),
@@ -79,6 +90,8 @@ export const deleteGroupNoticeTool = defineTool({
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
+    const noPerm = await botRoleGuard(ctx, gid)
+    if (noPerm) return { error: noPerm }
     const r = await sendApi(ctx, '_del_group_notice', { group_id: gid, notice_id: String(p.noticeId) })
     if (!r.ok) return { error: r.error }
     return { ok: true, groupId: gid, noticeId: p.noticeId, deleted: true }

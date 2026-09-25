@@ -252,8 +252,11 @@ export class KnowledgeStore {
     } catch { /* 非法 cron 静默 */ }
   }
 
-  /** 重启恢复：遍历带 refreshCron 的 doc 重新注册 job。在 apps 启动恢复时调一次。 */
+  /** 重启恢复：遍历带 refreshCron 的 doc 重新注册 job。在 apps 启动恢复时调一次。
+   *  幂等：先取消本实例已排 job 再重排，重复调用不会叠加触发。 */
   async restoreRefreshJobs(onRefresh) {
+    for (const job of this._refreshJobs.values()) { try { this.scheduler?.cancelJob(job) } catch { /* noop */ } }
+    this._refreshJobs.clear()
     const docs = (await this._load()).docs.filter((d) => d.refreshCron)
     for (const d of docs) {
       if (!this.scheduler) continue
@@ -266,6 +269,12 @@ export class KnowledgeStore {
   }
 
   async listUrlDocs() { return (await this._load()).docs.filter((d) => d.url) }
+
+  /** 取消全部定时刷新 job（热重载/关闭时调，防止旧 job 泄漏继续触发） */
+  shutdown() {
+    for (const job of this._refreshJobs.values()) { try { this.scheduler?.cancelJob(job) } catch { /* noop */ } }
+    this._refreshJobs.clear()
+  }
 }
 
 /**

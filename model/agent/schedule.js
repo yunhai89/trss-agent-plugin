@@ -61,6 +61,11 @@ export class ScheduleStore {
   }
 
   _schedule(rec, fire) {
+    // 幂等：同一 id 若已有 job，先取消旧 job 再排新的。
+    // 否则重复 restore（插件热重载 / 多次 getRuntime）会在同一记录上叠加多个 job，
+    // 到点并发触发 N 次（生产事故：一次性任务链被触发 21 次）。
+    const prev = this._jobs.get(rec.id)
+    if (prev?.job) { try { this.scheduler.cancelJob(prev.job) } catch { /* noop */ } }
     // cron → scheduleJob(cron) 周期触发，fire 后不 cancel（持续重复）
     // 无 cron → scheduleJob(Date) 一次性，fire 后 cancel
     const isCron = !!rec.cron
@@ -70,6 +75,12 @@ export class ScheduleStore {
       if (!isCron) { try { await this.cancel(rec.id) } catch { /* noop */ } }
     })
     this._jobs.set(rec.id, { job, info: rec })
+  }
+
+  /** 取消本实例已排的全部 job（热重载/关闭时调，防止旧 job 泄漏继续触发） */
+  shutdown() {
+    for (const { job } of this._jobs.values()) { try { this.scheduler.cancelJob(job) } catch { /* noop */ } }
+    this._jobs.clear()
   }
 
   async cancel(id) {
@@ -85,8 +96,10 @@ export class ScheduleStore {
   async listByUser(userId) { return (await this._load()).filter((r) => r.userId === userId).sort(_sortRec) }
   async listAll() { return (await this._load()).sort(_sortRec) }
 
-  /** 重启恢复：cron 任务始终重排（不过期）；一次性仅 at>now 重排，过期丢弃 */
+  /** 重启恢复：cron 任务始终重排（不过期）；一次性仅 at>now 重排，过期丢弃。
+   *  幂等：先取消本实例已排全部 job 再重排，重复调用不会叠加触发。 */
   async restore(fire) {
+    this.shutdown()
     const arr = await this._load()
     const now = Date.now()
     const live = []

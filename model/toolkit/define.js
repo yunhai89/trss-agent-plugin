@@ -133,6 +133,29 @@ export function groupIdOf(ctx, groupId) {
   return gid ? String(gid) : null
 }
 
+/**
+ * 查询**机器人自身**在某群的角色（admin/owner/member）。best-effort：失败返回 null。
+ * 群公告/群管类工具据此预检"机器人是否有权限"，给出可读原因（而不是把协议端原始报错抛给用户）。
+ */
+export async function botGroupRole(ctx, groupId) {
+  const gid = groupIdOf(ctx, groupId)
+  if (!gid) return null
+  const selfId = String(ctx?.bot?.uin || ctx?.e?.self_id || ctx?.selfId || '')
+  // 1) NapCat/OneBot 原生：no_cache 取实时角色
+  if (selfId) {
+    try {
+      const r = await sendApi(ctx, 'get_group_member_info', { group_id: gid, user_id: selfId, no_cache: true })
+      if (r.ok && r.data?.role) return String(r.data.role)
+    } catch { /* fallthrough */ }
+  }
+  // 2) 退回框架 group.pickMember
+  try {
+    const g = getGroup(ctx, gid)
+    if (g?.pickMember && selfId) { const m = await g.pickMember(selfId); if (m?.role) return String(m.role) }
+  } catch { /* noop */ }
+  return null
+}
+
 // ─── 参数构造辅助（JSONSchema 样板）───
 export const param = {
   str: (desc, opts = {}) => ({ type: 'string', description: desc, ...(opts.enum ? { enum: opts.enum } : {}) }),

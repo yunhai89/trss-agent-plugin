@@ -1015,6 +1015,12 @@ const getRuntime = async () => {
         if (gen !== _runtimeGen) return getRuntime()
         _runtime = rt
         _runtimeFailed = null
+        // 运行时（重）建后恢复定时调度：提醒 / 定时任务链 + KB 定时刷新。
+        // 放这里（而非仅 Chat 构造器）——热重载会 invalidate 旧运行时并取消其 job，
+        // 新运行时必须重新 restore，否则保存配置后所有定时任务会静默停摆。
+        // restore 已幂等：重复调用不会叠加 job（见 ScheduleStore.restore）。
+        try { rt.schedule?.restore?.(makeFireDispatch(rt)).catch(() => {}) } catch { /* noop */ }
+        try { rt.knowledge?.restoreRefreshJobs?.((id) => rt.knowledge.refreshDoc(id).catch((e) => Log.warn('[kb] 定时刷新失败', id, e?.message || e))).catch(() => {}) } catch { /* noop */ }
         return rt
       })
       .catch((e) => {
@@ -1031,6 +1037,10 @@ const getRuntime = async () => {
 
 /** 失效运行时单例（下一次 getRuntime 用新配置重建） */
 function invalidateRuntime() {
+  // 取消旧运行时的定时调度 job（提醒/定时任务链 + KB 刷新）：node-schedule 的 job 不会随对象失效自动停，
+  // 不取消会在热重载后继续触发（生产事故：同一任务被重复注册 → 到点并发触发 N 次）。
+  if (_runtime?.schedule?.shutdown) { try { _runtime.schedule.shutdown() } catch { /* noop */ } }
+  if (_runtime?.knowledge?.shutdown) { try { _runtime.knowledge.shutdown() } catch { /* noop */ } }
   if (_runtime?.toolEvo) {
     try { _runtime.toolEvo.runner?.stop?.() } catch { /* noop */ } // 关闭隔离 worker（审计 §4.2）
     // 先落盘埋点再关库：批量队列 2s 窗口内未 flush 的 tool_invocations 会随 closeDb 丢失
@@ -1161,8 +1171,12 @@ function ctxFromInfo(info) {
   const sharedGroup = !!(isGroup && groupId && !isolation)
   const scopeUserId = sharedGroup ? '__group__' : userId
   const scopeId = !isGroup ? `u_${userId}` : (isolation ? `g${groupId}_u${userId}` : `g${groupId}`)
+  // 创建者身份：定时任务 fire 时无用户事件，但任务创建者的主人身份必须保留——
+  // 否则群管类工具（如 send_group_notice）会被判为 member 而 rejected_by_policy
+  //（生产事故：master 建的群公告任务被误拒 + AI 反复重试）。
+  const isMaster = (cfg.masters || []).map((m) => String(m)).includes(userId)
   return {
-    userId, groupId, isGroup, isMaster: false, isolation, scopeUserId, scopeId,
+    userId, groupId, isGroup, isMaster, role: isMaster ? 'owner' : 'member', isolation, scopeUserId, scopeId,
     bot: (typeof Bot !== 'undefined' && Bot) || null, selfId: info.selfId || '',
     notify: () => {}, fetcher: (typeof fetch !== 'undefined' && fetch) || null,
     conversationId: null,
@@ -1279,12 +1293,8 @@ export class Chat extends plugin {
         { reg: '^[\\s\\S]+$', fnc: 'onTrigger', log: false },
       ],
     })
+    // 运行时装配完成后会自动恢复定时调度（见 getRuntime 的 .then）；此处只预热运行时并处理初始化失败提示。
     getRuntime()
-      .then((rt) => {
-        rt.schedule.restore(makeFireDispatch(rt)).catch(() => {})
-        // KB URL 定时刷新 job 恢复（重启后 cron 继续生效）
-        rt.knowledge.restoreRefreshJobs((id) => rt.knowledge.refreshDoc(id).catch((e) => Log.warn('[kb] 定时刷新失败', id, e?.message || e))).catch(() => {})
-      })
       .catch((e) => { if (!_initErrLogged) { _initErrLogged = true; Log.error('agent 初始化失败（修复 config 后重启，或保存 config 触发热加载自动恢复）', e?.message || e) } })
   }
 
