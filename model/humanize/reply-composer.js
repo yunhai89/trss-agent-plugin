@@ -14,6 +14,7 @@
 
 import Log from '../../utils/Log.js'
 import { resolvePersonaIdentity } from './default-config.js'
+import { stripMarkers } from '../sticker/parser.js'
 
 // URL 边界：排除空白/尖括号/引号/括号 + 全部 CJK 标点 + 全角空格，
 // 否则 "看 https://x.com，超好笑" 会被贪婪匹配成 "https://x.com，超好笑"
@@ -103,8 +104,8 @@ export class HumanizeReplyComposer {
     const c = cfg || this._cfgFn()
     const rcfg = c.reply || {}
     const maxBubbles = rcfg.maxBubbles ?? 3
-    // 先剥除文本中的 [sticker:...] 标记（防泄漏到正文）
-    const cleanText = this.stickerManager ? this.stickerManager.applyText(text, new Map()) : text
+    // 先剥除文本中的 [sticker:...] 标记（防泄漏到正文）；stickerManager 缺失时也走 stripMarkers 兜底
+    const cleanText = stripMarkers(this.stickerManager ? this.stickerManager.applyText(text, new Map()) : text)
     const segments = splitSegments(cleanText, { maxBubbles })
     if (!segments.length) return { sentIds: [], sentTexts: [], cancelled: true, cancelReason: 'no_segments' }
 

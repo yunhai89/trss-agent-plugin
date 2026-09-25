@@ -12,6 +12,18 @@
 export const MARKER_RE = /\[sticker:([^\[\]]{1,24})\]/g
 const NAME_MAX = 24
 
+/**
+ * 宽松剥离（外发安全网）：处理半/全角括号与冒号、大小写、任意长度名称，且不匹配跨行。
+ * 用于任何"模型文本直接外发"的出口（中途播报/定时任务结果/流式增量/兜底正文）——
+ * 这些路径不经过门控，若不剥离就会把字面 `[sticker:x]` 漏给用户（表情发送失败时尤其明显）。
+ */
+export const STRIP_MARKER_RE = /[\[【]\s*sticker\s*[:：]?\s*[^\[\]【】\n]*[\]】]/gi
+/** 剥离所有 sticker 标记（含变体）；非字符串原样返回 */
+export function stripMarkers(text) {
+  if (typeof text !== 'string') return text
+  return text.replace(STRIP_MARKER_RE, '')
+}
+
 /** 提取全部标记（每次新建正则实例，避免 /g 的 lastIndex 状态污染） */
 export function parseMarkers(text) {
   const out = []

@@ -57,7 +57,7 @@ import { createSearchManager, makeSearchTools } from '../model/search/index.js'
 import { PersonaStore, PersonaService } from '../model/persona/index.js'
 import { VisionService, describeImages } from '../model/vision/index.js'
 import { getStickerManager } from '../model/sticker/manager.js'
-import { isStickerOnly } from '../model/sticker/parser.js'
+import { isStickerOnly, stripMarkers } from '../model/sticker/parser.js'
 import { redactSecrets } from '../model/agent/redact.js'
 import { randomUUID } from 'node:crypto'
 import devLog from '../utils/DevLog.js'
@@ -234,10 +234,19 @@ export const makeDeltaStreamer = (safeReply, { enabled = false, minIntervalMs = 
   const flush = (force = false) => {
     if (!enabled) return
     if (!force && !(raw.length - sentLen >= minChars && Date.now() - lastAt >= minIntervalMs)) return
-    const next = raw.slice(sentLen)
+    let next = raw.slice(sentLen)
     if (!next) return
-    const chunk = redactSecrets(next)
-    sentLen = raw.length
+    // 流式防泄漏：结尾若是未闭合的 sticker 标记前缀，暂缓发送，等后续增量补齐；
+    // 剥离完整标记（含半/全角变体），force（收尾）时再清掉悬空前缀，绝不把 [sticker:x] 流给用户。
+    if (!force) {
+      const pending = next.match(/[\[【]\s*sticker\s*[:：]?[^\]】\n]*$/i)
+      if (pending) next = next.slice(0, pending.index)
+    } else {
+      next = next.replace(/[\[【]\s*sticker\s*[:：]?[^\]】\n]*$/i, '')
+    }
+    if (!next) return
+    const chunk = stripMarkers(redactSecrets(next))
+    sentLen += next.length
     lastAt = Date.now()
     if (chunk.trim()) { sentAny = true; safeReply(chunk) }
   }
@@ -949,7 +958,7 @@ async function buildRuntime() {
             const head = info.status === 'done'
               ? `🤖 后台子代理任务完成${label}：`
               : `⚠️ 后台子代理任务${info.status === 'timeout' ? '超时' : info.status === 'cancelled' ? '已中止' : '失败'}${label}：${String(info.error || '未知原因').slice(0, 200)}`
-            const body = redactSecrets(info.status === 'done' ? `${head}\n${String(info.result || '').slice(0, 1800)}` : head).trim()
+            const body = stripMarkers(redactSecrets(info.status === 'done' ? `${head}\n${String(info.result || '').slice(0, 1800)}` : head)).trim()
             if (!body) return
             const send = (m) => (sctx?.e?.reply ? sctx.e.reply(m)
               : (sctx?.bot?.pickGroup && sctx.groupId) ? sctx.bot.pickGroup(sctx.groupId).sendMsg(m)
@@ -1207,7 +1216,9 @@ export const makeFireDispatch = (rt) => {
         } catch { /* noop */ }
         try { rt.traceStore?.record({ scope: ctx.scopeUserId, scopeId: ctx.scopeId, input: info.prompt, output: r?.content, turns: r?.turns, usage: r?.usage, stopReason: r?.stopReason, taskId }) } catch (e) { Log.warn('[evolution] 定时任务采迹失败', e?.message || e) }
         try { rt.selfReview?.tick(ctx, { input: info.prompt, output: r?.content, turns: r?.turns, usage: r?.usage, stopReason: r?.stopReason }) } catch (e) { Log.warn('[evolution] 定时任务自评审触发失败', e?.message || e) }
-        const text = `🤖 定时任务：${(r?.content || '').trim() || '(无输出)'}`
+        // 定时任务结果外发前剥离 sticker 标记：任务链的回复不走主回复出口，
+        // 若模型输出 [sticker:x]（尤其表情发送失败时）会字面泄漏给群。
+        const text = `🤖 定时任务：${stripMarkers(String(r?.content || '')).trim() || '(无输出)'}`
         await sendByInfo(info, text)
         Log.info('[schedule] 任务链完成', info.id, 'turns=', r?.turns)
       } catch (e) {
@@ -1681,7 +1692,7 @@ export class Chat extends plugin {
         onAssistant: (res) => {
           // 旁白与工具进度共享节流闸：短时间内的多条旁白只发第一条，防刷屏 / 撞限流
           if (res?.toolCalls?.length && res?.content && cfg.reply?.narrate !== false && progressGate.allow()) {
-            safeReply(redactSecrets(res.content))
+            safeReply(stripMarkers(redactSecrets(res.content)))
           }
         },
         // 主人免确认直执行（masterSkipConfirm）时的高危提示——否则该开关静默绕过审批
@@ -1725,15 +1736,15 @@ export class Chat extends plugin {
           // 文本模式本就如此；此前图片模式仅在 acceptMap 非空时才剥，被频率闸挡下时标记会漏进图里）；
           // 通过门控的图独立成气泡（stickerImgs）
           let stickerImgs = []
-          let cleanBody = body
+          let cleanBody = stripMarkers(body)
           if (rt.sticker) {
             try {
-              cleanBody = rt.sticker.applyImage(body, new Map()).replace(/[\s\n]+$/, '')
+              cleanBody = stripMarkers(rt.sticker.applyImage(body, new Map())).replace(/[\s\n]+$/, '')
               if (acceptMap && acceptMap.size) {
                 // acceptMap 的 value 是图片绝对路径字符串；_imgDataUri 读文件转 data URI
                 stickerImgs = [...acceptMap.values()].map((abs) => rt.sticker._imgDataUri(abs)).filter(Boolean)
               }
-            } catch { cleanBody = body }
+            } catch { cleanBody = stripMarkers(body) }
           }
           const img = await renderReplyImage(cleanBody, {
           scale: cfg.reply?.renderScale ?? 3,
@@ -1785,7 +1796,11 @@ export class Chat extends plugin {
       if (!delivered) {
         // 文本模式（或图片渲染失败）：正文先发（剥除所有表情包标记，不在正文内联）；
         // 表情包作为主内容之后的【独立消息】依次发送（不与文字混排在同一条）。
-        const cleanBody = acceptMap ? rt.sticker.applyText(body, new Map()).replace(/[\s\n]+$/, '') : (body || '(无回复)')
+        // 安全网：无论 acceptMap 是否存在，都再 stripMarkers 一次（半/全角变体、超长名、门控异常），
+        // 保证任何情况下都不把字面 [sticker:x] 漏给用户。
+        const strippedRaw = acceptMap ? rt.sticker.applyText(body, new Map()) : (body || '')
+        let cleanBody = stripMarkers(String(strippedRaw)).replace(/[\s\n]+$/, '')
+        if (!cleanBody && !(acceptMap && acceptMap.size)) cleanBody = '(无回复)'
         const txt = `${cleanBody}${suffix ? `\n${suffix}` : ''}`
         finalOutcome = await replyQueue.enqueue({ msg: atSender ? [atSender, txt] : txt }, { tag: 'final' })
         delivered = !!finalOutcome.ok

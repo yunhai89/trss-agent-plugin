@@ -9,7 +9,7 @@
  *  - maxPerReply 限流。
  */
 import { StickerManager } from './manager.js'
-import { isStickerOnly } from './parser.js'
+import { isStickerOnly, stripMarkers } from './parser.js'
 
 let passed = 0
 let failed = 0
@@ -46,6 +46,17 @@ await test('isStickerOnly：识别"只有表情"的回复（用于强制发出�
   eq(isStickerOnly('[sticker:开心] 你好'), false, '带正文 → false')
   eq(isStickerOnly('你好'), false, '无标记 → false')
   eq(isStickerOnly(''), false, '空串 → false')
+})
+
+await test('stripMarkers：外发安全网（半/全角、超长名、大小写、不跨行）', async () => {
+  eq(stripMarkers('你好 [sticker:开心] 呀'), '你好  呀', '标准半角')
+  eq(stripMarkers('你好【sticker：叼花少女】呀'), '你好呀', '全角括号+全角冒号')
+  eq(stripMarkers('[STICKER:Happy]'), '', '大小写不敏感')
+  eq(stripMarkers(`[sticker:${'长'.repeat(80)}]正文`), '正文', '超长名（门控正则漏掉，安全网兜住）')
+  eq(stripMarkers('多行 [sticker:开心\n无奈] 不跨行匹配'), '多行 [sticker:开心\n无奈] 不跨行匹配', '不跨行（避免误吞正文）')
+  eq(stripMarkers('普通[链接]文本'), '普通[链接]文本', '不误伤非 sticker 方括号')
+  eq(stripMarkers('没有标记'), '没有标记', '无标记原样')
+  eq(stripMarkers(null), null, '非字符串原样返回')
 })
 
 await test('频率闸：冷却 / 防连发 / 概率 默认生效', async () => {
