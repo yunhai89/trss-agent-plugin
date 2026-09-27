@@ -201,6 +201,9 @@ export class GeminiProvider extends Provider {
   async chat(opts = {}) {
     const model = opts.model || this.defaultModel
     if (!model) throw new Error('GeminiProvider.chat 需要 model')
+    const signal = opts.signal || null
+    // 已取消的 signal：不建连、不发请求，直接以 aborted 结束（避免迟到结果写回会话）
+    if (signal?.aborted) throw new Error('aborted')
     const ai = await this._ensureClient()
     const wantStream = opts.stream === true || !!opts.onDelta
 
@@ -216,31 +219,42 @@ export class GeminiProvider extends Provider {
     const tc = mapGeminiToolChoice(opts.tool_choice)
     if (tc) baseParams.tool_config = tc
 
-    if (wantStream) return this._chatStream(baseParams, opts, ai)
-    const interaction = await ai.interactions.create(baseParams)
+    if (wantStream) return this._chatStream(baseParams, opts, ai, signal)
+    // 取消信号走 SDK 第二参 RequestOptions（其类型含 RequestInit.signal）——建连/读响应阶段
+    // 由 SDK 主动中止，不再只靠调用方协作轮询；budget 到点也能中止在途请求。
+    const interaction = await ai.interactions.create(baseParams, { signal })
     return toAssistantResult(interaction)
   }
 
   /** 流式：step.delta 的 text/thought_summary 逐块回调；function_call 等结束后从 interaction 提取 */
-  async _chatStream(baseParams, opts, ai) {
-    const stream = await ai.interactions.create({ ...baseParams, stream: true })
+  async _chatStream(baseParams, opts, ai, signal) {
+    if (signal?.aborted) throw new Error('aborted')
+    const stream = await ai.interactions.create({ ...baseParams, stream: true }, { signal })
     let content = ''
     let reasoning = ''
     let interaction = null
-    for await (const ev of stream) {
-      if (!ev) continue
-      if (ev.event_type === 'step.delta' && ev.delta) {
-        const d = ev.delta
-        if (d.type === 'text' && d.text) {
-          content += d.text
-          try { opts.onDelta?.(d.text) } catch { /* noop */ }
-        } else if (d.type === 'thought_summary' && d.text) {
-          reasoning += d.text
-          try { opts.onReasoning?.(d.text) } catch { /* noop */ }
+    try {
+      for await (const ev of stream) {
+        // 迭代阶段取消：终止读取并释放流资源，迟到增量不得回调/写回
+        if (signal?.aborted) throw new Error('aborted')
+        if (!ev) continue
+        if (ev.event_type === 'step.delta' && ev.delta) {
+          const d = ev.delta
+          if (d.type === 'text' && d.text) {
+            content += d.text
+            try { opts.onDelta?.(d.text) } catch { /* noop */ }
+          } else if (d.type === 'thought_summary' && d.text) {
+            reasoning += d.text
+            try { opts.onReasoning?.(d.text) } catch { /* noop */ }
+          }
+        } else if (ev.event_type === 'interaction.completed' && ev.interaction) {
+          interaction = ev.interaction
         }
-      } else if (ev.event_type === 'interaction.completed' && ev.interaction) {
-        interaction = ev.interaction
       }
+    } catch (e) {
+      // 取消/异常：显式关闭迭代器（SDK 取消底层请求），再上抛——不把迟到结果当成功
+      try { await stream.return?.() } catch { /* noop */ }
+      throw e
     }
     // interaction.completed 携带完整对象（含 steps/usage）；用其提取 toolCalls/usage，文本用流式累加
     const fromInteraction = interaction ? toAssistantResult(interaction) : {}

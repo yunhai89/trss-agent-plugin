@@ -106,30 +106,35 @@ export async function runCrawl4ai(url, {
   } catch (e) {
     return { success: false, via: 'crawl4ai', code: 'spawn_failed', error: e?.message || String(e) }
   }
-  if (!proc.pid) {
-    return { success: false, via: 'crawl4ai', code: 'spawn_failed', error: 'spawn 未获得 pid（解释器不存在？）' }
-  }
 
+  // spawn 的同步返回不代表启动成功：解释器缺失/不可执行时 Node 用异步 'error' 事件报告
+  // ENOENT/EACCES。必须无条件先挂 error/exit 监听再讨论 pid——曾因 `!proc.pid` 提前 return，
+  // 使 error 事件无监听器升级为 Unhandled 'error' event，打崩调用宿主（爬虫不可用时
+  // 上层 fetch 降级的预期也随之被破坏）。缺 pid 只跳过 stdin/计时器，绝不跳过监听。
   return await new Promise((resolve) => {
     let stdout = ''
     let stderrTail = ''
     let settled = false
     let timedOut = false
+    let timer = null
     const STDOUT_CAP = 32 * 1024 * 1024 // python 侧 max_chars 截断后的 32MB 硬顶（防失控内存）
     const STDERR_TAIL = 8 * 1024
 
     const finish = (result) => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       try { proc.stdin?.destroy() } catch { /* 已关 */ }
       resolve(result)
     }
 
-    proc.stdout.on('data', (d) => { if (stdout.length < STDOUT_CAP) stdout += d })
-    proc.stderr.on('data', (d) => {
+    proc.stdout?.on('data', (d) => { if (stdout.length < STDOUT_CAP) stdout += d })
+    proc.stderr?.on('data', (d) => {
       stderrTail = (stderrTail + d).slice(-STDERR_TAIL) // 环形留尾（并发 drain 不堵 pipe）
     })
+    // stdin 写失败（子进程即退 EPIPE 等）经流 error 事件上报；同步 try/catch 接不住。
+    // 独立 no-op 消费，最终结果仍由 error/exit/超时统一结算，不在此处抢先 finish。
+    proc.stdin?.on('error', () => { /* 由 exit/timeout 统一收尾 */ })
     proc.on('error', (e) => finish({ success: false, via: 'crawl4ai', code: 'spawn_failed', error: e?.message || String(e) }))
 
     proc.on('exit', (code, signal) => {
@@ -162,8 +167,11 @@ export async function runCrawl4ai(url, {
       finish({ success: false, via: 'crawl4ai', code: parsed.code || code4, error: String(parsed.error || `exit=${code}`), ...stderr })
     })
 
+    // 无 pid（解释器缺失）：error 事件即将结算，跳过计时器/写 stdin（写失败流已单独消费）
+    if (proc.pid == null) return
+
     // 分阶段超时：快照后代 → TERM 组 → 宽限 → KILL 组+快照（exit 事件收尾 reap）
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       timedOut = true
       const extra = snapshotDescendants(proc.pid)
       try { if (!IS_WIN) process.kill(-proc.pid, 'SIGTERM'); else proc.kill('SIGTERM') } catch { /* 组已消失 */ }
@@ -176,6 +184,7 @@ export async function runCrawl4ai(url, {
 
     // 请求写 stdin（背压兜底：请求体小，写满管道概率可忽略；destroy on error 已覆盖）
     try {
+      if (!proc.stdin) throw new Error('stdin 不可用')
       const req = { url, timeout_s: Math.round(timeout / 1000), max_chars: maxChars }
       if (waitFor) req.wait_for = String(waitFor).trim()
       if (jsCode) req.js_code = Array.isArray(jsCode) ? jsCode : String(jsCode)
@@ -213,32 +222,35 @@ export async function isCrawl4aiAvailable({ python = null, probeArg = null, ttl 
   const result = await new Promise((resolve) => {
     let out = ''
     let settled = false
+    let timer = null
     let proc
     try {
       proc = spawn(py, probeArg ?? ['-c', PROBE_CODE], { stdio: ['ignore', 'pipe', 'pipe'] })
     } catch (e) {
       return resolve({ ok: false, reason: 'spawn_failed', error: e?.message || String(e) })
     }
-    if (!proc.pid) return resolve({ ok: false, reason: 'spawn_failed', error: '无 pid' })
-    const timer = setTimeout(() => {
-      if (settled) return
+    // 先挂监听再判断 pid：解释器缺失时 spawn 仍返回 ChildProcess（pid 为 undefined），
+    // ENOENT/EACCES 经异步 'error' 事件上报——提前 return 会让它无监听器而打崩宿主。
+    const settle = (r) => {
+      if (settled) return false
       settled = true
-      try { proc.kill('SIGKILL') } catch { /* 已退出 */ }
-      resolve({ ok: false, reason: 'probe_timeout' })
-    }, CRAWL4AI_TIMEOUTS.probeRunMs)
-    proc.stdout.on('data', (d) => { out += d })
-    proc.on('error', () => { if (!settled) { settled = true; clearTimeout(timer); resolve({ ok: false, reason: 'spawn_failed' }) } })
+      if (timer) clearTimeout(timer)
+      resolve(r)
+      return true
+    }
+    proc.stdout?.on('data', (d) => { out += d })
+    proc.stderr?.on('data', () => { /* 并发 drain：探测通常无 stderr，但不能让 pipe 满堵 */ })
+    proc.on('error', (e) => settle({ ok: false, reason: 'spawn_failed', error: e?.message || String(e) }))
     proc.on('exit', (code) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      if (code === 0) {
-        const version = String(out).trim().split('\n').pop().slice(0, 40)
-        resolve({ ok: true, version: version || 'unknown' })
-      } else {
-        resolve({ ok: false, reason: `exit=${code}`, hint: '未安装？跑 scripts/install-crawl4ai.sh' })
-      }
+      if (!settle(code === 0
+        ? { ok: true, version: (String(out).trim().split('\n').pop() || 'unknown').slice(0, 40) }
+        : { ok: false, reason: `exit=${code}`, hint: '未安装？跑 scripts/install-crawl4ai.sh' })) return
     })
+    if (proc.pid == null) return // 缺 pid：等待上面的 error 事件结算
+    timer = setTimeout(() => {
+      if (!settle({ ok: false, reason: 'probe_timeout' })) return
+      try { proc.kill('SIGKILL') } catch { /* 已退出 */ }
+    }, CRAWL4AI_TIMEOUTS.probeRunMs)
   })
   probeCache = { key, at: now, result }
   return result

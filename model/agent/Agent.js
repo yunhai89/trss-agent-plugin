@@ -117,7 +117,7 @@ function truncateJson(value, max) {
 const TOOL_FAIL_HINT = '这是工具返回的真实失败原因——请据此如实回复用户（勿臆测/编造其它原因）；若给出可重试方向（缺参数/权限不足/网络不可达/需先查 id）则换方式重试或指导用户；若反复失败无法解决，引导用户发送 #上报错误 <问题描述> 上报（命令会自动打包本次会话日志给开发者）。'
 
 /** 异常停止原因集合（命中且尚无最终答案时必须进一次禁工具 finalizer；不以"有没有旁白"为条件） */
-export const GOVERNOR_STOP = new Set(['max_turns', 'duplicate_action', 'consecutive_failures', 'no_progress', 'time_budget', 'token_budget'])
+export const GOVERNOR_STOP = new Set(['max_turns', 'duplicate_action', 'consecutive_failures', 'no_progress', 'time_budget', 'token_budget', 'provider_incomplete'])
 /** 强制收尾指令：让模型据已完成工具结果交付进展，不再调工具（审计 §2.1：预算耗尽不返回空串） */
 const GOVERNOR_WRAP_DIRECTIVE = '任务尚未完成。请根据上方已完成的工具调用与结果，向用户简要交付：①已完成的进展；②遇到的问题或失败原因；③建议的下一步。直接给出文字回复，不要再调用工具。'
 
@@ -129,6 +129,7 @@ export const STOP_REASON_CN = {
   duplicate_action: '检测到工具在重复执行相同操作，已停止以避免空转',
   no_progress: '连续多步工具调用没有产生新结果，已停止',
   consecutive_failures: '工具连续失败多次，已停止重试',
+  provider_incomplete: '模型未产出可用正文（可能达到输出上限或被截断），已停止',
 }
 
 export class Agent {
@@ -296,7 +297,7 @@ export class Agent {
         tools: toolList.length ? toolList : undefined, // 同前缀 tools；tool_choice:'none' 保证不调用
         tool_choice: 'none',
         ...(this._cacheControlFor(this.provider) ? { cacheControl: true } : {}),
-        ...(this._promptCacheKeyFor(this.provider)),
+        ...(this._promptCacheKeyFor(this.provider, this.model)),
         temperature: this.temperature,
         max_tokens: Math.min(this.maxTokens ?? 1024, 1024), // 收尾只需简短总结，防吞掉预留
         ...this._finalizeReasoningOpts(),
@@ -605,7 +606,7 @@ export class Agent {
           signal: workSignal, stream: wantStream, onDelta: __delta, onReasoning: cb.onReasoning,
           sessionId: this._curConvId || undefined, // 会话级标识（如 OpenCode Go 的 x-opencode-session）
           ...(this._cacheControlFor(prov) ? { cacheControl: true } : {}),
-          ...this._promptCacheKeyFor(prov),
+          ...this._promptCacheKeyFor(prov, m),
           ...this._extraRunOpts(opts),
         })
         const __tries = [{ provider: this.provider, model: this.model }, ...this.fallbackProviders]
@@ -659,6 +660,9 @@ export class Agent {
           content: result.content || (__emptyAssistant ? '(模型本轮未输出正文)' : null),
           // 默认不回灌 reasoning（keepReasoning=false），避免隐藏 token 持续吃 context
           ...((this.keepReasoning && result.reasoning) ? { reasoning: result.reasoning } : {}),
+          // Provider 原生载荷（如 Anthropic thinking.signature/redacted_thinking）：协议必需，
+          // 独立于 keepReasoning 保存并原样回发（工具续轮缺签名会 400），不参与正文/reasoning 策略。
+          ...(result.providerNative ? { provider_native: result.providerNative } : {}),
         }
         if (result.toolCalls?.length) {
           assistantMsg.tool_calls = result.toolCalls.map((tc) => ({
@@ -669,6 +673,14 @@ export class Agent {
         cb.onAssistant?.(result, assistantMsg)
 
         if (!result.toolCalls?.length) {
+          // 空正文（length/max_tokens/内容过滤/纯 reasoning 无正文）：绝不用推理文本填空，
+          // 也不交付空串——标记 provider_incomplete 进入禁工具收尾（有限预算内给出确定性说明）。
+          if (!result.content) {
+            stopReason = 'provider_incomplete'
+            this.logger('warn', `[provider] 无工具轮但正文为空（finish=${result.finishReason}，reasoning=${!!result.reasoning}），进入收尾`)
+            this.devLog?.('provider_incomplete', { finishReason: result.finishReason, hadReasoning: !!result.reasoning }, taskId, ctx?.devScope)
+            break
+          }
           // 反思门：交付前自检，发现实质问题则回环修正（自我纠正）
           if (reflectIter < this.reflectMaxIterations && await this._shouldReflect(usedTools, turns, result.content, workSignal)) {
             const verdict = await this._reflect({ system, signal: workSignal }).catch((e) => {
@@ -721,6 +733,15 @@ export class Agent {
         const toolResults = await this._executeToolCalls(result.toolCalls, execCtx, cb, ctx)
         usedTools = true
         for (const trm of toolResults) this.messages.push(trm)
+
+        // 工具执行期间工作预算耗尽（用户未取消）：剩余工具已按"未执行"配对，
+        // 直接进入既有收尾路径，不再跑下一轮模型/工具。
+        if (workSignal.aborted && !signal?.aborted) {
+          stopReason = 'time_budget'
+          this.logger('warn', '[governor] 工具执行期间时间预算到点，剩余工具未执行，进入收尾')
+          this.devLog?.('governor_stop', { reason: 'time_budget', phase: 'in_tools', ...this.governor?.snapshot?.() }, taskId, ctx?.devScope)
+          break
+        }
 
         // clarify 短路：指定工具的结果作为最终回复
         const sc = toolResults.find((tr) => this.shortCircuitTools.includes(tr.name))
@@ -1001,6 +1022,7 @@ export class Agent {
       n += 4
       if (typeof m.content === 'string') n += fn(m.content)
       if (m.reasoning) n += fn(m.reasoning)
+      if (m.provider_native) n += fn(JSON.stringify(m.provider_native))
       if (m.tool_calls) n += fn(JSON.stringify(m.tool_calls))
     }
     return n
@@ -1014,6 +1036,7 @@ export class Agent {
       n += 4
       if (typeof m.content === 'string') n += fn(m.content)
       if (this.keepReasoning && m.reasoning) n += fn(m.reasoning)
+      if (m.provider_native) n += fn(JSON.stringify(m.provider_native))
       if (m.tool_calls) n += fn(JSON.stringify(m.tool_calls))
     }
     return n
@@ -1070,22 +1093,27 @@ export class Agent {
     return r.dropped
   }
 
-  /** Anthropic 断点是否生效：off 恒关；explicit 恒开；auto 看 provider.cacheCaps.cacheControlAuto（官方端点） */
-  _cacheControlFor(_prov) {
+  /** Anthropic 断点是否生效：off 恒关；explicit 恒开；auto 看【实际选中 provider】的
+   *  cacheCaps.cacheControlAuto（官方端点）。回退 provider 用自身能力，绝不沿用主模型能力。 */
+  _cacheControlFor(prov) {
     if (this.cacheControl === 'off') return false
     if (this.cacheControl === 'explicit') return true
+    const p = prov || this.provider
     // auto：官方 Anthropic 端点默认开（apps 装配层标记），第三方兼容网关关
-    return !!this.provider?.cacheCaps?.cacheControlAuto
+    return !!p?.cacheCaps?.cacheControlAuto
   }
 
-  /** OpenAI 官方 prompt_cache_key：仅显式开启 + provider 声明支持（不发 DeepSeek/兼容网关）。
-   *  键含 model/conversationId/epoch/工具指纹——工具集或换代即换键，避免旧路由污染 */
-  _promptCacheKeyFor(_prov) {
+  /** OpenAI 官方 prompt_cache_key：仅显式开启 + 【实际选中 provider】声明支持
+   *  （不发 DeepSeek/兼容网关/不支持的回退模型）。键含实际 model/conversationId/epoch/工具指纹
+   *  ——工具集或换代即换键，避免旧路由污染；回退模型用回退模型名，不套主模型名。 */
+  _promptCacheKeyFor(prov, model) {
     if (!this.promptCacheKey) return {}
-    if (!this.provider?.cacheCaps?.promptCacheKey) return {}
+    const p = prov || this.provider
+    if (!p?.cacheCaps?.promptCacheKey) return {}
+    const m = model ?? this.model
     const conv = this._curConvId || 'none'
     const toolFp = shortHash(this._buildToolList().map((t) => t.name).join(','))
-    return { prompt_cache_key: shortHash(`${this.model || ''}|${conv}|e${this.cacheEpoch}|${toolFp}`) }
+    return { prompt_cache_key: shortHash(`${m || ''}|${conv}|e${this.cacheEpoch}|${toolFp}`) }
   }
 
   /**
@@ -1285,6 +1313,17 @@ export class Agent {
     return out
   }
 
+  /**
+   * 未执行工具的配对结果（取消/预算耗尽）：保留 tool_call/tool_result 配对，
+   * 明确标注未执行，绝不伪装成功，也绝不触发副作用。
+   */
+  _cancelledToolResult(tc, reason = '任务已取消或预算耗尽，该工具未执行') {
+    return {
+      role: 'tool', tool_call_id: tc.id, name: tc.name,
+      content: stringifyArgs({ error: 'cancelled', reason, _hint: TOOL_FAIL_HINT }),
+    }
+  }
+
   async _executeToolCalls(toolCalls, execCtx, cb, ctx) {
     // 每个 tool_call 都必须产出一条配对 tool 结果。_executeOne 内部已尽量不抛；
     // 这里再兜底一次，避免任何回调/策略异常导致循环中断、历史留下孤立 tool_calls（下轮 API 400）。
@@ -1299,10 +1338,17 @@ export class Agent {
         }
       }
     }
+    const signal = execCtx?.signal || null
+    // 取消边界：本轮任何工具尚未启动前若已取消 → 全部标记未执行，不产生副作用
+    if (signal?.aborted) return toolCalls.map((tc) => this._cancelledToolResult(tc))
     const hasInteractive = toolCalls.some((tc) => this.tools?.get?.(tc.name)?.meta?.interactive)
     if (hasInteractive) {
+      // 串行（含交互式审批）：每项启动前重新检查 signal——前一项触发的取消/预算耗尽
+      // 不得让后续副作用工具开跑。向工具传 signal 只是协作提示，执行层必须自建取消边界。
       const results = []
-      for (const tc of toolCalls) results.push(await runOne(tc))
+      for (const tc of toolCalls) {
+        results.push(signal?.aborted ? this._cancelledToolResult(tc) : await runOne(tc))
+      }
       return results
     }
     return Promise.all(toolCalls.map((tc) => runOne(tc)))
@@ -1316,11 +1362,20 @@ export class Agent {
 
   async _executeOne(tc, execCtx, cb, ctx) {
     const __t = Date.now()
+    const aborted = () => !!(execCtx?.signal?.aborted)
+    // 执行层取消边界：已取消则不启动（不触发任何副作用，也不发进度回调）
+    if (aborted()) return this._cancelledToolResult(tc)
     this._safeCb(cb.onToolStart, tc)
     const tool = this.tools?.get?.(tc.name) ?? this._metaTools?.[tc.name]
     // 注：工具调用入参/耗时/结果/错误的日志由 ToolRegistry 的 AOP 切面统一打印，
     // 这里只记录调度层关心的 outcome（未注册 / 被策略拦截 / 审批拒绝）。
     let content
+    // 未执行（取消/预算耗尽）的配对结果 + 回调：不伪装成功、不产生副作用
+    const cancelledReturn = (reason) => {
+      content = stringifyArgs({ error: 'cancelled', reason, _hint: TOOL_FAIL_HINT })
+      this._safeCb(cb.onToolEnd, tc, content)
+      return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
+    }
 
     try {
       if (!tool) {
@@ -1376,6 +1431,8 @@ export class Agent {
             needConfirm = false
           }
         }
+        // await shouldConfirm 之后：审批前置判定期间可能被取消
+        if (aborted()) return cancelledReturn('审批前置判定期间任务已取消，工具未执行')
         if (needConfirm) {
           if (!this.confirm) {
             // 需确认但无确认器 → 拒绝（绝不放行危险动作）
@@ -1384,7 +1441,9 @@ export class Agent {
             this._safeCb(cb.onToolEnd, tc, content)
             return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
           }
-          const approved = await this.confirm.request({ tool: tc.name, args: tc.arguments, ctx, notify: ctx?.notify })
+          // 审批等待期间取消：ConfirmStore 随 signal 撤销 pending（迟到批准无效）
+          const approved = await this.confirm.request({ tool: tc.name, args: tc.arguments, ctx, notify: ctx?.notify, signal: execCtx?.signal })
+          if (aborted()) return cancelledReturn('审批期间任务已取消，工具未执行')
           if (!approved) {
             content = stringifyArgs({ error: 'rejected_by_confirm', reason: '未获批准或超时' })
             this.logger('mark', 'tool rejected', tc.name, '未获批准/超时')
@@ -1412,6 +1471,7 @@ export class Agent {
       // （不静默放行）；不可用/只读/可逆 → 按现有行为放行（不静默阻断正常命令）。
       if (this.jev?.client?.configured && this.jev.decisions?.terminalRisk && (tc.name === 'terminal' || tool?.meta?.shell === true)) {
         const risk = await this._jevShellRisk(tc, ctx, execCtx?.signal)
+        if (aborted()) return cancelledReturn('风险判定期间任务已取消，工具未执行')
         if (risk?.blocked) {
           content = stringifyArgs(risk.result)
           this.logger('mark', 'tool blocked by jev risk', tc.name, risk.result.reason)
@@ -1422,6 +1482,8 @@ export class Agent {
       // onBeforeTool 拦截（扩展点）
       let intercepted
       if (cb.onBeforeTool) intercepted = await cb.onBeforeTool(tc, execCtx)
+      // await 扩展回调之后、真正执行之前：最后一道取消检查（前置于工具副作用）
+      if (aborted()) return cancelledReturn('工具前置回调期间任务已取消，工具未执行')
       if (intercepted != null) {
         content = typeof intercepted === 'string' ? intercepted : stringifyArgs(intercepted)
       } else {
@@ -1517,7 +1579,7 @@ export class Agent {
       tools: toolList.length ? toolList : undefined,
       tool_choice: toolList.length ? 'none' : undefined,
       ...(this._cacheControlFor(this.provider) ? { cacheControl: true } : {}),
-      ...this._promptCacheKeyFor(this.provider),
+      ...this._promptCacheKeyFor(this.provider, this.model),
       temperature: this.temperature,
       max_tokens: this.maxTokens,
       ...this._finalizeReasoningOpts(),

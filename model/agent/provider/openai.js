@@ -150,13 +150,10 @@ export class OpenAIProvider extends Provider {
     const fieldReasoning = extractReasoning(message, this.reasoningFields)
     // 剥离内联 <think> 推理块：部分通道把思考内联在 content 里，不剥离会泄漏进最终回复
     const { content: cleanContent, reasoning: inlineReasoning } = splitInlineThink(message.content ?? '')
-    let content = cleanContent
+    const content = cleanContent
     const reasoning = [fieldReasoning, inlineReasoning].filter(Boolean).join('\n\n').trim()
-    // content 空 + 无 tool_calls + 有【字段】reasoning：用 reasoning 占位 content（防空消息进历史）。
-    // 注：只用字段 reasoning 占位，不拿刚剥掉的内联 think 凑，避免把推理又塞回正文
-    if (!content && !toolCalls.length && fieldReasoning) {
-      content = fieldReasoning
-    }
+    // 注：绝不拿 reasoning/思考文本填空正文（审计 B7）。content 为空即空——上层据 finishReason
+    // （length/max_tokens 等）走确定性收尾，而不是把内部推理当最终答案外发。
     return {
       role: 'assistant',
       content,

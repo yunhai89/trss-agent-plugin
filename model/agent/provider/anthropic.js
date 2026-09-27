@@ -35,16 +35,25 @@ export function toAnthropicMessages(messages, system) {
     if (m.role === 'user') {
       raw.push({ role: 'user', content: m.content })
     } else if (m.role === 'assistant') {
-      const blocks = []
-      if (m.content) blocks.push({ type: 'text', text: m.content })
-      if (Array.isArray(m.tool_calls)) {
-        for (const tc of m.tool_calls) {
-          const name = tc.function?.name || tc.name
-          const input = parseArgs(tc.function?.arguments ?? tc.arguments)
-          blocks.push({ type: 'tool_use', id: tc.id, name, input })
+      // Provider 原生载荷优先：Anthropic 扩展思考 + 工具续轮要求 assistant 消息原样带回
+      // thinking（含 signature）与 redacted_thinking 块——只按 content/tool_calls 重建会丢失
+      // 签名，下一轮 400。仅在原生载荷确实来自 Anthropic 时使用；跨协议（OpenAI 历史）回退重建，
+      // 绝不把别的 provider 的载荷无差别透传给 Anthropic。
+      const native = m.provider_native
+      if (native && native.type === 'anthropic' && Array.isArray(native.content) && native.content.length) {
+        raw.push({ role: 'assistant', content: native.content })
+      } else {
+        const blocks = []
+        if (m.content) blocks.push({ type: 'text', text: m.content })
+        if (Array.isArray(m.tool_calls)) {
+          for (const tc of m.tool_calls) {
+            const name = tc.function?.name || tc.name
+            const input = parseArgs(tc.function?.arguments ?? tc.arguments)
+            blocks.push({ type: 'tool_use', id: tc.id, name, input })
+          }
         }
+        raw.push({ role: 'assistant', content: blocks.length ? blocks : '' })
       }
-      raw.push({ role: 'assistant', content: blocks.length ? blocks : '' })
     } else if (m.role === 'tool') {
       raw.push({
         role: 'user',
@@ -80,6 +89,13 @@ export function toAnthropicMessages(messages, system) {
   return { system: finalSystem, messages: merged }
 }
 
+/** 保存 Anthropic 原生 content blocks（含 thinking.signature / redacted_thinking）供工具续轮原样回发。
+ *  与 keepReasoning（可见思考文本是否回灌历史）解耦：原生块是协议必需，不能因省 token 开关裁掉。 */
+function nativePayload(content) {
+  const blocks = Array.isArray(content) ? content.filter((b) => b && typeof b === 'object') : []
+  return blocks.length ? { type: 'anthropic', content: blocks } : null
+}
+
 function resultFromResponse(res) {
   const content = res.content || []
   // 防御：若 text block 里被内联了 <think>，剥离到 reasoning（原生 Anthropic 走 thinking block，此处为 no-op）
@@ -93,6 +109,7 @@ function resultFromResponse(res) {
     reasoning: reasoning || null,
     finishReason: res.stop_reason ?? null,
     usage: res.usage ?? null,
+    providerNative: nativePayload(content),
     rawMessage: res,
   }
 }
@@ -100,6 +117,7 @@ function resultFromResponse(res) {
 function resultFromStream(s) {
   const { content: cleanText, reasoning: inlineReasoning } = splitInlineThink(s.text ?? '')
   const reasoning = [s.thinking, inlineReasoning].filter(Boolean).join('\n\n').trim()
+  const content = s.assistantMessage?.content ?? s.content
   return {
     role: 'assistant',
     content: cleanText,
@@ -107,6 +125,7 @@ function resultFromStream(s) {
     reasoning: reasoning || null,
     finishReason: s.stopReason,
     usage: s.usage,
+    providerNative: nativePayload(content),
     rawMessage: s.assistantMessage,
   }
 }

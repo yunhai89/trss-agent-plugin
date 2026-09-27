@@ -12,6 +12,8 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { spawnSync } from 'node:child_process'
 import { runCrawl4ai, isCrawl4aiAvailable, CRAWL4AI_TIMEOUTS } from './crawl4ai.js'
 import { crawlUrl } from './index.js'
 
@@ -111,21 +113,40 @@ await test('子进程崩溃：退出码 4 → crashed + stderr 尾部留存', as
   ok(r.stderrTail && r.stderrTail.length > 0, 'stderr 尾部留存（诊断）')
 })
 
-await test('超时：request_timeout + 整棵进程树回收（孙进程也终止，无僵尸）', async () => {
+/** 读 /proc/<pid>/stat 的进程状态与 PPID/PGID；返回 null 表示进程不存在。
+ *  kill(pid,0) 对 zombie 仍成功——不能据此判断"仍在运行"，须看 state（Z=已终止未回收）。 */
+function procInfo(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    return { state: after[0], ppid: Number(after[1]), pgrp: Number(after[2]) }
+  } catch { return null }
+}
+
+await test('超时：request_timeout + 整棵进程树回收（孙进程不再运行；zombie 需记录回收责任）', async () => {
   const pidFile = process.env.STUB_CHILD_PID_FILE
   try { fs.unlinkSync(pidFile) } catch {}
   const r = await call('hang://example.com', { timeoutMs: 800 })
   ok(!r.success && r.code === 'request_timeout', `code=${r.code}`)
-  // 等待 kill 完成后，孙进程（sleep 30 / detached）必须已死：kill(pid,0) 应抛 ESRCH
-  let childDead = false
+  // 等待 kill 完成后，孙进程（sleep 30 / detached）必须已终止（不再运行）。
+  // 注意：kill(pid,0) 对 zombie 也成功，故以 /proc state 判定——Z=已终止（未回收），
+  // 若为 zombie 则记录 PPID/PGID 与回收责任（其父已被杀 → 应由 init/subreaper 回收）。
+  let pid = 0
+  let dead = false
+  let lastInfo = null
+  const t0 = Date.now()
   for (let i = 0; i < 30; i++) {
-    const pid = Number(fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8') : 0)
-    if (pid) {
-      try { process.kill(pid, 0); await new Promise((r2) => setTimeout(r2, 200)) }
-      catch { childDead = true; break }
-    } else { await new Promise((r2) => setTimeout(r2, 100)) }
+    pid = Number(fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8') : 0)
+    if (!pid) { await new Promise((r2) => setTimeout(r2, 100)); continue }
+    const info = procInfo(pid)
+    lastInfo = info
+    if (!info || info.state === 'Z') { dead = true; break }
+    await new Promise((r2) => setTimeout(r2, 200))
   }
-  ok(childDead, '孙进程随进程组被清理（无孤儿存活）')
+  if (dead && lastInfo?.state === 'Z') {
+    console.log(`  [diag] 孙进程 pid=${pid} 为 zombie（PPID=${lastInfo.ppid}, PGID=${lastInfo.pgrp}）——已终止未回收，回收责任在 init/subreaper；耗时 ${Date.now() - t0}ms`)
+  }
+  ok(dead, `孙进程随进程组被清理（不再运行；pid=${pid} state=${lastInfo?.state ?? 'gone'}，耗时 ${Date.now() - t0}ms）`)
 })
 
 await test('spawn 失败：spawn_failed（脚本不存在）', async () => {
@@ -263,6 +284,41 @@ await test('webCrawlTool 参数校验 + 降级标注透传到工具返回', asyn
   const deg = await webCrawlTool.execute({ url: 'https://a.invalid-tld-test-x', extract: { baseSelector: '.q', fields: [{ name: 'a', selector: '.a', type: 'text' }] }, engine: 'fetch' })
   ok(deg.error || deg.degraded, '错误路径可达（不崩溃）')
   ok(!deg.ok || deg.degraded === true, '若成功必带 degraded 标注')
+})
+
+await test('B8 解释器缺失：两入口无未处理 error 事件，独立宿主退出码 0 + 结构化 spawn_failed', async () => {
+  const mod = pathToFileURL(path.join(import.meta.dirname, 'crawl4ai.js')).href
+  for (const entry of ['runCrawl4ai', 'isCrawl4aiAvailable']) {
+    const expression = entry === 'runCrawl4ai'
+      ? `runCrawl4ai('https://example.invalid', { python: '/missing-audit-python', script: ${JSON.stringify(STUB)}, timeoutMs: 100 })`
+      : `isCrawl4aiAvailable({ python: '/missing-audit-python', ttl: 0 })`
+    const code = `import { ${entry} } from ${JSON.stringify(mod)}; console.log(JSON.stringify(await ${expression}));`
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { cwd: process.cwd(), encoding: 'utf8', timeout: 5000 })
+    ok(r.status === 0, `${entry} 独立宿主退出码 0（实际 ${r.status}）`)
+    ok(!/Unhandled 'error' event/.test(r.stderr || ''), `${entry} 无未处理 error 事件`)
+    ok(String(r.stdout || '').includes('spawn_failed'), `${entry} 返回结构化 spawn_failed`)
+  }
+})
+
+await test('B8 解释器不可执行（EACCES）：结构化 spawn_failed，不崩溃', async () => {
+  const noexec = path.join(TMP, 'noexec-python')
+  fs.writeFileSync(noexec, '#!/bin/sh\necho hi\n')
+  fs.chmodSync(noexec, 0o644) // 存在但不可执行
+  const r1 = await runCrawl4ai('ok://x', { python: noexec, script: STUB, timeoutMs: 2000 })
+  ok(!r1.success && r1.code === 'spawn_failed', `runCrawl4ai EACCES → spawn_failed（实际 ${r1.code}）`)
+  const r2 = await isCrawl4aiAvailable({ python: noexec, ttl: 0 })
+  ok(!r2.ok && r2.reason === 'spawn_failed', `isCrawl4aiAvailable EACCES → spawn_failed（实际 ${r2.reason}）`)
+})
+
+await test('B8 spawn 失败可降级 fetch（真实 runCrawl4ai 解释器缺失）', async () => {
+  let fetched = 0
+  const r = await crawlUrl('https://a.com', {
+    engine: 'crawl4ai',
+    _avail: async () => ({ ok: true }),
+    _c4ai: () => runCrawl4ai('https://a.com', { python: '/missing-audit-python', script: STUB, timeoutMs: 200 }),
+    _fetch: async () => { fetched++; return { success: true, markdown: 'F', title: 'F', via: 'fetch' } },
+  })
+  ok(r.via === 'fetch' && fetched === 1, 'spawn_failed 自动降级 fetch（上层可达）')
 })
 
 console.log(`\n========================================`)

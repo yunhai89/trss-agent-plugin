@@ -21,29 +21,41 @@ export class ConfirmStore {
   /**
    * 发起一次审批请求；返回 Promise<bool>（true=批准）。
    * @param {function} notify(id, info)  把待审请求投递给 master 的回调（失败不影响，超时兜底）
+   * @param {AbortSignal} [signal]  当前任务取消信号：取消即撤销 pending 并结算 false，
+   *   此后迟到的 resolve(id, true) 找不到 pending → 返回 false（迟到批准无效，不得放行副作用）
    */
-  request({ tool, args, ctx, notify } = {}) {
+  request({ tool, args, ctx, notify, signal = null } = {}) {
     return new Promise((resolve) => {
+      let done = false
       const id = this._nextId()
-      const timer = setTimeout(() => {
-        if (this._pending.has(id)) {
+      const settle = (val) => {
+        if (done) return
+        done = true
+        const p = this._pending.get(id)
+        if (p) {
+          clearTimeout(p.timer)
           this._pending.delete(id)
-          resolve(false)
         }
-      }, this.timeout)
-      this._pending.set(id, { resolve, timer, info: { id, tool, args, ctx, createdAt: this._now() } })
+        if (signal) { try { signal.removeEventListener('abort', onAbort) } catch { /* noop */ } }
+        resolve(val)
+      }
+      const onAbort = () => settle(false)
+      const timer = setTimeout(() => settle(false), this.timeout)
+      this._pending.set(id, { resolve: settle, timer, info: { id, tool, args, ctx, createdAt: this._now() } })
+      if (signal) {
+        if (signal.aborted) { settle(false); return }
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
       if (typeof notify === 'function') {
         try { notify(id, { tool, args, ctx }) } catch { /* noop */ }
       }
     })
   }
 
-  /** master 端调用：批准/拒绝某个待审 id */
+  /** master 端调用：批准/拒绝某个待审 id。pending 已因取消/超时撤销时返回 false（迟到批准无效） */
   resolve(id, approved) {
     const p = this._pending.get(String(id))
     if (!p) return false
-    clearTimeout(p.timer)
-    this._pending.delete(p.info.id)
     p.resolve(!!approved)
     return true
   }
@@ -54,8 +66,9 @@ export class ConfirmStore {
 
   get size() { return this._pending.size }
 
+  /** 撤销全部待审（任务取消/关闭）：结算 false，避免悬挂的审批 Promise 永不返回 */
   clear() {
-    for (const p of this._pending.values()) clearTimeout(p.timer)
+    for (const p of [...this._pending.values()]) p.resolve(false)
     this._pending.clear()
   }
 }

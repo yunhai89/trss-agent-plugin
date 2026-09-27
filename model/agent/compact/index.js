@@ -249,6 +249,7 @@ export async function compactMessages(messages, {
     for (const m of msgs) {
       n += 4
       if (typeof m.content === 'string') n += fn(m.content)
+      if (m.provider_native) n += fn(JSON.stringify(m.provider_native))
       if (m.tool_calls) n += fn(JSON.stringify(m.tool_calls))
     }
     return n

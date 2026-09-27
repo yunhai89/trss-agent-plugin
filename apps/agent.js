@@ -226,36 +226,130 @@ function makeReplyStream(e, {
  */
 // 注意：必须是箭头函数（无 prototype）。Yunzai 加载器会把带 prototype 的导出当插件类 new，
 // 函数声明会因此被误当插件并触发 collectTask(undefined).cron 报错（index.js 也做了 class 过滤兜底）。
+/**
+ * 判断从 start（'['/'【'）起是否可能是 sticker 标记的【前缀】（未闭合）：
+ *  - 已闭合（出现 ']'/'】'）→ false（完整标记交给 stripMarkers 剥除，不暂存）；
+ *  - 命中非法字符（'['/'【'/换行）→ false（不可能再长成标记）；
+ *  - 到达结尾仍未闭合 → true（必须暂存，等后续分片补齐，避免 `[sti` 先发出去后无法整体剥除）。
+ * 覆盖半/全角、大小写、可选冒号与空白。
+ */
+function isStickerMarkerPrefix(s, start) {
+  let i = start + 1
+  while (i < s.length && /\s/.test(s[i])) i++
+  const word = 'sticker'
+  for (let t = 0; t < word.length; t++) {
+    if (i >= s.length) return true // 词尚未输完：可能是前缀
+    if (s[i].toLowerCase() !== word[t]) return false
+    i++
+  }
+  while (i < s.length && /\s/.test(s[i])) i++
+  if (i < s.length && (s[i] === ':' || s[i] === '：')) {
+    i++
+    while (i < s.length && /\s/.test(s[i])) i++
+  }
+  for (; i < s.length; i++) {
+    const ch = s[i]
+    if (ch === ']' || ch === '】') return false // 完整标记
+    if (ch === '[' || ch === '【' || ch === '\n') return false // 断链，不再是标记
+  }
+  return true
+}
+
+/** 返回 s 中最长可疑 sticker 标记前缀的起始下标；无则 -1。用于跨分片暂存，绝不半截外发。 */
+function pendingStickerStart(s) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (c !== '[' && c !== '【') continue
+    if (isStickerMarkerPrefix(s, i)) return i
+  }
+  return -1
+}
+
 export const makeDeltaStreamer = (safeReply, { enabled = false, minIntervalMs = 1200, minChars = 24 } = {}) => {
   let raw = ''
   let sentLen = 0
   let lastAt = 0
-  let sentAny = false
+  let queuedAny = false
+  let failed = false
+  let complete = false
+  let deliveredEnd = 0 // 已确认送达的 raw 前缀长度（分片按序发送）
+  const inflight = [] // { end, p } 已入队发送的 Promise（永不 reject，归一为 {ok}）
+
+  const enqueueChunk = (chunk, end) => {
+    queuedAny = true
+    let ret
+    try {
+      ret = safeReply(chunk)
+    } catch {
+      failed = true
+      inflight.push({ end, p: Promise.resolve({ ok: false }), _ok: false })
+      return
+    }
+    // 同步发送（返回非 thenable，如 `(m)=>sent.push(m)`）：立即视为已确认，保持旧同步语义
+    if (!ret || typeof ret.then !== 'function') {
+      inflight.push({ end, p: Promise.resolve({ ok: true }), _ok: true })
+      return
+    }
+    const q = Promise.resolve(ret).then(
+      (outcome) => {
+        const ok = !(outcome && outcome.ok === false)
+        if (!ok) failed = true
+        return { ok }
+      },
+      () => { failed = true; return { ok: false } },
+    )
+    inflight.push({ end, p: q })
+  }
+
   const flush = (force = false) => {
     if (!enabled) return
     if (!force && !(raw.length - sentLen >= minChars && Date.now() - lastAt >= minIntervalMs)) return
     let next = raw.slice(sentLen)
     if (!next) return
-    // 流式防泄漏：结尾若是未闭合的 sticker 标记前缀，暂缓发送，等后续增量补齐；
-    // 剥离完整标记（含半/全角变体），force（收尾）时再清掉悬空前缀，绝不把 [sticker:x] 流给用户。
-    if (!force) {
-      const pending = next.match(/[\[【]\s*sticker\s*[:：]?[^\]】\n]*$/i)
-      if (pending) next = next.slice(0, pending.index)
-    } else {
-      next = next.replace(/[\[【]\s*sticker\s*[:：]?[^\]】\n]*$/i, '')
-    }
+    // 跨分片防泄漏：结尾若可能是 sticker 标记的【未闭合前缀】（含 `[`、`[s`、`[sti` 等），
+    // 暂缓发送等后续增量补齐；force（收尾）时丢弃悬空前缀，绝不把 [sticker:x] 流给用户。
+    const hold = pendingStickerStart(next)
+    if (hold !== -1) next = next.slice(0, hold)
     if (!next) return
     const chunk = stripMarkers(redactSecrets(next))
     sentLen += next.length
     lastAt = Date.now()
-    if (chunk.trim()) { sentAny = true; safeReply(chunk) }
+    if (chunk.trim()) enqueueChunk(chunk, sentLen)
   }
+
+  const finalize = () => {
+    let end = 0
+    for (const c of inflight) {
+      if (c._ok === false) break
+      end = c.end
+    }
+    deliveredEnd = end
+    complete = queuedAny && !failed
+    return complete
+  }
+
   return {
     enabled,
     push(d) { if (typeof d === 'string') raw += d; flush(false) },
-    finish() { flush(true) },
+    /**
+     * 收尾：发完剩余增量并等待全部入队分片结算（发送队列完成屏障）。
+     * 返回 { ok, sentAny, deliveredEnd, rawLen }；只要存在失败/未决/缺片即 ok=false，
+     * 调用方据此不得标记"完整送达"（避免失败被当成功、正文被跳过）。
+     */
+    finish() {
+      flush(true)
+      const unsettled = inflight.filter((c) => c._ok === undefined)
+      const result = () => ({ ok: complete, sentAny: complete, deliveredEnd, rawLen: raw.length })
+      if (!unsettled.length) { finalize(); return Promise.resolve(result()) }
+      return Promise.all(unsettled.map((c) => c.p)).then((results) => {
+        unsettled.forEach((c, i) => { c._ok = results[i].ok })
+        finalize()
+        return result()
+      })
+    },
     get rawFull() { return raw },
-    get sentAny() { return sentAny },
+    get sentAny() { return complete },
+    get deliveredEnd() { return deliveredEnd },
   }
 }
 
@@ -389,6 +483,13 @@ async function buildRuntime() {
         log: providerLog,
         ...(proxyFetch ? { fetch: proxyFetch } : {}),
       })
+      // 回退 provider 的缓存能力按【自身】配置推导（与主 provider 同一套规则）：
+      // 之前只有主 provider 设 cacheCaps，回退时 _cacheControlFor/_promptCacheKeyFor 沿用主模型能力，
+      // 会把主模型才支持的 prompt_cache_key/cacheControl 发给不支持的回退端点。装配一次不漏。
+      fp.cacheCaps = {
+        cacheControlAuto: fbp === 'anthropic' && !fb.baseURL && (!fb.preset || fb.preset === 'anthropic'),
+        promptCacheKey: fbp === 'openai' && !fb.baseURL && (!fb.preset || fb.preset === 'openai'),
+      }
       fallbackProviders.push({ provider: fp, model: fb.model })
     } catch (e) { Log.warn('[fallback] 回退模型装配失败', fb?.model, e?.message || e) }
   }
@@ -1710,10 +1811,19 @@ export class Chat extends plugin {
       Log.mark('[chat]', `reply turns=${turns} stop=${stopReason} usage=${u} replyLen=${(content || '').length}`)
       // 发送前脱敏：屏蔽 API Key / token 等敏感信息（agent.redactSecrets 默认开；异常不阻塞回复）
       const body = cfg.redactSecrets === false ? (content || '') : redactSecrets(content || '')
-      // 收尾流式：发完剩余增量；若流式全文与最终正文一致，则视为已投递，跳过重复的整段最终回复
-      streamer.finish()
-      const streamedFinal = streamer.enabled && streamer.sentAny && streamer.rawFull === (content || '')
-      devLog('stream', { enabled: streamer.enabled, deltaEvents: __deltaEvents, deltaChars: __deltaChars, reasoningChars: __reasonChars, streamedFinal }, traceId, ctx.devScope)
+      // 收尾流式：发完剩余增量并等待发送队列结算（完成屏障）。只有全部分片确认送达、且流式全文
+      // 与最终正文一致，才算"已投递"从而跳过整段最终回复；存在失败/未决/缺片一律不算成功。
+      const streamState = await streamer.finish()
+      const streamedFinal = streamer.enabled && streamState.sentAny && streamer.rawFull === (content || '')
+      // 缺片恢复：部分分片已送达且流式全文等于正文 → 只补发未送达的尾部（避免成功部分重复）；
+      // 全部失败或正文与流式不一致 → 走下方整段发送。超时等未知状态按失败处理（不冒充成功），
+      // 也不无条件重发全部（已有确认送达的前缀不重发）。
+      let streamRecovery = null
+      if (streamer.enabled && !streamedFinal && streamState.deliveredEnd > 0 && streamer.rawFull === (content || '')) {
+        const rest = String(content || '').slice(streamState.deliveredEnd)
+        if (rest.trim()) streamRecovery = rest
+      }
+      devLog('stream', { enabled: streamer.enabled, deltaEvents: __deltaEvents, deltaChars: __deltaChars, reasoningChars: __reasonChars, streamedFinal, deliveredEnd: streamState.deliveredEnd, recovery: !!streamRecovery }, traceId, ctx.devScope)
       // 异常停止必须以可见标记落到回复上：否则预算耗尽 / 空转 / 连续失败与普通回复外形完全一致
       // （用户以为任务正常完成）。文案复用 Agent 的确定性兜底表，保持单一真源。
       const suffix = STOP_REASON_CN[stopReason] ? `（${STOP_REASON_CN[stopReason]}）` : ''
@@ -1798,7 +1908,10 @@ export class Chat extends plugin {
         // 表情包作为主内容之后的【独立消息】依次发送（不与文字混排在同一条）。
         // 安全网：无论 acceptMap 是否存在，都再 stripMarkers 一次（半/全角变体、超长名、门控异常），
         // 保证任何情况下都不把字面 [sticker:x] 漏给用户。
-        const strippedRaw = acceptMap ? rt.sticker.applyText(body, new Map()) : (body || '')
+        // 缺片恢复：仅补发未确认送达的尾部（正文身份与流式一致时）；否则按整段正文发送
+        const strippedRaw = streamRecovery != null
+          ? stripMarkers(redactSecrets(streamRecovery))
+          : (acceptMap ? rt.sticker.applyText(body, new Map()) : (body || ''))
         let cleanBody = stripMarkers(String(strippedRaw)).replace(/[\s\n]+$/, '')
         if (!cleanBody && !(acceptMap && acceptMap.size)) cleanBody = '(无回复)'
         const txt = `${cleanBody}${suffix ? `\n${suffix}` : ''}`
