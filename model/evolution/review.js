@@ -73,14 +73,6 @@ function parseSuggestions(text) {
 
 const ALLOWED_KIND = new Set(['memory', 'skill', 'prompt', 'tool'])
 
-/** semver patch 自增（1.0.0 → 1.0.1），用于 tool suggestion 改 description 的新版本 */
-function bumpPatch(semver) {
-  const p = String(semver || '0.0.0').split('.').map((n) => parseInt(n, 10) || 0)
-  while (p.length < 3) p.push(0)
-  p[2] += 1
-  return p.join('.')
-}
-
 export class SelfReviewer {
   constructor({
     provider, model = null, traceStore = null, memory = null, skills = null,
@@ -242,6 +234,13 @@ export function removeSuggestion(suggestionDir, scopeId, id) {
   try { fs.unlinkSync(file); return true } catch { return false }
 }
 
+/** 把 suggestion 状态写回磁盘（应用结果 / 失败保留待审，供审阅追溯） */
+export function persistSuggestion(suggestionDir, s) {
+  const dir = path.join(suggestionDir, String(s?.scopeId || '__global__'))
+  try { fs.mkdirSync(dir, { recursive: true }) } catch { /* noop */ }
+  try { fs.writeFileSync(path.join(dir, `${s.id}.json`), JSON.stringify(s, null, 2)); return true } catch { return false }
+}
+
 /**
  * 应用一条 suggestion（Web 面板 #apply 与命令行 #采纳 共用，避免逻辑漂移）。
  * prompt → 改 promptRegistry + 落盘；memory → memory.add/replace/remove；skill → 无自动（提示手工）。
@@ -274,19 +273,32 @@ export async function applySuggestion(rt, s) {
   }
   if (s.kind === 'tool') {
     const reg = rt.toolEvo?.registry
-    if (!reg) throw new Error('toolEvo 未启用，无法应用 tool suggestion')
+    const engine = rt.toolEvo?.engine
+    if (!reg || !engine) throw new Error('toolEvo 未启用，无法应用 tool suggestion')
     const tool = await reg.getByName(s.target)
     if (!tool?.active_version_id) throw new Error(`工具 ${s.target} 不存在或无 active 版本`)
     const active = await reg.getVersion(tool.active_version_id)
-    const newSemver = bumpPatch(active.semver)
-    // 仅改进 description（payload.description），复用原 source + tests → 新 patch 版本 draft
-    const newManifest = { ...active.manifest, description: (s.payload && s.payload.description) || active.manifest.description, version: newSemver, status: 'draft' }
-    const dir = path.join(reg.artifactsDir, s.target, active.semver)
-    let source = ''
-    try { source = fs.readFileSync(path.join(dir, 'index.js'), 'utf8') } catch { /* noop */ }
-    await reg.createVersion({ toolId: tool.id, semver: newSemver, manifest: newManifest, source, parentVersionId: active.id })
-    removeSuggestion(rt.suggestionDir, s.scopeId, s.id)
-    return { ok: true, note: `工具「${s.target}」description 改进 → ${newSemver} draft（待 #采纳工具 验证上线）` }
+    const tests = await reg.getTests(active.id)
+    try {
+      // 统一走引擎修订：复用父 source/tests、系统分配版本、静态+行为验证通过后才 verified（审计 P1-5）
+      const r = await engine.revise({
+        toolId: tool.id, parentVersionId: active.id,
+        description: (s.payload && s.payload.description) || active.manifest.description,
+        tests, actor: 'suggestion',
+      })
+      if (!r.ok) throw new Error(r.reason || '修订验证失败')
+      s.status = 'applied'
+      s.applyResult = { versionId: r.versionId, version: r.version, status: r.status }
+      persistSuggestion(rt.suggestionDir, s)
+      return { ok: true, note: `工具「${s.target}」描述修订已通过验证 → ${r.version} verified（versionId=${r.versionId}），待 #采纳工具 ${r.versionId} 上线` }
+    } catch (e) {
+      // 失败保留待审证据与原因，不删除唯一待办记录
+      s.status = 'pending'
+      s.lastError = e?.message || String(e)
+      s.attempts = (s.attempts || 0) + 1
+      persistSuggestion(rt.suggestionDir, s)
+      throw new Error(`工具建议应用失败（已保留待审）：${e?.message || e}`)
+    }
   }
   // skill 类：无自动应用机制，仅移出待审
   removeSuggestion(rt.suggestionDir, s.scopeId, s.id)

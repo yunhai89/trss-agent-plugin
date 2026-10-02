@@ -12,6 +12,7 @@ export class OpenAIProvider extends Provider {
     this.reasoningFields = config.reasoningFields || this.client.reasoningFields || []
     this.systemRole = config.systemRole || 'system' // 'system' | 'developer'
     this._modelsNoTemp = new Set() // 自适应记忆：拒绝过 temperature 的模型（推理模型如 kimi-k2.6/r1/o1），后续不传
+    this._modelsNoStructuredOutput = new Set() // 自适应记忆：拒绝过 response_format 的模型，后续只靠 prompt，本地校验兜底
   }
 
   async chat(opts) {
@@ -29,6 +30,8 @@ export class OpenAIProvider extends Provider {
       messages: this._toMessages(messages, system),
       ...rest,
     }
+    // 已记忆该模型不支持结构化输出 → 不再发送（避免每轮原样重试）
+    if (body.response_format && this._modelsNoStructuredOutput.has(body.model)) delete body.response_format
 
     const list = toolsToList(tools)
     if (list.length) {
@@ -74,6 +77,12 @@ export class OpenAIProvider extends Provider {
         for (const k of reasoningKeys) delete body[k]
         return await this._create(body, { signal, stream, onDelta, onReasoning, sessionId })
       }
+      // 自适应：兼容端不认结构化输出 → 剥离 response_format 重试一次并记住该模型，降级后由调用方本地校验兜底
+      if (body.response_format && !this._modelsNoStructuredOutput.has(body.model) && this._isStructuredOutputError(e)) {
+        this._modelsNoStructuredOutput.add(body.model)
+        delete body.response_format
+        return await this._create(body, { signal, stream, onDelta, onReasoning, sessionId })
+      }
       throw e
     }
   }
@@ -99,6 +108,14 @@ export class OpenAIProvider extends Provider {
   _isTempError(e) {
     const m = String(e?.message || e).toLowerCase()
     return m.includes('temperature') || m.includes('only 1 is allowed')
+  }
+
+  /** 是否"厂商不认结构化输出"类错误：报错点名 response_format/json_schema，或 4xx 参数非法 */
+  _isStructuredOutputError(e) {
+    const m = String(e?.message || e).toLowerCase()
+    const named = /response_format|json_schema|structured|schema/.test(m)
+    const param = /unknown|unsupported|unrecognized|invalid|not supported|extra|unexpected|400/.test(m)
+    return named && param
   }
 
   /** 是否"厂商不认某思考字段"类错误：报错点名思考相关字段，或 4xx 参数非法 */

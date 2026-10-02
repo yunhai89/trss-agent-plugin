@@ -12,7 +12,7 @@
  *
  * 参考：Gemini_API_完整开发文档.md（Interactions API，2026-06 GA）。
  */
-import { Provider, toolsToList } from './base.js'
+import { Provider, toolsToList, jsonSchemaOf } from './base.js'
 
 /** Agent OpenAI 风格 messages → Interactions Step[]（无状态全量历史） */
 export function toGeminiSteps(messages) {
@@ -181,6 +181,13 @@ export class GeminiProvider extends Provider {
     this._apiKey = config.apiKey || process.env.GEMINI_API_KEY
     this._client = config.client || null
     this.defaultModel = config.model || config.defaultModel || null
+    this._noStructuredOutput = false // 记忆：兼容端拒绝过结构化输出，后续不再发送
+  }
+
+  _isStructuredUnsupported(e) {
+    const m = String(e?.message || e).toLowerCase()
+    return /response_format|json_schema|structured|schema/.test(m)
+      && /unknown|unsupported|unrecognized|invalid|not supported|400/.test(m)
   }
 
   /** 首次 chat 时动态 import @google/genai 并构造客户端 */
@@ -218,12 +225,29 @@ export class GeminiProvider extends Provider {
     if (tools?.length) baseParams.tools = tools
     const tc = mapGeminiToolChoice(opts.tool_choice)
     if (tc) baseParams.tool_config = tc
+    // 结构化输出：Interactions API 原生形态 response_format{type:'text',mime_type:'application/json',schema}；
+    // 绝不把 OpenAI 的 response_format.json_schema 原样透传（审计 P1-2）。
+    const jsonSchema = jsonSchemaOf(opts.response_format)
+    if (jsonSchema && !this._noStructuredOutput) {
+      baseParams.response_format = { type: 'text', mime_type: 'application/json', schema: jsonSchema }
+    }
 
     if (wantStream) return this._chatStream(baseParams, opts, ai, signal)
     // 取消信号走 SDK 第二参 RequestOptions（其类型含 RequestInit.signal）——建连/读响应阶段
     // 由 SDK 主动中止，不再只靠调用方协作轮询；budget 到点也能中止在途请求。
-    const interaction = await ai.interactions.create(baseParams, { signal })
-    return toAssistantResult(interaction)
+    try {
+      const interaction = await ai.interactions.create(baseParams, { signal })
+      return toAssistantResult(interaction)
+    } catch (e) {
+      // 兼容端/模型不支持结构化输出 → 剥离重试一次并记住，由调用方本地校验兜底，不伪装成功
+      if (baseParams.response_format && this._isStructuredUnsupported(e)) {
+        this._noStructuredOutput = true
+        delete baseParams.response_format
+        const interaction = await ai.interactions.create(baseParams, { signal })
+        return toAssistantResult(interaction)
+      }
+      throw e
+    }
   }
 
   /** 流式：step.delta 的 text/thought_summary 逐块回调；function_call 等结束后从 interaction 提取 */

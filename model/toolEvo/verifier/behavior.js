@@ -11,6 +11,11 @@
  */
 import { createLocalCandidateSession } from '../sandbox.js'
 
+/** 行为验证器版本：写进验证证据，制品内容变更后据此判定验证失效（审计 P1-7） */
+export const VERIFIER_VERSION = 'te-behavior-1'
+
+const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+
 /** 深比（JSON 规范化后字符串比；候选输出与 expected 须结构一致） */
 function deepEqual(a, b) {
   try { return JSON.stringify(normalize(a)) === JSON.stringify(normalize(b)) }
@@ -42,20 +47,22 @@ export async function verifyBehavior({ source, tests, timeoutMs = 3000, perfMs =
     session = await factory({ source, timeoutMs })
     backend = session.backend || (createSession ? 'sandbox' : 'local')
     for (const t of list) {
+      // oracle 硬门（审计 P1-4）：用例必须带 expected（含 null/false/0）；缺 oracle 一律不计正确
+      if (!hasOwn(t, 'expected')) {
+        results.push({ name: t.name || JSON.stringify(t.input).slice(0, 40), passed: false, reason: '用例缺少 oracle（expected），不计为正确', duration: 0, kind: t.kind, trusted: !!t.trusted })
+        continue
+      }
       const r = await session.run({ input: t.input, timeoutMs })
       let passed = false, reason = ''
       if (r.timedOut) { timedOutCount++; reason = `超时(>${timeoutMs}ms)` }
       else if (!r.ok) { reason = `执行失败：${r.error || ''}${r.errorClass ? '(' + r.errorClass + ')' : ''}` }
-      else if (t.expected !== undefined) {
+      else {
         passed = deepEqual(r.output, t.expected)
         if (!passed) reason = `输出 ${JSON.stringify(r.output).slice(0, 80)} ≠ 期望 ${JSON.stringify(t.expected).slice(0, 80)}`
-      } else {
-        // 无 expected（属性测试占位，第一版视为通过 if ok）
-        passed = true
       }
       // 性能门
       if (passed && r.duration > perfMs) { passed = false; reason = `性能超限：${r.duration}ms > ${perfMs}ms` }
-      results.push({ name: t.name || JSON.stringify(t.input).slice(0, 40), passed, reason, duration: r.duration })
+      results.push({ name: t.name || JSON.stringify(t.input).slice(0, 40), passed, reason, duration: r.duration, kind: t.kind, trusted: !!t.trusted })
     }
   } catch (e) {
     // 会话建立失败（沙箱不可达等）：整组用例判失败并留原因，不静默通过

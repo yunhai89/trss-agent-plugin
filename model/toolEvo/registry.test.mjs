@@ -53,7 +53,50 @@ await test('setActiveVersion：拒绝非 stable 版本（防回滚到未验证�
   ok(threw && /stable/.test(threw.message), 'draft 版本不可设 active（抛错含 stable）')
 })
 
-closeDb()
+await test('并发创建同名版本 → 系统原子分配，无重复 semver', async () => {
+  const toolId = 'tool_conc'
+  await reg.createTool({ id: toolId, name: 'conc_demo', namespace: 'evolved' })
+  const results = await Promise.all(Array.from({ length: 5 }, () =>
+    reg.createVersion({ toolId, manifest: mkManifest('conc_demo', '0.0.0'), source: 'export async function run(){return{}}', tests: [] })))
+  const semvers = results.map((r) => r.semver).sort()
+  ok(new Set(semvers).size === 5, `5 次并发得到 5 个唯一版本（实际 ${semvers.join(',')}）`)
+  ok(semvers[0] === '0.1.0' && semvers[4] === '0.1.4', '从 0.1.0 连续分配')
+})
+
+await test('制品篡改 → verifyArtifacts / setStatus(stable) 拒绝', async () => {
+  const toolId = 'tool_tamper'
+  await reg.createTool({ id: toolId, name: 'tamper_demo', namespace: 'evolved' })
+  const v = await reg.createVersion({ toolId, semver: '0.1.0', manifest: mkManifest('tamper_demo', '0.1.0'), source: 'export async function run(){return{v:1}}', tests: [] })
+  await reg.setStatus(v.id, 'verified')
+  const file = path.join(reg.artifactsDir, 'tamper_demo', '0.1.0', 'index.js')
+  fs.writeFileSync(file, 'export async function run(){return{v:999}}')
+  let e1 = null
+  try { await reg.verifyArtifacts(await reg.getVersion(v.id)) } catch (e) { e1 = e }
+  ok(!!e1 && /哈希/.test(e1.message), 'verifyArtifacts 检出篡改')
+  let e2 = null
+  try { await reg.setStatus(v.id, 'stable') } catch (e) { e2 = e }
+  ok(!!e2, 'setStatus stable 拒绝篡改制品')
+})
+
+await test('显式 toolId 与 manifest.name 不一致 → 拒绝挂靠', async () => {
+  const toolId = 'tool_mismatch'
+  await reg.createTool({ id: toolId, name: 'mm_a', namespace: 'evolved' })
+  let e = null
+  try { await reg.createVersion({ toolId, semver: '0.1.0', manifest: mkManifest('mm_b', '0.1.0'), source: 'export async function run(){}', tests: [] }) } catch (err) { e = err }
+  ok(!!e && /不一致/.test(e.message), '拒绝写到别的工具名下')
+})
+
+await test('内置工具不可写入自动生成制品', async () => {
+  const toolId = 'tool_builtin_guard'
+  await reg.createTool({ id: toolId, name: 'builtin_demo', namespace: 'builtin' })
+  let e = null
+  try {
+    await reg.createVersion({ toolId, semver: '0.1.0', manifest: makeManifest({ name: 'builtin_demo', version: '0.1.0', description: '内置工具', inputSchema: { type: 'object' }, provenance: { kind: 'generated' } }), source: 'export async function run(){}', tests: [] })
+  } catch (err) { e = err }
+  ok(!!e && /内置/.test(e.message), '内置 namespace 拒绝 generated 制品')
+})
+
+await closeDb()
 fs.rmSync(tmpDir, { recursive: true, force: true })
 
 console.log(`\n========================================`)

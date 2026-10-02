@@ -69,9 +69,13 @@
           <div v-for="v in filtered" :key="v.id" class="mem-row" style="align-items:center">
             <span class="pill" :class="(STATUS[v.status] || STATUS.draft).cls">{{ (STATUS[v.status] || STATUS.draft).name }}</span>
             <div style="flex:1;min-width:0">
-              <b style="font-size:13px" class="mono">{{ v.tool_id }}</b>
+              <b style="font-size:13px" class="mono">{{ v.name || v.tool_id }}</b>
               <span class="mono mut" style="margin-left:8px">v{{ v.semver }}</span>
-              <div class="mut2 mono ell" style="font-size:10.5px;margin-top:2px">id: {{ v.id }} · 生成模型: {{ v.generator_model || '—' }}</div>
+              <span v-if="v.active" class="pill p-green" style="margin-left:6px">★ 当前上线</span>
+              <div class="mut ell" style="font-size:12px;margin-top:2px">{{ v.description || '（无描述）' }}</div>
+              <div class="mut2 mono ell" style="font-size:10.5px;margin-top:2px">
+                id: {{ v.id }} · 权限: {{ (v.sideEffects || []).join('/') || '—' }} · 测试: {{ v.tests_count ?? 0 }} · 类别: {{ v.category || '—' }} · 来源: {{ v.provenanceKind || '—' }} · 生成模型: {{ v.generator_model || '—' }}
+              </div>
             </div>
             <div class="row g6 wrap">
               <button v-if="v.status==='verified'" class="btn b-pri b-sm" @click="approve(v.id)"><v-icon name="check"/>采纳上线</button>

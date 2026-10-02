@@ -24,3 +24,7 @@ export const RT = {
 }
 
 export async function getRuntime() { return RT }
+
+// Web API 离线集成测试用桩（model/web/api.js 的静态依赖）
+export async function fireReminder() { return { ok: false, reason: 'stub' } }
+export function makeFireDispatch() { return async () => ({ ok: false, reason: 'stub' }) }

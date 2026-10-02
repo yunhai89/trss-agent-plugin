@@ -9,7 +9,7 @@
  */
 import { createClient, extractText, extractThinking, extractToolUses } from '../../anthropic/index.js'
 import { splitInlineThink, createThinkStripper } from '../../openai/index.js' // 纯函数：剥离内联 <think>（防御某些 Anthropic 兼容聚合层把思考内联进 text block）
-import { Provider, toolsToList, mapToolChoice, clientOpts } from './base.js'
+import { Provider, toolsToList, mapToolChoice, clientOpts, jsonSchemaOf } from './base.js'
 import { parseArgs } from '../messages.js'
 
 function mergeContent(a, b) {
@@ -139,7 +139,9 @@ export class AnthropicProvider extends Provider {
   async chat(opts) {
     const {
       model, messages, system, tools, tool_choice, temperature, max_tokens, thinking,
-      top_p, top_k, signal, stream, onDelta, onReasoning, stop_sequences, cacheControl = false, sessionId, ...rest
+      top_p, top_k, signal, stream, onDelta, onReasoning, stop_sequences, cacheControl = false, sessionId,
+      response_format: responseFormat, // 与协议无关的结构化输出契约：映射为 Anthropic 原生 output_config.format（审计 P1-2）
+      ...rest
     } = opts
 
     const conv = toAnthropicMessages(messages, system)
@@ -148,6 +150,11 @@ export class AnthropicProvider extends Provider {
       max_tokens: max_tokens ?? 4096,
       messages: conv.messages,
       ...rest,
+    }
+    // 结构化输出：Claude 原生配置（output_config.format.type=json_schema），绝不把 OpenAI 的 response_format 原样发送。
+    const jsonSchema = jsonSchemaOf(responseFormat)
+    if (jsonSchema && !this._noStructuredOutput) {
+      body.output_config = { format: { type: 'json_schema', schema: jsonSchema } }
     }
     // Prompt caching（Anthropic 需显式 cache_control 断点；写 1.25x / 读 0.1x，命中一次即回本）：
     //   ① tools 末个 ② system（转 block 数组，末块）③ messages 末条末 block。
@@ -213,6 +220,12 @@ export class AnthropicProvider extends Provider {
       const res = await this.client.messages.create(body, { signal, sessionId })
       return resultFromResponse(res)
     } catch (e) {
+      // 兼容端不认结构化输出（output_config.format）→ 剥离重试一次并记住，降级后由调用方本地校验兜底
+      if (body.output_config && this._isStructuredUnsupported(e)) {
+        this._noStructuredOutput = true
+        delete body.output_config
+        return this.chat({ ...opts, response_format: undefined })
+      }
       // 兼容端不认 thinking 字段 → 剥离重试一次（降级为不思考，不阻断）
       if (this._isUnsupportedParam(e) && stripThinking()) {
         if (stream) {
@@ -233,5 +246,11 @@ export class AnthropicProvider extends Provider {
   _isUnsupportedParam(e) {
     const m = String(e?.message || e).toLowerCase()
     return /thinking|budget_tokens|reasoning/.test(m) && /unknown|unsupported|unrecognized|invalid|not supported|400/.test(m)
+  }
+
+  _isStructuredUnsupported(e) {
+    const m = String(e?.message || e).toLowerCase()
+    return /output_config|json_schema|structured|response_format/.test(m)
+      && /unknown|unsupported|unrecognized|invalid|not supported|400/.test(m)
   }
 }

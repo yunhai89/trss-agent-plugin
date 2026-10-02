@@ -31,6 +31,11 @@ const SCHEMA = {
     semver TEXT NOT NULL,
     status TEXT NOT NULL,
     source_hash TEXT,
+    source_text TEXT,
+    tests_json TEXT,
+    content_hash TEXT,
+    verified_content_hash TEXT,
+    verified_verifier TEXT,
     manifest_json TEXT NOT NULL,
     parent_version_id TEXT,
     generator_model TEXT,
@@ -128,7 +133,29 @@ export function getDb({ dir } = {}) {
   return _db
 }
 
-/** 初始化：建全部表 + PRAGMA（WAL 并发读、外键约束）。幂等。 */
+/**
+ * 增量迁移：给已存在的库补列（SQLite 不支持 ADD COLUMN IF NOT EXISTS）。
+ * 旧库（审计前创建）缺 source_text/tests_json/content_hash 等；缺列按 NULL 补齐，
+ * 这些旧版本因无 content_hash 无法通过稳定性校验（需重新验证），属预期 fail-closed。
+ */
+async function ensureColumn(db, table, column, ddl) {
+  try {
+    const cols = await allP(db, `PRAGMA table_info(${table})`)
+    if (cols.some((c) => c.name === column)) return
+    await runP(db, `ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+    Log.info(`[toolEvo] 迁移：${table}.${column} 已添加`)
+  } catch (e) { Log.warn(`[toolEvo] 迁移 ${table}.${column} 失败:`, e?.message || e) }
+}
+
+async function migrate(db) {
+  await ensureColumn(db, 'tool_versions', 'source_text', 'TEXT')
+  await ensureColumn(db, 'tool_versions', 'tests_json', 'TEXT')
+  await ensureColumn(db, 'tool_versions', 'content_hash', 'TEXT')
+  await ensureColumn(db, 'tool_versions', 'verified_content_hash', 'TEXT')
+  await ensureColumn(db, 'tool_versions', 'verified_verifier', 'TEXT')
+}
+
+/** 初始化：建全部表 + PRAGMA（WAL 并发读、外键约束）+ 增量迁移。幂等。 */
 export async function initDb({ dir }) {
   const db = getDb({ dir })
   await execP(db, 'PRAGMA journal_mode=WAL;')
@@ -136,11 +163,18 @@ export async function initDb({ dir }) {
   for (const [name, sql] of Object.entries(SCHEMA)) {
     try { await execP(db, sql) } catch (e) { Log.warn(`[toolEvo] 建表失败 ${name}:`, e?.message || e) }
   }
+  await migrate(db)
   return db
 }
 
-/** 关闭句柄（热重载/卸载时调，防泄漏） */
-export function closeDb() {
+/**
+ * 关闭句柄（热重载/卸载时调，防泄漏）。
+ * 先停掉落盘定时器并冲刷队列，再关闭——否则队列里未落盘的调用埋点会被直接丢弃（审计 P1-8）。
+ * 异步：调用方应 `await closeDb()`；旧同步调用方不 await 也不会同步关闭，保证 flush 完整。
+ */
+export async function closeDb() {
+  if (_flushTimer) { clearTimeout(_flushTimer); _flushTimer = null }
+  try { await flushInvocations() } catch { /* noop */ }
   if (_db) { try { _db.close() } catch { /* noop */ }; _db = null; _dbPath = null }
 }
 

@@ -71,10 +71,23 @@ export class ToolRegistry {
     for (const tool of tools.flat(Infinity).filter(Boolean)) {
       if (!tool || !tool.name) throw new Error('工具必须包含 name')
       if (typeof tool.execute !== 'function') throw new Error(`工具 ${tool.name} 必须包含 execute 函数`)
+      tool.meta = tool.meta || {} // 保证 meta 引用稳定（bindVersion 才能更新到 #wrap 闭包里的同一对象）
       this.tools.set(tool.name, this.#wrap(tool))
     }
     this._indexDirty = true
     return this
+  }
+
+  /**
+   * 绑定工具的 toolEvo 版本身份（内置 seed / 进化 stable 共用）。
+   * 使调用埋点能关联到具体版本（审计 P1-8）；不改变 execute 与权限等原始行为。
+   */
+  bindVersion(name, versionId) {
+    const t = this.tools.get(name)
+    if (!t) return false
+    t.meta = t.meta || {}
+    t.meta.toolEvoVersionId = versionId
+    return true
   }
 
   /** AOP 包装：调用前后统一打日志、计时。
@@ -101,7 +114,9 @@ export class ToolRegistry {
           const ms = Date.now() - t0
           if (isErrorShape(r)) {
             ;(isMcp ? lg : self.logger)('warn', 'tool failed', name, brief(r.error != null ? r.error : r, 200), 'args=', brief(params))
-            sink({ success: false, latencyMs: ms, errorClass: 'soft_fail' })
+            // 保留结构化错误类别（策略拒绝/超时/安全失败不得一律折成 soft_fail）
+            const cls = (r && typeof r === 'object' && (r.errorClass || r.code)) || 'soft_fail'
+            sink({ success: false, latencyMs: ms, errorClass: String(cls) })
           } else if (isMcp) {
             lg('info', `完成 ${name}`, `耗时=${ms}ms`)
             sink({ success: true, latencyMs: ms })
@@ -112,7 +127,7 @@ export class ToolRegistry {
           return r
         } catch (e) {
           lg('warn', 'tool error', name, e?.message || e, 'args=', brief(params))
-          sink({ success: false, latencyMs: Date.now() - t0, errorClass: e?.name || 'Error' })
+          sink({ success: false, latencyMs: Date.now() - t0, errorClass: e?.errorClass || e?.code || e?.name || 'Error' })
           throw e
         }
       },

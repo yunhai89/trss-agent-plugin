@@ -110,7 +110,7 @@ await test('沙箱档：合法 JSON / 非 JSON 文案 / 超时文案', async () 
   const t2 = stubTransport({ stdoutFor: () => ({ stdout: '不是 JSON 的输出' }) })
   const m2 = mkVerifyManager(t2)
   try {
-    const vb = await verifyBehavior({ source: src, tests: [{ input: {} }], createSession: (args) => createSandboxCandidateSession(m2, args) })
+    const vb = await verifyBehavior({ source: src, tests: [{ input: {}, expected: {} }], createSession: (args) => createSandboxCandidateSession(m2, args) })
     eq(vb.passed, false, '非 JSON 输出 → 判失败')
     ok(/候选输出非 JSON/.test(vb.results[0].reason || ''), '保留原文案「候选输出非 JSON」')
   } finally { await m2.shutdown() }
@@ -118,7 +118,7 @@ await test('沙箱档：合法 JSON / 非 JSON 文案 / 超时文案', async () 
   const t3 = stubTransport({ stdoutFor: () => ({ timedOut: true }) })
   const m3 = mkVerifyManager(t3)
   try {
-    const vb = await verifyBehavior({ source: src, tests: [{ input: {} }], timeoutMs: 500, createSession: (args) => createSandboxCandidateSession(m3, args) })
+    const vb = await verifyBehavior({ source: src, tests: [{ input: {}, expected: {} }], timeoutMs: 500, createSession: (args) => createSandboxCandidateSession(m3, args) })
     eq(vb.passed, false, '超时 → 判失败')
     ok(/超时/.test(vb.results[0].reason || ''), '超时原因可见')
   } finally { await m3.shutdown() }
@@ -128,7 +128,7 @@ await test('沙箱档：执行面不可用 → 整组失败并留原因（不静
   const t = stubTransport({ throwOnRun: Object.assign(new Error('fetch failed'), { code: 'ENOTFOUND' }) })
   const m = mkVerifyManager(t)
   try {
-    const vb = await verifyBehavior({ source: src, tests: [{ input: {} }], createSession: (args) => createSandboxCandidateSession(m, args) })
+    const vb = await verifyBehavior({ source: src, tests: [{ input: {}, expected: {} }], createSession: (args) => createSandboxCandidateSession(m, args) })
     eq(vb.passed, false, '判失败')
     ok(/ENOTFOUND|沙箱|不可用/.test(vb.results[0].reason || ''), `原因可见（${vb.results[0].reason}）`)
     eq(t.calls.create, 1, '只在沙箱内尝试（无本地兜底路径）')

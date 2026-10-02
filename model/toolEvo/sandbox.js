@@ -20,12 +20,29 @@ import path from 'node:path'
 import os from 'node:os'
 
 import { openSandboxBundle } from '../sandbox/bundle.js'
+import { isolatedNodeCommand } from './isolation.js'
 
 /** 测试驱动：动态 import 候选 index.js 的 run，跑 input，输出 JSON 结果 */
 const RUNNER = `
 const inp = JSON.parse(process.env.TOOL_INPUT_JSON || '{}')
 const ctx = { requestId: 'verify', now: () => new Date().toISOString(), log() {} }
 import('./index.js').then(async ({ run }) => {
+  if (typeof run !== 'function') return process.stdout.write(JSON.stringify({ ok: false, error: '未导出 run 函数' }))
+  try { const out = await run(inp, ctx); process.stdout.write(JSON.stringify({ ok: true, output: out })) }
+  catch (e) { process.stdout.write(JSON.stringify({ ok: false, error: e?.message || String(e), errorClass: e?.name || 'Error' })) }
+}).catch(e => process.stdout.write(JSON.stringify({ ok: false, error: '加载候选失败：' + (e?.message || e) })))
+`
+
+/** 本地档 runner：入口用 .mjs，避免权限模型下解析 package.json 时越界读取；先削弱宿主全局再加载候选 */
+const LOCAL_RUNNER = `
+try { delete process.getBuiltinModule } catch {}
+try { delete process.binding } catch {}
+try { delete process.dlopen } catch {}
+try { delete process._linkedBinding } catch {}
+for (const g of ['fetch', 'WebSocket', 'EventSource', 'XMLHttpRequest', 'require']) { try { delete globalThis[g] } catch {} }
+const inp = JSON.parse(process.env.TOOL_INPUT_JSON || '{}')
+const ctx = { requestId: 'verify', now: () => new Date().toISOString(), log() {} }
+import('./index.mjs').then(async ({ run }) => {
   if (typeof run !== 'function') return process.stdout.write(JSON.stringify({ ok: false, error: '未导出 run 函数' }))
   try { const out = await run(inp, ctx); process.stdout.write(JSON.stringify({ ok: true, output: out })) }
   catch (e) { process.stdout.write(JSON.stringify({ ok: false, error: e?.message || String(e), errorClass: e?.name || 'Error' })) }
@@ -45,11 +62,20 @@ function foldOutput(raw, { exitCode, duration, maxOutput, stderr }) {
   }
 }
 
-/** 本地档会话：临时目录写 bundle，每个用例 spawn 一次 node */
+/**
+ * 本地档会话：临时目录写 bundle，每个用例用**隔离进程**（unshare -n + node --permission）spawn 一次。
+ * 隔离不可用（缺 unshare 或权限模型）→ 直接抛错，绝不降级为普通 node（fail-closed，审计 P0-1）。
+ */
 export async function createLocalCandidateSession({ source, timeoutMs = 3000, maxOutput = 8192 }) {
   const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tevo-verify-'))
-  fs.writeFileSync(path.join(bundleDir, 'index.js'), String(source || ''))
-  fs.writeFileSync(path.join(bundleDir, 'runner.mjs'), RUNNER)
+  // 入口 .mjs：权限模型下无需读取上层 package.json（避免越界 fs 读取）
+  fs.writeFileSync(path.join(bundleDir, 'index.mjs'), String(source || ''))
+  fs.writeFileSync(path.join(bundleDir, 'runner.mjs'), LOCAL_RUNNER)
+  const launch = isolatedNodeCommand({ fsReadPaths: [bundleDir], nodeFlags: ['--max-old-space-size=128'] })
+  if (!launch) {
+    try { fs.rmSync(bundleDir, { recursive: true, force: true }) } catch { /* noop */ }
+    throw new Error('本地档隔离面不可用（需要 unshare 网络命名空间 + Node --permission），已拒绝执行不可信候选')
+  }
   const env = { TOOL_INPUT_JSON: '', PATH: process.env.PATH || '', HOME: process.env.HOME || '' }
   return {
     backend: 'local',
@@ -58,7 +84,7 @@ export async function createLocalCandidateSession({ source, timeoutMs = 3000, ma
       const t0 = Date.now()
       const r = await new Promise((resolve) => {
         const e = { ...env, TOOL_INPUT_JSON: JSON.stringify(input ?? {}) }
-        const proc = spawn(process.execPath, ['runner.mjs'], { cwd: bundleDir, env: e, stdio: ['ignore', 'pipe', 'pipe'] })
+        const proc = spawn(launch.command, [...launch.args, 'runner.mjs'], { cwd: bundleDir, env: e, stdio: ['ignore', 'pipe', 'pipe'] })
         let stdout = '', stderr = ''
         const timer = setTimeout(() => {
           try { proc.kill('SIGKILL') } catch { /* noop */ }

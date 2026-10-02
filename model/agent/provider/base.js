@@ -8,6 +8,20 @@
  * 统一 tool_choice（中性形式）：{ mode:'auto'|'any'|'none'|'tool', name? } 或字符串；各协议自行映射。
  */
 
+/**
+ * 从与协议无关的 response_format 中取出 JSON Schema。
+ * 统一契约：{ type:'json_schema', json_schema:{ name?, strict?, schema } }（OpenAI 形态）。
+ * Anthropic → output_config.format；Gemini → response_format{type:'text',mime_type,schema}。
+ * @returns {object|null}
+ */
+export function jsonSchemaOf(responseFormat) {
+  const rf = responseFormat
+  if (rf && typeof rf === 'object' && rf.type === 'json_schema' && rf.json_schema && typeof rf.json_schema.schema === 'object') {
+    return rf.json_schema.schema
+  }
+  return null
+}
+
 /** 从 ToolRegistry 或数组中取出工具列表 */
 export function toolsToList(tools) {
   if (!tools) return []

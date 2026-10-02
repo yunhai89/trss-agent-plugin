@@ -794,21 +794,29 @@ async function buildRuntime() {
       const te = await import('../model/toolEvo/index.js')
       await te.initDb({ dir: path.resolve(PLUGIN_ROOT, path.dirname(cfg.toolEvo?.dbPath || 'data/evolution/tevo.db')) })
       const toolEvoRegistry = new te.ToolEvoRegistry({ artifactsDir: path.resolve(PLUGIN_ROOT, cfg.toolEvo?.artifactsDir || 'data/evolution/tools') })
+      // 兼容迁移：为旧版本回填内容哈希/源码，使既有 stable 工具升级后仍可校验与注入
+      await toolEvoRegistry.backfillFromArtifacts().catch((e) => Log.warn('[toolEvo] 旧制品哈希回填失败', e?.message || e))
       tools.setInvocationSink(te.recordInvocation)
       const artifactsDir = path.resolve(PLUGIN_ROOT, cfg.toolEvo?.artifactsDir || 'data/evolution/tools')
       // 隔离 runner：stable 工具**不在主进程执行**。两档——沙箱可用时跑在 E2B microVM 内，
       // 否则退回本地 fork worker（capability ctx 冻结 {now,log}，env 仅 PATH/HOME，不暴露 e/bot/fetcher）。
+      // 显式选择 e2b 时，manager 初始化失败必须保持该执行面不可用（禁止静默降级本地）。
+      // 进化工具专用 manager 出口全关（evoManager），绝不继承 terminal 的联网白名单。
+      const e2bRequested = String(sandbox.mode || 'off').toLowerCase() === 'e2b'
       const runner = new te.RunnerClient({
         logger: Log.tag('toolEvo'),
         timeoutMs: cfg.toolEvo?.runnerTimeoutMs || 5000,
-        sandbox: sandbox.manager ? sandbox : null,
+        sandbox: { mode: sandbox.mode, manager: sandbox.evoManager },
         artifactsDir,
       })
       const builtins = tools.list().filter((t) => !t.meta?.mcp).map((t) => ({
         name: t.name, description: t.description, parameters: t.parameters,
         sideEffects: t.meta?.sideEffects || ['none'], tags: ['builtin'],
       }))
-      const seeded = await te.seedBuiltinTools(toolEvoRegistry, builtins).catch((e) => { Log.warn('[toolEvo] seed 失败', e?.message || e); return 0 })
+      const seedRes = await te.seedBuiltinTools(toolEvoRegistry, builtins).catch((e) => { Log.warn('[toolEvo] seed 失败', e?.message || e); return { added: 0, bindings: [] } })
+      const seeded = seedRes?.added || 0
+      // 内置工具执行契约绑定 seed 出的版本身份（否则埋点 version_id=null，健康检测漏报，审计 P1-8）
+      for (const b of (seedRes?.bindings || [])) { try { tools.bindVersion(b.name, b.versionId) } catch { /* noop */ } }
       const synthesizer = new te.ToolSynthesizer({ provider: srTarget.provider, model: srTarget.model || cfg.model, maxRepairAttempts: cfg.toolEvo?.maxRepairAttempts ?? 2, logger: Log.tag('toolEvo') })
       // 候选行为验证同样双档：沙箱可用时在出口全关的一次性 microVM 里跑候选（跑的是不可信代码），
       // 否则本地子进程 + AST 前置门。
@@ -816,7 +824,11 @@ async function buildRuntime() {
         synthesizer,
         registry: toolEvoRegistry,
         logger: Log.tag('toolEvo'),
-        verifySession: sandbox.verifyManager ? (args) => te.createSandboxCandidateSession(sandbox.verifyManager, args) : null,
+        verifySession: sandbox.verifyManager
+          ? (args) => te.createSandboxCandidateSession(sandbox.verifyManager, args)
+          : (e2bRequested
+            ? () => { throw new Error('E2B 沙箱不可用（已显式选择 e2b），拒绝降级到本地验证候选') }
+            : null),
         verifyTimeoutMs: cfg.sandbox?.toolEvoVerifyTimeoutMs || 3000,
       })
       // 注入已 stable 的进化工具（经 runner 隔离执行；重启/热重载后自动恢复，供 agent tool_search 调用）
@@ -826,7 +838,12 @@ async function buildRuntime() {
           // 内置工具(provenance=human)由插件代码注册,不走制品注入(其 source 为空,execute 在插件代码);
           // 只注入进化产出(generated/refined,制品含 export run)
           if (s.manifest?.provenance?.kind === 'human') continue
-          try { tools.register(await toolEvoRegistry.toToolContract(s, runner)); stableCount++ } catch (e) { Log.warn('[toolEvo] 注入 stable 失败', s.name, e?.message || e) }
+          try {
+            // 启动恢复前校验制品完整性：哈希不匹配/缺失即拒绝激活（保留 fail-closed），不注入可调用契约
+            await toolEvoRegistry.verifyArtifacts(s)
+            tools.register(await toolEvoRegistry.toToolContract(s, runner))
+            stableCount++
+          } catch (e) { Log.warn('[toolEvo] 注入 stable 失败', s.name, e?.message || e) }
         }
       } catch (e) { Log.warn('[toolEvo] stable 注入失败', e?.message || e) }
       toolEvo = { registry: toolEvoRegistry, engine, runner, closeDb: te.closeDb, flushNow: te.flushNow }
@@ -1153,9 +1170,8 @@ function invalidateRuntime() {
   if (_runtime?.knowledge?.shutdown) { try { _runtime.knowledge.shutdown() } catch { /* noop */ } }
   if (_runtime?.toolEvo) {
     try { _runtime.toolEvo.runner?.stop?.() } catch { /* noop */ } // 关闭隔离 worker（审计 §4.2）
-    // 先落盘埋点再关库：批量队列 2s 窗口内未 flush 的 tool_invocations 会随 closeDb 丢失
-    try { _runtime.toolEvo.flushNow?.() } catch { /* noop */ }
-    try { _runtime.toolEvo.closeDb() } catch { /* noop */ }
+    // closeDb 内部会先停落盘定时器并 flush 队列再关库（审计 P1-8），不会丢 2s 窗口内的埋点
+    try { Promise.resolve(_runtime.toolEvo.closeDb?.()).catch(() => {}) } catch { /* noop */ }
   }
   if (_runtime?.stagehand?.sessionMgr) {
     try { _runtime.stagehand.sessionMgr.closeAll() } catch { /* noop */ } // 关闭所有浏览器会话
@@ -2032,13 +2048,16 @@ export class Chat extends plugin {
     try {
       const r = await rt.toolEvo.engine.evolve({ goal })
       if (r.ok) {
+        const ev = r.evidence || {}
         await this.e.reply([
-          `✅ 候选已生成：${r.name}@${r.version} → draft`,
-          '待阶段2 沙箱行为验证 + #采纳 后上线（当前仅注册，不自动晋升）。',
+          `✅ 候选已生成并通过验证：${r.name}@${r.version}`,
+          `状态：${r.status}（静态通过 · 行为 ${ev.passed ?? '?'}/${ev.totalTests ?? '?'} 通过）`,
+          `versionId：${r.versionId}`,
+          `下一步：#采纳工具 ${r.versionId}（主人审批后上线，Agent 可经 tool_search 调用）`,
           r.assumptions?.length ? '假设：' + r.assumptions.join('；') : '',
         ].filter(Boolean).join('\n'))
       } else {
-        await this.e.reply(`❌ 候选被拒（${r.status}）：\n${r.reason}`)
+        await this.e.reply(`❌ 候选未通过（${r.status}）：\n${r.reason}${r.versionId ? `\nversionId：${r.versionId}（记录可审阅）` : ''}`)
       }
     } catch (err) { await this.e.reply('❌ 进化失败：' + (err?.message || err)) }
     return true
@@ -2050,8 +2069,12 @@ export class Chat extends plugin {
     const versions = await rt.toolEvo.registry.listVersions()
     if (!versions.length) { await this.e.reply('暂无进化工具版本。用 #进化工具 <能力描述> 生成候选。'); return true }
     const icon = (s) => s === 'stable' ? '🟢' : s === 'verified' ? '🟡' : s === 'draft' ? '⚪' : '⚫'
-    const lines = versions.slice(0, 20).map((v) => `${icon(v.status)} ${v.semver} · id=${v.id} [${v.status}]`)
-    await this.e.reply(`工具进化版本（共 ${versions.length}，显示前 20）：\n${lines.join('\n')}\n\n🟡verified 可 #采纳工具 <id> 晋升 stable`)
+    const lines = versions.slice(0, 20).map((v) => {
+      const perms = (v.sideEffects || []).join('/') || '-'
+      const head = `${icon(v.status)}${v.active ? ' ★active' : ''} ${v.name || '?'}@${v.semver} [${v.status}] 权限=${perms} 测试=${v.tests_count ?? 0} id=${v.id}`
+      return v.description ? `${head}\n   ${String(v.description).slice(0, 60)}` : head
+    })
+    await this.e.reply(`工具进化版本（共 ${versions.length}，显示前 20）：\n${lines.join('\n')}\n\n🟡verified 可 #采纳工具 <id> 晋升 stable；★=当前上线版本`)
     return true
   }
 
@@ -2130,8 +2153,15 @@ export class Chat extends plugin {
     if (!rt?.toolEvo?.registry) { await this.e.reply('工具进化未启用（config: agent.toolEvo.enable）'); return true }
     const { failureClusters, convergenceMetrics } = await import('../model/toolEvo/evaluator.js')
     const [clusters, metrics] = await Promise.all([failureClusters(), convergenceMetrics()])
-    const head = `📊 工具库：${metrics.stable} stable / ${metrics.totalVersions} 总版本 · 调用 ${metrics.invocations} 次（失败率 ${(metrics.invocationFailRate * 100).toFixed(0)}%）`
-    if (!clusters.length) { await this.e.reply(`${head}\n\n✅ 所有 stable 工具健康（无高失败率工具）`); return true }
+    const head = `📊 工具库：${metrics.activeStable} active / ${metrics.stable} stable / ${metrics.totalVersions} 总版本 · 调用 ${metrics.invocations} 次（失败率 ${(metrics.invocationFailRate * 100).toFixed(0)}%）· 复用率 ${(metrics.reuseRate * 100).toFixed(0)}%`
+    if (!clusters.length) {
+      // 样本不足不得写成“全部健康”：需足够真实调用才能判定
+      const enough = metrics.invocations >= 3 && metrics.activeStable > 0
+      await this.e.reply(enough
+        ? `${head}\n\n✅ 当前样本下未发现高失败率 stable 工具`
+        : `${head}\n\n⚠️ 调用样本不足，暂无法判定健康（需 ≥3 次真实调用且存在 active 版本）`)
+      return true
+    }
     const lines = clusters.map((c) => `⚠️ ${c.toolName}：失败率 ${(c.failRate * 100).toFixed(0)}%（${c.failed}/${c.total}）· ${c.topErrors.join(', ')}`)
     await this.e.reply(`${head}\n\n${lines.join('\n')}\n\n用 #进化工具 <修复描述> 生成修复候选`)
     return true

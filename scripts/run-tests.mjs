@@ -48,7 +48,11 @@ let failFiles = 0
 const reSummary = /通过\s*(\d+)\s*[，,]\s*失败\s*(\d+)/
 
 // 需要先装 Yunzai 桩钩子才能跑的真实入口测试（其余 stress 文件是纯离线断言）
-const HOOKED_STRESS = new Set(['stress/e2e/run.mjs', 'stress/e2e/agent-init-failure.mjs', 'stress/e2e/agent-sandbox-wiring.mjs'])
+const HOOKED_STRESS = new Set([
+  'stress/e2e/run.mjs', 'stress/e2e/agent-init-failure.mjs', 'stress/e2e/agent-sandbox-wiring.mjs',
+  // 真实 Web router 测试需要 Yunzai 桩（apps/agent.js / lib 解析）
+  'model/web/api.tevo.test.mjs',
+])
 for (const t of tests) {
   const rel = t.replace(root, '')
   const args = HOOKED_STRESS.has(rel)
@@ -59,7 +63,8 @@ for (const t of tests) {
   })
   const out = (r.stdout || '') + (r.stderr || '')
   const m = out.match(reSummary)
-  const markerFailures = (out.match(/✗ (?:FAIL|THROW)|FAIL:|THROW:/g) || []).length
+  // 识别常见失败标记：行首 ✗（含普通 ✗ / ✗ FAIL / ✗ THROW）与 FAIL:/THROW:
+  const markerFailures = (out.match(/^\s*✗|FAIL:|THROW:/gm) || []).length
   const failedCount = Math.max(
     m ? Number(m[2]) : 0,
     markerFailures,

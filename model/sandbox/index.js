@@ -113,6 +113,7 @@ export async function createSandboxRuntime(cfg = {}, { logger = null, transport 
     transport: null,
     manager: null,
     verifyManager: null,
+    evoManager: null,
     commands,
     error: null,
     async probe() { return false },
@@ -150,11 +151,20 @@ export async function createSandboxRuntime(cfg = {}, { logger = null, transport 
       network: verifyEgress.network,
       allowInternetAccess: verifyEgress.allowInternetAccess,
     })
+    // 进化 stable 工具专用 manager：出口全关（进化工具只允许 none/read，绝不继承 terminal 的联网白名单）
+    const evoManager = new SandboxManager({
+      ...common,
+      template: cfg.evoTemplate || cfg.template || 'base',
+      maxSandboxes: cfg.maxSandboxes,
+      network: verifyEgress.network,
+      allowInternetAccess: verifyEgress.allowInternetAccess,
+    })
     return {
       ...base,
       transport: t,
       manager,
       verifyManager,
+      evoManager,
       /** 可达性/鉴权预检（不抛：调用方据此决定提示用户还是继续） */
       async probe(timeoutMs = 3000) {
         try { await t.ping(timeoutMs); return true } catch (e) { base.error = e; return false }
@@ -163,6 +173,7 @@ export async function createSandboxRuntime(cfg = {}, { logger = null, transport 
         commands.clear()
         let n = 0
         try { n += await verifyManager.shutdown() } catch { /* noop */ }
+        try { n += await evoManager.shutdown() } catch { /* noop */ }
         try { n += await manager.shutdown() } catch { /* noop */ }
         return n
       },

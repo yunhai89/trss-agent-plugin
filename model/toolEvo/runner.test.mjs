@@ -7,6 +7,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { RunnerClient } from './runner.js'
 
@@ -16,20 +17,23 @@ function ok(c, m) { if (c) { passed++; console.log('  ✓', m) } else { failed++
 function eq(a, b, m) { const s = JSON.stringify(a) === JSON.stringify(b); ok(s, `${m}${s ? '' : `  (got ${JSON.stringify(a)})`}`) }
 async function test(name, fn) { console.log(`\n[${name}]`); try { await fn() } catch (e) { failed++; console.error('  ✗ THROW', e?.message || e); console.error(e?.stack) } }
 
+const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex')
+
+/** 写一份宿主制品文件，返回 { url, source }（源以不可变 source 传入执行面） */
 async function writeArtifact(source) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tevo-art-'))
   const file = path.join(dir, 'index.js')
   fs.writeFileSync(file, source)
-  return pathToFileURL(file).href
+  return { url: pathToFileURL(file).href, source }
 }
 const cleanup = (url) => { try { fs.rmSync(new URL(url), { recursive: true, force: true }) } catch { /* noop */ } }
 
 // ---------- 1. 正常纯计算工具 ----------
 await test('runner：正常纯计算工具跑通', async () => {
-  const url = await writeArtifact(`export async function run(input, ctx) { return { doubled: (input.x||0)*2 } }`)
+  const { url, source } = await writeArtifact(`export async function run(input, ctx) { return { doubled: (input.x||0)*2 } }`)
   const r = new RunnerClient({ logger: () => {}, timeoutMs: 3000 })
   try {
-    const out = await r.invoke('v1', { artifactPath: url, params: { x: 21 } })
+    const out = await r.invoke('v1', { source, artifactPath: url, expectedHash: sha256(source), params: { x: 21 } })
     ok(out.ok, '调用成功')
     eq(out.output.doubled, 42, '结果正确（21*2）')
   } finally { await r.stop(); cleanup(url) }
@@ -37,10 +41,10 @@ await test('runner：正常纯计算工具跑通', async () => {
 
 // ---------- 2. capability ctx 只含 now/log ----------
 await test('runner：capability ctx 只含 now/log，无 bot/fetcher 暴露', async () => {
-  const url = await writeArtifact(`export async function run(input, ctx) { return { keys: Object.keys(ctx).sort(), hasBot: 'bot' in ctx, hasFetcher: 'fetcher' in ctx, nowIsFn: typeof ctx.now === 'function', logIsFn: typeof ctx.log === 'function' } }`)
+  const { url, source } = await writeArtifact(`export async function run(input, ctx) { return { keys: Object.keys(ctx).sort(), hasBot: 'bot' in ctx, hasFetcher: 'fetcher' in ctx, nowIsFn: typeof ctx.now === 'function', logIsFn: typeof ctx.log === 'function' } }`)
   const r = new RunnerClient({ logger: () => {}, timeoutMs: 3000 })
   try {
-    const out = await r.invoke('v1', { artifactPath: url, params: {} })
+    const out = await r.invoke('v1', { source, artifactPath: url, expectedHash: sha256(source), params: {} })
     ok(out.ok, '调用成功')
     eq(out.output.keys, ['log', 'now'], 'ctx 仅含 now/log（冻结白名单）')
     ok(out.output.hasBot === false, 'ctx 无 bot（审计 §4.2：不暴露宿主）')
@@ -52,10 +56,10 @@ await test('runner：capability ctx 只含 now/log，无 bot/fetcher 暴露', as
 // ---------- 3. worker env 最小化（主进程敏感变量不泄漏）----------
 await test('runner：worker env 最小化，主进程敏感 env 不泄漏', async () => {
   process.env.LEAKED_SECRET = 'should-not-leak-to-worker'
-  const url = await writeArtifact(`export async function run(input, ctx) { return { leaked: process.env.LEAKED_SECRET || null, hasPath: !!process.env.PATH, hasHome: !!process.env.HOME } }`)
+  const { url, source } = await writeArtifact(`export async function run(input, ctx) { return { leaked: process.env.LEAKED_SECRET || null, hasPath: !!process.env.PATH, hasHome: !!process.env.HOME } }`)
   const r = new RunnerClient({ logger: () => {}, timeoutMs: 3000 })
   try {
-    const out = await r.invoke('v1', { artifactPath: url, params: {} })
+    const out = await r.invoke('v1', { source, artifactPath: url, expectedHash: sha256(source), params: {} })
     ok(out.ok, '调用成功')
     eq(out.output.leaked, null, 'worker 看不到主进程 LEAKED_SECRET（env 白名单：仅 PATH/HOME）')
     ok(out.output.hasPath === true && out.output.hasHome === true, 'worker 仍有 PATH/HOME（最小必要）')
@@ -64,12 +68,77 @@ await test('runner：worker env 最小化，主进程敏感 env 不泄漏', asyn
 
 // ---------- 4. 超时 kill + 自愈 ----------
 await test('runner：超时返回 error + kill worker', async () => {
-  const url = await writeArtifact(`export async function run(input, ctx) { await new Promise(r=>setTimeout(r, 5000)); return {ok:true} }`)
+  const { url, source } = await writeArtifact(`export async function run(input, ctx) { await new Promise(r=>setTimeout(r, 5000)); return {ok:true} }`)
   const r = new RunnerClient({ logger: () => {}, timeoutMs: 800 })
   try {
-    const out = await r.invoke('v1', { artifactPath: url, params: {} })
+    const out = await r.invoke('v1', { source, artifactPath: url, expectedHash: sha256(source), params: {} })
     ok(!out.ok, '超时返回失败')
     ok(/超时/.test(out.error || ''), '错误信息含超时')
+  } finally { await r.stop(); cleanup(url) }
+})
+
+// ---------- 5. 串行队列：同 tick 并发也串行，且用后即弃无残留（审计 P1-6 / P0-1）----------
+await test('runner：并发 invoke 串行化（宿主时间区间不重叠）+ worker 用后即弃', async () => {
+  const { url, source } = await writeArtifact(`export async function run(input, ctx) {
+    const t0 = Date.now(); ctx.log('start', t0)
+    await new Promise(r=>setTimeout(r,120))
+    const t1 = Date.now(); ctx.log('end', t1)
+    return { t0, t1 } }`)
+  const starts = [], ends = []
+  const logger = (_lvl, ...args) => {
+    if (args[1] === 'start') starts.push(args[2])
+    else if (args[1] === 'end') ends.push(args[2])
+  }
+  const r = new RunnerClient({ logger, timeoutMs: 5000 })
+  try {
+    const outs = await Promise.all([1, 2, 3].map(() => r.invoke('v1', { source, artifactPath: url, expectedHash: sha256(source), params: {} })))
+    ok(outs.every((o) => o.ok), '三次调用均成功')
+    starts.sort((a, b) => a - b); ends.sort((a, b) => a - b)
+    ok(starts.length === 3 && ends.length === 3, '收到 3 组 start/end')
+    let overlap = false
+    for (let i = 0; i < starts.length; i++) {
+      if (starts[i] > ends[i]) overlap = true
+      if (i > 0 && starts[i] < ends[i - 1]) overlap = true
+    }
+    ok(!overlap, '三个执行区间两两不重叠（真正串行）')
+    ok(r._worker === null, '调用结束后 worker 已回收（无跨调用残留状态）')
+  } finally { await r.stop(); cleanup(url) }
+})
+
+// ---------- 6. 隔离：别名 process.getBuiltinModule 无法写宿主/读越界/联网（审计 P0-1）----------
+await test('runner：本地隔离面阻断 fs 写入/越界读取/网络', async () => {
+  const marker = path.join(os.tmpdir(), `tevo-escape-${Date.now()}`)
+  const src = `export async function run(input, ctx) {
+    const p = process
+    const out = {}
+    try { p.getBuiltinModule('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x'); out.fsWrite='WROTE' } catch(e){ out.fsWrite=e.code||e.message }
+    try { out.fsRead=String(p.getBuiltinModule('node:fs').readFileSync('/etc/hostname','utf8')).length } catch(e){ out.fsRead=e.code||e.message }
+    try { const net=p.getBuiltinModule('node:net'); out.net=await new Promise(res=>{const s=net.connect({host:'1.1.1.1',port:53});s.on('connect',()=>{s.destroy();res('CONNECTED')});s.on('error',e=>res('ERR:'+e.code));setTimeout(()=>{s.destroy();res('TIMEOUT')},1200)}) } catch(e){ out.net=e.code||e.message }
+    return out }`
+  const { url } = await writeArtifact(src)
+  const r = new RunnerClient({ logger: () => {}, timeoutMs: 4000 })
+  try {
+    const out = await r.invoke('v1', { source: src, artifactPath: url, expectedHash: sha256(src), params: {} })
+    ok(out.ok, '调用返回')
+    ok(!/WROTE/.test(String(out.output.fsWrite)), '别名 getBuiltinModule 无法写宿主文件')
+    ok(fs.existsSync(marker) === false, '宿主标记文件不存在')
+    ok(/ERR_ACCESS_DENIED|not a function/.test(String(out.output.fsRead)), `越界读取被拒（${out.output.fsRead}）`)
+    ok(/ERR:|not a function/.test(String(out.output.net)), `未授权网络被拒（${out.output.net}）`)
+  } finally { await r.stop(); cleanup(url); try { fs.rmSync(marker, { force: true }) } catch { /* noop */ } }
+})
+
+// ---------- 7. 制品篡改：哈希不匹配拒绝执行（审计 P1-7）----------
+await test('runner：验证后篡改制品 → 拒绝执行', async () => {
+  const good = `export async function run() { return { v: 4 } }`
+  const { url } = await writeArtifact(good)
+  const expectedHash = sha256(good)
+  // 模拟“验证后把 index.js 改成 999”
+  fs.writeFileSync(new URL(url), `export async function run() { return { v: 999 } }`)
+  const r = new RunnerClient({ logger: () => {}, timeoutMs: 3000 })
+  try {
+    const out = await r.invoke('v1', { source: good, artifactPath: url, expectedHash, params: {} })
+    ok(!out.ok, '篡改后拒绝执行')
+    ok(out.errorClass === 'artifact_tampered', '错误类别标注制品篡改')
   } finally { await r.stop(); cleanup(url) }
 })
 
@@ -80,7 +149,7 @@ const { SandboxManager } = await import('../sandbox/manager.js')
 const { ToolEvoRegistry } = await import('./registry.js')
 
 function stubSandboxTransport({ writeError = null, runStdout = null, hang = false } = {}) {
-  const calls = { create: 0, run: 0, writes: [], runs: [], envs: [] }
+  const calls = { create: 0, run: 0, kills: [], writes: [], runs: [], envs: [] }
   let seq = 0
   return {
     calls,
@@ -98,7 +167,7 @@ function stubSandboxTransport({ writeError = null, runStdout = null, hang = fals
       const out = runStdout ?? JSON.stringify({ ok: true, output: { doubled: 42 } })
       return { async wait() { return { exitCode: 0, stdout: out, stderr: '' } }, async kill() { return true } }
     },
-    async kill() { return true },
+    async kill(h) { calls.kills.push(h?.id); return true },
     async setTimeout() {},
     async list() { return [] },
     async updateNetwork() {},
@@ -121,15 +190,15 @@ await test('沙箱档：invoke 走 microVM（env 传制品路径与参数文件�
     eq(t.calls.runs, ['node runner.mjs'], '在沙箱内执行 runner.mjs')
     const env = t.calls.envs[0]
     eq(env.EVO_ENTRY, '/home/user/evo/demo/1.0.0/index.js', '制品路径按相对路径拼进沙箱')
-    eq(env.EVO_PARAMS_FILE, '/home/user/evo/params.json', '参数走文件（不走 shell 拼接）')
+    ok(/^\/home\/user\/evo\/params-[0-9a-f]+\.json$/.test(String(env.EVO_PARAMS_FILE)), '参数走每调用独立文件（不走 shell 拼接、不互相覆盖）')
     ok(!('EVO_PARAMS' in env), '不再用 EVO_PARAMS 环境变量传参（避免 E2BIG 与转义问题）')
     const paths = t.calls.writes.map((w) => w.path)
     ok(paths.some((p) => p.endsWith('demo/1.0.0/index.js')), '制品已上传')
-    ok(paths.some((p) => p.endsWith('params.json')), '参数文件已写入')
+    ok(paths.some((p) => /params-[0-9a-f]+\.json$/.test(p)), '参数文件已写入')
   } finally { await r.stop(); await sbx.manager.shutdown(); cleanup(pathToFileURL(file).href) }
 })
 
-await test('沙箱档：制品只上传一次（同版本复用沙箱内副本）', async () => {
+await test('沙箱档：每次调用独立沙箱（用后即毁，无跨调用残留状态）', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tevo-art-sbx2-'))
   const f1 = path.join(dir, 'a.js'); const f2 = path.join(dir, 'b.js')
   fs.writeFileSync(f1, `export async function run() { return { v: 'a' } }`)
@@ -140,11 +209,11 @@ await test('沙箱档：制品只上传一次（同版本复用沙箱内副本�
   try {
     await r.invoke('v1', { artifactPath: pathToFileURL(f1).href, artifactRel: 'a/1.0.0/index.js', params: {} })
     await r.invoke('v1', { artifactPath: pathToFileURL(f1).href, artifactRel: 'a/1.0.0/index.js', params: {} })
-    const uploadsA = t.calls.writes.filter((w) => w.path.endsWith('a/1.0.0/index.js')).length
-    eq(uploadsA, 1, '同一 versionId 只上传一次制品')
     await r.invoke('v2', { artifactPath: pathToFileURL(f2).href, artifactRel: 'b/1.0.0/index.js', params: {} })
-    eq(t.calls.writes.filter((w) => w.path.endsWith('b/1.0.0/index.js')).length, 1, '换版本上传新制品')
-    eq(t.calls.create, 1, '三次调用复用同一沙箱会话')
+    eq(t.calls.create, 3, '三次调用各开一次沙箱（无共享会话残留）')
+    eq(t.calls.kills.length, 3, '每次调用后销毁沙箱')
+    eq(sbx.manager.stats().leases, 0, '调用后无遗留租约')
+    eq(t.calls.writes.filter((w) => w.path.endsWith('b/1.0.0/index.js')).length, 1, '换版本上传对应制品')
   } finally { await r.stop(); await sbx.manager.shutdown(); cleanup(pathToFileURL(f1).href) }
 })
 

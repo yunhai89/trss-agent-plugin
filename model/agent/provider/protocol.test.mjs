@@ -204,6 +204,49 @@ await test('B7 正常工具调用不受影响', async () => {
   assert.equal(result.content, 'after tool')
 })
 
+// ── 结构化输出：各协议映射到原生参数（审计 P1-2）─────────────────────
+const NEUTRAL_SCHEMA = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false }
+const NEUTRAL_RF = { type: 'json_schema', json_schema: { name: 'fixture', strict: true, schema: NEUTRAL_SCHEMA } }
+
+await test('结构化输出：OpenAI 原样透传 response_format（不改造）', async () => {
+  let captured
+  const client = { chat: { completions: { async create(body) { captured = structuredClone(body); return { choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }] } } } } }
+  await new OpenAIProvider({ client }).chat({ model: 'fixture', messages: [{ role: 'user', content: 'x' }], response_format: NEUTRAL_RF })
+  assert.deepEqual(captured.response_format, NEUTRAL_RF, 'OpenAI 收到原生 response_format')
+})
+
+await test('结构化输出：Anthropic 映射为 output_config.format，不发送 OpenAI response_format', async () => {
+  let captured
+  const client = { messages: { async create(body) { captured = structuredClone(body); return { content: [{ type: 'text', text: '{"ok":true}' }], stop_reason: 'end_turn' } } } }
+  await new AnthropicProvider({ client }).chat({ model: 'fixture', messages: [{ role: 'user', content: 'x' }], response_format: NEUTRAL_RF })
+  assert.equal(Object.hasOwn(captured, 'response_format'), false, '不得把 OpenAI response_format 发给 Anthropic')
+  assert.deepEqual(captured.output_config?.format, { type: 'json_schema', schema: NEUTRAL_SCHEMA }, 'Anthropic 原生 output_config.format')
+})
+
+await test('结构化输出：Gemini 映射为 response_format{type:text,mime_type,schema}', async () => {
+  let captured
+  const client = { interactions: { async create(body) { captured = structuredClone(body); return { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: '{"ok":true}' }] }] } } } }
+  await new GeminiProvider({ client }).chat({ model: 'fixture', messages: [{ role: 'user', content: 'x' }], response_format: NEUTRAL_RF })
+  assert.deepEqual(captured.response_format, { type: 'text', mime_type: 'application/json', schema: NEUTRAL_SCHEMA }, 'Gemini 原生 response_format')
+  assert.equal(Object.hasOwn(captured.response_format || {}, 'json_schema'), false, '不透传 json_schema 包装')
+})
+
+await test('结构化输出：兼容端拒绝 response_format → 降级一次并记住（不反复原样重试）', async () => {
+  const bodies = []
+  let calls = 0
+  const client = { chat: { completions: { async create(body) {
+    bodies.push(structuredClone(body)); calls++
+    if (calls === 1) throw new Error('400 unsupported parameter: response_format')
+    return { choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }] }
+  } } } }
+  const p = new OpenAIProvider({ client })
+  await p.chat({ model: 'no-struct-model', messages: [{ role: 'user', content: 'x' }], response_format: NEUTRAL_RF })
+  await p.chat({ model: 'no-struct-model', messages: [{ role: 'user', content: 'x' }], response_format: NEUTRAL_RF })
+  assert.equal(bodies.length, 3, '首次降级重试 2 次 + 第二次直接成功 1 次')
+  assert.equal(Object.hasOwn(bodies[1], 'response_format'), false, '降级重试不带 response_format')
+  assert.equal(Object.hasOwn(bodies[2], 'response_format'), false, '后续调用主动剥离（记忆生效）')
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)

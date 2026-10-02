@@ -24,9 +24,12 @@ import { getStickerManager } from '../sticker/manager.js'
 
 const router = express.Router()
 
+// 运行时提供者：默认 getRuntime；离线集成测试可经 buildApiRouter({ runtimeProvider }) 注入桩
+let _runtimeProvider = getRuntime
+
 /** 取运行时；失败则响应 5000 并返回 null（handler 据此中断） */
 async function getRt(res) {
-  try { return await getRuntime() }
+  try { return await _runtimeProvider() }
   catch (e) {
     fail(res, CODE.INTERNAL, `运行时未就绪：${e?.message || '可能 apiKey 未配'}`)
     return null
@@ -270,7 +273,7 @@ router.post('/tevo/tools/:versionId/rollback', asyncHandler(async (req, res) => 
 router.get('/tevo/metrics', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
   if (!r.toolEvo?.registry) return ok(res, null)
-  const { convergenceMetrics } = await import('../../toolEvo/evaluator.js')
+  const { convergenceMetrics } = await import('../toolEvo/evaluator.js')
   return ok(res, await convergenceMetrics())
 }))
 
@@ -278,7 +281,7 @@ router.get('/tevo/metrics', asyncHandler(async (req, res) => {
 router.get('/tevo/health', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
   if (!r.toolEvo?.registry) return ok(res, [])
-  const { failureClusters } = await import('../../toolEvo/evaluator.js')
+  const { failureClusters } = await import('../toolEvo/evaluator.js')
   return ok(res, await failureClusters())
 }))
 
@@ -797,6 +800,7 @@ router.delete('/suggestions/:id', asyncHandler(async (req, res) => {
 // 未知 /api 路径 → JSON 404（不走 SPA fallback）
 router.use((req, res) => fail(res, CODE.NOTFOUND, `未知接口 ${req.method} ${req.path}`))
 
-export function buildApiRouter() {
+export function buildApiRouter({ runtimeProvider } = {}) {
+  if (typeof runtimeProvider === 'function') _runtimeProvider = runtimeProvider
   return router
 }

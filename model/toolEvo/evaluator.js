@@ -67,7 +67,12 @@ export async function failureClusters({ minInvocations = 3, minFailRate = 0.3 } 
 }
 
 /**
- * 收敛指标（文档 §22）：版本/状态分布 + 复用率 + 调用失败率 + 库紧凑度。
+ * 收敛指标（文档 §22）。各指标分母/含义明确：
+ *   - activeStable：当前真正在线的 stable 版本数（tools.active_version_id）；
+ *   - reuseRate = 被真实调用过的 stable 版本数 / stable 版本总数（用实际调用证明复用，而非 stable 占比）；
+ *   - libraryCompactness = stable / 总版本数（库中已上线版本占比，衡量版本收敛）；
+ *   - verifyPassRate = (stable+verified) / 总版本数（验证通过占比）；
+ *   - invocationFailRate = 失败调用 / 总调用。
  */
 export async function convergenceMetrics() {
   const count = async (where) => ((await dao.get(`SELECT COUNT(*) AS n FROM tool_versions${where ? ' WHERE ' + where : ''}`))?.n || 0)
@@ -76,14 +81,18 @@ export async function convergenceMetrics() {
   const verified = await count("status='verified'")
   const rejected = await count("status='rejected'")
   const deprecated = await count("status='deprecated'")
+  const activeStable = (await dao.get(`SELECT COUNT(*) AS n FROM tools WHERE active_version_id IS NOT NULL`))?.n || 0
+  const invokedStable = (await dao.get(
+    `SELECT COUNT(DISTINCT tv.id) AS n FROM tool_versions tv JOIN tool_invocations ti ON ti.version_id=tv.id WHERE tv.status='stable'`,
+  ))?.n || 0
   const invocations = (await dao.get('SELECT COUNT(*) AS n FROM tool_invocations'))?.n || 0
   const failedInv = (await dao.get('SELECT COUNT(*) AS n FROM tool_invocations WHERE success=0'))?.n || 0
   return {
-    totalVersions, stable, verified, rejected, deprecated,
+    totalVersions, stable, activeStable, verified, rejected, deprecated, invokedStable,
     verifyPassRate: totalVersions ? +((stable + verified) / totalVersions).toFixed(2) : 0,
-    reuseRate: totalVersions ? +(stable / totalVersions).toFixed(2) : 0,
+    reuseRate: stable ? +(invokedStable / stable).toFixed(2) : 0,
     invocationFailRate: invocations ? +(failedInv / invocations).toFixed(2) : 0,
-    libraryCompactness: stable ? +(stable / totalVersions).toFixed(2) : 0,
+    libraryCompactness: totalVersions ? +(stable / totalVersions).toFixed(2) : 0,
     invocations,
   }
 }

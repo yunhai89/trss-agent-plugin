@@ -1,11 +1,22 @@
 /**
- * toolEvo stable 工具隔离执行 worker（子进程入口，由 RunnerClient fork）。
+ * toolEvo stable 工具隔离执行 worker（子进程入口）。
  *
- * 通过 IPC 收 {id, artifactPath, params} → import 制品的 run → 用 capabilityCtx 调用 → 回 {id, ok, output/error}。
- * capabilityCtx = Object.freeze({ now, log })——**绝不**暴露 e/bot/fetcher/process（审计 §4.2 阻断级）。
- * 制品在子进程内 import 后缓存（Map），崩溃由主进程重启 worker 重建。
+ * 由 RunnerClient 以 `unshare -n node --permission --allow-fs-read=<workDir,workerDir>` 启动：
+ *   - 无网络命名空间出口、无文件写、无 child_process/worker；
+ *   - 本进程再削弱宿主全局（getBuiltinModule/binding/dlopen/fetch/...），只加载私有工作目录里的
+ *     不可变 source（宿主已按 content_hash 校验并落盘为只读）。
+ * 通过 IPC 收 {id, artifactPath, params} → import 制品的 run → 用冻结 capabilityCtx 调用。
  */
 const cache = new Map() // artifactPath → mod
+
+// 纵深防御：删除可获取宿主能力的全局（权限模型已挡 fs/child，此处削弱网络/动态加载入口）
+try { delete process.getBuiltinModule } catch { /* noop */ }
+try { delete process.binding } catch { /* noop */ }
+try { delete process.dlopen } catch { /* noop */ }
+try { delete process._linkedBinding } catch { /* noop */ }
+for (const g of ['fetch', 'WebSocket', 'EventSource', 'XMLHttpRequest', 'require']) {
+  try { delete globalThis[g] } catch { /* noop */ }
+}
 
 process.on('message', async (msg) => {
   if (!msg || !msg.id) return

@@ -87,28 +87,61 @@ export function validateManifest(m) {
   return { ok, errors: ok ? [] : (fn.errors || []).map((e) => `${e.instancePath || '/'} ${e.message}`) }
 }
 
-/** 生成候选安全闸：只允许 sideEffects ∈ {none, read}（固定受信适配器永不自动生成） */
-export function isGenerationAllowed(m) {
-  const se = m?.permissions?.sideEffects || []
-  return se.length > 0 && se.every((s) => s === 'none' || s === 'read')
+/**
+ * 生成候选安全闸（审计 P1-2）：sideEffects 仅 none/read，且不得声明任何额外能力
+ * （network 必须 deny、filesystem 必须为空、secrets 必须为空）。固定受信适配器永不自动生成。
+ * @returns {string[]} 违规项（空数组 = 通过）
+ */
+export function generationPermissionViolations(m) {
+  const v = []
+  const perm = m?.permissions || {}
+  const se = perm.sideEffects
+  if (!Array.isArray(se) || se.length === 0 || !se.every((s) => s === 'none' || s === 'read')) {
+    v.push('sideEffects 仅允许 none/read')
+  }
+  const net = perm.network || {}
+  if (net.mode && net.mode !== 'deny') v.push('network.mode 仅允许 deny')
+  if (Array.isArray(net.hosts) && net.hosts.length) v.push('不允许声明 network.hosts')
+  const fsperm = perm.filesystem || {}
+  if ((fsperm.read || []).length || (fsperm.write || []).length) v.push('不允许声明 filesystem 访问')
+  if ((perm.secrets || []).length) v.push('不允许声明 secrets')
+  return v
 }
 
-/** 构造一个 manifest（补默认值） */
-export function makeManifest(partial) {
-  return {
-    version: '0.1.0',
-    status: 'draft',
-    category: 'query',
-    description: '',
-    useWhen: [],
-    doNotUseWhen: [],
-    tags: [],
-    entrypoint: 'index.js',
-    runtime: { kind: 'node', timeoutMs: 3000, memoryMb: 128, cpuQuota: 0.5 },
-    permissions: { sideEffects: ['none'], network: { mode: 'deny', hosts: [] }, filesystem: { read: [], write: [] }, secrets: [] },
-    provenance: { kind: 'generated', createdAt: new Date().toISOString() },
-    ...partial,
+/** 生成候选安全闸：只允许 sideEffects ∈ {none, read} 且无额外能力声明 */
+export function isGenerationAllowed(m) {
+  return generationPermissionViolations(m).length === 0
+}
+
+/**
+ * 构造 manifest（补默认值）。permissions/runtime/provenance 做**深合并**：
+ * 候选只声明 sideEffects 时，network/filesystem/secrets 仍取受信默认（deny/空），
+ * 绝不会因浅层展开被不完整的 LLM 输出覆盖（审计 P1-2）。
+ */
+export function makeManifest(partial = {}) {
+  const p = partial || {}
+  const perm = p.permissions || {}
+  const runtime = p.runtime || {}
+  const prov = p.provenance || {}
+  const out = { ...p }
+  out.version = typeof p.version === 'string' ? p.version : '0.1.0'
+  out.status = p.status || 'draft'
+  out.category = p.category || 'query'
+  out.description = typeof p.description === 'string' ? p.description : ''
+  out.useWhen = Array.isArray(p.useWhen) ? p.useWhen : []
+  out.doNotUseWhen = Array.isArray(p.doNotUseWhen) ? p.doNotUseWhen : []
+  out.tags = Array.isArray(p.tags) ? p.tags : []
+  out.inputSchema = (p.inputSchema && typeof p.inputSchema === 'object') ? p.inputSchema : { type: 'object', properties: {} }
+  out.entrypoint = p.entrypoint || 'index.js'
+  out.runtime = { kind: 'node', timeoutMs: 3000, memoryMb: 128, cpuQuota: 0.5, ...runtime }
+  out.permissions = {
+    sideEffects: Array.isArray(perm.sideEffects) && perm.sideEffects.length ? perm.sideEffects : ['none'],
+    network: { mode: 'deny', hosts: [], ...(perm.network || {}) },
+    filesystem: { read: [], write: [], ...(perm.filesystem || {}) },
+    secrets: Array.isArray(perm.secrets) ? perm.secrets : [],
   }
+  out.provenance = { kind: 'generated', createdAt: new Date().toISOString(), ...prov }
+  return out
 }
 
 export { NAME_RE, SEMVER_RE }
