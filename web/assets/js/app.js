@@ -103,7 +103,7 @@
       <div class="login-card">
         <div class="login-logo"><v-icon name="bot"/></div>
         <h2 style="margin:16px 0 4px;font-size:20px">agents-plugin <span class="grad-t">管理面板</span></h2>
-        <p class="mut2" style="font-size:12.5px;margin:0 0 18px">私聊 bot 发送 <b>#agents登录</b>，将返回的 token 粘贴到下方</p>
+        <p class="mut2" style="font-size:12.5px;margin:0 0 18px">私聊 bot 发送 <b>#agents登录</b>，会分别返回【公网地址】与【本地地址】两条链接；直接点开链接即可，或把链接里的 token 粘贴到下方</p>
         <input class="inp" v-model="loginInput" placeholder="粘贴登录 token" style="margin-bottom:12px;text-align:left" @keyup.enter="doLogin"/>
         <button class="btn b-pri" style="width:100%;padding:11px" @click="doLogin"><v-icon name="key"/>登 录</button>
       </div>

@@ -102,17 +102,27 @@ async function resolveHost(cfg) {
   return detectLanIp()
 }
 
+/**
+ * 本地访问地址（固定 127.0.0.1，不读任何配置）。
+ * 服务端监听 0.0.0.0，天然覆盖本机回环；此地址用于同机/内网直连，避免域名走公网 NAT 回环不通。
+ */
+export function localHost() {
+  return '127.0.0.1'
+}
+
 /** #agents登录 命令处理（permission:'master' 已挡权限；群聊提示去私聊） */
 export async function handleAgentsLogin(e) {
   const cfg = Config.get().agent?.webApi || {}
   if (cfg.enable === false) { await e.reply('Web 面板未启用（config: agent.webApi.enable）'); return true }
   if (e.isGroup) { await e.reply('为安全，请在私聊对我发送 #agents登录'); return true }
-  const port = cfg.port || 6098
+  const port = Number(cfg.port) || 6098
   const host = await resolveHost(cfg)
   const token = issueToken(e.user_id)
-  const url = `http://${host}:${port}/?token=${token}`
-  Log.mark(`[web] master ${e.user_id} 登录面板（host=${host}）`)
-  // 地址单独发送（参考锅巴 #锅巴登录）：公网 IP 由代码自动探测，不依赖配置文件
-  await e.reply(url)
+  const publicUrl = `http://${host}:${port}/?token=${token}`
+  const localUrl = `http://${localHost()}:${port}/?token=${token}`
+  Log.mark(`[web] master ${e.user_id} 登录面板（公网 host=${host}，本地 ${localHost()}）`)
+  // 公网/本地两个地址【分两条消息发送】，绝不合并（便于分别复制、避免长文本被适配器截断/换行错乱）
+  await e.reply(`🌐 公网地址：\n${publicUrl}`)
+  await e.reply(`💻 本地地址：\n${localUrl}`)
   return true
 }

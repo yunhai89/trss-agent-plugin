@@ -1,7 +1,8 @@
 /**
  * Web 管理面板 HTTP 服务（独立于锅巴）。
  * Yunzai 自带 express（5.2.1）；静态托管 web/ + /api 路由（鉴权）+ SPA 兜底。
- * 监听 0.0.0.0:port（默认 6098）；幂等启动；仅 webApi.{enable,port} 变化才重启（不随常规配置热加载重启）。
+ * 监听 0.0.0.0:port（默认 6098）——该绑定**同时覆盖本地回环(127.0.0.1)与公网**，本地访问固定生效、无需任何配置；
+ * 幂等启动；仅 webApi.{enable,port} 变化才重启（不随常规配置热加载重启）。
  */
 import express from 'express'
 import path from 'node:path'
@@ -33,7 +34,8 @@ export async function startServer() {
   })
   app.use(errorMiddleware)
 
-  _server = app.listen(port, '0.0.0.0', () => Log.mark(`[web] 管理面板已启动：http://0.0.0.0:${port}（私聊 #agents登录 取访问地址）`))
+  // 0.0.0.0 已同时监听公网与本地回环，本地地址固定可用（#agents登录 会分别给出公网/本地两条地址）
+  _server = app.listen(port, '0.0.0.0', () => Log.mark(`[web] 管理面板已启动：0.0.0.0:${port}（公网+本地 127.0.0.1；私聊 #agents登录 取访问地址）`))
   _curPort = port
   _server.on('error', (e) => {
     if (e.code === 'EADDRINUSE') Log.warn(`[web] 端口 ${port} 被占用，面板未启动；改 agent.webApi.port 后 #agents重载`)
