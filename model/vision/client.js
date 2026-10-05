@@ -21,7 +21,7 @@ export const DEFAULT_DESCRIBE = [
 ].join('\n')
 
 export class VisionService {
-  constructor({ provider, model, protocol = 'openai', describePrompt, maxTokens = 1024, thinking = null, temperature = null, logger = () => {} } = {}) {
+  constructor({ provider, model, protocol = 'openai', describePrompt, maxTokens = 1024, thinking = null, temperature = null, videoCapable, logger = () => {} } = {}) {
     if (!provider) throw new Error('VisionService 需要 provider')
     if (!model) throw new Error('VisionService 需要 model')
     this.provider = provider
@@ -31,6 +31,7 @@ export class VisionService {
     this.maxTokens = maxTokens
     this.thinking = thinking // 原生 thinking 控制：{type:'enabled'|'disabled'}；来自「模型列表」该模型的 thinking 设置
     this.temperature = temperature
+    this.videoCapable = videoCapable !== false // 该视觉模型是否支持视频输入（caps.video；未传则保持旧行为=尝试）
     this.logger = logger
   }
 
@@ -86,6 +87,11 @@ export class VisionService {
     // 因此直接跳过，由调用方降级为"视频（识别失败/为空）"文本占位。
     if (this.protocol !== 'openai') {
       this.logger('warn', `[vision] 视频识别跳过：协议 ${this.protocol} 不支持 video_url 原生块`)
+      return ''
+    }
+    // 视觉模型本身不支持视频（caps.video=false，如纯图像 VL 模型）：不下发，避免端点拒收或对空视频编描述
+    if (this.videoCapable === false) {
+      this.logger('warn', `[vision] 视频识别跳过：视觉模型 ${this.model} 未声明视频能力（media.caps.video / 模型列表）`)
       return ''
     }
     const videoUrl = `data:${mime};base64,${buffer.toString('base64')}`
@@ -155,11 +161,16 @@ export class VisionService {
    */
   _finalText(res, kind, name) {
     const text = String(res?.content || '').trim()
+    const reasoning = String(res?.reasoning || '').trim()
     if (!text) {
-      this._warnEmpty(kind, name)
+      // 区分"仅产出思考"（思考模型 + max_tokens 被推理耗尽，最常见）与"模型/通道根本不处理图片"
+      if (reasoning) {
+        this.logger('warn', `[vision] ${kind} ${name || ''}：仅产出思考、正文为空（finish=${res?.finishReason || '?'}，思考 ${reasoning.length} 字）——max_tokens 被推理耗尽；请给该视觉模型关思考（模型列表 thinking=off）或提高 agent.vision.maxTokens`)
+      } else {
+        this._warnEmpty(kind, name)
+      }
       return ''
     }
-    const reasoning = String(res?.reasoning || '').trim()
     if (reasoning && reasoning.includes(text)) {
       this.logger('warn', `[vision] ${kind} ${name || ''}：模型只返回了思考内容、未产出结果（finish=${res?.finishReason || '?'}）——多为 max_tokens 被推理耗尽；请提高 agent.vision.maxTokens 或换非思考视觉模型`)
       return ''

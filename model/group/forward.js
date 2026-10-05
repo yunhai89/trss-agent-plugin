@@ -13,6 +13,47 @@
 
 import { defineTool, param, groupIdOf, sendApi } from '../toolkit/index.js'
 
+/** 单个消息段归一为 OneBot 段 {type, data}（LLM 可能给扁平 {type,...} 或已是 {type,data}） */
+function normSegment(s) {
+  if (typeof s === 'string') return { type: 'text', data: { text: s } }
+  if (!s || typeof s !== 'object') return { type: 'text', data: { text: String(s ?? '') } }
+  if (s.data && typeof s.data === 'object') return s
+  const { type, ...rest } = s
+  return { type: type || 'text', data: rest }
+}
+
+/** 节点 content 归一：字符串原样（NapCat 会解析 CQ 码）；数组逐段归一；单段对象包成数组 */
+function normContent(c) {
+  if (Array.isArray(c)) return c.map(normSegment)
+  if (typeof c === 'string') return c
+  if (c && typeof c === 'object') return [normSegment(c)]
+  return ''
+}
+
+/**
+ * 归一转发节点为 NapCat 要求的 {type:'node', data:{content,user_id,nickname}} 形状。
+ *
+ * 关键：NapCat 的 send_*_forward_msg 只把 `type==='node'` 的元素当转发节点（其 data 里读
+ * content/user_id/nickname）；裸 {uin,name,content} 会被当成普通消息段，因 `type` 为 undefined
+ * 直接报「未知的消息类型：undefined」。本工具历史上正是这样透传 LLM 给的裸节点。
+ */
+export function normalizeForwardNodes(messages) {
+  return (messages || []).map((n) => {
+    if (n && n.type === 'node' && n.data && typeof n.data === 'object') return n // 已是原生 node
+    const data = {}
+    if (n?.id != null) {
+      data.id = String(n.id) // 引用已有消息
+    } else {
+      data.content = normContent(n?.content)
+      const uid = n?.uin ?? n?.user_id
+      if (uid != null && uid !== '') data.user_id = String(uid)
+      const nick = n?.name ?? n?.nickname
+      if (nick) data.nickname = String(nick)
+    }
+    return { type: 'node', data }
+  })
+}
+
 /** send_forward_msg：发送合并转发；群→send_group_forward_msg，私聊→send_private_forward_msg */
 export const sendForwardMsgTool = defineTool({
   name: 'send_forward_msg',
@@ -35,9 +76,10 @@ export const sendForwardMsgTool = defineTool({
     const target = gid ? 'group' : uid ? 'private' : null
     if (!target) return { error: '需指定目标（群聊或 userId）；当前会话无法判断' }
     const action = target === 'group' ? 'send_group_forward_msg' : 'send_private_forward_msg'
+    const nodes = normalizeForwardNodes(p.messages)
     const params = target === 'group'
-      ? { group_id: gid, messages: p.messages }
-      : { user_id: uid, messages: p.messages }
+      ? { group_id: gid, messages: nodes }
+      : { user_id: uid, messages: nodes }
     const r = await sendApi(ctx, action, params)
     if (!r.ok) return { error: r.error }
     return { ok: true, target, groupId: gid || null, userId: uid || null, messageId: r.data?.message_id ?? null, resId: r.data?.res_id ?? r.data?.resid ?? null }

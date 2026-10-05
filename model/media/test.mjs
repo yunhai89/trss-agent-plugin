@@ -13,6 +13,7 @@ import {
   toGeminiBlocks,
   buildUserContent,
   createMediaService,
+  resolveMedia,
   listGroupFilesTool,
   getGroupFileTool,
   readAttachmentTool,
@@ -37,6 +38,7 @@ async function test(name, fn) {
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00])
 const JPG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46])
 const PDF = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34])
+const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom')])
 
 // ---------- 1. 魔数嗅探 ----------
 await test('sniffMagic：PNG/JPG/PDF', async () => {
@@ -44,6 +46,22 @@ await test('sniffMagic：PNG/JPG/PDF', async () => {
   eq(sniffMagic(JPG), 'image/jpeg', 'JPG 魔数')
   eq(sniffMagic(PDF), 'application/pdf', 'PDF 魔数')
   eq(sniffMagic(Buffer.from('hello world')), null, '无魔数 → null')
+})
+
+// ---------- 1b. 魔数嗅探：视频/容器格式 ----------
+const ftyp = (brand) => Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftyp'), Buffer.from(brand)])
+await test('sniffMagic：视频容器格式', async () => {
+  eq(sniffMagic(Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.from('....webm....')])), 'video/webm', 'webm')
+  eq(sniffMagic(Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.from('....matroska....')])), 'video/x-matroska', 'mkv')
+  eq(sniffMagic(Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('AVI ')])), 'video/x-msvideo', 'avi')
+  eq(sniffMagic(Buffer.from([0x46, 0x4c, 0x56, 0x01, 0x00])), 'video/x-flv', 'flv')
+  eq(sniffMagic(Buffer.from([0x00, 0x00, 0x01, 0xba, 0x00])), 'video/mpeg', 'mpeg-ps')
+  eq(sniffMagic(ftyp('isom')), 'video/mp4', 'mp4 isom')
+  eq(sniffMagic(ftyp('qt  ')), 'video/quicktime', 'mov qt')
+  eq(sniffMagic(ftyp('3gp4')), 'video/3gpp', '3gp')
+  eq(sniffMagic(ftyp('M4A ')), 'audio/mp4', 'm4a')
+  eq(sniffMagic(ftyp('avif')), 'image/avif', 'avif')
+  eq(sniffMagic(ftyp('heic')), 'image/heic', 'heic')
 })
 
 // ---------- 2. inferMime：魔数优先，名称扩展兜底 ----------
@@ -58,6 +76,9 @@ await test('inferMime：魔数优先 + 名称扩展兜底', async () => {
   eq(inferMime('a.jpg', PNG).mime, 'image/png', 'jpg 名 + PNG 字节 → 以字节为准')
   const WEBP = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')])
   eq(inferMime('a.png', WEBP).mime, 'image/webp', 'png 名 + webp 字节 → 以字节为准')
+  // 视频容器：扩展名与魔数
+  eq(inferMime('v.mkv', Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0])).mime, 'video/x-matroska', 'mkv')
+  eq(inferMime('v.mp4', Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypM4A ')])).mime, 'audio/mp4', 'm4a 字节优先于 mp4 名')
 })
 
 // ---------- 3. 段抽取 ----------
@@ -126,6 +147,15 @@ await test('convert：预置 mime 与字节不符时，image 块按魔数纠正'
   ok(oai[0].image_url.url.startsWith('data:image/png;base64,'), 'openai data url 按字节纠正')
   const gem = toGeminiBlocks(mislabeled, { caps: { vision: true } })
   eq(gem[0].mime_type, 'image/png', 'gemini 按字节纠正 mime_type')
+})
+
+await test('convert：AVIF/HEIC 等非通用图片格式降级文本（不发原生 image 块）', async () => {
+  const avif = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypavif')])
+  const m = [{ name: 'a.avif', mime: 'image/avif', buffer: avif, bytes: avif.length, kind: 'image' }]
+  eq(toOpenaiBlocks(m, { caps: { vision: true } })[0].type, 'text', 'openai 降级 text')
+  eq(toAnthropicBlocks(m, { caps: { vision: true } })[0].type, 'text', 'anthropic 降级 text')
+  eq(toGeminiBlocks(m, { caps: { vision: true } })[0].type, 'text', 'gemini 降级 text')
+  ok(toOpenaiBlocks(m, { caps: { vision: true } })[0].text.includes('不受支持'), '说明含格式原因')
 })
 
 // ---------- 7. convert：非视觉降级 ----------
@@ -283,6 +313,37 @@ await test('toGeminiBlocks：image/audio/pdf + 非视觉降级', async () => {
   // 未声明 audio：即使有 vision 也不下发原生 audio 块（防端点 unknown variant input_audio）
   const noAudio = toGeminiBlocks([{ kind: 'audio', mime: 'audio/wav', buffer: Buffer.from('wavdata'), name: 'r.wav', bytes: 7 }], { caps: { vision: true }, degrade: 'note' })
   eq(noAudio[0].type, 'text', '未声明 audio → 降级 text')
+})
+
+// ---------- NapCat 兜底取字节：视频走 get_file（不是 get_image）----------
+await test('resolveMedia：url 缺失时视频经 get_file 取字节（非 get_image）', async () => {
+  const calls = []
+  const e = {
+    bot: {
+      async sendApi(action, params) {
+        calls.push([action, params])
+        if (action === 'get_file') return { file: 'http://cdn/v.mp4' }
+        return {}
+      },
+    },
+  }
+  const fetcher = async () => ({ ok: true, arrayBuffer: async () => Uint8Array.from(MP4).buffer })
+  const mf = await resolveMedia(
+    { id: 'v1', source: 'message', kind: 'video', name: 'v.mp4', url: null, fid: null, segment: { file: 'video_code' } },
+    { e, fetcher, log: () => {} },
+  )
+  ok(calls.some(([a]) => a === 'get_file'), '视频调用 get_file')
+  ok(!calls.some(([a]) => a === 'get_image'), '视频不调用 get_image')
+  eq(mf.mime, 'video/mp4', '字节为 mp4 → mime 正确')
+  eq(mf.resolveError, undefined, '成功解析')
+})
+
+await test('resolveMedia：图片仍走 get_image', async () => {
+  const calls = []
+  const e = { bot: { async sendApi(action) { calls.push(action); return action === 'get_image' ? { file: 'http://cdn/a.png' } : {} } } }
+  const fetcher = async () => ({ ok: true, arrayBuffer: async () => Uint8Array.from(PNG).buffer })
+  await resolveMedia({ id: 'i1', source: 'message', kind: 'image', name: 'a.png', url: null, fid: null, segment: { file: 'img_code' } }, { e, fetcher, log: () => {} })
+  ok(calls.includes('get_image'), '图片调用 get_image')
 })
 
 // ---------- 总结 ----------

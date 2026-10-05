@@ -103,6 +103,52 @@ await test('describeImages：边界', async () => {
   eq(await describeImages({}, []), [], '空列表')
 })
 
+// ---------- 7b. describeImages：视频 → 文本媒体 ----------
+await test('describeImages：视频交视觉模型识别并替换为文本载体', async () => {
+  const m = mockProvider('视频里有人在跑步')
+  const v = new VisionService({ provider: m.provider, model: 'mimo-omni', protocol: 'openai' })
+  const out = await describeImages(v, [{ name: 'a.mp4', mime: 'video/mp4', buffer: PNG, bytes: 8, kind: 'video' }], '')
+  eq(out[0].kind, 'file', '视频→file')
+  ok(out[0].buffer.toString().includes('视频里有人在跑步'), '含视频描述')
+  ok(out[0].__visionDescribed, '标记已识别')
+  ok(m.received().messages[0].content.some((b) => b.type === 'video_url'), '子模型收到 video_url 块')
+})
+
+// ---------- 7c. describeImages：选择性转换 + 上限守卫 ----------
+await test('describeImages：images=false 保留图片原生，仅转视频', async () => {
+  const m = mockProvider('视频描述')
+  const v = new VisionService({ provider: m.provider, model: 'mimo-omni', protocol: 'openai' })
+  const media = [
+    { name: 'a.png', mime: 'image/png', buffer: PNG, bytes: 8, kind: 'image' },
+    { name: 'a.mp4', mime: 'video/mp4', buffer: PNG, bytes: 8, kind: 'video' },
+  ]
+  const out = await describeImages(v, media, '', { images: false, video: true })
+  eq(out[0].kind, 'image', '图片保持原生（不转文本）')
+  eq(out[1].kind, 'file', '视频转为文本')
+})
+
+await test('describeImages：超限媒体不送识别（避免超大字节 base64）', async () => {
+  let called = 0
+  const v = new VisionService({ provider: { async chat() { called++; return { content: 'x' } } }, model: 'v' })
+  const out = await describeImages(v, [{ name: 'big.mp4', mime: 'video/mp4', buffer: PNG, bytes: 8, kind: 'video', resolveError: 'limit_size', __skipReason: '超过单文件大小上限 8.0MB' }], '')
+  eq(called, 0, '不调用视觉模型')
+  ok(out[0].buffer.toString().includes('未送识别'), '降级文本含原因')
+  ok(out[0].__visionDescribed, '标记已处理（防盲媒体误报）')
+})
+
+await test('recognizeVideo：视频能力关闭时跳过（不调用 provider）', async () => {
+  let called = 0
+  const logs = []
+  const v = new VisionService({
+    provider: { async chat() { called++; return { content: 'x' } } },
+    model: 'qwen-vl-max', protocol: 'openai', videoCapable: false,
+    logger: (lvl, msg) => logs.push([lvl, msg]),
+  })
+  eq(await v.recognizeVideo({ buffer: PNG, mime: 'video/mp4' }), '', '返回空串')
+  eq(called, 0, '不调用 provider')
+  ok(logs.some(([lvl, msg]) => lvl === 'warn' && /视频能力/.test(msg)), '有明确 warn')
+})
+
 // ---------- 8. 端到端语义：描述能被 buildContent 当文本抽出 ----------
 await test('端到端：描述媒体经 buildContent 抽为文本（主模型可见）', async () => {
   const { buildUserContent } = await import('../media/convert.js')
@@ -127,6 +173,19 @@ await test('VisionService：模型返回空内容时告警（不再静默）', a
   ok(logs.some(([lvl, msg]) => lvl === 'warn' && /返回空/.test(msg)), 'recognize 空返回有 warn')
   eq(await v.analyze({ buffer: PNG, mime: 'image/png', name: 'y.png' }, 'judge'), '', 'analyze 空返回 → 空串')
   ok(logs.filter(([lvl, msg]) => lvl === 'warn' && /返回空/.test(msg)).length >= 2, 'analyze 空返回也告警')
+})
+
+// ---------- 9b. 正文空 + 有思考（思考吃光 max_tokens）→ 明确诊断，不误报"不支持图片" ----------
+await test('VisionService：正文空但有思考 → 提示 max_tokens 被推理耗尽', async () => {
+  const logs = []
+  const v = new VisionService({
+    provider: { async chat() { return { content: '', reasoning: '用户希望我描述这张图……'.repeat(40), finishReason: 'length' } } },
+    model: 'mimo-v2.6-flash',
+    logger: (lvl, msg) => logs.push([lvl, msg]),
+  })
+  eq(await v.recognize({ buffer: PNG, mime: 'image/png', name: 'a.jpg' }), '', '空正文 → 空串')
+  ok(logs.some(([lvl, msg]) => lvl === 'warn' && /仅产出思考/.test(msg)), '诊断为思考耗尽')
+  ok(!logs.some(([, msg]) => /不支持图片输入/.test(msg)), '不误报"不支持图片"')
 })
 
 // ---------- 10. 只返回思考内容时不能当作结果 ----------

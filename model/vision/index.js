@@ -13,15 +13,18 @@ import { VisionService, DEFAULT_DESCRIBE } from './client.js'
 import { isImage } from '../media/resolve.js'
 
 /**
- * 把 mediaList 中的图片逐张交视觉模型识别，替换为携带描述文本的"伪文本媒体"。
- * 非图片媒体原样保留（交由主模型路径按能力降级）。
+ * 把 mediaList 中的图片/视频逐张交视觉模型识别，替换为携带描述文本的"伪文本媒体"。
+ * 非图片/视频媒体原样保留（交由主模型路径按能力降级）。
  *
  * @param {VisionService} vision
  * @param {MediaFile[]} mediaList 收集到的媒体（需已 resolve 出 buffer/mime）
  * @param {string} question 用户当前问题（引导识别重点）
- * @returns {Promise<MediaFile[]>} 转换后的媒体列表（图片 → 文本）
+ * @param {object} opts { images?:boolean, video?:boolean } 选择性转换：
+ *   images=false 时保留图片原生块（主模型自带视觉，只让子模型转视频）；
+ *   video=false 时保留视频原样（一般不用，视频无主模型原生块路径）。
+ * @returns {Promise<MediaFile[]>} 转换后的媒体列表（图片/视频 → 文本）
  */
-export async function describeImages(vision, mediaList, question) {
+export async function describeImages(vision, mediaList, question, { images = true, video = true } = {}) {
   if (!vision || !Array.isArray(mediaList)) return mediaList || []
   const out = []
   for (const mf of mediaList) {
@@ -29,6 +32,16 @@ export async function describeImages(vision, mediaList, question) {
     const vid = mf.kind === 'video' || (mf.mime || '').startsWith('video/')
 
     if (!img && !vid) { out.push(mf); continue }
+    if (img && !images) { out.push(mf); continue } // 主模型可原生看图 → 不转文本
+    if (vid && !video) { out.push(mf); continue }
+
+    // 超过大小/数量上限的媒体不送识别（否则把超大字节 base64 发给视觉端，浪费/失败）；
+    // 降级为文本说明，保留文件名与来源。
+    if (mf.resolveError === 'limit_size' || mf.resolveError === 'limit_images') {
+      const label = mf.name ? `[${vid ? '视频' : '图片'} ${mf.name}]` : `[${vid ? '视频' : '图片'}]`
+      out.push(toTextMedia(mf, `${label}（${mf.__skipReason || mf.resolveError}，未送识别）`))
+      continue
+    }
 
     if (vid) {
       // 视频识别（MiMo-V2.5 等支持 video_url 的模型）

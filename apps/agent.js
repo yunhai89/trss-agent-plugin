@@ -986,7 +986,10 @@ async function buildRuntime() {
         // 视觉模型参数覆盖：vision.model 若在「模型列表」登记且设了 thinking/温度/maxTokens，则同样生效。
         // 否则在模型列表里给视觉模型关掉思考，视觉调用仍会按默认思考（烧推理预算、易导致判定超预算）。
         const vReg = (cfg.llmModels || []).find((m) => m && String(m.model) === String(vModel))
-        const vThinking = vReg?.thinking === 'on' ? { type: 'enabled' } : vReg?.thinking === 'off' ? { type: 'disabled' } : null
+        // 视觉识别是受限抽取任务：思考默认关（inherit/未配均视为关）。mimo-v2.6 系列默认开思考，
+        // 实测 agent.vision.maxTokens=1024 时思考吃掉全部预算 → 正文为空（finish=length），表现为"图片无法识别"。
+        // 需要深度推理的视觉模型，可在「模型列表」把该模型 thinking 显式设为 on。
+        const vThinking = vReg?.thinking === 'on' ? { type: 'enabled' } : { type: 'disabled' }
         const vTemperature = Number.isFinite(Number(vReg?.temperature)) ? Number(vReg.temperature) : null
         const vMaxTokens = Number.isFinite(Number(vReg?.maxTokens)) && Number(vReg.maxTokens) > 0 ? Number(vReg.maxTokens) : (vcfg.maxTokens || 1024)
         const vProvider = createProvider({
@@ -1006,6 +1009,7 @@ async function buildRuntime() {
           maxTokens: vMaxTokens,
           thinking: vThinking,
           temperature: vTemperature,
+          videoCapable: vCaps.video, // 视频能力（mimo omni 等；可经 media.caps.video 覆盖）
           logger: Log.tag('vision'),
         })
         startupInfo.visionModel = vModel
@@ -1622,20 +1626,24 @@ export class Chat extends plugin {
       log: (m) => (/失败|未能|异常/.test(m) ? Log.warn('[media]', m) : Log.debug('[media]', m)),
     }) : null
     let input = text
-    let blindImage = false // 收集到图片但模型无法识别（主模型无视觉 + 未被 vision 子模型转成文本）—— 防臆测
+    let blindMedia = '' // 收集到但无法识别的媒体种类（如"图片/视频"）——主模型无对应能力且未被 vision 子模型转文本，用于防臆测提示
     let effText = text
     if (mediaEnabled) {
       try {
         let files = await media.collectActive()
         const nImg = files.filter((f) => f.kind === 'image' || (f.mime || '').startsWith('image/')).length
-        // A 方案：主模型不支持视觉时，由视觉子模型把图片转成文本描述，再喂给主模型
-        if (!caps.vision && rt.vision && nImg > 0) {
-          Log.mark('[chat]', `vision 子模型识别 ${nImg} 张图（主模型 ${cfg.model} 无视觉）`)
+        const nVid = files.filter((f) => f.kind === 'video' || (f.mime || '').startsWith('video/')).length
+        // A 方案：主模型看不到的图片、以及**所有视频**，交视觉子模型转文本描述再喂主模型。
+        //  - 图片仅在主模型无视觉时转（主模型自带视觉则保留原生块，不丢细节）；
+        //  - 视频无主模型原生块路径（convert 不发 video），无论主模型是否有视觉都走子模型。
+        const needVision = rt.vision && ((!caps.vision && nImg > 0) || nVid > 0)
+        if (needVision) {
+          Log.mark('[chat]', `vision 子模型识别 ${nImg} 图/${nVid} 视频（主模型 ${cfg.model} 视觉=${caps.vision ? 'on' : 'off'}）`)
           try {
-            files = await describeImages(rt.vision, files, text)
+            files = await describeImages(rt.vision, files, text, { images: !caps.vision, video: true })
             media.replaceActive(files)
           } catch (e) {
-            Log.warn('[vision] 图片识别失败，按原能力降级', e?.message || e)
+            Log.warn('[vision] 媒体识别失败，按原能力降级', e?.message || e)
           }
         }
         ctx.media = files // 供 read_attachment 等被动工具读取
@@ -1649,11 +1657,14 @@ export class Chat extends plugin {
           skipReason: f.__skipReason || null,
           visionDescribed: !!f.__visionDescribed, // 图片是否已被 vision 子模型转成文本描述
         })) }, traceId, ctx.devScope)
-        // 盲图判定（问题1）：有图片，主模型无视觉，且这些图片没被 vision 子模型转成文本（__visionDescribed）
-        if (nImg > 0 && !caps.vision) {
-          const rawImageLeft = files.some((f) => (f.kind === 'image' || (f.mime || '').startsWith('image/')) && f.buffer && !f.__visionDescribed)
-          blindImage = rawImageLeft
-          if (blindImage) Log.warn('[vision] 用户发送了图片但当前无法识别（主模型无视觉，未配 agent.vision.model）；将提示用户而非臆测')
+        // 盲媒体判定（问题1）：有图片/视频，主模型无对应能力，且未被 vision 子模型转成文本（__visionDescribed）
+        const stillBlind = (pred) => files.some((f) => pred(f) && f.buffer && !f.__visionDescribed)
+        const blindKinds = []
+        if (nImg > 0 && !caps.vision && stillBlind((f) => f.kind === 'image' || (f.mime || '').startsWith('image/'))) blindKinds.push('图片')
+        if (nVid > 0 && stillBlind((f) => f.kind === 'video' || (f.mime || '').startsWith('video/'))) blindKinds.push('视频')
+        if (blindKinds.length) {
+          blindMedia = blindKinds.join('/')
+          Log.warn(`[vision] 用户发送了${blindMedia}但当前无法识别（主模型无对应能力，未配可用视觉子模型 agent.vision.model）；将提示用户而非臆测`)
         }
         // 纯媒体无文字：注入默认指令（问题4）
         effText = text || (files.length ? '（我发了一张图片/文件给你，请查看并告诉我内容，或按需处理）' : '')
@@ -1661,7 +1672,7 @@ export class Chat extends plugin {
           const content = media.buildContent(effText)
           if (Array.isArray(content)) input = { role: 'user', content, _media: true }
           else input = effText
-          if (files.length) Log.debug('[chat]', `media files=${files.length} images=${nImg} vision=${!!caps.vision} blind=${blindImage} multimodal=${Array.isArray(content)}`)
+          if (files.length) Log.debug('[chat]', `media files=${files.length} images=${nImg} videos=${nVid} vision=${!!caps.vision} blind=${blindMedia || '-'} multimodal=${Array.isArray(content)}`)
         }
       } catch (e) {
         Log.warn('[media] 主动收集失败，回退纯文本', e?.message || e)
@@ -1725,9 +1736,9 @@ export class Chat extends plugin {
     } catch (e) {
       Log.warn('[perception/skill] 注入失败', e?.message || e)
     }
-    // 盲图防臆测（问题1）：模型看不到图时，明确告知"无法识别"，杜绝从历史/上下文臆测图片内容
-    if (blindImage) {
-      const warn = '【系统提示】用户发送了图片，但当前未配置视觉模型（agent.vision.model 为空）且主模型不支持视觉，无法识别图片内容。请如实告知用户暂时无法识别图片、建议配置视觉模型；切勿根据历史对话或上下文臆测图片内容。'
+    // 盲媒体防臆测（问题1）：模型看不到图/视频时，明确告知"无法识别"，杜绝从历史/上下文臆测内容
+    if (blindMedia) {
+      const warn = `【系统提示】用户发送了${blindMedia}，但当前无法识别（未配置可用的视觉模型 agent.vision.model，或主模型不支持）。请如实告知用户暂时无法识别${blindMedia}内容、建议配置视觉模型；切勿根据历史对话或上下文臆测内容。`
       context = context ? `${context}\n\n${warn}` : warn
     }
 

@@ -23,7 +23,10 @@ const EXT_MIME = {
   js: 'text/javascript', ts: 'text/typescript', py: 'text/x-python', java: 'text/x-java',
   c: 'text/x-c', cpp: 'text/x-cpp', go: 'text/x-go', rs: 'text/x-rust', sh: 'application/x-sh',
   mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac',
-  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', mkv: 'video/x-matroska', avi: 'video/x-msvideo',
+  flv: 'video/x-flv', wmv: 'video/x-ms-wmv', m4v: 'video/x-m4v', '3gp': 'video/3gpp', mpeg: 'video/mpeg', mpg: 'video/mpeg',
+  ts: 'video/mp2t', m2ts: 'video/mp2t',
+  avif: 'image/avif', heic: 'image/heic', heif: 'image/heic',
   zip: 'application/zip', '7z': 'application/x-7z-compressed', gz: 'application/gzip', tar: 'application/x-tar',
   doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -41,12 +44,22 @@ export function sniffMagic(buf) {
   if (h[0] === 0xff && h[1] === 0xd8 && h[2] === 0xff) return 'image/jpeg'
   if (h[0] === 0x47 && h[1] === 0x49 && h[2] === 0x46) return 'image/gif'
   if (h[0] === 0x42 && h[1] === 0x4d) return 'image/bmp'
-  // RIFF: webp / wav
+  // RIFF: webp / wav / avi
   if (h.length >= 12 && h[0] === 0x52 && h[1] === 0x49 && h[2] === 0x46 && h[3] === 0x46) {
     const fourcc = buf.toString('ascii', 8, 12)
     if (fourcc === 'WEBP') return 'image/webp'
     if (fourcc === 'WAVE') return 'audio/wav'
+    if (fourcc === 'AVI ') return 'video/x-msvideo'
   }
+  // EBML: matroska(.mkv) / webm
+  if (h[0] === 0x1a && h[1] === 0x45 && h[2] === 0xdf && h[3] === 0xa3) {
+    const head = buf.toString('latin1', 0, Math.min(buf.length, 128)).toLowerCase()
+    return head.includes('webm') ? 'video/webm' : 'video/x-matroska'
+  }
+  // FLV
+  if (h[0] === 0x46 && h[1] === 0x4c && h[2] === 0x56 && h[3] === 0x01) return 'video/x-flv'
+  // MPEG-PS / MPEG-ES（00 00 01 BA/B3）
+  if (h[0] === 0x00 && h[1] === 0x00 && h[2] === 0x01 && (h[3] === 0xba || h[3] === 0xb3)) return 'video/mpeg'
   // PDF
   if (h[0] === 0x25 && h[1] === 0x50 && h[2] === 0x44 && h[3] === 0x46) return 'application/pdf'
   // ZIP 家族（docx/xlsx/pptx/zip/odt 等 —— 统称 zip，按扩展名细化在外层）
@@ -56,8 +69,16 @@ export function sniffMagic(buf) {
   // ID3 / MP3
   if (h[0] === 0x49 && h[1] === 0x44 && h[2] === 0x33) return 'audio/mpeg'
   if (h[0] === 0xff && (h[1] === 0xfb || h[1] === 0xf3 || h[1] === 0xf2)) return 'audio/mpeg'
-  // MP4/M4A (ftyp)
-  if (h.length >= 12 && h[4] === 0x66 && h[5] === 0x74 && h[6] === 0x79 && h[7] === 0x70) return 'video/mp4'
+  // ISO BMFF (ftyp)：按 major_brand 细分 mp4/mov/m4a/3gp/avif/heic
+  if (h.length >= 12 && h[4] === 0x66 && h[5] === 0x74 && h[6] === 0x79 && h[7] === 0x70) {
+    const brand = buf.toString('ascii', 8, 12)
+    if (brand === 'avif' || brand === 'avis') return 'image/avif'
+    if (/^(heic|heix|hevc|hevx|mif1|msf1)$/.test(brand)) return 'image/heic'
+    if (brand === 'M4A ' || brand === 'M4B ') return 'audio/mp4'
+    if (brand === 'qt  ') return 'video/quicktime'
+    if (brand.startsWith('3gp') || brand.startsWith('3g2')) return 'video/3gpp'
+    return 'video/mp4'
+  }
   return null
 }
 
@@ -196,10 +217,11 @@ async function napcatBytes(mf, e, { bot, fetcher, log }) {
       const url = pickField(r, 'url')
       if (url) { const b = await toBuffer(url, { bot, fetcher }); if (b) return b }
     }
-    // 图片/语音（file 文件名）→ get_image / get_record 返回本地路径或 url
+    // 图片/语音/视频/文件（file 标识）→ 各专用接口返回本地路径或 url。
+    // NapCat 文档：图片 get_file 失败再降级 get_image；语音 get_record；**视频只用 get_file，无 get_image 降级**。
     const file = seg.file
     if (file) {
-      const action = mf.kind === 'audio' ? 'get_record' : 'get_image'
+      const action = mf.kind === 'audio' ? 'get_record' : mf.kind === 'image' ? 'get_image' : 'get_file'
       const params = action === 'get_record' ? { file, out_format: 'mp3' } : { file }
       const r = await sendApi(action, params)
       const target = pickField(r, 'url', 'file')

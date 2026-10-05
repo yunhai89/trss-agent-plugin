@@ -187,7 +187,8 @@ agent:
     maxImages: 4
     maxFileBytes: 8388608
     degrade: note
-    caps:
+    caps:                       # 能力覆盖（可选）：vision/file/audio/video/tools/thinking 等；留空按协议+模型名自动判定。
+                                # 原生音频块(OpenAI input_audio/Gemini audio)需 audio:true；视频识别需 video:true（mimo omni 已内置）
   vision:
     enable: true
     model: ""

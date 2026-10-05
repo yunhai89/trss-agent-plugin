@@ -196,7 +196,13 @@ export function createRequestWithRetry({ APIError, TimeoutError, ConnectionError
       attempt++
     }
 
-    log('error', `请求失败（${lastErr?.name ?? 'Error'}/${lastErr?.status ?? 'net'}），共 ${attempt + 1} 次尝试后放弃`)
+    // 区分"调用方主动中止"（如 humanize 规划被新一轮取代、超时）与真实请求失败：
+    // 前者是预期行为，降为 warn 并附消息；后者保留 error 且带错误消息（此前只打 name/status，
+    // 网络/中止一律显示成 "APIError/net"，无法定位）。
+    const msg = String(lastErr?.message || '')
+    const aborted = /aborted by caller/i.test(msg)
+    const detail = msg ? `：${msg.slice(0, 200)}` : ''
+    log(aborted ? 'warn' : 'error', `请求失败（${lastErr?.name ?? 'Error'}/${lastErr?.status ?? 'net'}）${detail}，共 ${attempt + 1} 次尝试后放弃`)
     throw lastErr || new APIError({ message: 'Request failed' })
   }
 }

@@ -38,7 +38,7 @@ const REGISTRY = [
   { match: /glm-?4v|glm.*-v/, caps: { vision: true, tools: true } },
   { match: /glm/, caps: { tools: true } },
   // MiMo
-  { match: /mimo.*omni/, caps: { vision: true, tools: true, thinking: true } },
+  { match: /mimo.*omni/, caps: { vision: true, tools: true, thinking: true, video: true } },
   { match: /mimo/, caps: { tools: true, thinking: true } },
 ]
 

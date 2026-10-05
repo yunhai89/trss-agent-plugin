@@ -6,6 +6,7 @@ import {
   groupInfoTool, groupMemberTool, groupMembersTool, userInfoTool,
   groupKickTool, groupMuteTool, groupSetCardTool, groupSetNameTool,
 } from './index.js'
+import { sendForwardMsgTool, normalizeForwardNodes } from './forward.js'
 
 let passed = 0
 let failed = 0
@@ -106,6 +107,33 @@ await test('group_set_name：改群名', async () => {
   const r = await groupSetNameTool.execute({ name: '新群名' }, mockCtx(group))
   eq(r.name, '新群名', '返回群名')
   eq(got, '新群名', '调 setName')
+})
+
+// ---------- 9. send_forward_msg：节点归一为 {type:'node',data} ----------
+await test('normalizeForwardNodes：裸节点包成 node，原生 node 保留', async () => {
+  const out = normalizeForwardNodes([
+    { uin: '1', name: 'A', content: 'hi' },
+    { id: '123' },
+    { type: 'node', data: { content: 'x', user_id: '2' } },
+    { uin: '3', name: 'C', content: [{ type: 'image', data: { file: 'http://x/a.jpg' } }] },
+  ])
+  eq(out[0], { type: 'node', data: { content: 'hi', user_id: '1', nickname: 'A' } }, '裸节点包 node')
+  eq(out[1], { type: 'node', data: { id: '123' } }, 'id 引用节点')
+  eq(out[2], { type: 'node', data: { content: 'x', user_id: '2' } }, '原生 node 保留')
+  eq(out[3].data.content[0], { type: 'image', data: { file: 'http://x/a.jpg' } }, '段已规范')
+})
+
+await test('send_forward_msg：发出的是 type=node（否则 NapCat 报未知的消息类型）', async () => {
+  let captured = null
+  const ctx = {
+    e: { group_id: 123 },
+    bot: { async sendApi(action, params) { captured = { action, params }; return { status: 'ok', data: { message_id: 7 } } } },
+  }
+  const r = await sendForwardMsgTool.execute({ messages: [{ uin: '1', name: 'A', content: 'hi' }] }, ctx)
+  eq(r.ok, true, '返回 ok')
+  eq(captured.action, 'send_group_forward_msg', '群转发动作')
+  eq(captured.params.messages[0].type, 'node', '节点 type=node')
+  eq(captured.params.messages[0].data.content, 'hi', '内容在 data.content')
 })
 
 // ---------- 总结 ----------

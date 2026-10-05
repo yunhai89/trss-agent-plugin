@@ -19,6 +19,15 @@ function imageMediaType(mf) {
   return sniffed && sniffed.startsWith('image/') ? sniffed : mf.mime
 }
 
+/** 各端点普遍接受的图片子类型；AVIF/HEIC 等虽被嗅探为 image/*，但多数视觉端点不收，
+ *  强发会 400（unsupported media type）——不满足则降级为文本说明。 */
+const SENDABLE_IMAGE = /^image\/(png|jpe?g|gif|webp)$/
+
+/** 该图片能否作为原生 image 块下发（能力允许 + 子类型受支持） */
+function sendableImage(mf, caps) {
+  return !!caps.vision && SENDABLE_IMAGE.test(imageMediaType(mf) || '')
+}
+
 /**
  * OpenAI Chat Completions 多模态块：
  *  image → image_url(data: 或 http url)；audio → input_audio；文件 → file(部分端点)。
@@ -32,7 +41,7 @@ export function toOpenaiBlocks(media, { caps = {}, degrade = 'note' } = {}) {
       continue
     }
     if (isImage(mf.mime)) {
-      if (caps.vision) {
+      if (sendableImage(mf, caps)) {
         blocks.push({ type: 'image_url', image_url: { url: dataUrl(mf) } })
       } else {
         const t = degradeBlock(mf, degrade)
@@ -66,7 +75,7 @@ export function toAnthropicBlocks(media, { caps = {}, degrade = 'note' } = {}) {
       continue
     }
     if (isImage(mf.mime)) {
-      if (caps.vision) {
+      if (sendableImage(mf, caps)) {
         blocks.push({ type: 'image', source: { type: 'base64', media_type: imageMediaType(mf), data: asBase64(mf.buffer) } })
       } else {
         const t = degradeBlock(mf, degrade)
@@ -97,7 +106,7 @@ export function toGeminiBlocks(media, { caps = {}, degrade = 'note' } = {}) {
       continue
     }
     if (isImage(mf.mime)) {
-      if (caps.vision) {
+      if (sendableImage(mf, caps)) {
         blocks.push({ type: 'image', data: asBase64(mf.buffer), mime_type: imageMediaType(mf) })
       } else {
         const t = degradeBlock(mf, degrade)
@@ -146,7 +155,10 @@ function degradeNote(mf, degrade, errored) {
   // 图片只要有直链就附带，保证即便走到降级占位，主模型/MCP 仍能拿到地址去识别（不再"没有图片"）
   const urlHint = (mf.kind === 'image' && mf.url) ? `；图片直链可供视觉类工具/MCP 使用：${mf.url}` : ''
   if (errored) return `[附件 ${mf.name}（${size}）获取失败：${mf.resolveError || '未知'}${urlHint}]`
-  const why = mf.kind === 'image' ? '当前模型不支持视觉' : '当前模型不支持该文件类型'
+  // 图片降级区分两种原因：格式不受端点支持（AVIF/HEIC 等）vs 模型无视觉能力
+  const why = mf.kind === 'image'
+    ? (SENDABLE_IMAGE.test(mf.mime || '') ? '当前模型不支持视觉' : `图片格式 ${mf.mime} 不受支持，请转为 PNG/JPEG`)
+    : '当前模型不支持该文件类型'
   return `[附件 ${mf.name}（${size}，${mf.mime || mf.kind}）：${why}${urlHint}]`
 }
 
