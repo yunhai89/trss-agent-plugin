@@ -428,6 +428,31 @@ async function makeProxyFetch(proxy) {
   }
 }
 
+/**
+ * 搜索专用 fetch：
+ *  - 显式配了 agent.proxy → 直接用该代理；
+ *  - 否则若环境变量有 HTTP(S)_PROXY/ALL_PROXY（Node 原生 fetch 默认不读，curl 却读，极易误判"直连能通"）
+ *    → 用环境代理，但本地/内网地址（SearXNG localhost 等）仍直连；
+ *  - 都没有 → 原生 fetch。
+ * 目的：让 DDG 等海外兜底源在受限网络下真正可用（此前搜索固定裸 fetch，配了代理也不生效）。
+ */
+async function makeSearchFetch(proxyFetch) {
+  const direct = (typeof fetch !== 'undefined' && fetch) || undefined
+  if (proxyFetch) return proxyFetch
+  const envProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY
+    || process.env.HTTP_PROXY || process.env.http_proxy
+  if (!envProxy) return direct
+  try {
+    const { ProxyAgent, fetch: uFetch } = await import('undici')
+    const dispatcher = new ProxyAgent(envProxy)
+    const isLocal = (u) => /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(String(u))
+    return (url, opts = {}) => uFetch(url, isLocal(url) ? opts : { ...opts, dispatcher })
+  } catch (e) {
+    Log.warn('[search] 环境代理不可用，搜索将直连', e?.message || e)
+    return direct
+  }
+}
+
 async function buildRuntime() {
   const cfg = Config.get().agent || {}
   const startupInfo = {} // 运行时构建期采集的摘要信息（供末尾统一面板输出）
@@ -564,9 +589,11 @@ async function buildRuntime() {
   }
 
   // 统一搜索：多源自动路由（Tavily/Exa/Perplexity/Brave → SearXNG → DDG 兜底）
+  // fetcher 必须与 provider 一致走代理：DDG/海外源直连在受限网络下超时（undici 默认不读 HTTP(S)_PROXY），
+  // 此前搜索固定用裸 fetch → 配了 agent.proxy 也不生效，DDG 兜底形同虚设。
   const searchManager = createSearchManager({
     ...(cfg.search || {}),
-    fetcher: (typeof fetch !== 'undefined' && fetch) || undefined,
+    fetcher: await makeSearchFetch(proxyFetch),
     logger: Log.tag('search'),
   })
   const enabledSearch = searchManager.availableProviders
@@ -1261,7 +1288,9 @@ function notifyMaster(e, id, info) {
   const detail = JSON.stringify(info.args || {}).slice(0, 120)
   const text = `待审批 #${id}：${info.tool} ${detail}\n回复「#确认 ${id}」或「#拒绝 ${id}」`
   try {
-    for (const mid of masters) {
+    for (const rawMid of masters) {
+      const mid = String(rawMid ?? '').trim()
+      if (!mid) continue
       const bot = (typeof Bot !== 'undefined' && Bot) || null
       // 异步发送必须挂 rejection 处理（同步 catch 捕获不了 Promise 拒绝 → unhandledRejection）
       Promise.resolve(bot?.pickFriend?.(mid)?.sendMsg?.(text)).catch((err) => Log.warn('notifyMaster 私信发送失败', mid, err?.message || err))
@@ -1304,7 +1333,7 @@ function ctxFromInfo(info) {
   // 创建者身份：定时任务 fire 时无用户事件，但任务创建者的主人身份必须保留——
   // 否则群管类工具（如 send_group_notice）会被判为 member 而 rejected_by_policy
   //（生产事故：master 建的群公告任务被误拒 + AI 反复重试）。
-  const isMaster = (cfg.masters || []).map((m) => String(m)).includes(userId)
+  const isMaster = (cfg.masters || []).map((m) => String(m).trim()).includes(String(userId))
   return {
     userId, groupId, isGroup, isMaster, role: isMaster ? 'owner' : 'member', isolation, scopeUserId, scopeId,
     bot: (typeof Bot !== 'undefined' && Bot) || null, selfId: info.selfId || '',
@@ -2340,20 +2369,63 @@ export class Chat extends plugin {
     }
     try { fs.mkdirSync(Config.path.temp, { recursive: true }); fs.writeFileSync(bundlePath, header + body) }
     catch (e) { await this.e.reply(`打包失败：${e?.message || e}`); return true }
-    // 发主人私信
+    // 发主人私信。关键：`bot?.pickFriend?.(mid)?.sendMsg` 在 bot/pickFriend 不可用时是静默 no-op，
+    // 既不抛错也不计入 okCnt —— 此前会"上报成功 0/N"却无任何日志。这里显式判定每一步并落错误日志。
     const bot = (typeof Bot !== 'undefined' && Bot) || null
+    const errors = []      // 致命失败（该 master 连文本都没送达）
+    const fileFails = []   // 非致命：文本已送达，仅日志文件发送失败
     let okCnt = 0
-    for (const mid of masters) {
-      try {
-        await bot?.pickFriend?.(mid)?.sendMsg(`🐛 用户上报错误\n用户：${ctx.userId}（群：${ctx.groupId || '私聊'}）\n描述：${desc || '(无)'}\n会话数：${collected.length}\n时间：${ts.toLocaleString('zh-CN')}`)
-        await bot?.pickFriend?.(mid)?.sendMsg(toFileSegment(bundlePath, `上报日志-${uid}-${stamp}.log`))
-        okCnt++
-      } catch (e) { Log.warn('[reportBug] 发送 master 失败', mid, e?.message || e) }
+    const textMsg = `🐛 用户上报错误\n用户：${ctx.userId}（群：${ctx.groupId || '私聊'}）\n描述：${desc || '(无)'}\n会话数：${collected.length}\n时间：${ts.toLocaleString('zh-CN')}`
+    if (!bot) {
+      errors.push('Bot 未就绪（协议端未连接）')
+      Log.error('[reportBug] 发送失败：globalThis.Bot 为空，无法私信 master')
     }
-    await this.e.reply([
-      `✅ 已上报给 ${okCnt}/${masters.length} 位 master（含最近 ${collected.length} 个会话日志）`,
-      '如需进一步帮助：加入官方 QQ 群 960179589 @群主，并附上本次上报的问题描述/日志。',
-    ].join('\n'))
+    for (const rawMid of masters) {
+      // masters 条目在不同环境可能是数字/字符串/带空白的字符串——统一 String 归一，避免下游对非字符串 .trim() 抛错
+      const mid = String(rawMid ?? '').trim()
+      if (!mid) { errors.push('存在空的 master 条目'); continue }
+      let friend
+      try {
+        friend = bot?.pickFriend?.(mid)
+      } catch (e) {
+        errors.push(`${mid}：pickFriend 异常（${e?.message || e}）`)
+        Log.error(`[reportBug] 获取 master ${mid} 会话异常：${e?.message || e}`)
+        continue
+      }
+      if (!friend || typeof friend.sendMsg !== 'function') {
+        errors.push(`${mid}：无法获取好友会话（pickFriend 不可用或该 QQ 非好友）`)
+        Log.error(`[reportBug] 发送失败：无法获取 master ${mid} 的好友会话（pickFriend 不可用）`)
+        continue
+      }
+      // ① 先发文本（关键信息）：失败即该 master 整体失败
+      try {
+        await friend.sendMsg(textMsg)
+      } catch (e) {
+        errors.push(`${mid}：文本发送失败（${e?.message || e}）`)
+        Log.error(`[reportBug] 发送 master ${mid} 文本失败：${e?.message || e}`)
+        continue
+      }
+      // ② 再发日志文件：失败不致命（文本已送达），单独记录，不吞、不阻断其它 master
+      try {
+        await friend.sendMsg(toFileSegment(bundlePath, `上报日志-${uid}-${stamp}.log`))
+      } catch (e) {
+        fileFails.push(`${mid}：${e?.message || e}`)
+        Log.error(`[reportBug] 发送 master ${mid} 日志文件失败（文本已送达）：${e?.message || e}`)
+      }
+      okCnt++
+    }
+    const lines = []
+    if (okCnt > 0) {
+      lines.push(`✅ 已上报给 ${okCnt}/${masters.length} 位 master（含最近 ${collected.length} 个会话日志）`)
+      if (errors.length) lines.push(`⚠️ 另有 ${errors.length} 位 master 发送失败：${errors.slice(0, 3).join('；')}`)
+      if (fileFails.length) lines.push(`⚠️ ${fileFails.length} 位 master 日志文件未送达（文本已送达）：${fileFails.slice(0, 3).join('；')}`)
+    } else {
+      lines.push(`❌ 上报失败：未能发送给任何 master（${errors[0] || '未知原因'}）`)
+      lines.push('失败原因已打印到控制台日志，请联系管理员检查 agent.masters 配置与协议端连接后重试。')
+    }
+    lines.push('如需进一步帮助：加入官方 QQ 群 960179589 @群主，并附上本次上报的问题描述/日志。')
+    // 群聊反馈本身也可能失败：显式 catch 并落日志，不静默
+    try { await this.e.reply(lines.join('\n')) } catch (e) { Log.error('[reportBug] 群聊反馈发送失败', e?.message || e) }
     return true
   }
 

@@ -4,6 +4,7 @@
  */
 import {
   createSearchManager,
+  SearchManager,
   makeSearchTools,
   createTavilyProvider,
   createExaProvider,
@@ -147,6 +148,40 @@ await test('manager：全部失败 → 聚合各源原因（不再只抛最后�
   ok(err && /searxng: SearXNG HTTP 403/.test(err.message) && /ddg: fetch failed/.test(err.message), '聚合两个源的原因')
 })
 
+// ---------- 7b. 空结果必须回退（SearXNG 200 + results=[] 不再吞掉 DDG）----------
+await test('manager：源返回空结果 → 回退下一源', async () => {
+  const empty = { name: 'searxng', available: () => true, async search() { return { provider: 'searxng', query: 't', results: [] } } }
+  const ddg = { name: 'ddg', available: () => true, async search() { return { provider: 'ddg', query: 't', results: [{ title: 'D', url: 'https://d.com', content: 'c' }] } } }
+  const mgr = new SearchManager({ providers: [empty, ddg] })
+  const r = await mgr.search('t')
+  eq(r.provider, 'ddg', '回退到 ddg')
+  eq(r.results[0].title, 'D', 'ddg 结果')
+})
+
+await test('manager：所有源都空 → 返回空结果（不抛错，附尝试源）', async () => {
+  const a = { name: 'a', available: () => true, async search() { return { provider: 'a', query: 't', results: [] } } }
+  const b = { name: 'b', available: () => true, async search() { return { provider: 'b', query: 't', results: [] } } }
+  const mgr = new SearchManager({ providers: [a, b] })
+  const r = await mgr.search('t')
+  eq(r.results.length, 0, '空结果返回')
+  eq(r.provider, 'a', '返回首个空源')
+})
+
+// ---------- 7c. DDG 双端点 + html 版解析 ----------
+await test('ddgSearch：lite 端点空 → 尝试 html 端点', async () => {
+  const { ddgSearch } = await import('../agent/tools/web.js')
+  let calls = 0
+  const f = async (url) => {
+    calls++
+    if (url.includes('lite')) return { ok: true, status: 200, async text() { return '<html>no results</html>' } }
+    return { ok: true, status: 200, async text() { return '<a class="result__a" href="https://h.com">H</a><a class="result__snippet">snip</a>' } }
+  }
+  const r = await ddgSearch('t', { fetcher: f, limit: 5 })
+  eq(r.length, 1, 'html 端点结果')
+  eq(r[0].url, 'https://h.com', 'URL 解析')
+  eq(calls, 2, '两个端点都尝试')
+})
+
 // ---------- 8. createSearchManager：无 key → DDG 兜底 ----------
 await test('createSearchManager：无 key → SearXNG → DDG', async () => {
   // 无 key、无 searxng → 只有 DDG
@@ -166,7 +201,8 @@ await test('createSearchManager：无 key → SearXNG → DDG', async () => {
 await test('formatResults / formatExtract', async () => {
   const text = formatResults({ answer: '42', results: [{ title: 'A', url: 'https://a.com', content: '内容', score: 0.9 }], citations: ['https://c.com'] })
   ok(text.includes('42') && text.includes('A') && text.includes('https://a.com') && text.includes('引用'), 'formatResults')
-  ok(formatResults({ results: [] }) === '(无搜索结果)', '空结果')
+  ok(formatResults({ results: [] }).startsWith('(无搜索结果'), '空结果带可执行提示')
+  ok(/更换关键词|重试/.test(formatResults({ results: [] })), '空结果提示重试')
   const ext = formatExtract({ results: [{ url: 'https://x.com', raw_content: '正文' }] })
   ok(ext.includes('正文'), 'formatExtract')
 })

@@ -42,11 +42,52 @@ export function parseDDG(html, limit = 5) {
   return out
 }
 
-export async function ddgSearch(query, { limit = 5, fetcher, fetchOpts } = {}) {
+/** 解析 DDG HTML 版（html.duckduckgo.com/html/）→ [{title,url,snippet}] */
+export function parseDDGHtml(html, limit = 5) {
+  const out = []
+  const links = []
+  const snaps = []
+  let m
+  const reLink = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
+  const reSnippet = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi
+  while ((m = reLink.exec(html))) links.push({ href: decodeDDG(m[1]), title: stripHtml(m[2]) })
+  while ((m = reSnippet.exec(html))) snaps.push(stripHtml(m[1]))
+  const n = Math.min(limit, links.length)
+  for (let i = 0; i < n; i++) out.push({ title: links[i].title, url: links[i].href, snippet: snaps[i] || '' })
+  return out
+}
+
+const DDG_ENDPOINTS = [
+  { url: (q) => `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}`, parse: parseDDG },
+  { url: (q) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, parse: parseDDGHtml },
+]
+
+/**
+ * DDG 搜索：依次尝试 lite / html 两个端点（任一被限流/改版时另一个兜底）。
+ * 端点正常响应但 0 结果 → 返回 []（交上层决定回退）；全部请求异常 → 抛最后一个错误。
+ */
+export async function ddgSearch(query, { limit = 5, fetcher, fetchOpts, timeout = 15000 } = {}) {
   const f = fetcher || globalThis.fetch
   if (!f) throw new Error('ddgSearch 需要 fetcher 或 globalThis.fetch')
-  const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`
-  const res = await f(url, { method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0 (agents-plugin)' }, ...fetchOpts })
-  const html = await res.text()
-  return parseDDG(html, limit)
+  let anyOk = false
+  let lastErr = null
+  for (const ep of DDG_ENDPOINTS) {
+    try {
+      const opts = { method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0 (agents-plugin)' }, ...fetchOpts }
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' && !opts.signal) {
+        opts.signal = AbortSignal.timeout(timeout)
+      }
+      const res = await f(ep.url(query), opts)
+      // 仅显式失败才算失败（注入的 mock fetcher 可能不带 ok 字段）
+      if (res.ok === false || (typeof res.status === 'number' && res.status >= 400)) {
+        lastErr = new Error(`DDG HTTP ${res.status ?? 'error'}`)
+        continue
+      }
+      anyOk = true
+      const results = ep.parse(await res.text(), limit)
+      if (results.length) return results
+    } catch (e) { lastErr = e }
+  }
+  if (anyOk) return [] // 端点可用但确实没结果
+  throw lastErr || new Error('DDG 搜索失败')
 }
