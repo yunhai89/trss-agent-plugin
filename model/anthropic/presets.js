@@ -10,6 +10,7 @@
  * DeepSeek / MiMo 同时提供 OpenAI 与 Anthropic 两套兼容端点；
  * 这里是它们的 Anthropic 协议入口（与 model/openai/presets.js 的 OpenAI 入口互补）。
  */
+import { VERSION } from '../../utils/version.js'
 
 export const presets = {
   /** Anthropic 官方 */
@@ -69,7 +70,7 @@ export const presets = {
     baseURL: 'https://opencode.ai/zen',
     version: '2023-06-01',
     authHeader: 'x-api-key',
-    headers: { 'User-Agent': 'trss-agent-plugin/0.3.0' },
+    headers: { 'User-Agent': `trss-agent-plugin/${VERSION}` },
     sessionHeader: 'x-opencode-session',
   },
 
@@ -82,7 +83,7 @@ export const presets = {
     baseURL: 'https://opencode.ai/zen/go',
     version: '2023-06-01',
     authHeader: 'x-api-key',
-    headers: { 'User-Agent': 'trss-agent-plugin/0.3.0' },
+    headers: { 'User-Agent': `trss-agent-plugin/${VERSION}` },
     sessionHeader: 'x-opencode-session',
   },
 }

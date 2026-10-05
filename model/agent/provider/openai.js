@@ -4,6 +4,7 @@
 import { createClient, extractReasoning, splitInlineThink, createThinkStripper, extractToolCallsOpenAI } from '../../openai/index.js'
 import { Provider, toolsToList, mapToolChoice, clientOpts } from './base.js'
 import { stringifyArgs } from '../messages.js'
+import { toOpenAIContent } from './content-blocks.js'
 
 export class OpenAIProvider extends Provider {
   constructor(config = {}) {
@@ -140,7 +141,7 @@ export class OpenAIProvider extends Provider {
   }
 
   _convert(m) {
-    const out = { role: m.role, content: normalizeOpenAIContent(m.content) }
+    const out = { role: m.role, content: toOpenAIContent(m.content) }
     if (m.tool_calls) {
       out.tool_calls = m.tool_calls.map((tc) => ({
         id: tc.id,
@@ -196,45 +197,4 @@ export class OpenAIProvider extends Provider {
       rawMessage: s.assistantMessage,
     }
   }
-}
-
-/**
- * 跨协议历史兜底：把非 OpenAI 原生内容块归一为 Chat Completions 块。
- *
- * 历史消息按会话持久化，可能携带另一协议的原生块（如切模型/跨协议回退到 OpenAI 端点时留下
- * Anthropic `{type:'image',source}` 或 Gemini `{type:'image',data,mime_type}`）。原样透传会被
- * 端点拒收：`unknown variant 'image', expected text/image_url/file`。发送前统一转成 image_url。
- * 未知块降级为文本占位，绝不原样透传（宁可丢图也不 400 中断整轮对话）。
- */
-export function normalizeOpenAIContent(content) {
-  if (!Array.isArray(content)) return content
-  const out = []
-  for (const b of content) {
-    if (b == null) continue
-    if (typeof b !== 'object') { out.push({ type: 'text', text: String(b) }); continue }
-    if (b.type === 'text') { out.push({ type: 'text', text: String(b.text ?? '') }); continue }
-    if (b.type === 'image_url' || b.type === 'input_audio' || b.type === 'video_url') { out.push(b); continue }
-    if (b.type === 'image') {
-      const url = imageBlockToUrl(b)
-      if (url) out.push({ type: 'image_url', image_url: { url } })
-      continue
-    }
-    if (b.type === 'document' || b.type === 'file') {
-      out.push({ type: 'text', text: `[附件（${b.type} 块）在 OpenAI 协议下不支持，已忽略]` })
-      continue
-    }
-    out.push({ type: 'text', text: `[${b.type || 'unknown'} 内容块已忽略]` })
-  }
-  return out
-}
-
-/** Anthropic `{source:{type:base64|url}}` 或 Gemini `{data,mime_type}` → image_url */
-function imageBlockToUrl(b) {
-  const src = b.source || {}
-  if (src.type === 'base64' && src.data) return `data:${src.media_type || b.mime_type || 'image/png'};base64,${src.data}`
-  if (src.type === 'url' && src.url) return src.url
-  if (b.data) return `data:${b.mime_type || 'image/png'};base64,${b.data}`
-  if (b.image_url?.url) return b.image_url.url
-  if (typeof b.url === 'string') return b.url
-  return null
 }

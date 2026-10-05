@@ -105,6 +105,11 @@ await test('toOpenaiBlocks / toAnthropicBlocks：视觉模型', async () => {
   eq(ant[0].type, 'image', 'anthropic image')
   eq(ant[0].source.type, 'base64', 'anthropic base64 source')
   eq(ant[0].source.media_type, 'image/png', 'anthropic media_type')
+
+  // audio：仅显式 caps.audio 才下发 input_audio，否则降级 text（vision≠audio）
+  const wav = [{ name: 'r.wav', mime: 'audio/wav', buffer: Buffer.from('wavdata'), bytes: 7, kind: 'audio' }]
+  eq(toOpenaiBlocks(wav, { caps: { vision: true } })[0].type, 'text', 'openai 未声明 audio → text')
+  eq(toOpenaiBlocks(wav, { caps: { vision: true, audio: true } })[0].type, 'input_audio', 'openai 声明 audio → input_audio')
 })
 
 // ---------- 7. convert：非视觉降级 ----------
@@ -250,7 +255,7 @@ await test('toGeminiBlocks：image/audio/pdf + 非视觉降级', async () => {
     { kind: 'image', mime: 'image/png', buffer: PNG, name: 'a.png', bytes: 10 },
     { kind: 'audio', mime: 'audio/wav', buffer: Buffer.from('wavdata'), name: 'r.wav', bytes: 7 },
     { kind: 'file', mime: 'application/pdf', buffer: PDF, name: 'd.pdf', bytes: 8 },
-  ], { caps: { vision: true, file: true } })
+  ], { caps: { vision: true, audio: true, file: true } })
   eq(blocks[0].type, 'image', 'image → image 块')
   ok(!!blocks[0].data && blocks[0].mime_type === 'image/png', 'image: data(base64) + mime_type')
   eq(blocks[1].type, 'audio', 'audio → audio 块')
@@ -259,6 +264,9 @@ await test('toGeminiBlocks：image/audio/pdf + 非视觉降级', async () => {
   // 非视觉降级
   const d = toGeminiBlocks([{ kind: 'image', mime: 'image/png', buffer: PNG, name: 'a.png', bytes: 10 }], { caps: { vision: false }, degrade: 'note' })
   eq(d[0].type, 'text', '非视觉 image 降级为 text 块')
+  // 未声明 audio：即使有 vision 也不下发原生 audio 块（防端点 unknown variant input_audio）
+  const noAudio = toGeminiBlocks([{ kind: 'audio', mime: 'audio/wav', buffer: Buffer.from('wavdata'), name: 'r.wav', bytes: 7 }], { caps: { vision: true }, degrade: 'note' })
+  eq(noAudio[0].type, 'text', '未声明 audio → 降级 text')
 })
 
 // ---------- 总结 ----------

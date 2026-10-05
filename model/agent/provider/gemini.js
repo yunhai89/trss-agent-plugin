@@ -13,6 +13,7 @@
  * 参考：Gemini_API_完整开发文档.md（Interactions API，2026-06 GA）。
  */
 import { Provider, toolsToList, jsonSchemaOf } from './base.js'
+import { toGeminiContent } from './content-blocks.js'
 
 /** Agent OpenAI 风格 messages → Interactions Step[]（无状态全量历史） */
 export function toGeminiSteps(messages) {
@@ -40,47 +41,14 @@ export function toGeminiSteps(messages) {
   return steps
 }
 
-/** user content → Content_2[]（apps 经 media.toGeminiBlocks 产的块直接用；兼容 openai 块兜底） */
+/** user content → Content_2[]（apps 经 media.toGeminiBlocks 产的块直接用；跨协议块经 content-blocks 兜底归一） */
 function toContentBlocks(content) {
   if (typeof content === 'string') return [{ type: 'text', text: content }]
   if (Array.isArray(content)) {
-    const out = []
-    for (const b of content) {
-      const g = toGeminiBlock(b)
-      if (g) out.push(g)
-    }
+    const out = toGeminiContent(content).filter(Boolean)
     return out.length ? out : [{ type: 'text', text: '' }]
   }
   return [{ type: 'text', text: String(content ?? '') }]
-}
-
-/** 单个内容块 → Gemini Content_2（gemini 块直通；openai image_url/input_audio 兜底转换） */
-function toGeminiBlock(b) {
-  if (!b) return null
-  if (b.type === 'text' && b.text != null) return { type: 'text', text: String(b.text) }
-  if (b.type === 'image') {
-    // 原生 Gemini 块（data/mime_type）直通；Anthropic 块（source）跨协议兜底归一
-    if (b.data) return { type: 'image', data: b.data, mime_type: b.mime_type }
-    const src = b.source || {}
-    if (src.type === 'base64' && src.data) return { type: 'image', data: src.data, mime_type: src.media_type || 'image/png' }
-    if (src.type === 'url' && src.url) {
-      const m = /^data:([^;]+);base64,(.+)$/.exec(src.url)
-      if (m) return { type: 'image', data: m[2], mime_type: m[1] }
-    }
-    return null
-  }
-  if (b.type === 'audio') return { type: 'audio', data: b.data, mime_type: b.mime_type }
-  if (b.type === 'document') return { type: 'document', data: b.data, mime_type: b.mime_type }
-  if (b.type === 'video') return { type: 'video', data: b.data, mime_type: b.mime_type }
-  // 兜底：openai 风格块（protocol 配错 / 旧路径产出）
-  if (b.type === 'image_url' && b.image_url?.url) {
-    const m = /^data:([^;]+);base64,(.+)$/.exec(b.image_url.url)
-    if (m) return { type: 'image', data: m[2], mime_type: m[1] }
-  }
-  if (b.type === 'input_audio' && b.input_audio?.data) {
-    return { type: 'audio', data: b.input_audio.data, mime_type: 'audio/' + (b.input_audio.format || 'mp3') }
-  }
-  return null
 }
 
 function textOf(content) {

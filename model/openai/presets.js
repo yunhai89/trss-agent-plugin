@@ -11,6 +11,7 @@
  * 厂商非标准字段（thinking / enable_thinking / reasoning_effort 等）直接写进请求体即可，无需 extra_body 包裹。
  * DeepSeek / MiMo 还提供 Anthropic 协议端点，见 model/anthropic/presets.js。
  */
+import { VERSION } from '../../utils/version.js'
 
 export const presets = {
   openai: {
@@ -156,7 +157,7 @@ export const presets = {
     baseURL: 'https://opencode.ai/zen/v1',
     reasoningFields: [],
     // OpenCode Go/Zen 要求：真实客户端 UA + 每会话稳定 x-opencode-session（否则路由告警）
-    headers: { 'User-Agent': 'trss-agent-plugin/0.3.0' },
+    headers: { 'User-Agent': `trss-agent-plugin/${VERSION}` },
     sessionHeader: 'x-opencode-session',
   },
 
@@ -171,7 +172,7 @@ export const presets = {
     baseURL: 'https://opencode.ai/zen/go/v1',
     reasoningFields: [],
     // Go 明确要求客户端自报 UA + x-opencode-session 会话 id（缺省会被判"无法高效路由"）
-    headers: { 'User-Agent': 'trss-agent-plugin/0.3.0' },
+    headers: { 'User-Agent': `trss-agent-plugin/${VERSION}` },
     sessionHeader: 'x-opencode-session',
   },
 }

@@ -6,7 +6,7 @@
  * 返回 source 标注哪一层拍板。
  */
 
-const BASELINE = { tools: false, vision: false, thinking: false, caching: false, json_mode: false, file: false }
+const BASELINE = { tools: false, vision: false, thinking: false, caching: false, json_mode: false, file: false, audio: false, video: false }
 
 const PROTOCOL_DEFAULT = {
   openai: { tools: true },

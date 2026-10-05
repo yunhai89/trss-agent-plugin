@@ -353,6 +353,7 @@ router.get('/overview', asyncHandler(async (req, res) => {
     conversations,
   }
   const data = {
+    version: Config.version, // 版本号单一来源（package.json），前端 Hero 展示
     tokenTrend, requestTrend, toolTop, totalRequests, totalToolCalls, totalTokens, totalCached, perceptions, counts,
     // 工具成功率（KV 日统计口径；null=尚无 KV 数据——如部署首日，前端显示「暂无」）
     toolOk: kvActive ? kvSum.toolOk : null,

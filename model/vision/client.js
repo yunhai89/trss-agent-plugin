@@ -81,6 +81,13 @@ export class VisionService {
    */
   async recognizeVideo({ buffer, mime, name } = {}, { question } = {}) {
     if (!buffer || !mime) return ''
+    // video_url 仅 OpenAI 兼容多模态端（MiMo-V2.5 等）支持；Anthropic 无视频原生块。
+    // 非 openai 协议若强发 video_url，会被端点拒收（或被归一为占位文本 → 对着空视频编描述），
+    // 因此直接跳过，由调用方降级为"视频（识别失败/为空）"文本占位。
+    if (this.protocol !== 'openai') {
+      this.logger('warn', `[vision] 视频识别跳过：协议 ${this.protocol} 不支持 video_url 原生块`)
+      return ''
+    }
     const videoUrl = `data:${mime};base64,${buffer.toString('base64')}`
     const userText = question
       ? `${DEFAULT_DESCRIBE}\n\n用户想了解：${question}`

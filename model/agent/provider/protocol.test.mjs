@@ -278,6 +278,44 @@ await test('跨协议：Anthropic image 块发给 Gemini 端点 → 转 Content_
   assert.deepEqual(step.content[1], { type: 'image', data: 'QQ==', mime_type: 'image/png' })
 })
 
+await test('跨协议：Anthropic document 块发给 Gemini 端点 → 补齐 data/mime_type（曾丢成空 document）', async () => {
+  let captured
+  const client = { interactions: { async create(body) { captured = structuredClone(body); return { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: 'ok' }] }] } } } }
+  const doc = { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0=' } }
+  await new GeminiProvider({ model: 'fixture', client }).chat({ messages: [{ role: 'user', content: [doc] }] })
+  const step = captured.input.find((s) => s.type === 'user_input')
+  assert.deepEqual(step.content[0], { type: 'document', data: 'JVBERi0=', mime_type: 'application/pdf' })
+})
+
+await test('跨协议：Gemini document 块发给 Anthropic 端点 → 补齐 source{base64}', async () => {
+  let captured
+  const client = { messages: { async create(body) { captured = structuredClone(body); return { content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' } } } }
+  const doc = { type: 'document', data: 'JVBERi0=', mime_type: 'application/pdf' }
+  await new AnthropicProvider({ client }).chat({ model: 'fixture', messages: [{ role: 'user', content: [doc] }] })
+  const content = captured.messages.at(-1).content
+  assert.deepEqual(content[0], { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'JVBERi0=' } })
+})
+
+await test('跨协议：无法原生表达的块（Anthropic 端点收到 audio/video）→ 降级 text 占位，不透传', async () => {
+  let captured
+  const client = { messages: { async create(body) { captured = structuredClone(body); return { content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' } } } }
+  const audio = { type: 'input_audio', input_audio: { data: 'QQ==', format: 'mp3' } }
+  const video = { type: 'video_url', video_url: { url: 'data:video/mp4;base64,QQ==' } }
+  await new AnthropicProvider({ client }).chat({ model: 'fixture', messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }, audio, video] }] })
+  const content = captured.messages.at(-1).content
+  assert.ok(content.every((b) => b.type === 'text'), 'Anthropic 请求中不得出现 audio/video 块')
+  assert.ok(content.some((b) => /input_audio|video_url/.test(b.text)), '降级占位保留来源类型')
+})
+
+await test('跨协议：OpenAI video_url 块发给 Gemini → 转 Content_2 video{data,mime_type}', async () => {
+  let captured
+  const client = { interactions: { async create(body) { captured = structuredClone(body); return { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: 'ok' }] }] } } } }
+  const video = { type: 'video_url', video_url: { url: 'data:video/mp4;base64,QUJD' } }
+  await new GeminiProvider({ model: 'fixture', client }).chat({ messages: [{ role: 'user', content: [video] }] })
+  const step = captured.input.find((s) => s.type === 'user_input')
+  assert.deepEqual(step.content[0], { type: 'video', data: 'QUJD', mime_type: 'video/mp4' })
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)

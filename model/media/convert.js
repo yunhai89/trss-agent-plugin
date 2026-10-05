@@ -32,7 +32,9 @@ export function toOpenaiBlocks(media, { caps = {}, degrade = 'note' } = {}) {
       }
       continue
     }
-    if (mf.mime?.startsWith('audio/') && caps.vision) {
+    // 原生音频块（input_audio）仅当显式声明 caps.audio——绝大多数多模态端只认 image_url/text，
+    // 把音频当"视觉能力"下发会被端点拒收（unknown variant input_audio）。未声明则降级为文本说明。
+    if (mf.mime?.startsWith('audio/') && caps.audio) {
       const fmt = mf.ext || (mf.mime.includes('mpeg') ? 'mp3' : mf.mime.includes('wav') ? 'wav' : 'ogg')
       blocks.push({ type: 'input_audio', input_audio: { data: asBase64(mf.buffer), format: fmt } })
       continue
@@ -95,7 +97,8 @@ export function toGeminiBlocks(media, { caps = {}, degrade = 'note' } = {}) {
       }
       continue
     }
-    if (mf.mime?.startsWith('audio/') && caps.vision) {
+    // 同上：Gemini 原生音频块需显式 caps.audio，否则降级文本
+    if (mf.mime?.startsWith('audio/') && caps.audio) {
       blocks.push({ type: 'audio', data: asBase64(mf.buffer), mime_type: mf.mime })
       continue
     }

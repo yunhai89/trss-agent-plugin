@@ -161,6 +161,26 @@ await test('VisionService：thinking/temperature 透传给 provider', async () =
   ok(!('thinking' in got2) && !('temperature' in got2), '未配置则不下发')
 })
 
+// ---------- 12. recognizeVideo：仅 OpenAI 协议发 video_url，其它协议跳过（防不可识别块 400/幻觉）----------
+await test('recognizeVideo：openai 发 video_url；anthropic 跳过（不调用 provider）', async () => {
+  const m = mockProvider('一段视频描述')
+  const vOpenai = new VisionService({ provider: m.provider, model: 'mimo-2.5', protocol: 'openai' })
+  const desc = await vOpenai.recognizeVideo({ buffer: PNG, mime: 'video/mp4', name: 'a.mp4' })
+  eq(desc, '一段视频描述', 'openai 正常识别')
+  ok(m.received().messages[0].content.some((b) => b.type === 'video_url'), 'openai 发 video_url 块')
+
+  let called = 0
+  const logs = []
+  const vAnthropic = new VisionService({
+    provider: { async chat() { called++; return { content: 'x' } } },
+    model: 'claude', protocol: 'anthropic',
+    logger: (lvl, msg) => logs.push([lvl, msg]),
+  })
+  eq(await vAnthropic.recognizeVideo({ buffer: PNG, mime: 'video/mp4', name: 'a.mp4' }), '', 'anthropic 跳过返回空串')
+  eq(called, 0, 'anthropic 不调用 provider')
+  ok(logs.some(([lvl, msg]) => lvl === 'warn' && /video_url/.test(msg)), '有明确 warn')
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
