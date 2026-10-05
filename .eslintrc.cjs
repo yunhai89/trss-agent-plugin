@@ -20,6 +20,9 @@ module.exports = {
     Headers: 'readonly',
     FormData: 'readonly',
     Blob: 'readonly',
+    ReadableStream: 'readonly',
+    TextEncoder: 'readonly',
+    TextDecoder: 'readonly',
     // 浏览器 DOM：仅 puppeteer evaluate 字符串上下文引用，node 端不执行
     document: 'readonly',
   },

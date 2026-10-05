@@ -11,6 +11,8 @@ import {
   splitInlineThink,
   createThinkStripper,
   extractToolCallsOpenAI,
+  parseInlineToolCalls,
+  stripInlineToolCalls,
   APIError,
   TimeoutError,
 } from './index.js'
@@ -441,6 +443,34 @@ test('extractToolCallsOpenAI 兼容标准 + 旧版 function_call', () => {
   // 无工具调用
   eq(extractToolCallsOpenAI({ content: '纯文本回复' }), [], '无工具调用返回空数组')
   eq(extractToolCallsOpenAI({}), [], '空 message 安全')
+
+// ---------- parseInlineToolCalls（内联工具调用标记不得外发）----------
+test('parseInlineToolCalls 解析 <tool_calls><invoke> 并剥离正文', () => {
+  const content = '主人，我查一下「登录」对应的工具。\n<tool_calls>\n<invoke name="tool_search">\n<arguments>{"query": "登录 账号 授权"}</arguments>\n</invoke>\n</tool_calls>'
+  const r = parseInlineToolCalls(content)
+  eq(r.toolCalls.length, 1, '解析出 1 个调用')
+  eq(r.toolCalls[0].name, 'tool_search', '工具名')
+  eq(r.toolCalls[0].arguments, { query: '登录 账号 授权' }, '参数解析')
+  eq(r.content, '主人，我查一下「登录」对应的工具。', '正文剥离标记')
+  ok(!r.content.includes('tool_calls') && !r.content.includes('invoke'), '无残留控制标签')
+})
+
+test('parseInlineToolCalls 兼容 antml: / <tool_call> / 裸 invoke / 多调用', () => {
+  const antml = parseInlineToolCalls('<antml:invoke name="web_search"><antml:arguments>{"q":1}</antml:arguments></antml:invoke>')
+  eq(antml.toolCalls[0].name, 'web_search', 'antml:invoke')
+  eq(antml.content, '', 'antml 正文清空')
+  const multi = parseInlineToolCalls('<invoke name="a"><arguments>{}</arguments></invoke><invoke name="b"><arguments>{"x":2}</arguments></invoke>')
+  eq(multi.toolCalls.map((t) => t.name), ['a', 'b'], '多调用')
+  const noName = parseInlineToolCalls('<invoke><arguments>{}</arguments></invoke>正文')
+  eq(noName.toolCalls.length, 0, '无 name 丢弃')
+  eq(noName.content, '正文', '无 name 块剥除')
+})
+
+test('parseInlineToolCalls / stripInlineToolCalls 无标记时原样返回', () => {
+  eq(parseInlineToolCalls('普通回复'), { content: '普通回复', toolCalls: [] }, '无标记')
+  eq(stripInlineToolCalls('普通回复'), '普通回复', 'strip 原样')
+  eq(stripInlineToolCalls(''), '', '空串安全')
+})
 })
 
 // ---------- 总结 ----------

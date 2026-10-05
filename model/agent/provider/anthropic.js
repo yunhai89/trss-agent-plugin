@@ -8,7 +8,7 @@
  *   - max_tokens 必填：未给默认 4096
  */
 import { createClient, extractText, extractThinking, extractToolUses } from '../../anthropic/index.js'
-import { splitInlineThink, createThinkStripper } from '../../openai/index.js' // 纯函数：剥离内联 <think>（防御某些 Anthropic 兼容聚合层把思考内联进 text block）
+import { splitInlineThink, createThinkStripper, parseInlineToolCalls } from '../../openai/index.js' // 纯函数：剥离内联 <think>（防御某些 Anthropic 兼容聚合层把思考内联进 text block）
 import { Provider, toolsToList, mapToolChoice, clientOpts, jsonSchemaOf } from './base.js'
 import { parseArgs } from '../messages.js'
 import { toAnthropicContent } from './content-blocks.js'
@@ -100,13 +100,16 @@ function nativePayload(content) {
 function resultFromResponse(res) {
   const content = res.content || []
   // 防御：若 text block 里被内联了 <think>，剥离到 reasoning（原生 Anthropic 走 thinking block，此处为 no-op）
-  const { content: cleanText, reasoning: inlineReasoning } = splitInlineThink(extractText(content))
+  const { content: thinkClean, reasoning: inlineReasoning } = splitInlineThink(extractText(content))
   const thinking = extractThinking(content)
   const reasoning = [thinking, inlineReasoning].filter(Boolean).join('\n\n').trim()
+  // 兼容聚合层把工具调用内联进 text block（<tool_calls><invoke…>）：解析回结构化，避免当正文外发
+  const structured = extractToolUses(content)
+  const { content: cleanText, toolCalls: inlineCalls } = parseInlineToolCalls(thinkClean)
   return {
     role: 'assistant',
     content: cleanText,
-    toolCalls: extractToolUses(content),
+    toolCalls: structured.length ? structured : inlineCalls,
     reasoning: reasoning || null,
     finishReason: res.stop_reason ?? null,
     usage: res.usage ?? null,
@@ -116,13 +119,15 @@ function resultFromResponse(res) {
 }
 
 function resultFromStream(s) {
-  const { content: cleanText, reasoning: inlineReasoning } = splitInlineThink(s.text ?? '')
+  const { content: thinkClean, reasoning: inlineReasoning } = splitInlineThink(s.text ?? '')
   const reasoning = [s.thinking, inlineReasoning].filter(Boolean).join('\n\n').trim()
   const content = s.assistantMessage?.content ?? s.content
+  const structured = Array.isArray(s.toolUses) ? s.toolUses : []
+  const { content: cleanText, toolCalls: inlineCalls } = parseInlineToolCalls(thinkClean)
   return {
     role: 'assistant',
     content: cleanText,
-    toolCalls: s.toolUses,
+    toolCalls: structured.length ? structured : inlineCalls,
     reasoning: reasoning || null,
     finishReason: s.stopReason,
     usage: s.usage,

@@ -1,7 +1,7 @@
 /**
  * OpenAIProvider —— 包装 model/openai，统一消息↔OpenAI Chat Completions 格式。
  */
-import { createClient, extractReasoning, splitInlineThink, createThinkStripper, extractToolCallsOpenAI } from '../../openai/index.js'
+import { createClient, extractReasoning, splitInlineThink, createThinkStripper, extractToolCallsOpenAI, parseInlineToolCalls } from '../../openai/index.js'
 import { Provider, toolsToList, mapToolChoice, clientOpts } from './base.js'
 import { stringifyArgs } from '../messages.js'
 import { toOpenAIContent } from './content-blocks.js'
@@ -164,11 +164,13 @@ export class OpenAIProvider extends Provider {
   _resultFromResponse(res) {
     const choice = res.choices?.[0]
     const message = choice?.message || {}
-    const toolCalls = extractToolCallsOpenAI(message)
+    const structured = extractToolCallsOpenAI(message)
     const fieldReasoning = extractReasoning(message, this.reasoningFields)
-    // 剥离内联 <think> 推理块：部分通道把思考内联在 content 里，不剥离会泄漏进最终回复
-    const { content: cleanContent, reasoning: inlineReasoning } = splitInlineThink(message.content ?? '')
-    const content = cleanContent
+    // 剥离内联  thinking 推理块：部分通道把思考内联在 content 里，不剥离会泄漏进最终回复
+    const { content: thinkClean, reasoning: inlineReasoning } = splitInlineThink(message.content ?? '')
+    // 再剥离/解析内联工具调用标记（<tool_calls><invoke…>）：不处理会当正文外发且工具不执行
+    const { content, toolCalls: inlineCalls } = parseInlineToolCalls(thinkClean)
+    const toolCalls = structured.length ? structured : inlineCalls
     const reasoning = [fieldReasoning, inlineReasoning].filter(Boolean).join('\n\n').trim()
     // 注：绝不拿 reasoning/思考文本填空正文（审计 B7）。content 为空即空——上层据 finishReason
     // （length/max_tokens 等）走确定性收尾，而不是把内部推理当最终答案外发。
@@ -184,8 +186,10 @@ export class OpenAIProvider extends Provider {
   }
 
   _resultFromStream(s) {
-    const toolCalls = s.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments }))
-    const { content, reasoning: inlineReasoning } = splitInlineThink(s.content ?? '')
+    const structured = s.toolCalls.map((tc) => ({ id: tc.id, name: tc.name, arguments: tc.arguments }))
+    const { content: thinkClean, reasoning: inlineReasoning } = splitInlineThink(s.content ?? '')
+    const { content, toolCalls: inlineCalls } = parseInlineToolCalls(thinkClean)
+    const toolCalls = structured.length ? structured : inlineCalls
     const reasoning = [s.reasoning, inlineReasoning].filter(Boolean).join('\n\n').trim()
     return {
       role: 'assistant',

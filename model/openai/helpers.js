@@ -107,7 +107,49 @@ export function splitInlineThink(content, reasoning = '') {
 }
 
 /**
- * 流式 <think> 剥离器（有状态，跨 delta 累积），用于流式 live 旁路（onDelta）。
+ * 解析并剥离 content 中内联的「工具调用」文本标记。
+ *
+ * 部分模型/通道不在结构化 tool_calls 字段返回调用，而是把调用内联进正文，例如：
+ *   <tool_calls><invoke name="tool_search"><arguments>{"query":"…"}</arguments></invoke></tool_calls>
+ * （还有 antml: 前缀、<tool_call>、<function_calls> 等变体）。插件此前只解析结构化 tool_calls，
+ * 内联文本会被当作正文发给用户（控制文本泄漏），且本应执行的工具不会执行。
+ *
+ * 返回 { content, toolCalls }：content 已剔除所有调用标记；toolCalls 为解析出的调用（缺 name 的块丢弃）。
+ * 仅当结构化 toolCalls 为空时，调用方应回退使用这里的 toolCalls。
+ */
+export function parseInlineToolCalls(content) {
+  if (typeof content !== 'string' || !content) return { content: content || '', toolCalls: [] }
+  if (!/<(?:antml:)?(?:tool_calls?|function_calls?|invoke)\b/i.test(content)) return { content, toolCalls: [] }
+  const toolCalls = []
+  let cleaned = content.replace(
+    /<(?:antml:)?invoke\b([^>]*)>([\s\S]*?)<\/(?:antml:)?invoke\s*>/gi,
+    (_m, attrs, inner) => {
+      const name = (String(attrs).match(/\bname\s*=\s*["']([^"']+)["']/i) || [])[1]
+      if (!name) return '' // 无 name 的 invoke 块：无法调用，直接剥除
+      const argMatch = String(inner).match(/<(?:antml:)?arguments\b[^>]*>([\s\S]*?)<\/(?:antml:)?arguments\s*>/i)
+      const raw = String((argMatch ? argMatch[1] : inner) ?? '').trim()
+      let args = {}
+      if (raw) {
+        try { args = JSON.parse(raw) } catch { args = { _raw: raw } }
+      }
+      toolCalls.push({ id: synthCallId(), name, arguments: args })
+      return ''
+    },
+  )
+  // 清掉残留的包裹/参数标签（含无 invoke 的空壳），确保任何控制标签都不外发
+  cleaned = cleaned
+    .replace(/<\/?(?:antml:)?(?:tool_calls?|function_calls?|arguments)\b[^>]*>/gi, '')
+    .replace(/^\s+|\s+$/g, '')
+  return { content: cleaned, toolCalls }
+}
+
+/** 仅剥离内联工具调用标记，返回干净正文（供最终外发的安全网使用） */
+export function stripInlineToolCalls(content) {
+  return parseInlineToolCalls(content).content
+}
+
+/**
+ * 流式  thinking 剥离器（有状态，跨 delta 累积），用于流式 live 旁路（onDelta）。
  * 标签可能被拆到多个 delta（如 "<thi"｜"nk>…"），靠尾部前缀缓冲处理。
  * feed(chunk) 返回本轮可安全外发的文本（已剔除 <think>…</think>）。
  * @returns {{feed:(chunk:string)=>string, end:()=>string}}

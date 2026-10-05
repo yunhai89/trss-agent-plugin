@@ -39,6 +39,7 @@ import {
   buildPersonaListHtml,
 } from '../model/agent/index.js'
 import { presets as openaiPresets } from '../model/openai/index.js'
+import { stripInlineToolCalls } from '../model/openai/helpers.js'
 import { presets as anthropicPresets } from '../model/anthropic/index.js'
 import { McpManager } from '../model/mcp/index.js'
 import { createMediaService, makeMediaTools } from '../model/media/index.js'
@@ -1866,7 +1867,9 @@ export class Chat extends plugin {
       const u = usage ? `in:${usage.prompt_tokens ?? usage.input_tokens ?? usage.input ?? '-'}/out:${usage.completion_tokens ?? usage.output_tokens ?? usage.output ?? '-'}` : '-'
       Log.mark('[chat]', `reply turns=${turns} stop=${stopReason} usage=${u} replyLen=${(content || '').length}`)
       // 发送前脱敏：屏蔽 API Key / token 等敏感信息（agent.redactSecrets 默认开；异常不阻塞回复）
-      const body = cfg.redactSecrets === false ? (content || '') : redactSecrets(content || '')
+      // 安全网：无论 provider 是否已剥离，最终外发前再剥一次内联工具调用标记（<tool_calls><invoke…>），
+      // 杜绝任何模型/通道把控制文本当正文发出（provider 层已解析，这里防 fallback/自定义 provider 漏网）
+      const body = stripInlineToolCalls(cfg.redactSecrets === false ? (content || '') : redactSecrets(content || ''))
       // 收尾流式：发完剩余增量并等待发送队列结算（完成屏障）。只有全部分片确认送达、且流式全文
       // 与最终正文一致，才算"已投递"从而跳过整段最终回复；存在失败/未决/缺片一律不算成功。
       const streamState = await streamer.finish()

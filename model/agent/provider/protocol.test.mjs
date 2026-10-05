@@ -247,6 +247,25 @@ await test('结构化输出：兼容端拒绝 response_format → 降级一次�
   assert.equal(Object.hasOwn(bodies[2], 'response_format'), false, '后续调用主动剥离（记忆生效）')
 })
 
+// ── 内联工具调用：不得当正文外发，应解析回结构化调用 ──────────────────
+await test('OpenAIProvider：content 内联 <tool_calls><invoke> → 解析为 toolCalls，正文剥离', async () => {
+  const inline = '我查一下工具。\n<tool_calls>\n<invoke name="tool_search">\n<arguments>{"query":"登录 账号 授权"}</arguments>\n</invoke>\n</tool_calls>'
+  const client = { chat: { completions: { async create() { return { choices: [{ message: { role: 'assistant', content: inline }, finish_reason: 'tool_calls' }] } } } } }
+  const res = await new OpenAIProvider({ client }).chat({ model: 'fixture', messages: [{ role: 'user', content: 'x' }] })
+  ok(res.toolCalls.length === 1 && res.toolCalls[0].name === 'tool_search', '解析出 tool_search 调用')
+  assert.deepEqual(res.toolCalls[0].arguments, { query: '登录 账号 授权' })
+  ok(!/tool_calls|invoke/.test(res.content), `正文不含控制标签（实际：${res.content}）`)
+  ok(res.content.includes('我查一下工具'), '正文保留叙述')
+})
+
+await test('AnthropicProvider：text block 内联 <tool_calls><invoke> → 解析为 toolCalls，正文剥离', async () => {
+  const inline = '查一下。<invoke name="tool_search"><arguments>{"query":"x"}</arguments></invoke>'
+  const client = { messages: { async create() { return { content: [{ type: 'text', text: inline }], stop_reason: 'end_turn' } } } }
+  const res = await new AnthropicProvider({ client }).chat({ model: 'fixture', messages: [{ role: 'user', content: 'x' }] })
+  ok(res.toolCalls.length === 1 && res.toolCalls[0].name === 'tool_search', '解析出调用')
+  ok(!/invoke|tool_calls/.test(res.content), `正文不含控制标签（实际：${res.content}）`)
+})
+
 // ── 跨协议历史：内容块发送前归一为当前协议原生块 ─────────────────────
 const ANTH_IMAGE = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'QQ==' } }
 const OAI_IMAGE = { type: 'image_url', image_url: { url: 'data:image/png;base64,QQ==' } }
