@@ -71,8 +71,8 @@ export function extractForwardResid(seg) {
   if (seg.type === 'forward' && seg.id) return seg.id
   if (seg.type === 'xml' || seg.type === 'json') {
     const raw = typeof seg.data === 'string' ? seg.data : JSON.stringify(seg.data || {})
-    // 兼容 xml 的 m_resid="..." 与 json 的 "m_resid":"..." 两种分隔
-    const m = String(raw).match(/m_resid["']?\s*[:=]\s*["']([\w/+=-]+)["']/)
+    // XML 卡片用 m_resid，JSON 卡片（com.tencent.multimsg）用 resid —— 两者都兼容
+    const m = String(raw).match(/(?:m_)?resid["']?\s*[:=]\s*["']([\w/+=-]+)["']/)
     if (m) return m[1]
   }
   return null
@@ -116,10 +116,11 @@ export async function fetchReply(e, { bot, log } = {}) {
       if (r?.message) return r
     }
   } catch (err) { log?.(`getReply 失败: ${err?.message || err}`) }
-  // 直连 OneBot get_msg（最稳；NapCat 历史消息也能取到 message 段）
-  if (replyId != null && typeof e.bot?.sendApi === 'function') {
+  // 直连 OneBot get_msg（最稳；NapCat 历史消息也能取到 message 段）。e.bot 不可用时用注入的 bot 兜底。
+  const sendApiFn = (typeof e.bot?.sendApi === 'function' && e.bot.sendApi.bind(e.bot)) || (typeof bot?.sendApi === 'function' && bot.sendApi.bind(bot)) || null
+  if (replyId != null && sendApiFn) {
     try {
-      const r = await e.bot.sendApi('get_msg', { message_id: replyId })
+      const r = await sendApiFn('get_msg', { message_id: replyId })
       if (r?.message) return r
     } catch (err) { log?.(`get_msg(reply ${replyId}) 失败: ${err?.message || err}`) }
   }
@@ -133,6 +134,42 @@ export async function fetchReply(e, { bot, log } = {}) {
     } catch (err) { log?.(`getChatHistory(reply) 失败: ${err?.message || err}`) }
   }
   return null
+}
+
+/** 消息段 → 引用预览文本（转发/文件/图片给占位，不丢信息） */
+function quoteSegText(s) {
+  if (typeof s === 'string') return s
+  if (!s || typeof s !== 'object') return ''
+  const d = s.data && typeof s.data === 'object' ? s.data : s
+  switch (s.type) {
+    case 'text': return d.text || ''
+    case 'at': return `@${d.qq ?? d.user_id ?? ''}`
+    case 'image': return '[图片]'
+    case 'face': return '[表情]'
+    case 'record': case 'voice': return '[语音]'
+    case 'video': return '[视频]'
+    case 'file': return `[文件:${d.name || d.file || ''}]`
+    case 'forward': case 'xml': case 'json': return '[聊天记录卡片]'
+    case 'reply': return '[回复]'
+    default: return d.text || d.summary || ''
+  }
+}
+
+/**
+ * 拉取被引用消息的上下文（文本 / 媒体段 / 转发卡片 resid），供 Agent 把"引用内容"并入本轮输入。
+ * 复用 fetchReply（getReply → get_msg → 历史兜底）；取不到返回 null（调用方降级，不阻断）。
+ * @returns {Promise<{nick:string,text:string,forwardResid:string|null,raw:object}|null>}
+ */
+export async function fetchQuotedContext(e, { bot, log } = {}) {
+  const reply = await fetchReply(e, { bot, log })
+  if (!reply) return null
+  const segsRaw = reply.message ?? reply.content ?? reply.messages ?? []
+  const segs = Array.isArray(segsRaw) ? segsRaw : (segsRaw ? [segsRaw] : [])
+  const text = segs.map(quoteSegText).join('').trim()
+  let forwardResid = null
+  for (const s of segs) { const r = extractForwardResid(s); if (r) { forwardResid = r; break } }
+  const nick = reply.sender?.nickname || reply.sender?.card || reply.user_id || reply.sender?.user_id || ''
+  return { nick: String(nick || ''), text, forwardResid, raw: reply }
 }
 
 /** 按 url||name 去重（保留首个来源） */

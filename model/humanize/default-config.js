@@ -80,7 +80,7 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
 })
 
 /** 危险工具名黑名单：绝不允许进 allowedReadTools（指南 §15）。 */
-const FORBIDDEN_READ_TOOLS = /^(?:send_|delete_|remove_|group_(kick|mute|set_|notice)|terminal|stagehand|file_to_pdf|upload_|create_group|transfer_|schedule_task|reminder_set|reload_skills|memory$)/i
+const FORBIDDEN_READ_TOOLS = /^(?:send_|delete_|remove_|group_(kick|mute|set_|notice)|terminal|stagehand|file_to_pdf|upload_|create_group|transfer_|schedule_task|reminder_set|reload_skills|install_skill|memory$)/i
 
 /**
  * 校验并归一化人类化配置。返回 { ok, config, errors[] }。

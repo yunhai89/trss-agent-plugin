@@ -139,8 +139,8 @@ function runtimeStatus(runtime, cfg) {
   feats.push('人设切换(#人设)')
   if (feats.length) lines.push(`- 框架能力：${feats.join('、')}`)
 
-  // 技能目录（供 skillhub 安装时 --dir 指向）
-  if (runtime?.skillsDir) lines.push(`- 技能目录：${runtime.skillsDir}（安装 SkillHub 技能时 --dir 指向它）`)
+  // 技能目录（宿主侧 install_skill 工具内部会用它，无需模型传参）
+  if (runtime?.skillsDir) lines.push(`- 技能目录：${runtime.skillsDir}（安装 SkillHub 技能请用 install_skill 工具，无需手动指定路径）`)
   return lines.join('\n')
 }
 

@@ -42,7 +42,7 @@ const WORKER_CTX_UNSUPPORTED = new Set([
   'terminal',                 // ctx.sandbox
   'read_attachment',          // ctx.media
   'list_group_folder', 'get_group_file_url', // ctx.e/bot
-  'get_chat_history', 'get_forward_msg', 'get_group_notice', // ctx.e/bot
+  'get_chat_history', 'get_forward_msg', 'analyze_chat_record', 'get_group_notice', // ctx.e/bot/quoted
   'group_info', 'group_member', 'user_info', // ctx.bot
   'get_ai_characters', 'ai_tts', // ctx.e/bot（AI 语音通道）
   'read_pdf', 'create_excel', 'send_file', 'file_to_pdf', // ctx.e / ctx.media

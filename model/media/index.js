@@ -22,7 +22,7 @@
  *   tools.register(...makeMediaTools())   // 工具从 ctx.e / ctx.bot / ctx.media 读运行时
  */
 
-import { collectFromEvent, fetchReply, extractFromMessage, extractForwardResid, kindOf, dedupMedia } from './collect.js'
+import { collectFromEvent, fetchReply, fetchQuotedContext, extractFromMessage, extractForwardResid, kindOf, dedupMedia } from './collect.js'
 import { resolveMedia, resolveAll, inferMime, sniffMagic, asBase64, isTextLike, isImage, truncateText, mimeFromName, EXT_MIME } from './resolve.js'
 import { toOpenaiBlocks, toAnthropicBlocks, toGeminiBlocks, buildUserContent } from './convert.js'
 import { listGroupFilesTool, getGroupFileTool, readAttachmentTool, makeMediaTools } from './tool.js'
@@ -114,6 +114,7 @@ function applyLimits(list, { maxImages, maxFileBytes, caps }) {
 export {
   collectFromEvent,
   fetchReply,
+  fetchQuotedContext,
   extractFromMessage,
   extractForwardResid,
   kindOf,

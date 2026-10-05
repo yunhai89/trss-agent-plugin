@@ -42,7 +42,7 @@ import { presets as openaiPresets } from '../model/openai/index.js'
 import { stripInlineToolCalls } from '../model/openai/helpers.js'
 import { presets as anthropicPresets } from '../model/anthropic/index.js'
 import { McpManager } from '../model/mcp/index.js'
-import { createMediaService, makeMediaTools } from '../model/media/index.js'
+import { createMediaService, makeMediaTools, fetchQuotedContext } from '../model/media/index.js'
 import { detectCapabilities } from '../model/llm/capabilities.js'
 import { buildEmbed } from '../model/llm/embed-wiring.js'
 import { thinkingLogFields as fmtThinkingLogFields } from '../model/llm/thinking.js'
@@ -64,6 +64,7 @@ import { randomUUID } from 'node:crypto'
 import devLog from '../utils/DevLog.js'
 import { ReplySender, createRunQueues, makeProgressGate } from '../model/agent/reply-sender.js'
 import { SkillRegistry, loadSkillPack, makeSkillTool } from '../model/skill/index.js'
+import { makeInstallSkillTool } from '../model/skill/install.js'
 import { PromptRegistry, PromptTemplate, evolveTemplate, regressionGate, TEMPLATES } from '../model/prompt/index.js'
 import { TraceStore } from '../model/evolution/trace.js'
 import { SelfReviewer, listPendingSuggestions, removeSuggestion } from '../model/evolution/review.js'
@@ -742,6 +743,10 @@ async function buildRuntime() {
       return { ok: true, count: skills.list().length, skills: skills.list().map((s) => s.name) }
     },
   })
+
+  // 宿主侧受控技能安装器（SkillHub）：terminal 是 E2B 隔离沙箱、装不到宿主，故安装必须走宿主侧专用工具。
+  // 仅主人（category:system + execute 内 isMaster 复核）+ alwaysConfirm；固定 argv 无 shell；产物仅允许 .md。
+  tools.register(makeInstallSkillTool({ skillsDir, registry: skills, logger: Log.tag('skill') }))
 
   const mcp = new McpManager({ registry: tools, logger: Log.tag('mcp'), requestTimeout: cfg.mcp?.requestTimeout })
   mcp.start(cfg.mcp?.servers || {}).catch((e) => Log.error('[mcp] 启动失败', e?.message || e))
@@ -1527,10 +1532,10 @@ export class Chat extends plugin {
     return true
   }
 
-  /** 轻量探测：消息是否含图片/文件/音视频段，或引用了某条消息（引用的媒体由 collectActive 兜底拉取）。不发网络请求。 */
+  /** 轻量探测：消息是否含图片/文件/音视频/合并转发(聊天记录)段，或引用了某条消息（引用的媒体由 collectActive 兜底拉取）。不发网络请求。 */
   _hasMedia(e) {
     const segs = e?.message
-    const hasSeg = Array.isArray(segs) && segs.some((s) => s && ['image', 'file', 'record', 'video', 'flash'].includes(s.type))
+    const hasSeg = Array.isArray(segs) && segs.some((s) => s && ['image', 'file', 'record', 'video', 'flash', 'forward', 'xml', 'json'].includes(s.type))
     return !!(hasSeg || e?.reply_id != null)
   }
 
@@ -1655,9 +1660,30 @@ export class Chat extends plugin {
       bot: ctx.bot, e: this.e, caps, protocol, config: mediaCfg, fetcher: ctx.fetcher,
       log: (m) => (/失败|未能|异常/.test(m) ? Log.warn('[media]', m) : Log.debug('[media]', m)),
     }) : null
-    let input = text
+    // —— 引用消息：拉取被引用内容（文本/文件/聊天记录卡片）并入本轮输入 ——
+    // 此前只对引用里的媒体做了收集，引用文本/转发卡片从未进模型上下文 → 机器人"看不到引用"。
+    let quotedBlock = ''
+    try {
+      const hasReply = this.e?.reply_id != null || (Array.isArray(this.e?.message) && this.e.message.some((s) => s && s.type === 'reply'))
+      if (hasReply) {
+        const q = await fetchQuotedContext(this.e, { bot: ctx.bot, fetcher: ctx.fetcher, log: (m) => Log.debug('[reply]', m) })
+        if (q) {
+          ctx.quoted = q // 供 analyze_chat_record 自动定位被引用的聊天记录卡片
+          const parts = []
+          if (q.nick || q.text) parts.push(`${q.nick ? q.nick + ': ' : ''}${q.text || '(无文本)'}`)
+          if (q.forwardResid) parts.push('[这是一条合并聊天记录卡片，可用 analyze_chat_record 工具分析其内容]')
+          if (parts.length) quotedBlock = `【引用消息】\n${parts.join('\n')}`
+        } else {
+          Log.debug('[reply] 未能取到被引用消息（getReply/get_msg/历史均失败）')
+        }
+      }
+    } catch (e) { Log.warn('[reply] 引用消息获取失败', e?.message || e) }
+    // 模型可见文本 = 引用块 + 用户本轮文字（引用只进模型输入，不改原始 text，避免影响 skill 匹配/日志）
+    const modelText = quotedBlock ? (text ? `${quotedBlock}\n\n${text}` : quotedBlock) : text
+
+    let input = modelText
     let blindMedia = '' // 收集到但无法识别的媒体种类（如"图片/视频"）——主模型无对应能力且未被 vision 子模型转文本，用于防臆测提示
-    let effText = text
+    let effText = modelText
     if (mediaEnabled) {
       try {
         let files = await media.collectActive()
@@ -1670,7 +1696,7 @@ export class Chat extends plugin {
         if (needVision) {
           Log.mark('[chat]', `vision 子模型识别 ${nImg} 图/${nVid} 视频（主模型 ${cfg.model} 视觉=${caps.vision ? 'on' : 'off'}）`)
           try {
-            files = await describeImages(rt.vision, files, text, { images: !caps.vision, video: true })
+            files = await describeImages(rt.vision, files, modelText, { images: !caps.vision, video: true })
             media.replaceActive(files)
           } catch (e) {
             Log.warn('[vision] 媒体识别失败，按原能力降级', e?.message || e)
@@ -1697,7 +1723,7 @@ export class Chat extends plugin {
           Log.warn(`[vision] 用户发送了${blindMedia}但当前无法识别（主模型无对应能力，未配可用视觉子模型 agent.vision.model）；将提示用户而非臆测`)
         }
         // 纯媒体无文字：注入默认指令（问题4）
-        effText = text || (files.length ? '（我发了一张图片/文件给你，请查看并告诉我内容，或按需处理）' : '')
+        effText = modelText || (files.length ? '（我发了一张图片/文件给你，请查看并告诉我内容，或按需处理）' : '')
         if (effText) {
           const content = media.buildContent(effText)
           if (Array.isArray(content)) input = { role: 'user', content, _media: true }

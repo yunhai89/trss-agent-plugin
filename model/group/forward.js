@@ -12,6 +12,7 @@
  */
 
 import { defineTool, param, groupIdOf, sendApi } from '../toolkit/index.js'
+import { fetchForwardNodes, flattenForwardNodes, formatTranscript, analyzeMessages, resolveForwardId } from './chat-record.js'
 
 /** 单个消息段归一为 OneBot 段 {type, data}（LLM 可能给扁平 {type,...} 或已是 {type,data}） */
 function normSegment(s) {
@@ -86,27 +87,63 @@ export const sendForwardMsgTool = defineTool({
   },
 })
 
-/** get_forward_msg：获取合并转发消息内容 */
+/**
+ * get_forward_msg：读取合并转发（聊天记录卡片）的完整内容。
+ * 修形状：NapCat 返回节点是 `{type:'node',data:{user_id,nickname,message}}`（旧实现按 n.content/n.sender 读 → 取不到）。
+ * 支持自动定位：未传 messageId/resid 时，自动取当前消息或引用消息里的转发卡片。
+ */
 export const getForwardMsgTool = defineTool({
   name: 'get_forward_msg',
-  description: '按 resid/message_id 获取合并转发消息的完整内容（各节点文本/媒体）。用户发来或转发了合并转发卡片时用它解析内容。',
+  description: '获取合并转发（聊天记录卡片）的完整内容（各节点昵称/时间/文本）。用户发来或引用了转发卡片时用它解析；需要统计/总结用 analyze_chat_record。',
   category: 'query',
-  meta: { summary: '读取合并转发', resultCap: 10000 },
+  meta: { summary: '读取合并转发', resultCap: 12000 },
   parameters: param.object({
-    messageId: param.str('合并转发的 resid / message_id'),
-  }, ['messageId']),
+    messageId: param.str('转发卡片的 message_id / resid（留空则自动取当前消息或引用消息里的转发卡片）'),
+  }),
   async execute(p, ctx) {
-    const r = await sendApi(ctx, 'get_forward_msg', { message_id: String(p.messageId) })
-    if (!r.ok) return { error: r.error }
-    const nodes = Array.isArray(r.data) ? r.data : (r.data?.messages || [])
-    const items = nodes.map((n) => ({
-      sender: n.sender?.nickname || n.name || null,
-      uin: String(n.user_id || n.uin || ''),
-      time: n.time ? new Date(n.time * 1000).toLocaleString('zh-CN') : null,
-      content: Array.isArray(n.content) ? n.content.map((s) => s?.data?.text || s?.data?.summary || `[${s?.type || ''}]`).join('') : (typeof n.content === 'string' ? n.content : ''),
-    }))
-    return { ok: true, count: items.length, messages: items }
+    const id = resolveForwardId(ctx, p || {})
+    if (!id) return { error: '未找到转发卡片：请直接发送/引用该聊天记录，或传入 messageId/resid' }
+    const { nodes, error } = await fetchForwardNodes(sendApi, ctx, id)
+    if (error) return { error }
+    const messages = flattenForwardNodes(nodes)
+    if (!messages.length) return { error: '转发内容为空或已过期（NapCat 仅能取仍在服务器保留期的记录）' }
+    const { text, truncated, total } = formatTranscript(messages, { maxChars: 10000 })
+    return { ok: true, count: total, truncated, transcript: text }
   },
 })
 
-export const forwardTools = [sendForwardMsgTool, getForwardMsgTool]
+/**
+ * analyze_chat_record：分析用户发送/引用的「合并聊天记录」卡片（可能来自别的群）。
+ * 拉全文 → 归一 → 确定性统计（条数/时间跨度/发言排行/关键词/链接）→ 返回可总结的转录文本。
+ */
+export const analyzeChatRecordTool = defineTool({
+  name: 'analyze_chat_record',
+  description: '分析用户发送/引用的「合并聊天记录」卡片（可能来自其他群）：拉取全文并给出条数、时间跨度、发言排行、关键词等统计 + 可总结的转录文本。何时用：用户转发聊天记录并让你总结/分析/看谁说了什么/提取要点时。',
+  category: 'query',
+  meta: { summary: '分析聊天记录', resultCap: 14000 },
+  parameters: param.object({
+    messageId: param.str('转发卡片的 message_id/resid（留空自动取当前或引用的卡片）'),
+    question: param.str('用户的分析诉求（如"总结重点"/"谁在吵架"），用于引导你的总结'),
+  }),
+  async execute(p, ctx) {
+    const id = resolveForwardId(ctx, p || {})
+    if (!id) return { error: '未找到聊天记录卡片：请直接发送/引用该记录，或传入 messageId/resid' }
+    const { nodes, error } = await fetchForwardNodes(sendApi, ctx, id)
+    if (error) return { error }
+    const messages = flattenForwardNodes(nodes)
+    if (!messages.length) return { error: '聊天记录为空或已过期（NapCat 仅能取仍在服务器保留期的记录）' }
+    const stats = analyzeMessages(messages)
+    const { text, truncated, total } = formatTranscript(messages, { maxChars: 9000 })
+    return {
+      ok: true,
+      total,
+      stats: { total: stats.total, timeSpan: stats.spanText, topSenders: stats.senders, keywords: stats.keywords, links: stats.links },
+      truncated,
+      transcript: text,
+      ...(truncated ? { hint: '记录较长，以上为头尾节选；需要特定部分请让用户指明发送者或关键词' } : {}),
+      ...(p?.question ? { question: String(p.question) } : {}),
+    }
+  },
+})
+
+export const forwardTools = [sendForwardMsgTool, getForwardMsgTool, analyzeChatRecordTool]
