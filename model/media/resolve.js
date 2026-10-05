@@ -61,19 +61,29 @@ export function sniffMagic(buf) {
   return null
 }
 
-/** 综合名称扩展 + 魔数推断 mime */
+/**
+ * 综合名称扩展 + 魔数推断 mime。
+ *
+ * **魔数优先**：名称/扩展名常与实际字节不符（QQ 图片转码、改扩展名、file 字段是哈希名），
+ * 而 Anthropic 等端点对 image 块的 media_type 强校验「声明类型必须与内容一致」，按名称下发的
+ * image/jpeg 配 PNG 字节会直接 400（inline image declared media type does not match its content）。
+ * 故先按字节判定，仅当魔数无结论时才回退名称扩展。
+ */
 export function inferMime(name, buf) {
-  // 1) 名称扩展
   const ext = String(name || '').toLowerCase().match(/\.([a-z0-9]+)$/)?.[1]
-  if (ext && EXT_MIME[ext]) return { mime: EXT_MIME[ext], ext }
-  // 2) 魔数（对 zip 家族再用名称扩展细化 docx/xlsx 等）
+  const nameMime = ext ? EXT_MIME[ext] : null
+  // 1) 魔数（对 zip 家族再用名称扩展细化 docx/xlsx 等）
   const magic = sniffMagic(buf)
   if (magic) {
     if (magic === 'application/zip' && ext && /^(docx|xlsx|pptx|odt|ods|odp)$/.test(ext)) {
       return { mime: EXT_MIME[ext] || magic, ext }
     }
+    // ftyp 家族魔数只到 video/mp4 粒度；名称明确是音频容器（m4a/mp4a）时保留名称类型
+    if (magic === 'video/mp4' && nameMime?.startsWith('audio/')) return { mime: nameMime, ext }
     return { mime: magic, ext: MIME_EXT[magic] || ext || null }
   }
+  // 2) 名称扩展（魔数无结论）
+  if (nameMime) return { mime: nameMime, ext }
   // 3) 文本嗅探（无 NUL 字节 → utf8 文本）
   if (Buffer.isBuffer(buf) && buf.length && !buf.slice(0, Math.min(buf.length, 1024)).includes(0)) {
     return { mime: 'text/plain', ext: ext || 'txt' }

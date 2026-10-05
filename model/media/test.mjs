@@ -46,14 +46,18 @@ await test('sniffMagic：PNG/JPG/PDF', async () => {
   eq(sniffMagic(Buffer.from('hello world')), null, '无魔数 → null')
 })
 
-// ---------- 2. inferMime：名称优先，魔数兜底 ----------
-await test('inferMime：名称扩展 + 魔数', async () => {
-  eq(inferMime('a.csv', Buffer.from('x,y\n1,2')).mime, 'text/csv', 'csv 按名称')
-  eq(inferMime('pic.png', PNG).mime, 'image/png', 'png 按名称')
+// ---------- 2. inferMime：魔数优先，名称扩展兜底 ----------
+await test('inferMime：魔数优先 + 名称扩展兜底', async () => {
+  eq(inferMime('a.csv', Buffer.from('x,y\n1,2')).mime, 'text/csv', '无魔数 → csv 按名称')
+  eq(inferMime('pic.png', PNG).mime, 'image/png', 'png 魔数')
   eq(inferMime('doc', PNG).mime, 'image/png', '无扩展 → 魔数 png')
   eq(inferMime('report.docx', Buffer.from([0x50, 0x4b, 0x03, 0x04])).mime, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'docx = zip 家族按名称细化')
-  eq(inferMime('notes.txt', Buffer.from('纯文本内容')).mime, 'text/plain', 'txt 按名称')
+  eq(inferMime('notes.txt', Buffer.from('纯文本内容')).mime, 'text/plain', '无魔数 → txt 按名称')
   eq(inferMime('未知', Buffer.from('一些utf8文本没有nul')).mime, 'text/plain', '无魔数无扩展 → 文本嗅探')
+  // 名称与实际字节冲突：必须以字节为准（否则 Anthropic 报 media type mismatch）
+  eq(inferMime('a.jpg', PNG).mime, 'image/png', 'jpg 名 + PNG 字节 → 以字节为准')
+  const WEBP = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')])
+  eq(inferMime('a.png', WEBP).mime, 'image/webp', 'png 名 + webp 字节 → 以字节为准')
 })
 
 // ---------- 3. 段抽取 ----------
@@ -110,6 +114,18 @@ await test('toOpenaiBlocks / toAnthropicBlocks：视觉模型', async () => {
   const wav = [{ name: 'r.wav', mime: 'audio/wav', buffer: Buffer.from('wavdata'), bytes: 7, kind: 'audio' }]
   eq(toOpenaiBlocks(wav, { caps: { vision: true } })[0].type, 'text', 'openai 未声明 audio → text')
   eq(toOpenaiBlocks(wav, { caps: { vision: true, audio: true } })[0].type, 'input_audio', 'openai 声明 audio → input_audio')
+})
+
+// ---------- 6b. 声明的 image media_type 必须与字节一致（Anthropic 强校验）----------
+await test('convert：预置 mime 与字节不符时，image 块按魔数纠正', async () => {
+  // 名称/mime 谎报 jpeg，实际字节是 PNG
+  const mislabeled = [{ name: 'a.jpg', mime: 'image/jpeg', buffer: PNG, bytes: PNG.length, kind: 'image' }]
+  const ant = toAnthropicBlocks(mislabeled, { caps: { vision: true } })
+  eq(ant[0].source.media_type, 'image/png', 'anthropic 按字节纠正 media_type')
+  const oai = toOpenaiBlocks(mislabeled, { caps: { vision: true } })
+  ok(oai[0].image_url.url.startsWith('data:image/png;base64,'), 'openai data url 按字节纠正')
+  const gem = toGeminiBlocks(mislabeled, { caps: { vision: true } })
+  eq(gem[0].mime_type, 'image/png', 'gemini 按字节纠正 mime_type')
 })
 
 // ---------- 7. convert：非视觉降级 ----------

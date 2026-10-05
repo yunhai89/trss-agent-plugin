@@ -9,7 +9,15 @@
  *  - vision=false → 降级（degrade）：skip 丢弃 / note 占位文字 / text 文本提取（仅文本类）
  */
 
-import { asBase64, isImage, isTextLike, truncateText } from './resolve.js'
+import { asBase64, isImage, isTextLike, truncateText, sniffMagic } from './resolve.js'
+
+/** image 块的 media_type：优先按实际字节嗅探（Anthropic 强校验「声明类型须与内容一致」），
+ *  嗅探不是图片时才回退 mf.mime（防预置 mime 与实际字节不符 → inline image declared media
+ *  type does not match its content）。 */
+function imageMediaType(mf) {
+  const sniffed = mf.buffer ? sniffMagic(mf.buffer) : null
+  return sniffed && sniffed.startsWith('image/') ? sniffed : mf.mime
+}
 
 /**
  * OpenAI Chat Completions 多模态块：
@@ -59,7 +67,7 @@ export function toAnthropicBlocks(media, { caps = {}, degrade = 'note' } = {}) {
     }
     if (isImage(mf.mime)) {
       if (caps.vision) {
-        blocks.push({ type: 'image', source: { type: 'base64', media_type: mf.mime, data: asBase64(mf.buffer) } })
+        blocks.push({ type: 'image', source: { type: 'base64', media_type: imageMediaType(mf), data: asBase64(mf.buffer) } })
       } else {
         const t = degradeBlock(mf, degrade)
         if (t) blocks.push({ type: 'text', text: t })
@@ -90,7 +98,7 @@ export function toGeminiBlocks(media, { caps = {}, degrade = 'note' } = {}) {
     }
     if (isImage(mf.mime)) {
       if (caps.vision) {
-        blocks.push({ type: 'image', data: asBase64(mf.buffer), mime_type: mf.mime })
+        blocks.push({ type: 'image', data: asBase64(mf.buffer), mime_type: imageMediaType(mf) })
       } else {
         const t = degradeBlock(mf, degrade)
         if (t) blocks.push({ type: 'text', text: t })
@@ -115,7 +123,7 @@ export function toGeminiBlocks(media, { caps = {}, degrade = 'note' } = {}) {
 /** data: URL（OpenAI image_url 直接收 base64 data url；统一走 base64——直链省 token 的设想
  *  曾以 `mf.__preferUrl` 预留，但从未赋值且各兼容端点对远程图支持不一（MiniMax 连 detail 都拒），已删） */
 function dataUrl(mf) {
-  return `data:${mf.mime};base64,${asBase64(mf.buffer)}`
+  return `data:${imageMediaType(mf)};base64,${asBase64(mf.buffer)}`
 }
 
 /** 文件 → 文本（文本类直接解码；其余按 degrade 策略） */
