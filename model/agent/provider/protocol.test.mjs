@@ -247,6 +247,37 @@ await test('结构化输出：兼容端拒绝 response_format → 降级一次�
   assert.equal(Object.hasOwn(bodies[2], 'response_format'), false, '后续调用主动剥离（记忆生效）')
 })
 
+// ── 跨协议历史：内容块发送前归一为当前协议原生块 ─────────────────────
+const ANTH_IMAGE = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'QQ==' } }
+const OAI_IMAGE = { type: 'image_url', image_url: { url: 'data:image/png;base64,QQ==' } }
+
+await test('跨协议：Anthropic image 块发给 OpenAI 端点 → 转 image_url（不再 unknown variant）', async () => {
+  let captured
+  const client = { chat: { completions: { async create(body) { captured = structuredClone(body); return { choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] } } } } }
+  await new OpenAIProvider({ client }).chat({ model: 'fixture', messages: [{ role: 'user', content: [{ type: 'text', text: '看图' }, ANTH_IMAGE] }] })
+  const content = captured.messages.at(-1).content
+  assert.equal(content[0].type, 'text')
+  assert.equal(content[1].type, 'image_url', 'Anthropic image → image_url')
+  assert.equal(content[1].image_url.url, 'data:image/png;base64,QQ==')
+})
+
+await test('跨协议：OpenAI image_url 块发给 Anthropic 端点 → 转 image{source}（不再 unknown variant）', async () => {
+  let captured
+  const client = { messages: { async create(body) { captured = structuredClone(body); return { content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' } } } }
+  await new AnthropicProvider({ client }).chat({ model: 'fixture', messages: [{ role: 'user', content: [{ type: 'text', text: '看图' }, OAI_IMAGE] }] })
+  const content = captured.messages.at(-1).content
+  assert.equal(content[1].type, 'image', 'OpenAI image_url → Anthropic image')
+  assert.deepEqual(content[1].source, { type: 'base64', media_type: 'image/png', data: 'QQ==' })
+})
+
+await test('跨协议：Anthropic image 块发给 Gemini 端点 → 转 Content_2 image{data,mime_type}', async () => {
+  let captured
+  const client = { interactions: { async create(body) { captured = structuredClone(body); return { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: 'ok' }] }] } } } }
+  await new GeminiProvider({ model: 'fixture', client }).chat({ messages: [{ role: 'user', content: [{ type: 'text', text: '看图' }, ANTH_IMAGE] }] })
+  const step = captured.input.find((s) => s.type === 'user_input')
+  assert.deepEqual(step.content[1], { type: 'image', data: 'QQ==', mime_type: 'image/png' })
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)

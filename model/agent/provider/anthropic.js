@@ -33,7 +33,7 @@ export function toAnthropicMessages(messages, system) {
       continue
     }
     if (m.role === 'user') {
-      raw.push({ role: 'user', content: m.content })
+      raw.push({ role: 'user', content: normalizeAnthropicContent(m.content) })
     } else if (m.role === 'assistant') {
       // Provider 原生载荷优先：Anthropic 扩展思考 + 工具续轮要求 assistant 消息原样带回
       // thinking（含 signature）与 redacted_thinking 块——只按 content/tool_calls 重建会丢失
@@ -87,6 +87,42 @@ export function toAnthropicMessages(messages, system) {
 
   const finalSystem = sysParts.filter(Boolean).join('\n\n') || null
   return { system: finalSystem, messages: merged }
+}
+
+/**
+ * 跨协议历史兜底：把非 Anthropic 原生内容块归一为 Anthropic 块。
+ *
+ * 历史按会话持久化，可能携带另一协议块（切模型/跨协议回退到 Anthropic 端点时留下 OpenAI
+ * `{type:'image_url'}`）。原样透传会被端点拒收（unknown variant）。发送前转成 `image{source}`；
+ * Anthropic 无原生块的 audio/video/file 降级为文本占位，绝不原样透传。
+ */
+export function normalizeAnthropicContent(content) {
+  if (!Array.isArray(content)) return content
+  const out = []
+  for (const b of content) {
+    if (b == null) continue
+    if (typeof b !== 'object') { out.push({ type: 'text', text: String(b) }); continue }
+    if (b.type === 'text' || b.type === 'image' || b.type === 'document') { out.push(b); continue }
+    if (b.type === 'image_url') {
+      const source = imageUrlToSource(b)
+      if (source) out.push({ type: 'image', source })
+      continue
+    }
+    out.push({ type: 'text', text: `[${b.type || 'unknown'} 内容块在 Anthropic 协议下不支持，已忽略]` })
+  }
+  return out
+}
+
+/** OpenAI `{image_url:{url}}` / Gemini `{data,mime_type}` → Anthropic `image.source` */
+function imageUrlToSource(b) {
+  const url = b.image_url?.url || b.url
+  if (typeof url === 'string' && url) {
+    const m = /^data:([^;]+);base64,(.+)$/.exec(url)
+    if (m) return { type: 'base64', media_type: m[1], data: m[2] }
+    return { type: 'url', url }
+  }
+  if (b.data) return { type: 'base64', media_type: b.mime_type || 'image/png', data: b.data }
+  return null
 }
 
 /** 保存 Anthropic 原生 content blocks（含 thinking.signature / redacted_thinking）供工具续轮原样回发。

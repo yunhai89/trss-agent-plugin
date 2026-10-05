@@ -58,7 +58,17 @@ function toContentBlocks(content) {
 function toGeminiBlock(b) {
   if (!b) return null
   if (b.type === 'text' && b.text != null) return { type: 'text', text: String(b.text) }
-  if (b.type === 'image') return { type: 'image', data: b.data, mime_type: b.mime_type }
+  if (b.type === 'image') {
+    // 原生 Gemini 块（data/mime_type）直通；Anthropic 块（source）跨协议兜底归一
+    if (b.data) return { type: 'image', data: b.data, mime_type: b.mime_type }
+    const src = b.source || {}
+    if (src.type === 'base64' && src.data) return { type: 'image', data: src.data, mime_type: src.media_type || 'image/png' }
+    if (src.type === 'url' && src.url) {
+      const m = /^data:([^;]+);base64,(.+)$/.exec(src.url)
+      if (m) return { type: 'image', data: m[2], mime_type: m[1] }
+    }
+    return null
+  }
   if (b.type === 'audio') return { type: 'audio', data: b.data, mime_type: b.mime_type }
   if (b.type === 'document') return { type: 'document', data: b.data, mime_type: b.mime_type }
   if (b.type === 'video') return { type: 'video', data: b.data, mime_type: b.mime_type }
