@@ -50,6 +50,7 @@ const reSummary = /通过\s*(\d+)\s*[，,]\s*失败\s*(\d+)/
 // 需要先装 Yunzai 桩钩子才能跑的真实入口测试（其余 stress 文件是纯离线断言）
 const HOOKED_STRESS = new Set([
   'stress/e2e/run.mjs', 'stress/e2e/agent-init-failure.mjs', 'stress/e2e/agent-sandbox-wiring.mjs',
+  'stress/e2e/compaction-clear.mjs', // F02：清空记录必须连同压缩归档一起清理 + 会话 id 不复用
   // 真实 Web router 测试需要 Yunzai 桩（apps/agent.js / lib 解析）
   'model/web/api.tevo.test.mjs',
 ])

@@ -260,6 +260,172 @@ await test('Agent 集成：token 水位触发无损压缩——归档可恢复 +
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+// ============================================================
+// P1 上下文压缩审计回归（F01、F03、F04、F05、F06、F08）
+// 这些断言描述「修复后的契约」；在修复前基线应失败。
+// ============================================================
+
+await test('F01：归档写入失败不丢原文——保留原历史、不返回虚构 ref、暴露 archiveError', async () => {
+  const input = [um('总目标')]
+  for (let i = 1; i <= 8; i++) { input.push(um(`问题${i}` + 'q'.repeat(250))); input.push(am(`回复${i}` + 'a'.repeat(250))) }
+  let attempted = 0
+  const failing = { save() { attempted++; throw new Error('simulated ENOSPC') } }
+  const out = await compactMessages(input, { kind: 'count', value: 6, minKeep: 2, convKey: 'u1:p:c1', archive: failing })
+  ok(attempted > 0, '确实尝试过归档写入')
+  eq(out.dropped, 0, '归档失败时不丢弃任何消息')
+  eq(out.archiveRefs.length, 0, '不返回不存在的归档 ref')
+  ok(!out.messages.some((m) => String(m.content).includes('已无损归档')), '不谎称已无损归档')
+  ok(out.archiveError && /ENOSPC/.test(out.archiveError), `向上暴露归档错误（实际 ${out.archiveError}）`)
+  eq(out.messages.length, input.length, '返回原历史而非压缩结果')
+})
+
+await test('F01：无归档模式(mode=ledger)不产生 archive_refs，也不声称无损', async () => {
+  const input = [um('总目标')]
+  for (let i = 1; i <= 8; i++) { input.push(um(`问题${i}` + 'q'.repeat(250))); input.push(am(`回复${i}` + 'a'.repeat(250))) }
+  const out = await compactMessages(input, { kind: 'count', value: 6, minKeep: 2, convKey: 'u1:p:c1', archive: null })
+  ok(out.dropped > 0, '仍执行台账压缩')
+  eq(out.mode, 'ledger', 'mode=ledger')
+  eq(out.archiveRefs.length, 0, 'ledger 模式无 archive_refs')
+  ok(!out.messages.some((m) => String(m.content).includes('已无损归档')), '不声称无损归档')
+  ok(out.messages.some((m) => String(m.content).includes('未启用归档')), '明确标注原文不可恢复')
+})
+
+await test('F04：Phase 1 旧工具结果优先被修剪，最新结果保留', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'compact-f04-'))
+  const arch = new CompactionArchive({ dir })
+  const input = [
+    um('GOAL'),
+    atmFlat([{ id: 'old', name: 'inspect' }]), tmFlat('old', 'O'.repeat(3000)),
+    atmFlat([{ id: 'new', name: 'inspect' }]), tmFlat('new', 'N'.repeat(4000)),
+  ]
+  const out = await compactMessages(input, { kind: 'token', value: 1400, minKeep: 2, convKey: 'u1:p:c1', archive: arch, estimateTokens: estFn })
+  const oldM = out.messages.find((m) => m.tool_call_id === 'old')
+  const newM = out.messages.find((m) => m.tool_call_id === 'new')
+  ok(out.pruned > 0, '发生了工具结果修剪')
+  ok(oldM.content !== 'O'.repeat(3000), '旧的大工具结果被优先修剪')
+  eq(newM.content, 'N'.repeat(4000), '最新的工具结果被保留')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('F05：仅修剪工具结果时仍保留（重建）压缩台账，关键事实对模型可见', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'compact-f05-'))
+  const arch = new CompactionArchive({ dir })
+  const prev = buildLedger([um('KEEP_LEDGER_FACT_42')])
+  prev.archive_refs = [arch.save({ convKey: 'u1:p:c1', epoch: 1, messages: [um('KEEP_LEDGER_FACT_42')] })]
+  const summary = renderCompactionMessage({ ledger: prev, nextRole: 'assistant' })
+  const input = [
+    um('GOAL'), summary,
+    atmFlat([{ id: 'old', name: 't' }]), tmFlat('old', 'O'.repeat(100)),
+    atmFlat([{ id: 'new', name: 't' }]), tmFlat('new', 'N'.repeat(4000)),
+  ]
+  const out = await compactMessages(input, { kind: 'token', value: 500, minKeep: 2, convKey: 'u1:p:c1', archive: arch, prevLedger: prev, epoch: 2, estimateTokens: estFn })
+  eq(out.dropped, 0, '未移出整块')
+  ok(out.pruned > 0, '修剪了工具结果')
+  ok(out.messages.some((m) => String(m.content).startsWith('【上下文压缩档案')), '窗口内仍有压缩台账消息')
+  ok(out.messages.some((m) => String(m.content).includes('KEEP_LEDGER_FACT_42')), '台账事实仍对模型可见')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('F03：大归档可分页读到末尾；工具调用参数不丢；续读锚点不被封顶切掉', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'compact-f03-'))
+  const arch = new CompactionArchive({ dir })
+  const rctx = { userId: 'u1', scopeUserId: 'u1', groupId: null, conversationId: 'c1' }
+  const tool = makeContextRecallTool({ archiveFor: () => arch })
+  ok(['offset', 'limit', 'from', 'to'].every((k) => k in tool.parameters.properties), 'schema 提供 offset/limit/from/to 分页参数')
+  // 9000 字符前缀 + 尾部标记：逐页必须能读到末尾
+  const tail = 'TAIL_MARKER_42'
+  const saved = arch.save({ convKey: 'u1:p:c1', messages: [um('X'.repeat(9000)), um(tail)] })
+  let offset = 0
+  let all = ''
+  for (let i = 0; i < 12; i++) {
+    const r = await tool.execute({ ref: saved.ref, offset, limit: 4000 }, rctx)
+    if (!r.ok) { ok(false, `分页读取失败：${r.error}`); break }
+    all += r.text
+    if (r.next_offset == null) break
+    offset = r.next_offset
+  }
+  ok(all.includes(tail), '分页可读到归档末尾')
+  const hit = await tool.execute({ ref: saved.ref, query: tail }, rctx)
+  ok(hit.ok && hit.text.includes(tail), 'ref+query 直接取命中片段（query 参与定位）')
+  // 空正文 assistant 的 tool_calls 参数必须保留
+  const saved2 = arch.save({ convKey: 'u1:p:c1', epoch: 1, messages: [um('q'), atmFlat([{ id: 'c1', name: 'inspect', arguments: { target: 'TARGET_ARGUMENT_42' } }]), tmFlat('c1', 'ok')] })
+  const r2 = await tool.execute({ ref: saved2.ref }, rctx)
+  ok(r2.ok && r2.text.includes('TARGET_ARGUMENT_42'), 'assistant 的 tool_calls 参数被保留')
+  ok(r2.text.includes('tool_call'), '恢复视图标注 tool_call 结构')
+  // 大页 + 外层封顶：JSON 必须仍在 resultCap 内，next_offset 不丢
+  const big = arch.save({ convKey: 'u1:p:c1', epoch: 2, messages: [um('Y'.repeat(20000))] })
+  const r3 = await tool.execute({ ref: big.ref, limit: 8000 }, rctx)
+  ok(r3.ok && r3.next_offset != null, '大页返回 next_offset 续读锚点')
+  ok(JSON.stringify(r3).length <= tool.meta.resultCap, `返回 JSON 不超 resultCap（${JSON.stringify(r3).length} ≤ ${tool.meta.resultCap}）`)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('F08：epoch≥100 的展示 ref 不被截断，可直接取回', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'compact-f08-'))
+  const arch = new CompactionArchive({ dir })
+  const saved = arch.save({ convKey: 'u1:p:c1', epoch: 100, messages: [um('payload')] })
+  const ledger = buildLedger([um('payload')]); ledger.archive_refs = [saved]
+  const text = renderCompactionMessage({ ledger }).content
+  const m = text.match(/^- \[([^\]]+)\]/m)
+  ok(m && m[1] === saved.ref, `展示 ref 与归档一致（displayed=${m && m[1]} saved=${saved.ref}）`)
+  ok(m && arch.get(m[1], { convKey: 'u1:p:c1' }).ok, '按展示 ref 可取回')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('F06：多模态数组文本与工具 schema 计入请求预算；压后完整请求不超窗口', async () => {
+  // content 为数组时，长文本块不能被漏算
+  const a1 = new Agent({ provider: {}, contextWindow: 1000 })
+  a1.messages = [um([{ type: 'text', text: 'X'.repeat(20000) }, { type: 'image_url', image_url: { url: 'https://example.invalid/i.png' } }])]
+  ok(a1._estimateHistory('S') >= 5000, `content 数组文本计入估算（实际 ${a1._estimateHistory('S')}）`)
+  // 工具 schema 计入触发检查
+  const tools = new ToolRegistry().register({ name: 'inspect', description: 'D'.repeat(20000), parameters: { type: 'object' }, execute() {} })
+  const a2 = new Agent({ provider: {}, tools, contextWindow: 1000, toolDiscovery: { enable: false } })
+  a2.messages = [um('Q')]
+  const p2 = await a2._hysteresisPressure('S', { scopeUserId: 'u1' })
+  ok(p2 && p2.unresolved, `大工具 schema 触发压力检查（reason=${p2 && p2.reason}）`)
+  // 低水位扣除 system/tools，压后完整请求不超过窗口
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'compact-f06-'))
+  const a3 = new Agent({ provider: {}, contextWindow: 1000, contextKeepRecent: 2, compactArchive: new CompactionArchive({ dir }) })
+  a3.messages = [um('FIRST_GOAL')]
+  for (let i = 0; i < 8; i++) { a3.messages.push(um(`q${i}:` + 'q'.repeat(400))); a3.messages.push(am(`a${i}:` + 'a'.repeat(400))) }
+  a3.messages.push(um('LATEST_REQUEST'))
+  const sys = 'S'.repeat(2400)
+  const before = a3._estimateHistory(sys)
+  const pr = await a3._hysteresisPressure(sys, { scopeUserId: 'u1', conversationId: 'c1' })
+  const after = a3._estimateHistory(sys)
+  ok(before > a3.contextWindow && pr, `超窗口触发压缩（before=${before}）`)
+  ok(after <= a3.contextWindow, `压后完整请求不超窗口（after=${after} ≤ ${a3.contextWindow}）`)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('F06：异常收尾前若仍超窗口，先压缩再收尾，并全量覆写持久化', async () => {
+  const kv = memoryKv()
+  const session = new SessionStore({ kv })
+  await session.createConversation('u1', null, 'c1')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'compact-finalize-'))
+  const arch = new CompactionArchive({ dir })
+  let calls = 0
+  const provider = {
+    async chat() {
+      calls++
+      if (calls === 1) return { content: '我先查一下', toolCalls: [{ id: 'c1', name: 'big', arguments: {} }], finishReason: 'tool_calls', usage: { prompt_tokens: 5, completion_tokens: 1 } }
+      return { content: '收尾交付：已完成检索', finishReason: 'stop', usage: { prompt_tokens: 5, completion_tokens: 1 } }
+    },
+  }
+  const tools = new ToolRegistry().register({ name: 'big', description: 'd', parameters: { type: 'object' }, async execute() { return 'R'.repeat(8000) } })
+  const agent = new Agent({ provider, tools, session, maxTurns: 1, reflect: 'off', contextWindow: 1000, contextKeepRecent: 2, maxToolResultChars: 20000, compactArchive: arch })
+  const res = await agent.run('任务', { ctx: { userId: 'u1', groupId: null, scopeUserId: 'u1', conversationId: 'c1' }, systemPrompt: '短身份' })
+  eq(res.content, '收尾交付：已完成检索', '返回 finalizer 交付内容')
+  const st = await session.getConversationState('u1', null, 'c1')
+  ok(st.cacheEpoch >= 1, `收尾前压缩发生并持久化 epoch（${st.cacheEpoch}）`)
+  const hist = await session.getConversation('u1', null, 'c1')
+  ok(hist.some((m) => String(m.content).startsWith('【上下文压缩档案')), '持久化历史含压缩台账（全量覆写未错位）')
+  const ids = new Set()
+  for (const m of hist) for (const tc of m.tool_calls || []) ids.add(tc.id)
+  ok(hist.filter((m) => m.role === 'tool').every((m) => ids.has(m.tool_call_id)), '收尾前压缩后 tool 配对完整')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)

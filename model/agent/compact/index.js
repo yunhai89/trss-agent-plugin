@@ -171,16 +171,24 @@ export function mergeLedger(prev, next) {
  * budgetTokens 给定时按预算自适应裁剪章节（保底：标注 + recall 指引 + 最新 ref）——
  * 台账消息自身也占窗口，不能把压后水位顶过高水位（滞回失效）。
  */
-export function renderCompactionMessage({ ledger, nextRole, budgetTokens = null }) {
+export function renderCompactionMessage({ ledger, nextRole, budgetTokens = null, reversible = null }) {
   const role = nextRole === 'assistant' ? 'user' : 'assistant'
   const tok = (s) => Math.ceil(String(s || '').length / 4)
   const L = []
   let used = 0
   const push = (line) => { L.push(line); used += tok(line) }
+  // reversible 缺省按台账是否真的带归档索引推断（直接调用该函数的旧路径兼容）
+  const rev = reversible == null ? !!(ledger.archive_refs || []).length : !!reversible
   push('【上下文压缩档案 v1（系统生成，非用户发言，非助手观点）】')
   const s = ledger.stats || {}
-  if (s.compactedMsgs) push(`更早的 ${s.compactedMsgs} 条消息已无损归档（原文完整保存，sha256 校验）。`)
-  push('需要原文细节（数字/报错/代码片段）时，调用 context_recall 工具按 ref 取回或按关键词检索。')
+  if (s.compactedMsgs) {
+    push(rev
+      ? `更早的 ${s.compactedMsgs} 条消息已无损归档（原文完整保存，sha256 校验）。`
+      : `更早的 ${s.compactedMsgs} 条消息已压缩为台账（未启用归档，原文不可恢复）。`)
+  }
+  push(rev
+    ? '需要原文细节（数字/报错/代码片段）时，调用 context_recall 工具按 ref 取回或按关键词检索。'
+    : '需要细节时请基于上述台账与近期消息工作（当前未启用原文归档）。')
   const fits = (line) => budgetTokens == null || used + tok(line) <= budgetTokens
   const sections = [
     { title: '## 用户事实与纠正（按时间序，数字/否定原样）', items: (ledger.facts || []).map((f) => `- ${f.text}`) },
@@ -197,12 +205,13 @@ export function renderCompactionMessage({ ledger, nextRole, budgetTokens = null 
     }
   }
   const refs = ledger.archive_refs || []
-  if (refs.length) {
+  if (rev && refs.length) {
     const title = '## 归档索引（archive_refs）'
     if (fits(title)) {
       push(title)
       for (const r of refs.slice(0, 3)) {
-        const line = `- [${String(r.ref).slice(0, 24)}] ${r.msgs ?? '?'} 条消息 · sha256:${String(r.hash).slice(0, 16)}`
+        // ref 是恢复标识，必须原样给出（截断会让 epoch>=100 的归档 .json 变成 .jso 而无法取回）
+        const line = `- [${r.ref}] ${r.msgs ?? '?'} 条消息 · sha256:${String(r.hash).slice(0, 16)}`
         if (!fits(line)) break
         push(line)
       }
@@ -212,7 +221,7 @@ export function renderCompactionMessage({ ledger, nextRole, budgetTokens = null 
       }
     } else if (refs[0]) {
       // 预算耗尽也要留恢复锚点（一句话）
-      push(`归档索引：[${String(refs[0].ref).slice(0, 24)}] 等 ${refs.length} 份（context_recall 可检索）`)
+      push(`归档索引：[${refs[0].ref}] 等 ${refs.length} 份（context_recall 可检索）`)
     }
   }
   push('（本条由上下文水位治理自动生成；继续基于上述台账与尾部近期消息工作即可）')
@@ -232,7 +241,9 @@ function defaultEstimate(t) { return Math.ceil(String(t || '').length / 4) }
  *  - minKeep：尾部保底条数（Agent 的 contextKeepRecent）
  *  - prevLedger：上一代台账（迭代合并防漂移）
  *  - pruneToolResultChars：Phase 1 修剪阈值（Hermes 默认 200 字符）
- * @returns {Promise<{messages, dropped, pruned, ledger, archiveRefs}>}
+ * @returns {Promise<{messages, dropped, pruned, ledger, archiveRefs, mode, archiveError}>}
+ *  - mode: 'reversible'（原文已归档可恢复）| 'ledger'（未装配归档，仅台账压缩）
+ *  - archiveError: 归档写入失败时的错误信息；此时绝不丢弃未保存的整块原文
  *
  * 组装目标把**档案消息自身**计入低水位（预算自适应裁剪章节）——否则台账逐代增长会把
  * 压后水位顶过高水位，滞回失效（每轮重触压缩、epoch 空转、前缀缓存逐轮全灭）。
@@ -243,12 +254,26 @@ export async function compactMessages(messages, {
   estimateTokens = null, minKeep = 4, prevLedger = null, pruneToolResultChars = 200,
 } = {}) {
   const fn = estimateTokens || defaultEstimate
+  // content 可能是协议原生块数组（多模态）：先归一到可计数文本，避免长文本块被整段漏算（F06）
+  const textOf = (c) => {
+    if (c == null) return ''
+    if (typeof c === 'string') return c
+    if (Array.isArray(c)) {
+      return c.map((b) => {
+        if (b == null) return ''
+        if (typeof b === 'string') return b
+        if (typeof b.text === 'string') return b.text
+        try { return JSON.stringify(b) } catch { return '' }
+      }).filter(Boolean).join('\n')
+    }
+    try { return JSON.stringify(c) } catch { return '' }
+  }
   const est = (msgs) => {
     if (kind === 'count') return msgs.length
     let n = 0
     for (const m of msgs) {
       n += 4
-      if (typeof m.content === 'string') n += fn(m.content)
+      n += fn(textOf(m.content))
       if (m.provider_native) n += fn(JSON.stringify(m.provider_native))
       if (m.tool_calls) n += fn(JSON.stringify(m.tool_calls))
     }
@@ -256,10 +281,12 @@ export async function compactMessages(messages, {
   }
   const over = (msgs) => (kind === 'count' ? msgs.length > value : est(msgs) > value)
   const minKeep2 = Math.max(minKeep, 2)
-  const noOp = { messages, dropped: 0, pruned: 0, ledger: prevLedger, archiveRefs: prevLedger?.archive_refs || [] }
-  if (!over(messages)) return noOp
+  const reversible = !!archive
+  const mode = reversible ? 'reversible' : 'ledger'
+  const base = { messages, dropped: 0, pruned: 0, ledger: prevLedger, archiveRefs: prevLedger?.archive_refs || [], mode, archiveError: null }
+  if (!over(messages)) return base
   // 计数水位：块不能再丢时修剪无意义（不减条数），保留旧防抖语义防止 epoch 每轮空转
-  if (kind === 'count' && messages.length <= minKeep2 + 1) return noOp
+  if (kind === 'count' && messages.length <= minKeep2 + 1) return base
 
   // 上一代的档案消息是派生数据（台账已持久化在会话 extra）：剔除后由本代合并台账重渲染替换，
   // 不进归档、不重复占窗（曾把旧档案消息当原文归档——恢复出的"原文"竟是台账渲染本身）。
@@ -278,16 +305,25 @@ export async function compactMessages(messages, {
     const hash = contentHash({ convKey, epoch, messages: msgs })
     return { ref: `${Number(epoch) || 0}-${hash.slice(0, 16)}.json`, hash, msgs: msgs.length }
   }
-  // 候选：归档 blocks[1..R]，台账按「低水位 - 首意图 - 尾部」预算自适应渲染
+  // 候选：归档 blocks[1..R]，台账按「低水位 - 首意图 - 尾部」预算自适应渲染。
+  // 关键（F05）：即使不丢整块（r=0）也渲染档案消息——只要发生任何压缩就保留一份台账，
+  // 不能因「只修剪工具结果」而把上一代摘要从模型输入里抹掉。
   const choose = (r) => {
     const droppedMsgs = blocks.slice(1, r + 1).flat()
     const tail = blocks.slice(r + 1).flat()
-    let ledger = buildLedger(droppedMsgs, { msgStart: 1 })
-    ledger.archive_refs = droppedMsgs.length ? [virtualRef(droppedMsgs)] : []
-    ledger.stats.compactedTokens = Math.round(est(droppedMsgs))
-    if (prevLedger) ledger = mergeLedger(prevLedger, ledger)
+    let ledger
+    if (droppedMsgs.length) {
+      ledger = buildLedger(droppedMsgs, { msgStart: 1 })
+      ledger.stats.compactedTokens = Math.round(est(droppedMsgs))
+      if (reversible) ledger.archive_refs = [virtualRef(droppedMsgs)]
+      if (prevLedger) ledger = mergeLedger(prevLedger, ledger)
+    } else {
+      ledger = prevLedger ? { ...prevLedger } : buildLedger([])
+    }
+    // ledger-only 模式：绝不携带/展示无法恢复的 ref（配置从 reversible 切换过来时 prevLedger 可能残留）
+    if (!reversible) ledger.archive_refs = []
     const budgetTokens = kind === 'token' ? Math.max(0, value - est([live[0], ...tail])) : null
-    const msg = renderCompactionMessage({ ledger, nextRole: tail[0]?.role, budgetTokens })
+    const msg = renderCompactionMessage({ ledger, nextRole: tail[0]?.role, budgetTokens, reversible })
     return { r, droppedMsgs, tail, ledger, msg, assembled: sanitizeToolPairs([live[0], msg, ...tail]) }
   }
 
@@ -297,29 +333,48 @@ export async function compactMessages(messages, {
     cand = choose(r)
     if (!over(cand.assembled)) break
   }
-  if (!cand) {
-    // 一块都丢不了（floor 全保）：纯 Phase 1 路径——不动块结构，只修剪长工具结果
-    cand = { r: 0, droppedMsgs: [], tail: [], ledger: prevLedger || buildLedger([]), msg: null, assembled: live.slice() }
+  if (!cand) cand = choose(0) // 一块都丢不了（floor 全保）：纯 Phase 1 路径（仍保留台账消息）
+
+  // F01：整块原文必须**先成功落盘**，才允许从窗口移除。归档失败 → 放弃块级丢弃，
+  // 保留原消息、不写虚构 ref，并把错误向上暴露（绝不报告"已无损归档"却无文件）。
+  let archiveError = null
+  if (reversible && cand.droppedMsgs.length) {
+    try {
+      const saved = await archive.save({ convKey, epoch, messages: cand.droppedMsgs })
+      // 校验确定性：落盘 ref 必须与台账虚拟 ref 一致（不一致说明实现有状态泄漏，保留实际值）
+      const v = cand.ledger.archive_refs?.[0]
+      if (v && v.ref !== saved.ref) v.ref = saved.ref
+    } catch (e) {
+      archiveError = e?.message || String(e)
+      cand = choose(0) // 降级：不丢任何整块，选中前置空 ref 的候选
+    }
   }
 
   // Phase 1 兜底（仅 token 水位：修剪减 token 不减条数）：floor 保护下仍超标 →
-  // 老 tool result 占位 + 原文归档（Hermes Phase 1 的无损化版本）
+  // 修剪长工具结果；**旧闭合结果优先**，最近 minKeep2 条只在仍超预算时才自旧向新修剪（F04）。
   let pruned = 0
   const savedResults = []
   if (kind === 'token' && over(cand.assembled)) {
-    const keepFrom = Math.max(2, cand.assembled.length - minKeep2) // 保住 m0+档案+尾部 minKeep 条
-    for (let i = cand.assembled.length - 1; i >= keepFrom && over(cand.assembled); i--) {
+    const keepFrom = Math.max(1, cand.assembled.length - minKeep2)
+    const order = []
+    for (let i = 1; i < keepFrom; i++) order.push(i)                      // 非保护区：最旧优先
+    for (let i = keepFrom; i < cand.assembled.length; i++) order.push(i)  // 仍超才动保护尾部（最旧先，最新最后）
+    for (const i of order) {
+      if (!over(cand.assembled)) break
       const m = cand.assembled[i]
-      if (m.role !== 'tool' || typeof m.content !== 'string' || m.content.length <= pruneToolResultChars) continue
+      if (!m || m.role !== 'tool' || typeof m.content !== 'string' || m.content.length <= pruneToolResultChars) continue
       let ref = ''
-      if (archive) {
+      if (reversible) {
         try {
           const saved = await archive.save({ convKey, epoch, messages: [m] })
           savedResults.push(saved)
           ref = saved.ref
-        } catch { continue }
+        } catch (e) { archiveError = archiveError || e?.message || String(e); continue }
       }
-      m.content = `[此工具输出较长（${m.content.length} 字符），已归档${ref ? `：ref=${ref}` : ''} —— 可用 context_recall 取回]`
+      const len = m.content.length
+      m.content = ref
+        ? `[此工具输出较长（${len} 字符），已归档：ref=${ref} —— 可用 context_recall 取回]`
+        : `[此工具输出较长（${len} 字符），已压缩省略]`
       pruned++
     }
     if (pruned && savedResults.length) {
@@ -330,17 +385,16 @@ export async function compactMessages(messages, {
       })
     }
   }
-  if (!cand.droppedMsgs.length && !pruned) return noOp
 
-  // 定稿落盘：整块归档一次写入（ref 与虚拟引用一致——内容寻址确定性）
-  if (archive && cand.droppedMsgs.length) {
-    try {
-      const saved = await archive.save({ convKey, epoch, messages: cand.droppedMsgs })
-      // 校验确定性：落盘 ref 必须与台账虚拟 ref 一致（不一致说明实现有状态泄漏，保留实际值）
-      const v = cand.ledger.archive_refs?.[0]
-      if (v && v.ref !== saved.ref) v.ref = saved.ref
-    } catch { /* 归档失败不阻断压缩（降级为无该 ref 台账），装配层可观测 */ }
+  // 无任何实际变化（块没丢、工具结果没修剪）→ 返回原历史 + 归档错误，绝不提交虚构台账
+  if (!cand.droppedMsgs.length && !pruned) return { ...base, archiveError }
+
+  // F05：用**最终**台账（含 Phase 1 新增 refs）重渲染窗口内档案消息，保证摘要与持久化台账一致
+  if (cand.msg && cand.assembled[1] === cand.msg) {
+    const tail = cand.assembled.slice(2)
+    const budgetTokens = kind === 'token' ? Math.max(0, value - est([cand.assembled[0], ...tail])) : null
+    cand.assembled[1] = renderCompactionMessage({ ledger: cand.ledger, nextRole: tail[0]?.role, budgetTokens, reversible })
   }
 
-  return { messages: cand.assembled, dropped: cand.droppedMsgs.length, pruned, ledger: cand.ledger, archiveRefs: cand.ledger.archive_refs || [] }
+  return { messages: cand.assembled, dropped: cand.droppedMsgs.length, pruned, ledger: cand.ledger, archiveRefs: cand.ledger.archive_refs || [], mode, archiveError }
 }

@@ -32,13 +32,23 @@ export class CompactionArchive {
     return d
   }
 
-  /** 归档一批消息 → { ref, hash, count, tokens? }。ref = 文件名（不含目录），get/search 用。 */
+  /** 归档一批消息 → { ref, hash, count, tokens? }。ref = 文件名（不含目录），get/search 用。
+   *  原子写：先写临时文件再 rename（同目录内 rename 原子）——避免半写文件被 get 当成损坏归档，
+   *  也避免 ENOSPC/进程中断留下看似成功实则残缺的原文。失败时清掉临时文件并抛出。 */
   save({ convKey, epoch = 0, messages = [] }) {
     if (!Array.isArray(messages) || !messages.length) throw new Error('archive.save: messages 为空')
     const hash = contentHash({ convKey, epoch, messages })
     const ref = `${Number(epoch) || 0}-${hash.slice(0, 16)}.json`
     const rec = { v: 1, hash, convKey, epoch: Number(epoch) || 0, createdAt: Date.now(), count: messages.length, messages }
-    fs.writeFileSync(path.join(this._convDir(convKey), ref), JSON.stringify(rec))
+    const finalPath = path.join(this._convDir(convKey), ref)
+    const tmpPath = `${finalPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    try {
+      fs.writeFileSync(tmpPath, JSON.stringify(rec))
+      fs.renameSync(tmpPath, finalPath)
+    } catch (e) {
+      try { fs.rmSync(tmpPath, { force: true }) } catch { /* best effort */ }
+      throw e
+    }
     return { ref, hash, count: messages.length }
   }
 
@@ -93,5 +103,23 @@ export class CompactionArchive {
     const d = path.join(this.dir, safeKey(convKey))
     if (!fs.existsSync(d)) return []
     return fs.readdirSync(d).filter((f) => f.endsWith('.json')).sort(byNewest)
+  }
+
+  /**
+   * 清空某 scope 用户在各隔离域（私聊 + 各群）的全部归档。
+   * 目录名 = safeKey(`${scopeUserId}:${groupId||'p'}:${convId}`) = `${safeKey(scopeUserId)}_...`，
+   * 用带尾随 `_` 的前缀匹配，避免 `1234_` 命中 `12345_...`。
+   * 群共享（scopeUserId='__group__'）不在本方法范围内——调用方只传真实 uid，群共享数据因此保留。
+   * @returns {number} 删除的归档目录数
+   */
+  purge(scopeUserId) {
+    const prefix = `${safeKey(scopeUserId)}_`
+    if (!fs.existsSync(this.dir)) return 0
+    let removed = 0
+    for (const name of fs.readdirSync(this.dir)) {
+      if (!name.startsWith(prefix)) continue
+      try { fs.rmSync(path.join(this.dir, name), { recursive: true, force: true }); removed++ } catch { /* 单个目录失败不阻断其余 */ }
+    }
+    return removed
   }
 }

@@ -24,7 +24,8 @@ export function formatResults(result, { maxResults = 10, maxContent = 500 } = {}
   if (result.citations?.length) parts.push(`📎 引用：${result.citations.slice(0, 5).join(' ')}`)
   if (parts.length) return parts.join('\n\n')
   // 所有源都返回空：给出可执行提示，避免模型直接断言"搜不到/没有相关信息"而放弃
-  return `(无搜索结果${result.provider ? `：${result.provider} 等搜索源均未返回内容` : ''}。可尝试更换关键词/更具体的表述后重试，或告知用户搜索暂时不可用)`
+  const sources = result.sources?.length ? result.sources.join('/') : result.provider
+  return `(无搜索结果${sources ? `：${sources} 等搜索源均未返回内容` : ''}。可尝试更换关键词/更具体的表述后重试，或告知用户搜索暂时不可用)`
 }
 
 /** 格式化提取结果 */

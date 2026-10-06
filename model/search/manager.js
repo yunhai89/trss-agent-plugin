@@ -23,10 +23,12 @@ export class SearchManager {
   async search(query, opts = {}) {
     const errs = []
     let tried = 0
+    const triedNames = []
     let empty = null // 首个「源可用但无结果」的返回：全部源都空时作为兜底返回
     for (const p of this.providers) {
       if (!p.available()) continue
       tried++
+      triedNames.push(p.name)
       try {
         const result = await p.search(query, opts)
         const n = result?.results?.length || 0
@@ -43,8 +45,8 @@ export class SearchManager {
     if (!tried) throw new Error('无可用搜索源（未配置任何搜索 API Key，且未部署 SearXNG）')
     if (empty) {
       // 所有源都可用但都无结果：附上已尝试的源，便于模型/用户判断是"确实没有"还是"源有问题"
-      this.logger('warn', `[search] 所有源均返回 0 结果（已试：${this.availableProviders.join(', ')}）query=${String(query).slice(0, 80)}`)
-      return empty
+      this.logger('warn', `[search] 所有源均返回 0 结果（已试：${triedNames.join(', ')}）query=${String(query).slice(0, 80)}`)
+      return { ...empty, sources: triedNames }
     }
     // 聚合每个源的真实失败原因，避免只抛出最后一个 "fetch failed" 让人无从排查
     throw new Error(`所有搜索源均失败 → ${errs.join('；')}`)

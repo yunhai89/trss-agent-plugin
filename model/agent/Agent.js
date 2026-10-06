@@ -286,9 +286,34 @@ export class Agent {
     }
     const graceMs = this.governor?.finalizeGraceMs ?? 45_000
     const finTimer = setTimeout(() => finCtl.abort({ kind: 'finalize_timeout' }), graceMs)
+    let compactedInFinalize = false // try/catch 两路都要回报，声明提到 try 外
     try {
       // 优先复用主循环最近一次的 system（逐字节一致）；仅在预检提前 break、从未组装过时重建。
       const wrapSys = system || this._assembleSystem(memories, systemPromptOverride, context, scopeId).system
+      // 收尾请求同样走完整预算口径（F06）：仍超硬窗口时先做一次定向压缩，避免注定超限的收尾调用。
+      // 压缩改变历史中段 → 回报 compacted 让 run 端用全量覆写持久化（否则 append 切片错位）。
+      if (this.contextWindow) {
+        try {
+          const fn = this.estimateTokens || ((t) => Math.ceil((t || '').length / 4))
+          if (this._estimateHistory(wrapSys) > this.contextWindow) {
+            const target = Math.max(128, Math.floor(this.contextWindow * 0.45) - fn(String(wrapSys ?? '')) - this._estimateToolsTokens() - 16)
+            const ck = ctx ? `${ctx.scopeUserId || ctx.userId || 'u'}:${ctx.groupId || 'p'}:${ctx.conversationId || 'unknown'}` : 'unknown'
+            const rr = await compactMessages(this.messages, {
+              kind: 'token', value: target, archive: this.compactArchive, convKey: ck, epoch: this.cacheEpoch + 1,
+              estimateTokens: this.estimateTokens, minKeep: Math.max(this.contextKeepRecent, 2), prevLedger: this._compactLedger,
+            })
+            if (rr.dropped || rr.pruned) {
+              this.messages = rr.messages
+              this._compactLedger = rr.ledger
+              this.cacheEpoch++
+              compactedInFinalize = true
+              this.logger('mark', `[finalize] 收尾前压缩以适配窗口：归档 ${rr.dropped} 条（修剪 ${rr.pruned} 条）`)
+            } else if (rr.archiveError) {
+              this.logger('warn', `[finalize] 收尾前压缩失败：${rr.archiveError}（原文保留，请求可能超窗）`)
+            }
+          }
+        } catch (e) { this.logger('warn', '[finalize] 收尾前压缩异常（忽略，按原历史收尾）', e?.message || e) }
+      }
       const toolList = this._buildToolList()
       const wrap = await this.provider.chat({
         model: this.model,
@@ -311,16 +336,16 @@ export class Agent {
       if (wrap.usage) {
         this.governor?.noteUsage(wrap.usage, { scope: 'finalize' })
         this.devLog?.('finalize_end', { ok: true, via: 'llm', contentLen: text.length, usage: wrap.usage, graceMs }, taskId, ctx?.devScope)
-        return { text, via: 'llm', usage: wrap.usage }
+        return { text, via: 'llm', usage: wrap.usage, compacted: compactedInFinalize }
       }
       this.devLog?.('finalize_end', { ok: true, via: 'llm', contentLen: text.length, graceMs }, taskId, ctx?.devScope)
-      return { text, via: 'llm', usage: null }
+      return { text, via: 'llm', usage: null, compacted: compactedInFinalize }
     } catch (e) {
       if (userSignal?.aborted) throw new Error('aborted') // 用户取消：不再交付过期结果
       const fb = this._deterministicWrapUp(stopReason)
       this.logger('warn', '[finalize] 收尾调用失败，使用代码生成的确定性兜底', e?.message || e)
       this.devLog?.('finalize_end', { ok: false, via: 'fallback', error: e?.message || String(e), contentLen: fb.length, graceMs }, taskId, ctx?.devScope)
-      return { text: fb, via: 'fallback', usage: null }
+      return { text: fb, via: 'fallback', usage: null, compacted: compactedInFinalize }
     } finally {
       clearTimeout(finTimer)
       if (userSignal) userSignal.removeEventListener('abort', onUserAbort)
@@ -583,11 +608,15 @@ export class Agent {
         // 高低水位滞回：未超 highWater 只追加（前缀逐字节稳定）；超了才一次压到 lowWater + epoch++
         const pressure = await this._hysteresisPressure(system, { scopeUserId, groupId: ctx?.groupId, conversationId: ctx?.conversationId })
         if (pressure) {
-          compactedThisRun = true
-          const { est, high, dropped, pruned = 0, epoch, archived = 0 } = pressure
-          this.logger('mark', `[epoch] 上下文压力(est=${est}>${high})：无损压缩至低水位——归档 ${dropped} 条消息（另修剪 ${pruned} 条长工具结果，archive_refs=${archived}），cacheEpoch ${epoch - 1}→${epoch}`)
-          this.devLog?.('cache_compact', { est, high, low: this._lowWaterMetric(system).value, dropped, pruned, archived, cacheEpoch: epoch, msgsAfter: this.messages.length, ledger: this._compactLedger ? { facts: this._compactLedger.facts?.length || 0, archiveRefs: this._compactLedger.archive_refs?.length || 0, compactions: this._compactLedger.stats?.compactions || 0 } : null }, taskId, ctx?.devScope)
-          cb.onContextPressure?.({ estimate: est, threshold: high, dropped, pruned, archived, cacheEpoch: epoch, messages: this.messages })
+          const { est, high, low = null, dropped = 0, pruned = 0, epoch, archived = 0, unresolved = false, reason = null, archiveError = null, after = null } = pressure
+          const changed = !!(dropped || pruned)
+          if (changed) compactedThisRun = true // 压不动时不走全量覆写（历史未变）
+          const head = changed
+            ? `[epoch] 上下文压力(est=${est}>${high})：压缩至低水位——归档 ${dropped} 条消息（另修剪 ${pruned} 条长工具结果，archive_refs=${archived}），cacheEpoch ${epoch - 1}→${epoch}`
+            : `[epoch] 上下文压力(est=${est}>${high})：无法进一步压缩（${reason}${archiveError ? '：' + archiveError : ''}），保持原历史`
+          this.logger(changed ? 'mark' : 'warn', head + (changed && unresolved ? `；压后完整请求仍 ${after} > 高水位 ${high}（未达标）` : ''))
+          this.devLog?.('cache_compact', { est, high, low, dropped, pruned, archived, cacheEpoch: epoch, msgsAfter: this.messages.length, unresolved, reason, archiveError, after, ledger: this._compactLedger ? { facts: this._compactLedger.facts?.length || 0, archiveRefs: this._compactLedger.archive_refs?.length || 0, compactions: this._compactLedger.stats?.compactions || 0 } : null }, taskId, ctx?.devScope)
+          if (changed) cb.onContextPressure?.({ estimate: est, threshold: high, dropped, pruned, archived, cacheEpoch: epoch, messages: this.messages })
         }
 
         const toolList = this._buildToolList() // 每轮重算：tool_search 命中后 activeTools 扩充，下轮须重新合成
@@ -804,6 +833,7 @@ export class Agent {
       const fin = await this._finalize({ stopReason, memories, systemPromptOverride, context, scopeId, userSignal: signal, system: this._lastSystem, taskId, ctx })
       finalContent = fin.text
       finalizedVia = fin.via
+      if (fin.compacted) compactedThisRun = true // 收尾前压缩改写中段 → 持久化须全量覆写
       if (fin.usage) usage = mergeUsage(usage, fin.usage)
       this.messages.push({ role: 'assistant', content: finalContent })
       this.logger('mark', `[finalize] 收尾完成（via=${fin.via}, reason=${stopReason}）`)
@@ -1015,27 +1045,50 @@ export class Agent {
     return out
   }
 
-  _estimateHistory(system) {
-    const fn = this.estimateTokens || ((t) => Math.ceil((t || '').length / 4))
-    let n = fn(system)
-    for (const m of this.messages) {
-      n += 4
-      if (typeof m.content === 'string') n += fn(m.content)
-      if (m.reasoning) n += fn(m.reasoning)
-      if (m.provider_native) n += fn(JSON.stringify(m.provider_native))
-      if (m.tool_calls) n += fn(JSON.stringify(m.tool_calls))
+  /** 把任意 content（字符串 / 协议原生块数组）归一到可计数文本——多模态文本块不能整段漏算（F06） */
+  _contentText(content) {
+    if (content == null) return ''
+    if (typeof content === 'string') return content
+    if (Array.isArray(content)) {
+      return content.map((b) => {
+        if (b == null) return ''
+        if (typeof b === 'string') return b
+        if (typeof b.text === 'string') return b.text
+        if (typeof b.type === 'string') return `[${b.type}]`
+        try { return JSON.stringify(b) } catch { return '' }
+      }).filter(Boolean).join('\n')
     }
+    try { return JSON.stringify(content) } catch { return '' }
+  }
+
+  /** 本轮实际下发的工具 schema token 估算（tools 是请求最前缀，必须计入预算，不能只在压力检查后单独算） */
+  _estimateToolsTokens() {
+    const list = this._buildToolList()
+    if (!list.length) return 0
+    return estimateMessages(list.map((t) => ({ content: JSON.stringify({ n: t.name, d: t.description, p: t.parameters }) })))
+  }
+
+  /**
+   * 完整请求 token 估算（system + messages + tools）；system/toolTokens 可预传入以复用同一轮结果。
+   * 这是压缩触发与水位判断的统一口径（F06）——纯 messages-only 估算会漏掉 system、工具 schema
+   * 和 content 数组里的长文本，导致"压后仍超窗口"。
+   */
+  _estimateHistory(system, { toolTokens = null } = {}) {
+    const fn = this.estimateTokens || ((t) => Math.ceil((t || '').length / 4))
+    let n = fn(String(system ?? ''))
+    n += this._estimateMessagesTokens({ includeReasoning: true })
+    n += toolTokens == null ? this._estimateToolsTokens() : toolTokens
     return n
   }
 
-  /** 仅估算 messages（不含 system）的 token 数 */
-  _estimateMessagesTokens() {
+  /** 仅估算 messages（不含 system/tools）的 token 数 */
+  _estimateMessagesTokens({ includeReasoning = this.keepReasoning } = {}) {
     const fn = this.estimateTokens || ((t) => Math.ceil((t || '').length / 4))
     let n = 0
     for (const m of this.messages) {
       n += 4
-      if (typeof m.content === 'string') n += fn(m.content)
-      if (this.keepReasoning && m.reasoning) n += fn(m.reasoning)
+      n += fn(this._contentText(m.content))
+      if (includeReasoning && m.reasoning) n += fn(m.reasoning)
       if (m.provider_native) n += fn(JSON.stringify(m.provider_native))
       if (m.tool_calls) n += fn(JSON.stringify(m.tool_calls))
     }
@@ -1057,31 +1110,60 @@ export class Agent {
 
   async _hysteresisPressure(system, ctxMeta = null) {
     const useToken = !!this.contextWindow
-    const est = useToken ? this._estimateHistory(system) : this.messages.length
+    const fn = this.estimateTokens || ((t) => Math.ceil((t || '').length / 4))
+    const REQUEST_OVERHEAD = 16
+    const sysTokens = fn(String(system ?? ''))
+    const toolsTokens = this._estimateToolsTokens()
+    const msgTokens = this._estimateMessagesTokens()
+    const total = sysTokens + msgTokens + toolsTokens + REQUEST_OVERHEAD
+    const est = useToken ? total : this.messages.length
     const high = useToken ? Math.floor(this.contextWindow * 0.65) : this.contextMsgHighWater
     if (est <= high) return null
     // 滞回防抖：floor（尾部保底）+ 台账消息的极限落地可能仍高于 highWater——没有新增量
     // 就不再空转重试（防同 run 逐轮 epoch++，前缀缓存逐轮全灭）。
     if (this._lastCompactMsgsEst != null) {
-      const nowMsgs = useToken ? this._estimateMessagesTokens() : this.messages.length
+      const nowMsgs = useToken ? total : this.messages.length
       const margin = Math.max(50, Math.floor((useToken ? this.contextWindow : this.contextMsgHighWater) * 0.05))
       if (nowMsgs < this._lastCompactMsgsEst + margin) return null
     }
-    const lowMetric = this._lowWaterMetric(system)
+    const lowTotal = useToken ? Math.floor(this.contextWindow * 0.45) : null
+    // 预留模型输出 + 下一轮工具结果 + 安全余量；低水位是「压后完整请求」的目标，不是 messages 独占
+    const reserve = useToken
+      ? Math.max(256, Math.floor(this.contextWindow * 0.08), Math.min(4096, Math.ceil(this.maxTokens || 0)))
+      : 0
+    const msgTarget = useToken
+      ? Math.max(128, lowTotal - sysTokens - toolsTokens - REQUEST_OVERHEAD - reserve)
+      : this.contextMsgLowWater
     const convKey = ctxMeta ? `${ctxMeta.scopeUserId || 'u'}:${ctxMeta.groupId || 'p'}:${ctxMeta.conversationId || 'unknown'}` : 'unknown'
     const r = await compactMessages(this.messages, {
-      kind: lowMetric.kind, value: lowMetric.value,
+      kind: useToken ? 'token' : 'count', value: msgTarget,
       archive: this.compactArchive, convKey, epoch: this.cacheEpoch + 1,
       estimateTokens: this.estimateTokens,
       minKeep: Math.max(this.contextKeepRecent, 2),
       prevLedger: this._compactLedger,
     })
-    if (!r.dropped && !r.pruned) return null
+    if (!r.dropped && !r.pruned) {
+      // 压不动：如实返回未解决压力（归档不可用 / 仅台账 / 结构不可再减），不虚增 epoch 也不谎报压缩成功
+      return {
+        est, high, low: lowTotal, dropped: 0, pruned: 0, epoch: this.cacheEpoch,
+        archived: (r.ledger?.archive_refs || []).length, unresolved: true,
+        reason: r.archiveError ? 'archive_unavailable' : (r.mode === 'ledger' ? 'ledger_only' : 'irreducible'),
+        archiveError: r.archiveError || null,
+        after: est,
+      }
+    }
     this.messages = r.messages
     this._compactLedger = r.ledger
-    this._lastCompactMsgsEst = useToken ? this._estimateMessagesTokens() : this.messages.length
     this.cacheEpoch++
-    return { est, high, dropped: r.dropped, pruned: r.pruned, epoch: this.cacheEpoch, archived: (r.ledger?.archive_refs || []).length }
+    const after = useToken ? this._estimateHistory(system) : this.messages.length
+    this._lastCompactMsgsEst = after
+    return {
+      est, high, low: lowTotal, dropped: r.dropped, pruned: r.pruned, epoch: this.cacheEpoch,
+      archived: (r.ledger?.archive_refs || []).length, after,
+      unresolved: after > high,
+      reason: after > high ? 'watermark_not_reached' : null,
+      archiveError: r.archiveError || null,
+    }
   }
 
   /** @deprecated 旧签名兼容（部分调用方/测试引用）；内部转滞回语义 */

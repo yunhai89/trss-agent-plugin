@@ -218,6 +218,48 @@ await test('makeSearchTools：注册 web_search + web_extract', async () => {
   ok(result.includes('X'), 'search 返回格式化结果')
 })
 
+// ---------- 11. DDG 解析健壮性（改版兼容）----------
+await test('parseDDG：兼容 href 在 class 之前（DDG lite 改版形态）', async () => {
+  const { parseDDG } = await import('../agent/tools/web.js')
+  const r = parseDDG('<a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com" class="result-link">Example</a><td class="result-snippet">snip</td>')
+  eq(r.length, 1, '解析出 1 条（旧正则属性顺序敏感会得 0）')
+  eq(r[0].url, 'https://example.com', 'URL 解码')
+  eq(r[0].snippet, 'snip', '摘要')
+})
+
+await test('parseDDG：兼容单引号属性 + class 在外层 <td>', async () => {
+  const { parseDDG } = await import('../agent/tools/web.js')
+  const single = parseDDG("<a class='result-link' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.com'>A</a><td class='result-snippet'>sa</td>")
+  eq(single[0]?.url, 'https://a.com', '单引号解析')
+  const tdWrap = parseDDG('<td class="result-link"><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fb.com">B</a></td><td class="result-snippet">sb</td>')
+  eq(tdWrap[0]?.url, 'https://b.com', 'class 在外层 td 也能取到内部链接')
+  eq(tdWrap[0]?.title, 'B', '标题')
+})
+
+await test('parseDDGHtml：兼容 href 在 class 之前', async () => {
+  const { parseDDGHtml } = await import('../agent/tools/web.js')
+  const r = parseDDGHtml('<a rel="nofollow" href="https://h.com" class="result__a">H</a><a class="result__snippet">snip</a>')
+  eq(r[0]?.url, 'https://h.com', 'html 版属性顺序无关')
+})
+
+await test('ddgSearch：反爬/验证页当作端点失败（不静默返回空）', async () => {
+  const { ddgSearch, looksBlocked } = await import('../agent/tools/web.js')
+  ok(looksBlocked('<html><body>Unusual traffic detected. Please complete the challenge.</body></html>'), '识别验证页')
+  ok(!looksBlocked('<a class="result-link" href="https://x.com">X</a>'), '有结果标记不算验证页')
+  const f = async () => ({ ok: true, status: 200, async text() { return '<html><body>Unusual traffic from your network</body></html>' } })
+  let err = null
+  try { await ddgSearch('原神', { fetcher: f, limit: 5 }) } catch (e) { err = e }
+  ok(err && /反爬|验证/.test(err.message), `全部端点验证页 → 抛可诊断错误（实际 ${err && err.message}）`)
+})
+
+await test('manager：仅 DDG 且被反爬 → 聚合错误而非"无结果"', async () => {
+  const f = async () => ({ ok: true, status: 200, async text() { return '<html>Unusual traffic / challenge</html>' } })
+  const mgr = createSearchManager({ fetcher: f })
+  let err = null
+  try { await mgr.search('王者荣耀') } catch (e) { err = e }
+  ok(err && /ddg/i.test(err.message), `抛出聚合失败原因（实际 ${err && err.message}）`)
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

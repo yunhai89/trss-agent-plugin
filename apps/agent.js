@@ -2887,6 +2887,7 @@ export class Chat extends plugin {
         '⚠️ 确认清空你的所有记录？将删除：',
         '· 全部对话历史',
         '· 长期记忆（recall）',
+        '· 压缩归档（context_recall 的原文）',
         '· 个人笔记',
         '· 提醒',
         '· 人设绑定（恢复默认）',
@@ -2905,12 +2906,22 @@ export class Chat extends plugin {
       for (const k of await rt.kv.scan(sessPrefix)) {
         const tail = String(k).slice(sessPrefix.length)
         const parts = tail.split(':')
+        // 保留编号序列（conv:seq:*）：对话 id 是不可复用身份，清空后新对话必须换新 id，
+        // 否则会重新绑定到已删会话遗留的压缩归档目录（F02）。只清会话/活跃指针/消息。
+        if (parts[0] === 'conv' && parts[1] === 'seq') continue
         let keyUid = null
-        if (parts[0] === 'conv') keyUid = (parts[1] === 'active' || parts[1] === 'seq') ? parts[3] : parts[2]
+        if (parts[0] === 'conv') keyUid = parts[1] === 'active' ? parts[3] : parts[2]
         else keyUid = parts[1] // 旧 group:user 会话 <gid>:<uid>
         if (keyUid === uid && keyUid !== '__group__') { await rt.session.clear(k); nSess++ }
       }
       if (nSess) cleared.push(`对话历史(${nSess})`)
+      // 压缩归档独立于会话 KV 落盘（按 convKey 分目录）：「清空所有记录」必须一并清理，
+      // 否则旧原文仍可被新会话召回（F02）。群共享归档在 '__group__' 域，purge(uid) 不会误伤。
+      const compactArchive = rt.agentConfig?.compactArchive
+      if (compactArchive && typeof compactArchive.purge === 'function') {
+        const nArch = compactArchive.purge(uid)
+        if (nArch) cleared.push(`压缩归档(${nArch})`)
+      }
       // 召回记忆（按真实 uid：ON=本人 recall；群共享 recall 在 '__group__' 下，不会被误清）
       await rt.recall.clearAll(uid); cleared.push('长期记忆')
       // 统一用户画像（按真实 uid，与 recall 同域）
