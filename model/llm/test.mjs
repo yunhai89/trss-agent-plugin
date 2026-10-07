@@ -4,6 +4,7 @@
  *   实际容灾 = transport-base 单请求重试 + Agent __tries fallback，见 model/agent/Agent.js。）
  */
 import { detectCapabilities } from './capabilities.js'
+import { capsFromModelItem, primeModelCaps, getApiCaps, clearApiCaps } from './caps-source.js'
 import { embed } from './embed.js'
 
 let passed = 0
@@ -40,6 +41,10 @@ await test('capabilities：分层判定', async () => {
   eq(detectCapabilities({ protocol: 'anthropic', model: 'claude-sonnet-4-5' }).caching, true, 'claude caching')
   eq(detectCapabilities({ protocol: 'openai', model: 'deepseek-reasoner' }).thinking, true, 'deepseek-reasoner thinking')
   eq(detectCapabilities({ protocol: 'openai', model: 'mimo-v2.5-pro' }).thinking, true, 'mimo thinking')
+  eq(detectCapabilities({ protocol: 'openai', model: 'mimo-v2.6-pro' }).vision, true, 'mimo-v2.6-pro vision')
+  eq(detectCapabilities({ protocol: 'openai', model: 'mimo-v2.6-pro' }).video, true, 'mimo-v2.6-pro video')
+  eq(detectCapabilities({ protocol: 'openai', model: 'mimo-v2.6-flash' }).audio, true, 'mimo-v2.6-flash audio')
+  eq(detectCapabilities({ protocol: 'openai', model: 'mimo-v2.5-asr' }).tools, false, 'mimo asr 非对话模型 tools=false')
   eq(detectCapabilities({ protocol: 'openai', model: 'qwen-vl-max' }).vision, true, 'qwen-vl vision')
   // 协议默认：未知模型 openai 仍有 tools
   eq(detectCapabilities({ protocol: 'openai', model: 'totally-unknown' }).tools, true, '未知模型 protocol default tools')
@@ -49,7 +54,28 @@ await test('capabilities：分层判定', async () => {
   eq(detectCapabilities({ protocol: 'openai', model: 'gpt-4o', caps: { vision: false } }).source, 'config', 'source=config')
 })
 
-// ---------- 2. embed ----------
+// ---------- 2. 官方能力数据源 ----------
+await test('caps-source：解析 OpenRouter 模态 + prime 后叠加', async () => {
+  const item = { id: 'some-omni-model', architecture: { input_modalities: ['text', 'image', 'video', 'audio'], supported_parameters: ['tools', 'reasoning'] } }
+  const caps = capsFromModelItem(item)
+  eq(caps, { vision: true, audio: true, video: true, tools: true, thinking: true }, 'OpenRouter 模态 → caps')
+  eq(capsFromModelItem({ id: 'x', object: 'model' }), null, '无模态字段 → null')
+  eq(capsFromModelItem({ id: 'y', capabilities: { vision: true, function_calling: true } }), { vision: true, tools: true }, 'capabilities 对象')
+
+  clearApiCaps()
+  const fakeFetch = async () => ({ ok: true, status: 200, async json() { return { data: [item] } } })
+  await primeModelCaps({ baseURL: 'https://x/v1', apiKey: 'k', models: ['some-omni-model'], fetchImpl: fakeFetch })
+  eq(getApiCaps('some-omni-model').video, true, 'prime 后缓存命中')
+  // detectCapabilities 叠加官方层（未知模型本无 vision，来自 api 数据）
+  const d = detectCapabilities({ protocol: 'openai', model: 'some-omni-model' })
+  eq(d.vision, true, 'api 层 vision')
+  eq(d.video, true, 'api 层 video')
+  eq(d.source, 'api', 'source=api')
+  clearApiCaps()
+  eq(getApiCaps('some-omni-model'), null, 'clear 后失效')
+})
+
+// ---------- 3. embed ----------
 await test('embed：按 index 排序 + 形状保持', async () => {
   const fetcher = async (url, opts) => ({
     ok: true,

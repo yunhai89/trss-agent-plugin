@@ -44,6 +44,7 @@ import { presets as anthropicPresets } from '../model/anthropic/index.js'
 import { McpManager } from '../model/mcp/index.js'
 import { createMediaService, makeMediaTools, fetchQuotedContext } from '../model/media/index.js'
 import { detectCapabilities } from '../model/llm/capabilities.js'
+import { primeModelCaps } from '../model/llm/caps-source.js'
 import { buildEmbed } from '../model/llm/embed-wiring.js'
 import { thinkingLogFields as fmtThinkingLogFields } from '../model/llm/thinking.js'
 import { KnowledgeStore, makeKbSearchTool } from '../model/agent/knowledge.js'
@@ -478,6 +479,18 @@ async function buildRuntime() {
     ...(cfg.reasoningFields ? { reasoningFields: cfg.reasoningFields } : {}),
     ...(proxyFetch ? { fetch: proxyFetch } : {}),
   })
+  // 官方模型能力（数据驱动）：从厂商 /models 拉取模态元数据（OpenRouter 等）prime 一次，供 detectCapabilities 同步叠加；
+  // 未暴露模态的厂商（含小米 MiMo）返回空 → 回退内置注册表 + media.caps 覆盖。best-effort，不阻塞启动失败。
+  if (cfg.media?.capsFromApi !== false) {
+    try {
+      await primeModelCaps({
+        protocol, baseURL: cfg.baseURL, apiKey: cfg.apiKey, preset: cfg.preset,
+        models: [cfg.model, cfg.vision?.model].filter(Boolean),
+        fetchImpl: proxyFetch || undefined,
+      })
+    } catch { /* 忽略：回退注册表 */ }
+  }
+
   // 按能力路由缓存参数：cacheControl 'auto' 仅官方 Anthropic 端点生效（自定义 baseURL/preset
   // 的兼容网关未知字段可能 400，默认 off）；prompt_cache_key 仅官方 OpenAI preset（绝不发 DeepSeek/兼容网关）
   provider.cacheCaps = {
@@ -1014,9 +1027,15 @@ async function buildRuntime() {
     const vcfg = cfg.vision
     const vProtocol = vcfg.protocol || protocol
     const vModel = vcfg.model || cfg.model
+    // 视觉模型也可能来自另一厂商：按其 baseURL/apiKey 再 prime 一次官方能力
+    if (cfg.media?.capsFromApi !== false) {
+      try {
+        await primeModelCaps({ protocol: vProtocol, baseURL: vcfg.baseURL || cfg.baseURL, apiKey: vcfg.apiKey || cfg.apiKey, preset: vcfg.preset || cfg.preset, models: [vModel], fetchImpl: proxyFetch || undefined })
+      } catch { /* 忽略：回退注册表 */ }
+    }
     const vCaps = detectCapabilities({ protocol: vProtocol, model: vModel, caps: cfg.media?.caps })
     if (!vcfg.model && !vCaps.vision) {
-      Log.warn(`[vision] 未配置 agent.vision.model，且主模型 ${vModel} 不支持视觉——视觉子模型已禁用（否则图片会被发给纯文本模型、静默失败）。如需识图/表情打标，请把 agent.vision.model 设为支持视觉的模型（如 qwen-vl-max / glm-4v / gpt-4o / 名称含 omni 的 mimo）`)
+      Log.warn(`[vision] 未配置 agent.vision.model，且主模型 ${vModel} 不支持视觉——视觉子模型已禁用（否则图片会被发给纯文本模型、静默失败）。如需识图/表情打标，请把 agent.vision.model 设为支持视觉的模型（如 mimo-v2.6 / qwen-vl-max / glm-4v / gpt-4o）`)
     } else {
       try {
         if (!vcfg.model && cfg.model) Log.debug('[vision] vision.model 未配，复用支持视觉的主模型', vModel)
