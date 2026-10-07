@@ -10,7 +10,7 @@
 
   // 覆盖为空 reactive（mock.js 若已加载则被覆盖；视图读取零改动，loadX 后填充）
   const MOCK = window.MOCK = reactive({
-    config: null, scopes: [], memories: {}, recall: {}, profile: {}, personas: [], skills: [], tools: [], kb: [],
+    config: null, scopes: [], memories: {}, recall: {}, profile: {}, personas: [], skills: [], tools: [], toolPacks: [], kb: [],
     conversations: [], sessions: {}, logFiles: [], logFilesTotal: 0, schedules: [], confirms: [],
     suggestions: [], perceptions: [], tokenTrend: [], requestTrend: [], toolTop: [],
     totalRequests: 0, totalToolCalls: 0, totalTokens: 0,
@@ -64,6 +64,7 @@
     async loadStickerLib() { MOCK.stickerLib = await api.get('/sticker') },
     async loadScopes() { MOCK.scopes = await api.get('/scopes') },
     async loadTools() { MOCK.tools = await api.get('/tools') },
+    async loadToolPacks() { MOCK.toolPacks = await api.get('/tool-packs'); return MOCK.toolPacks },
     async loadKb() { MOCK.kb = await api.get('/kb') },
     async loadMemories(scopeId) { MOCK.memories[scopeId] = await api.get('/memories', { scopeId }) },
     async loadRecall(userId) { MOCK.recall[userId] = await api.get('/recall', { userId }) },

@@ -133,6 +133,14 @@ router.get('/tools', asyncHandler(async (req, res) => {
   return ok(res, list.map((t) => ({ id: t.name, name: t.name, description: t.description || '', category: t.category || 'query' })))
 }))
 
+// GET /api/tool-packs —— 外置工具包元信息 + 配置 schema + 当前用户值（供配置中心动态渲染，不依赖 runtime）
+// 约定：tools/<包名>/tool.config.js；用户值存集中配置 agent.tools.<包名>
+router.get('/tool-packs', asyncHandler(async (req, res) => {
+  const { discoverToolPacks } = await import('../toolkit/pack-config.js')
+  const packs = await discoverToolPacks(path.join(Config.path.plugin, 'tools'))
+  return ok(res, packs)
+}))
+
 // GET /api/conversations?userId=&groupId= —— 对话列表（裸数组）。无 userId 时返回全局所有 scope 的对话（每条带 scopeUserId/scopeGroupId，与概览"活跃对话"同源）
 router.get('/conversations', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return

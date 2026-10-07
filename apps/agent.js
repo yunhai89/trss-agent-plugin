@@ -662,7 +662,13 @@ async function buildRuntime() {
   for (const t of loaded.tools) {
     try { tools.register(t) } catch (e) { Log.warn('[toolkit] 注册失败', t.name, e?.message || e) }
   }
-  if (loaded.packs.length) Log.debug('[toolkit] 已加载工具包：', loaded.packs.map((p) => `${p.name}(${p.count})`).join(', '))
+  // 外置工具：成功只报一条汇总，失败逐条单独报错（避免工具多时刷屏）
+  if (loaded.errors.length) {
+    for (const er of loaded.errors) Log.error(`[toolkit] 外部工具加载失败（${er.file}）：${er.error}`)
+  }
+  if (loaded.packs.length || loaded.errors.length) {
+    Log.info(`[toolkit] 成功加载 ${loaded.tools.length} 个外部工具（${loaded.packs.length} 个工具包${loaded.errors.length ? `，${loaded.errors.length} 个失败` : ''}）`)
+  }
 
   // 终端执行能力（沙箱内核；mode=off 或沙箱不可用 → 本工具不注册，宿主无 shell 执行面）
   if (sandbox.manager) {

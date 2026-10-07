@@ -36,6 +36,7 @@ function find(dir, out, { stress = false } = {}) {
 
 const tests = []
 find(join(root, 'model'), tests)
+find(join(root, 'tools'), tests) // 外置工具离线自检（tools/<包>/*.test.mjs）
 const stressTests = []
 find(join(root, 'stress'), stressTests, { stress: true })
 tests.sort()

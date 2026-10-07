@@ -387,5 +387,6 @@
     suggestions, perceptions, tokenTrend, requestTrend, toolTop,
     totalRequests, totalToolCalls, totalTokens, tevoTools,
     stickerLib: { enabled: true, total: 128, discovered: 128 },
+    toolPacks: [],
   })
 })()

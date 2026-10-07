@@ -26,7 +26,7 @@
         { id: 'evolution', name: '工具进化', icon: 'tool', badge: () => (window.MOCK?.tevoTools || []).filter((v) => v.status === 'verified').length },
       ],
     },
-    { group: '系统', items: [{ id: 'config', name: '配置中心', icon: 'config' }, { id: 'humanize', name: '伪人模式', icon: 'group' }, { id: 'groupworld', name: '群聊小世界', icon: 'globe' }, { id: 'selfstate', name: '自我状态', icon: 'bot' }, { id: 'sticker', name: '表情包', icon: 'smile' }] },
+    { group: '系统', items: [{ id: 'config', name: '配置中心', icon: 'config' }, { id: 'toolpacks', name: '外置工具', icon: 'tool' }, { id: 'humanize', name: '伪人模式', icon: 'group' }, { id: 'groupworld', name: '群聊小世界', icon: 'globe' }, { id: 'selfstate', name: '自我状态', icon: 'bot' }, { id: 'sticker', name: '表情包', icon: 'smile' }] },
   ]
   const TITLES = {
     dashboard: ['概览', '插件运行状态与核心指标'],
@@ -43,6 +43,7 @@
     suggestions: ['进化建议', '自评审产出的待审改进项'],
     evolution: ['工具进化', 'Tool Evolution · 候选生成/验证/审批/版本'],
     config: ['配置中心', 'config.yaml 全量配置项'],
+    toolpacks: ['外置工具', 'tools/ 自研工具 · 元信息与配置（tool.config.js 约定）'],
     humanize: ['伪人模式', '群聊环境参与者 · 旁听/门控/决策/发送'],
     groupworld: ['群聊小世界', '群聊社会记忆层 · 画像/关系/事件/圈子'],
     selfstate: ['自我状态', '自我认知与情绪 · 心境/情绪/期待/心事'],

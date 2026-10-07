@@ -1,6 +1,16 @@
 // utils/Config.js 桩——E2E harness 用（真实 Config 读写源码仓 config/*.yaml，测试需内存配置 + 临时目录）。
 // __setConfig 由驱动脚本在 import apps 之前调用（hooks 已把本模块替换为所有 import 方的 Config）。
 export const __state = { config: { agent: {} } }
+
+function isPlainObj(v) { return v && typeof v === 'object' && !Array.isArray(v) }
+/** 与真实 utils/Config.js 的 deepMerge 同语义（pack-config 等按名导入） */
+export function deepMerge(base, over) {
+  if (!isPlainObj(base) || !isPlainObj(over)) return over === undefined ? base : over
+  const out = { ...base }
+  for (const k of Object.keys(over)) out[k] = isPlainObj(base[k]) && isPlainObj(over[k]) ? deepMerge(base[k], over[k]) : over[k]
+  return out
+}
+
 export function __setConfig(c) { __state.config = c }
 /** 显式触发 onChange 回调（等价真实 Config 的 fs.watch → reload → 通知）。
  *  注意：__setConfig 刻意**不**自动触发，否则会影响既有 e2e 的多段 setCfg 流程。 */

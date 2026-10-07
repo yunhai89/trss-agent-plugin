@@ -29,11 +29,20 @@ import {
   sendApi, groupIdOf, botGroupRole, param, ok, fail, markdown, roleRank, VALID_CATEGORIES,
 } from './define.js'
 import { loadToolPacks, asPack } from './loader.js'
+import {
+  getToolConfig, saveToolConfig, discoverToolPacks, loadPackConfigDir,
+  registerPackConfig, normalizeSchema, normalizeInfo, listRegisteredPacks,
+  RESERVED_TOOL_KEYS, SCHEMA_FILE,
+} from './pack-config.js'
 
 export {
   defineTool, defineToolPack,
   getBot, getEvent, getGroup, getFriend, getMember,
   sendApi, groupIdOf, botGroupRole, param, ok, fail, markdown, roleRank, VALID_CATEGORIES,
   loadToolPacks, asPack,
+  // 外置工具配置约定（tool.config.js）
+  getToolConfig, saveToolConfig, discoverToolPacks, loadPackConfigDir,
+  registerPackConfig, normalizeSchema, normalizeInfo, listRegisteredPacks,
+  RESERVED_TOOL_KEYS, SCHEMA_FILE,
 }
-export { sendImage, sendVoice, sendVideo, sendFile, sendText } from './media.js'
+export { sendImage, sendVoice, sendVideo, sendFile, sendText, sendMusic, musicSegment } from './media.js'

@@ -68,3 +68,27 @@ export async function sendText(ctx, text) {
   try { await ctx?.e?.reply(String(text || '')); return true }
   catch { return false }
 }
+
+/**
+ * 构造 OneBot 11 `music` 音乐分享消息段（NapCat 支持）。
+ *  - 原生音源：{ type:'qq'|'163'|'kugou'|'kuwo'|'migu', id }（QQ 音乐的 id 用 songmid）
+ *  - 自定义卡片：{ type:'custom', url, audio?, title?, image, content? }（url、image 必填）
+ * 返回对象直接交给 e.reply 即可（OneBotv11 适配器会原样透传给协议端）。
+ */
+export function musicSegment(o = {}) {
+  const type = String(o.type || 'qq')
+  if (type === 'custom') {
+    const data = { type: 'custom', url: String(o.url || ''), image: String(o.image || '') }
+    if (o.audio) data.audio = String(o.audio)
+    if (o.title) data.title = String(o.title)
+    if (o.content) data.content = String(o.content)
+    return { type: 'music', data }
+  }
+  return { type: 'music', data: { type, id: String(o.id || '') } }
+}
+
+/** 发送音乐分享卡片；失败返回 false（由调用方决定降级到语音/文本）。 */
+export async function sendMusic(ctx, o) {
+  try { await ctx?.e?.reply(musicSegment(o)); return true }
+  catch { return false }
+}
