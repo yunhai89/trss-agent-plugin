@@ -47,7 +47,7 @@ const WORKER_CTX_UNSUPPORTED = new Set([
   'get_ai_characters', 'ai_tts', // ctx.e/bot（AI 语音通道）
   'read_pdf', 'create_excel', 'send_file', 'file_to_pdf', // ctx.e / ctx.media
   'miyoushe_search', 'miyoushe_post', 'miyoushe_replies', // ctx.miyoushe/fetcher/e
-  'pixiv_search', 'pixiv_illust', 'pixiv_ranking', 'pixiv_user', 'pixiv_tags', // ctx.e
+  'pixiv__search', 'pixiv__illust', 'pixiv__ranking', 'pixiv__user', 'pixiv__tags', // ctx.e（外置工具包）
 ])
 
 const MIN_BUDGET_MS = 10000

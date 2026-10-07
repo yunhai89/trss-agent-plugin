@@ -53,7 +53,6 @@ import { CompactionArchive } from '../model/agent/compact/archive.js' // 无损�
 import { makeContextRecallTool } from '../model/agent/compact/recall.js' // context_recall：取回归档原文
 import { groupInfoTools, groupManageTools, groupHistoryTools, groupNoticeTools, groupFileTools, aiVoiceTools, forwardTools } from '../model/group/index.js'
 import { miyousheTools } from '../model/miyoushe/index.js'
-import { pixivTools } from '../model/pixiv/index.js'
 import { loadToolPacks } from '../model/toolkit/index.js'
 import { createSearchManager, makeSearchTools } from '../model/search/index.js'
 import { PersonaStore, PersonaService } from '../model/persona/index.js'
@@ -149,11 +148,11 @@ const PROGRESS_LABELS = {
   send_forward_msg: '📦 合并转发',
   get_forward_msg: '📦 读转发消息',
   // Pixiv
-  pixiv_search: '🎨 搜Pixiv',
-  pixiv_illust: '🎨 取Pixiv作品',
-  pixiv_ranking: '🎨 Pixiv榜单',
-  pixiv_user: '🎨 查Pixiv画师',
-  pixiv_tags: '🎨 查Pixiv标签',
+  pixiv__search: '🎨 搜Pixiv',
+  pixiv__illust: '🎨 取Pixiv作品',
+  pixiv__ranking: '🎨 Pixiv榜单',
+  pixiv__user: '🎨 查Pixiv画师',
+  pixiv__tags: '🎨 查Pixiv标签',
 }
 
 /** 从工具调用参数提取关键信息，给进度消息加上下文（让用户知道在干什么，而非只看到工具名） */
@@ -171,8 +170,8 @@ function extractArgHint(args, name) {
     delete_group_file: 'fileId', get_group_file_url: 'fileId',
     create_group_folder: 'name', rename_group_file: 'newName',
     transfer_group_file: 'targetGroupId', delete_group_notice: 'noticeId',
-    pixiv_search: 'word', pixiv_illust: 'id', pixiv_ranking: 'mode',
-    pixiv_user: 'userId', pixiv_tags: 'word',
+    pixiv__search: 'word', pixiv__illust: 'id', pixiv__ranking: 'mode',
+    pixiv__user: 'userId', pixiv__tags: 'word',
   }
   const field = fields[name]
   if (field && a[field] != null) {
@@ -663,13 +662,8 @@ async function buildRuntime() {
     else Log.debug('[schedule] 定时任务已关闭（schedule.taskEnabled=false），schedule_task 工具不注册')
   }
 
-  // Pixiv（需 refreshToken；未配置则不注册，避免暴露不可用工具）
-  if (cfg.pixiv?.enable !== false && cfg.pixiv?.refreshToken) {
-    tools.register(...pixivTools) // 搜索/作品(发图)/排行/用户/标签
-    Log.debug('[pixiv] 已启用 Pixiv 工具（搜索/作品/排行/用户/标签；图片代理 ' + (cfg.pixiv.imageProxy || 'https://i.yuki.sh') + '）')
-  }
-
   // 自定义工具包：扫描插件根 tools/ 目录自动加载（TRSS-Yunzai apps 风格）
+  // （Pixiv 已从内置迁移为外置工具包 tools/pixiv/，随下方便捷加载）
   const toolsDir = path.resolve(PLUGIN_ROOT, cfg.tools?.dir || 'tools')
   const loaded = await loadToolPacks(toolsDir, { logger: Log.tag('toolkit') })
   for (const t of loaded.tools) {
@@ -1163,7 +1157,6 @@ async function buildRuntime() {
   if (promptRegistry.size > 0) evolutionBits.push(`prompt 覆盖 ${promptRegistry.size}`)
   if (startupInfo.toolEvo) evolutionBits.push(`toolEvo ${startupInfo.toolEvo.builtins}/${startupInfo.toolEvo.stable}（${startupInfo.toolEvo.backend}）`)
   const extras = []
-  if (cfg.pixiv?.enable !== false && cfg.pixiv?.refreshToken) extras.push('Pixiv')
   if (stagehand) extras.push('浏览器自动化')
   if (startupInfo.diagram) extras.push(`示意图(${startupInfo.diagram})`)
   if (cfg.sticker?.enable) extras.push('表情包')

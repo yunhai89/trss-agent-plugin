@@ -64,7 +64,7 @@
         <empty-state icon="tool" text="未发现外置工具" sub="把工具包放进插件 tools/ 目录，并在其内提供 tool.config.js（含 info 与 config schema）"/>
       </div>
 
-      <div v-for="(p, i) in packs" :key="p.name" class="card" :style="{'--i': i + 1, cursor: 'pointer'}" @click="openCfg(p)">
+      <div v-for="(p, i) in packs" :key="p.name" class="card" :style="{'--i': i + 1, cursor: 'pointer', marginBottom: '14px'}" @click="openCfg(p)">
         <div class="cf-sh" style="cursor:pointer">
           <span class="ct-ico" style="background:var(--grad-vio)">
             <img v-if="iconUrl(p)" :src="p.info.icon" alt="" style="width:20px;height:20px;object-fit:contain"/>

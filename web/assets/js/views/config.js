@@ -218,7 +218,6 @@
         if (!form.calc) form.calc = {}
         if (!form.document) form.document = {}
         if (!form.comfyui) form.comfyui = {}
-        if (!form.pixiv) form.pixiv = {}
         if (!form.miyoushe) form.miyoushe = {}
         if (!form.vision) form.vision = {}
         if (!form.tools) form.tools = {}
@@ -1518,9 +1517,6 @@
             <cfg-row class="full" name="米游社 Cookie" desc="明文">
               <input class="inp mono" style="width:100%" v-model="form.miyoushe.cookie" placeholder="cookie 字符串">
             </cfg-row>
-            <cfg-row class="full" name="Pixiv refreshToken" desc="明文">
-              <input class="inp mono" style="width:100%" v-model="form.pixiv.refreshToken" placeholder="refresh token">
-            </cfg-row>
             <cfg-row name="语音转写 STT" desc="whisper 兼容接口；关则不注册 transcribe_media 工具">
               <v-switch v-model="form.stt.enable"/>
             </cfg-row>
@@ -1696,10 +1692,6 @@
                 <cfg-row name="技能历史条数"><input type="number" class="inp" style="width:100px" min="0" v-model.number="form.skill.historyCount"></cfg-row>
                 <cfg-row name="米游社默认分区(bbs)"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.miyoushe.defaultGid"></cfg-row>
                 <cfg-row name="米游社单帖最大图"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.miyoushe.maxImages"></cfg-row>
-                <cfg-row name="启用 Pixiv"><v-switch v-model="form.pixiv.enable"/></cfg-row>
-                <cfg-row name="Pixiv 图片代理"><input class="inp mono" style="width:220px" v-model="form.pixiv.imageProxy"></cfg-row>
-                <cfg-row name="Pixiv API 反代(可选)"><input class="inp mono" style="width:220px" v-model="form.pixiv.apiProxy" placeholder="留空=直连"></cfg-row>
-                <cfg-row name="Pixiv 单次最大图"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.pixiv.maxImages"></cfg-row>
                 <cfg-row name="计算器 python 解释器"><input class="inp mono" style="width:130px" v-model="form.calc.python"></cfg-row>
                 <cfg-row name="文档转 PDF soffice"><input class="inp mono" style="width:140px" v-model="form.document.soffice"></cfg-row>
                 <cfg-row name="深度研究并发"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.research.maxConcurrent"></cfg-row>

@@ -224,12 +224,6 @@ agent:
     cookie: ""
     defaultGid: 2
     maxImages: 9              # miyoushe_post 单帖最多主动发图数（攻略图集帖，避免只发一张；默认 9）
-  pixiv:
-    enable: false            # Pixiv 功能总开关（需 refreshToken）
-    refreshToken: ""         # Pixiv refresh token（用 gppt / pxrepo 等获取；填后 #agents重载）
-    imageProxy: "https://i.yuki.sh"   # 图片代理：替换 i.pximg.net（QQ 无 Referer 直连 pximg 显示不了）
-    apiProxy: ""             # 可选：app-api 反代地址（留空=直连 app-api.pixiv.net；国内被墙时填反代）
-    maxImages: 4             # pixiv_illust 单次最多发图数
   comfyui:
     enable: false             # ComfyUI 工具总开关（关则不注册 comfyui__* 工具，零影响）
     host: "http://127.0.0.1:8188"   # ComfyUI 服务地址（本地/远程/Cloud）；本地默认 8188

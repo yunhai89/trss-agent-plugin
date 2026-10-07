@@ -92,7 +92,6 @@
     tools: { builtin: true, dir: 'tools' },
     toolDiscovery: { enable: true, method: 'llm', alwaysOn: ['tool_search', 'clarify', 'memory_search', 'web_search', 'skill', 'get_chat_history'], topK: 6, minScore: 0.1 },
     miyoushe: { cookie: 'miyoushe_cookie_demo', defaultGid: 2 },
-    pixiv: { enable: true, refreshToken: 'pixiv_refresh_demo', imageProxy: 'i.pximg.net', apiProxy: '', maxImages: 5 },
     persona: { dir: 'data/personas' },
     skill: { builtin: true, dir: 'skills', historyCount: 3 },
     search: {

@@ -50,7 +50,7 @@ function collectSecrets() {
   push(cfg.stagehand?.apiKey)
   push(cfg.stagehand?.modelApiKey)
   push(cfg.comfyui?.apiKey)
-  push(cfg.pixiv?.refreshToken)
+  push(cfg.tools?.pixiv?.refreshToken) // Pixiv 已迁为外置工具：值存 agent.tools.pixiv
   push(cfg.miyoushe?.cookie)
   // mcp servers 的 env / headers 值（常含 API Key），以及部分服务端的鉴权 token
   const servers = cfg.mcp?.servers || {}
