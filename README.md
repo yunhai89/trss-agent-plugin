@@ -150,6 +150,34 @@ cd ./plugins/agents-plugin && npm install      # 安装 markdown 渲染依赖（
 > 除 markdown 渲染（marked / marked-highlight / highlight.js，需在插件目录 `npm install`）外，其余依赖随 Yunzai 提供。`#agents更新`（git pull）后若 package.json 有变动，需重跑一次 `npm install`。
 > 重启 Yunzai 后，首次启动自动在**插件自己的** `plugins/agents-plugin/config/config.yaml` 生成配置，填入 API Key 即可使用。
 
+### 🌿 安装稳定版 / beta 测试版
+
+- **稳定版（推荐）**：直接使用上面的克隆命令（默认 `master` 分支）。
+- **beta 测试版（尝鲜）**：新功能与 Agents 底层改动会**先进入 `beta`**，验证稳定后再逐步合并进 `master`。安装时加 `-b beta`：
+
+```bash
+# Gitee（国内推荐）：
+git clone -b beta https://gitee.com/YunXi-67/trss-agent-plugin.git ./plugins/agents-plugin
+# 或 GitHub：
+git clone -b beta https://github.com/yunhai89/trss-agent-plugin.git ./plugins/agents-plugin
+cd ./plugins/agents-plugin && npm install
+```
+
+#### 已有安装切换分支
+
+```bash
+cd ./plugins/agents-plugin
+git fetch origin
+git checkout beta              # 切到 beta 测试分支
+git pull origin beta           # 拉取最新代码；若本地有冲突可改用：git reset --hard origin/beta
+npm install                    # package.json 有变动时需重跑
+```
+
+切回稳定版：`git checkout master && git pull origin master`。
+
+> ⚠️ 切换 / 更新后建议**重启 Yunzai**（或主人发 `#agents重载`）以重建运行时。你的配置（`config/config.yaml`）与 `tools/` 自研工具包**不在版本控制内**，切换分支不会覆盖。
+> 维护约定：**bug 修复同时更新 `master` 与 `beta`**；新功能 / 底层改动只进 `beta`（详见页首「🌿 分支说明」）。
+
 ### 🖼️ 图片回复（默认开启）
 
 机器人回复**默认渲染成精美浅色卡片图片**（完整 markdown + 代码语法高亮），渲染失败自动退文本。配置 `agent.reply.mode`：
