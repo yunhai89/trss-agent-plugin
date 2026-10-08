@@ -36,6 +36,8 @@ export { checkInput, analyze, isolate, tagUntrusted, screenUntrusted, systemHard
 export { decide, roleRank, categoryMinRole, visibleCategories, roleLabel, createPolicy, RANK, CATEGORY_MIN } from './policy.js'
 export { ConfirmStore } from './confirm.js'
 export { ToolScheduler, resolveToolConcurrency, READ_PARALLEL_TOOLS } from './tool-scheduler.js'
+export { resolveExecutionMeta } from './tool-effects.js'
+export { planRecovery } from './recovery.js'
 export { TaskStore, TASK_SCHEMA_VERSION, TASK_PHASES, TERMINAL_PHASES, scopeKeyOfCtx } from './task-store.js'
 export { buildHelpHtml, buildChatListHtml, buildPersonaListHtml } from './render.js'
 

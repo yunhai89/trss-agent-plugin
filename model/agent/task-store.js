@@ -14,6 +14,7 @@
 import sqlite3 from 'sqlite3'
 import fs from 'node:fs'
 import path from 'node:path'
+import { planRecovery } from './recovery.js'
 
 export const TASK_SCHEMA_VERSION = 1
 
@@ -317,7 +318,49 @@ export class TaskStore {
     const completedSteps = events.filter((e) => e.kind === 'step_done' || e.kind === 'tool_result').length
     // 阶段一：标记为等待用户确认后再人工继续，不在这里自动重跑
     await this.event({ taskId, kind: 'resume_requested', payload: { completedSteps } })
-    return { ok: true, task: rowToTask({ ...row }), checkpoint: { completedSteps } }
+    const plan = planRecovery(await this.listEvents(taskId))
+    return { ok: true, task: rowToTask({ ...row }), checkpoint: { completedSteps }, plan }
+  }
+
+  /** 读取任务事件并推导恢复计划（P0-3 阶段二，纯推导不执行）。 */
+  async recoveryPlan(taskId, { scopeKey = null, resolveMeta = null } = {}) {
+    const row = await getP(this._db, `SELECT scope_key FROM tasks WHERE task_id = ?`, [taskId])
+    if (!row) return { ok: false, code: 'not_found' }
+    if (scopeKey != null && row.scope_key !== scopeKey) return { ok: false, code: 'forbidden' }
+    const events = await this.listEvents(taskId)
+    return { ok: true, plan: planRecovery(events, { resolveMeta }) }
+  }
+
+  /**
+   * 有限只读自动恢复（P0-3 阶段二）：仅在「无任何未知写副作用」时，对可安全重放的只读步骤
+   * 调用注入的 execute 重跑。存在 block/reconcile 步骤时拒绝自动恢复，要求先人工/外部核实。
+   * 调用方注入的 execute 必须自行重新校验权限与外部状态。
+   * @returns {{ok:boolean, code?:string, plan?:object, applied?:Array}}
+   */
+  async recoverReadOnly(taskId, { scopeKey = null, execute = null, resolveMeta = null } = {}) {
+    const row = await getP(this._db, `SELECT scope_key, phase FROM tasks WHERE task_id = ?`, [taskId])
+    if (!row) return { ok: false, code: 'not_found' }
+    if (scopeKey != null && row.scope_key !== scopeKey) return { ok: false, code: 'forbidden' }
+    if (TERMINAL_PHASES.has(row.phase)) return { ok: false, code: 'terminal', phase: row.phase }
+    const events = await this.listEvents(taskId)
+    const plan = planRecovery(events, { resolveMeta })
+    if (plan.hasBlocking) return { ok: false, code: 'blocked_pending_reconciliation', plan }
+    if (typeof execute !== 'function') return { ok: false, code: 'no_executor', plan }
+
+    const applied = []
+    for (const step of plan.steps) {
+      if (step.action !== 'retry') { applied.push({ callId: step.callId, applied: false, reason: 'not_auto' }); continue }
+      if (step.effect && step.effect !== 'read') { applied.push({ callId: step.callId, applied: false, reason: 'not_read_only' }); continue }
+      try {
+        await execute(step)
+        await this.event({ taskId, kind: 'tool_result', callId: step.callId, payload: { name: step.name, ok: true, recovered: true, effectState: 'none' } })
+        applied.push({ callId: step.callId, applied: true })
+      } catch (e) {
+        await this.event({ taskId, kind: 'tool_result', callId: step.callId, payload: { name: step.name, ok: false, recovered: true, effectState: 'none', error: e?.message || String(e) } })
+        applied.push({ callId: step.callId, applied: false, error: e?.message || String(e) })
+      }
+    }
+    return { ok: true, plan, applied }
   }
 
   /**

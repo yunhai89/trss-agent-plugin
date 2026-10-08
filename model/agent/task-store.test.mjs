@@ -219,6 +219,58 @@ await test('Agent + TaskStore：会话持久化后记录投影游标', async () 
   await store.close()
 })
 
+// ---------- 13. 只读有限自动恢复（P0-3 阶段二）----------
+await test('TaskStore：recoverReadOnly 仅重跑只读可重放步骤', async () => {
+  const dir = tmp()
+  const s = new TaskStore({ dir }); await s.open()
+  await s.begin({ taskId: 't1', ctx: CTX })
+  await s.event({ taskId: 't1', kind: 'tool_planned', callId: 'c1', payload: { name: 'web_search', effect: 'read', replay: 'safe', args: { q: 'x' } } })
+  await s.event({ taskId: 't1', kind: 'tool_planned', callId: 'c2', payload: { name: 'kb_search', effect: 'read', replay: 'safe', args: { q: 'y' } } })
+  await s.event({ taskId: 't1', kind: 'tool_started', callId: 'c2', payload: { name: 'kb_search', effect: 'read', replay: 'safe', args: { q: 'y' } } })
+  const ran = []
+  const out = await s.recoverReadOnly('t1', { execute: async (step) => { ran.push(step.callId) } })
+  eq(out.ok, true, '自动恢复成功')
+  eq(ran.sort(), ['c1', 'c2'], '仅重跑只读步骤')
+  const results = (await s.listEvents('t1')).filter((e) => e.kind === 'tool_result')
+  eq(results.length, 2, '写入 recovered 结果事件')
+  await s.close()
+})
+
+await test('TaskStore：存在未知写副作用时 recoverReadOnly 拒绝', async () => {
+  const dir = tmp()
+  const s = new TaskStore({ dir }); await s.open()
+  await s.begin({ taskId: 't1', ctx: CTX })
+  await s.event({ taskId: 't1', kind: 'tool_planned', callId: 'w1', payload: { name: 'set_note', effect: 'write', replay: 'never' } })
+  await s.event({ taskId: 't1', kind: 'tool_started', callId: 'w1', payload: { name: 'set_note', effect: 'write', replay: 'never' } })
+  let ran = 0
+  const out = await s.recoverReadOnly('t1', { execute: async () => { ran++ } })
+  eq(out.ok, false, '拒绝自动恢复')
+  eq(out.code, 'blocked_pending_reconciliation', '原因=blocked_pending_reconciliation')
+  eq(ran, 0, '未执行任何副作用')
+  await s.close()
+})
+
+// ---------- 14. Agent 记录 tool_started + effectState ----------
+await test('Agent + TaskStore：记录 tool_started 与 effectState', async () => {
+  const dir = tmp()
+  const store = new TaskStore({ dir }); await store.open()
+  const tools = new ToolRegistry().register({
+    name: 'web_search', description: 'd', parameters: { type: 'object' }, async execute() { return { ok: true } },
+  })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'web_search', arguments: {} }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const agent = new Agent({ provider, tools, maxTurns: 5, taskStore: store })
+  const r = await agent.run('搜一下', { ctx: CTX })
+  const events = await store.listEvents(r.taskId)
+  ok(events.some((e) => e.kind === 'tool_started'), '记录 tool_started')
+  const tr = events.find((e) => e.kind === 'tool_result' && e.callId === 'c1')
+  eq(tr.payload.effect, 'read', '只读工具 effect=read')
+  eq(tr.payload.effectState, 'none', '只读成功 effectState=none')
+  await store.close()
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)

@@ -17,6 +17,7 @@
       const phase = ref('')
       const detail = ref(null)
       const events = ref([])
+      const plan = ref(null)
 
       const load = async () => {
         loading.value = true
@@ -30,7 +31,11 @@
           const d = await window.api.get('/tasks/' + encodeURIComponent(t.taskId))
           detail.value = d.task
           events.value = d.events || []
+          plan.value = null
         } catch (e) { toast(e.message, 'error') }
+      }
+      const loadPlan = async (t) => {
+        try { plan.value = await window.api.get('/tasks/' + encodeURIComponent(t.taskId) + '/recovery') } catch (e) { toast(e.message, 'error') }
       }
       const cancel = async (t) => {
         try {
@@ -55,7 +60,7 @@
 
       onMounted(load)
 
-      return { data, loading, phase, PHASES, detail, events, load, open, cancel, resume, phaseCn, phaseClass, isTerminal, fmtTime }
+      return { data, loading, phase, PHASES, detail, events, plan, load, open, loadPlan, cancel, resume, phaseCn, phaseClass, isTerminal, fmtTime }
     },
     template: `
     <div>
@@ -102,6 +107,18 @@
           <div v-for="e in events" :key="e.seq" class="mut2" style="font-size:12px;padding:4px 0;border-bottom:1px solid var(--line)">
             <span class="mono">#{{ e.seq }}</span> {{ e.kind }}<span v-if="e.callId"> ({{ e.callId }})</span><span v-if="e.phase"> → {{ e.phase }}</span>
           </div>
+        </div>
+        <div class="f-label mb8" style="margin-top:14px">恢复计划（P0-3 阶段二）</div>
+        <div v-if="!plan">
+          <button class="btn b-line" @click="loadPlan(detail)"><v-icon name="refresh"/>推导恢复计划</button>
+        </div>
+        <div v-else>
+          <div class="mut2 mb8" style="font-size:12px">复用 {{ plan.counts.reuse }} · 可重试 {{ plan.counts.retry }} · 需核实 {{ plan.counts.reconcile }} · 阻断 {{ plan.counts.block }}</div>
+          <div v-for="(s, i) in plan.steps" :key="i" class="mut2" style="font-size:12px;padding:3px 0">
+            <span class="mono">{{ s.name || s.callId }}</span> → {{ s.action }}（{{ s.reason }}）
+          </div>
+          <div v-if="plan.hasBlocking" style="font-size:12px;color:var(--rose);margin-top:4px">⚠️ 存在未知写副作用，禁止自动重放，请先核实外部状态</div>
+          <div v-else-if="plan.autoResumable" style="font-size:12px;color:var(--mint);margin-top:4px">✅ 全部为可安全重放的只读/未开始步骤</div>
         </div>
         <template #foot>
           <button class="btn b-line" @click="detail = null">关闭</button>

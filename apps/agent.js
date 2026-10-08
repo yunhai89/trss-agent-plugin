@@ -39,6 +39,7 @@ import {
   buildPersonaListHtml,
   TaskStore,
   scopeKeyOfCtx,
+  resolveExecutionMeta,
 } from '../model/agent/index.js'
 import { presets as openaiPresets } from '../model/openai/index.js'
 import { stripInlineToolCalls } from '../model/openai/helpers.js'
@@ -1497,8 +1498,9 @@ export class Chat extends plugin {
         { reg: '^#取消提醒\\s*(\\d+)', fnc: 'cancelReminder' },
         { reg: '^#任务列表$', fnc: 'listTasks' },
         { reg: '^#任务状态\\s+(\\S+)', fnc: 'taskStatus' },
-        { reg: '^#取消任务\\s+(\\S+)', fnc: 'cancelTask' },
         { reg: '^#继续任务\\s+(\\S+)', fnc: 'resumeTask' },
+        { reg: '^#恢复任务\\s+(\\S+)', fnc: 'recoverTask' },
+        { reg: '^#取消任务\\s+(\\S+)', fnc: 'cancelTask' },
         { reg: '^#清空所有记录$', fnc: 'clearMyData' },
         // —— 人设 ——（更具体的规则在前，避免被 #人设+id 吞掉）
         { reg: '^#人设列表$', fnc: 'personaList' },
@@ -2996,7 +2998,44 @@ export class Chat extends plugin {
     if (!id) return this.e.reply('未找到任务'), true
     const r = await rt.taskStore.resume(id, { scopeKey })
     if (!r.ok) return this.e.reply(`无法继续：${r.code}${r.phase ? `（${r.phase}）` : ''}`), true
-    await this.e.reply(`任务 ${id} 当前阶段 ${r.task.phase}；已完成步骤约 ${r.checkpoint.completedSteps} 个。\n阶段一仅恢复检查点、不自动重放副作用；请直接重新发起该任务，或让 AI 依据任务记录继续。`)
+    const p = r.plan
+    const planLine = p ? `\n恢复计划：复用 ${p.counts.reuse} · 可重试 ${p.counts.retry} · 需核实 ${p.counts.reconcile} · 阻断 ${p.counts.block}` : ''
+    await this.e.reply(`任务 ${id} 当前阶段 ${r.task.phase}；已完成步骤约 ${r.checkpoint.completedSteps} 个。${planLine}\n阶段一仅恢复检查点、不自动重放副作用；#恢复任务 ${id} 可对只读步骤做有限自动恢复。`)
+    return true
+  }
+
+  async recoverTask() {
+    const { rt, ctx, scopeKey } = await this._taskScope()
+    if (!rt.taskStore) return this.e.reply('任务账本未启用'), true
+    const input = (this.e.msg.match(/^#恢复任务\s+(\S+)/) || [])[1]
+    const id = await this._resolveTaskId(rt, scopeKey, input)
+    if (!id) return this.e.reply('未找到任务'), true
+    const planned = await rt.taskStore.recoveryPlan(id, { scopeKey })
+    if (!planned.ok) return this.e.reply(`无法读取：${planned.code}`), true
+    const p = planned.plan
+    const lines = p.steps.map((s) => `· ${s.name || s.callId} → ${s.action}（${s.reason}）`)
+    if (p.hasBlocking) {
+      await this.e.reply([
+        `任务 ${id} 恢复计划（存在未知写副作用，禁止自动重放）：`,
+        ...lines,
+        '⚠️ 请先人工核实外部实际状态后再决定是否重发任务。',
+      ].join('\n'))
+      return true
+    }
+    if (!p.autoResumable) return this.e.reply(`任务 ${id} 无可自动恢复的只读步骤（复用 ${p.counts.reuse}）`), true
+    // 有限自动恢复：仅重跑「仍为只读」且可安全重放的步骤；执行前用实时工具重新校验 effect
+    const exec = async (step) => {
+      const tool = rt.tools.get(step.name)
+      if (!tool) throw new Error(`工具 ${step.name} 已不存在`)
+      const meta = resolveExecutionMeta(tool, step.args || {}, ctx)
+      if (meta.effect !== 'read' || meta.replay !== 'safe') throw new Error(`工具 ${step.name} 当前不再是只读可重放，已中止`)
+      const toolCtx = Object.assign({}, ctx, { signal: null, taskId: id })
+      return await tool.execute(step.args || {}, toolCtx)
+    }
+    const out = await rt.taskStore.recoverReadOnly(id, { scopeKey, execute: exec })
+    if (!out.ok) return this.e.reply(`自动恢复未执行：${out.code}`), true
+    const done = out.applied.filter((a) => a.applied).length
+    await this.e.reply(`任务 ${id} 只读步骤恢复：成功 ${done}/${out.applied.length}${out.applied.filter((a) => a.error).length ? `（${out.applied.filter((a) => a.error).map((a) => a.error).join('；')}）` : ''}`)
     return true
   }
 

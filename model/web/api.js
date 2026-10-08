@@ -215,6 +215,14 @@ router.get('/tasks/:id', asyncHandler(async (req, res) => {
   return ok(res, { task: t, events })
 }))
 
+// GET /api/tasks/:id/recovery —— 恢复计划（P0-3 阶段二；纯推导，不执行副作用）
+router.get('/tasks/:id/recovery', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.taskStore) return fail(res, CODE.NOTFOUND, '任务账本未启用')
+  const out = await r.taskStore.recoveryPlan(req.params.id, { scopeKey: req.query.scopeKey || null })
+  return out.ok ? ok(res, out.plan) : fail(res, CODE.NOTFOUND, `无法读取：${out.code}`)
+}))
+
 // POST /api/tasks/:id/cancel —— 取消任务（P0-3）
 router.post('/tasks/:id/cancel', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return

@@ -19,6 +19,7 @@ import { stringifyArgs, estimateMessages, mergeUsage } from './messages.js'
 import { tokenBreakdown, toolResultFields, decisionFields } from './trace/events.js'
 import { LoopGovernor } from './loop-governor.js'
 import { ToolScheduler, resolveToolConcurrency } from './tool-scheduler.js'
+import { resolveExecutionMeta } from './tool-effects.js'
 import { validateToolArgs } from './tool-schema.js'
 import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
@@ -1465,30 +1466,53 @@ export class Agent {
     const signal = execCtx?.signal || null
     // 取消边界：本轮任何工具尚未启动前若已取消 → 全部标记未执行，不产生副作用
     if (signal?.aborted) return toolCalls.map((tc) => this._cancelledToolResult(tc))
+    // 解析每个工具的调度语义与执行语义（只读/写、可重放、幂等键）
+    const metas = toolCalls.map((tc) => {
+      const tool = this.tools?.get?.(tc.name) ?? this._metaTools?.[tc.name]
+      const { mode, resourceKeys } = resolveToolConcurrency(tool, tc.arguments, ctx)
+      const exec = resolveExecutionMeta(tool, tc.arguments, ctx)
+      // 只读工具的入参可持久化以支持有限自动恢复；写操作只存哈希，避免落敏感入参
+      const payload = { name: tc.name, ...exec, ...(exec.effect === 'read' ? { args: tc.arguments } : { argsHash: shortHash(JSON.stringify(tc.arguments ?? {})) }) }
+      return { mode, resourceKeys, exec, payload }
+    })
     // 任务账本：副作用开始前记录 planned（先落盘，便于崩溃后判定"尚未开始"）
     if (this.taskStore) {
-      await this._journal((s) => Promise.all(toolCalls.map((tc) => s.event({
-        taskId: execCtx.taskId, kind: 'tool_planned', callId: tc.id, payload: { name: tc.name },
+      await this._journal((s) => Promise.all(toolCalls.map((tc, i) => s.event({
+        taskId: execCtx.taskId, kind: 'tool_planned', callId: tc.id, payload: metas[i].payload,
       }))))
     }
     // 受控并发（P0-2）：按 meta.concurrency/resourceKeys 调度——未知工具默认独占、内置只读并发、
     // exclusive 形成屏障、resource 按资源键串行，结果仍按原始调用顺序回插。取消后不再启动排队项。
-    const tasks = toolCalls.map((tc) => {
-      const tool = this.tools?.get?.(tc.name) ?? this._metaTools?.[tc.name]
-      const { mode, resourceKeys } = resolveToolConcurrency(tool, tc.arguments, ctx)
-      return { concurrency: mode, resourceKeys, run: () => runOne(tc) }
-    })
+    const tasks = toolCalls.map((tc, i) => ({
+      concurrency: metas[i].mode,
+      resourceKeys: metas[i].resourceKeys,
+      exec: metas[i].exec,
+      run: async () => {
+        // 任务账本：副作用开始前记录 started（崩溃后可判定"已开始但结果未知"）
+        if (this.taskStore) {
+          await this._journal((s) => s.event({
+            taskId: execCtx.taskId, kind: 'tool_started', callId: tc.id, payload: metas[i].payload,
+          }))
+        }
+        return runOne(tc)
+      },
+    }))
     const settled = await this._toolScheduler.run(tasks, { signal })
-    // 任务账本：记录每个 tool_call 的结算（含取消），供恢复判定已提交步骤与未知副作用
+    // 任务账本：记录每个 tool_call 的结算（含取消/effectState），供恢复判定已提交步骤与未知副作用
     if (this.taskStore) {
-      await this._journal((s) => Promise.all(settled.map((r, i) => s.event({
-        taskId: execCtx.taskId, kind: 'tool_result', callId: toolCalls[i].id,
-        payload: {
-          name: toolCalls[i].name,
-          cancelled: !!(r && r.cancelled),
-          ok: !!(r && !r.cancelled && !r.error),
-        },
-      }))))
+      await this._journal((s) => Promise.all(settled.map((r, i) => {
+        const cancelled = !!(r && r.cancelled)
+        const ok = !!(r && !r.cancelled && !r.error)
+        const effect = metas[i].exec.effect
+        const effectState = cancelled ? 'unknown' : (ok ? (effect === 'read' ? 'none' : 'applied') : 'unknown')
+        return s.event({
+          taskId: execCtx.taskId, kind: 'tool_result', callId: toolCalls[i].id,
+          payload: {
+            name: toolCalls[i].name, cancelled, ok,
+            effect, replay: metas[i].exec.replay, effectState,
+          },
+        })
+      })))
     }
     return settled.map((r, i) => (r && r.cancelled ? this._cancelledToolResult(toolCalls[i]) : r?.value))
   }
