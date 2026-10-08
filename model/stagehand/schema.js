@@ -15,8 +15,40 @@
  *  - 未知 type、`$ref`、`not` 等官方不支持的结构由 fromJSONSchema 抛错，
  *    这里统一包成可读错误；不静默退化成 z.unknown() 丢掉约束；
  *  - 转换后做一次关键约束保留性校验，官方转换器若静默丢弃已声明约束则明确报错。
+ *
+ * 依赖解析（防"未装可选依赖导致插件整体加载失败"）：
+ *  - 首选声明的别名依赖 `zod-stagehand`（npm:zod@4.4.3，随 pnpm install 装入）；
+ *  - 回退复用 `@browserbasehq/stagehand` 自带的同版本 Zod 4（其本身必装）；
+ *  - 两者都不可用时才在 extract 调用时报可读错误，不影响插件启动。
  */
-import * as z4 from 'zod-stagehand'
+import { createRequire } from 'node:module'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const require = createRequire(import.meta.url)
+
+let _z4 = null
+let _z4Tried = false
+/** 懒加载 Zod 4 命名空间（同步）：zod-stagehand → stagehand 自带 zod。 */
+function zod4() {
+  if (_z4Tried) return _z4
+  _z4Tried = true
+  try {
+    const m = require('zod-stagehand')
+    _z4 = m?.fromJSONSchema ? m : (m?.default || m)
+    if (typeof _z4?.fromJSONSchema === 'function') return _z4
+  } catch { /* 回退 */ }
+  try {
+    const resolved = import.meta.resolve('@browserbasehq/stagehand')
+    const pkgDir = path.dirname(path.dirname(fileURLToPath(resolved)))
+    const req2 = createRequire(path.join(pkgDir, 'noop.js'))
+    const m = req2('zod')
+    const z = m?.fromJSONSchema ? m : (m?.default || m)
+    if (typeof z?.fromJSONSchema === 'function') { _z4 = z; return _z4 }
+  } catch { /* 都失败 */ }
+  _z4 = null
+  return null
+}
 
 /** 输入 schema 序列化后的字节上限（约 64KB，远超正常抽取需求） */
 export const MAX_SCHEMA_BYTES = 64 * 1024
@@ -52,9 +84,11 @@ export function jsonSchemaToZod(schema, opts = {}) {
   const budget = { nodes: 0 }
   validate(schema, 0, { maxDepth, maxNodes, maxKeys, budget })
 
+  const z = zod4()
+  if (!z) throw new Error('缺少 Zod 4（stagehand extract 需要）：请在云崽根目录执行 pnpm install（或 pnpm add zod-stagehand）')
   let zodSchema
   try {
-    zodSchema = z4.fromJSONSchema(schema)
+    zodSchema = z.fromJSONSchema(schema)
   } catch (e) {
     throw new Error(`不支持的 schema：${e?.message || e}`)
   }
@@ -113,7 +147,7 @@ function typeOf(node) {
  */
 function assertPreserved(input, zodSchema) {
   let out
-  try { out = z4.toJSONSchema(zodSchema) } catch { return } // 无法往返则不做该断言（fromJSONSchema 已通过）
+  try { out = zod4()?.toJSONSchema(zodSchema) } catch { return } // 无法往返则不做该断言（fromJSONSchema 已通过）
   walk(input, out, (inNode, outNode, where) => {
     const want = typeOf(inNode)
     if (want.length) {

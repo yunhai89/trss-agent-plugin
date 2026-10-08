@@ -716,7 +716,7 @@ stagehand:
 ```
 
 - **LLM**：Stagehand 每次原语调用要一次 LLM 推理。`modelName` 留空时**复用插件已配的 OpenAI 兼容 provider**（deepseek/openai/mimo 等，走 json_schema 结构化输出），并复用主 provider 已配置的代理；插件协议为 anthropic 或想用更强模型，填 `modelName`（五大 provider：openai/anthropic/google/groq/cerebras）。
-- **依赖**：`@browserbasehq/stagehand` v4 + `zod-stagehand`（Zod 4 别名，仅 Stagehand extract 用；其余模块仍用根依赖 Zod 3）；云崽根 `pnpm install` 随 workspace 装入插件。本地模式另需 chromium + 系统库（`libnss3 libatk-bridge2.0-dev libgtk-3-dev libxss1 libasound2`）。
+- **依赖**：`@browserbasehq/stagehand` v4 + `zod-stagehand`（Zod 4 别名，仅 Stagehand extract 用；其余模块仍用根依赖 Zod 3）。`zod-stagehand` 缺失时会回退复用 Stagehand 自带的同版本 Zod 4，因此不会导致插件加载失败；建议仍在云崽根 `pnpm install` 装入插件。本地模式另需 chromium + 系统库（`libnss3 libatk-bridge2.0-dev libgtk-3-dev libxss1 libasound2`）。
 - **兼容性影响**：早期版本把 SDK 返回值直接展开到结果根（数组会变成数字键、`result.title` 是原始 SDK 字段）；现统一为 `goto` 顶层 `url/title/status`、`observe/extract/act` 的载荷在 `result.data`（`goto` 同时提供 `result.data` 别名）。外部脚本请改读 `result.data`。
 - **安全边界**：入口对顶层导航做协议/IP/域名解析校验（含混淆 IPv4、尾点、空 DNS、取消/超时），并在请求级安装 Stagehand DomainPolicy（精确域名 + 子域通配 + IPv4 字面量）；IPv6/CIDR/单标签主机无法表达为域名规则，仅入口校验兜底；DNS 重绑定与"子资源访问私有 IP"不被 DomainPolicy 覆盖。因此**不宣称完整 SSRF 出口隔离**。
 - 云模式（Browserbase）不在主机跑浏览器、无需本地 chromium，但需 apiKey + 外网。
