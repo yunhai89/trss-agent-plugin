@@ -249,7 +249,7 @@ export function makeSpawnSubagentTools({
       }
       _tasks.set(taskId, taskInfo)
 
-      Log.mark('[spawn_subagent]', `异步创建子代理 ${taskId} scope=${scope} focus=${focus} budget=${Math.round(budgetMs / 1000)}s task="${task.slice(0, 60)}"`)
+      Log.mark('[spawn_subagent]', `异步创建子代理 ${taskId} scope=${scope} focus=${focus} budget=${Math.round(budgetMs / 1000)}s task="${task.slice(0, 120)}${task.length > 120 ? '…' : ''}"（完整任务见 devLog）`)
       trace.emit('delegate:start', { subagent: specName, task: task.slice(0, 120), budgetMs })
 
       // 后台执行（不阻塞 execute 返回）
