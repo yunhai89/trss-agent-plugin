@@ -2079,6 +2079,45 @@ await test('参数校验：合法参数正常执行；关闭开关可回滚', as
   eq(calls2, 1, '关闭校验时按其自身逻辑执行（回滚杠杆）')
 })
 
+// ---------- 收尾输出上限（修复：子代理报告被 1024 token 截断）----------
+await test('收尾 token 上限可配：finalizeMaxTokens', async () => {
+  let finOpts = null
+  const tools = new ToolRegistry().register({
+    name: 't1', description: 'd', parameters: { type: 'object' }, async execute() { return {} },
+  })
+  let n = 0
+  const provider = {
+    async chat(o) {
+      n++
+      if (n === 1) return { content: '', toolCalls: [{ id: 'c1', name: 't1', arguments: {} }], finishReason: 'tool_calls', usage: null }
+      finOpts = o
+      return { content: 'wrap', toolCalls: [], finishReason: 'stop', usage: null }
+    },
+  }
+  const agent = new Agent({ provider, tools, maxTurns: 1, finalizeMaxTokens: 4096 })
+  const r = await agent.run('x')
+  eq(r.stopReason, 'max_turns', '异常停止 max_turns')
+  eq(finOpts.max_tokens, 4096, 'finalizer max_tokens = finalizeMaxTokens（不再硬编码 1024）')
+})
+
+await test('收尾 token 上限默认 2048', async () => {
+  let finOpts = null
+  const tools = new ToolRegistry().register({
+    name: 't1', description: 'd', parameters: { type: 'object' }, async execute() { return {} },
+  })
+  let n = 0
+  const provider = {
+    async chat(o) {
+      n++
+      if (n === 1) return { content: '', toolCalls: [{ id: 'c1', name: 't1', arguments: {} }], finishReason: 'tool_calls', usage: null }
+      finOpts = o
+      return { content: 'wrap', toolCalls: [], finishReason: 'stop', usage: null }
+    },
+  }
+  await new Agent({ provider, tools, maxTurns: 1 }).run('x')
+  eq(finOpts.max_tokens, 2048, '默认 2048')
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

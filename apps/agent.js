@@ -1041,6 +1041,7 @@ async function _buildRuntime(scope) {
     cacheControl: cfg.cacheControl === true ? 'explicit' : (cfg.cacheControl === 'auto' || cfg.cacheControl === 'explicit' ? String(cfg.cacheControl) : 'off'), // Anthropic 断点三态：auto=官方端点默认开 / explicit=强制 / off（默认，兼容网关安全）
     promptCacheKey: cfg.promptCacheKey === true, // OpenAI 官方 prompt_cache_key 稳定会话路由（仅官方 preset 下发）
     reflectMaxIterations: cfg.reflectMaxIterations ?? 1,
+    finalizeMaxTokens: cfg.finalizeMaxTokens ?? 2048, // 收尾输出上限（异常停止后交付；防子代理报告被截断）
     stickers: getStickerManager({ logger: Log.tag('sticker') }), // 表情包清单注入（_assembleSystem 用 catalog()）
     devLog: (event, data, traceId, scope) => devLog(event, data, traceId, scope), // 详细 trace（框架无关，pino 文件）；库零依赖，由 apps 注入
     logger: Log.tag('agent'),
@@ -1965,7 +1966,8 @@ export class Chat extends plugin {
         onAssistant: (res) => {
           // 旁白与工具进度共享节流闸：短时间内的多条旁白只发第一条，防刷屏 / 撞限流
           if (res?.toolCalls?.length && res?.content && cfg.reply?.narrate !== false && progressGate.allow()) {
-            safeReply(stripMarkers(redactSecrets(res.content)))
+            const narr = stripMarkers(redactSecrets(res.content)).replace(/\s+$/, '')
+            if (narr) safeReply(narr)
           }
         },
         // 主人免确认直执行（masterSkipConfirm）时的高危提示——否则该开关静默绕过审批
@@ -1984,7 +1986,7 @@ export class Chat extends plugin {
       // 发送前脱敏：屏蔽 API Key / token 等敏感信息（agent.redactSecrets 默认开；异常不阻塞回复）
       // 安全网：无论 provider 是否已剥离，最终外发前再剥一次内联工具调用标记（<tool_calls><invoke…>），
       // 杜绝任何模型/通道把控制文本当正文发出（provider 层已解析，这里防 fallback/自定义 provider 漏网）
-      const body = stripInlineToolCalls(cfg.redactSecrets === false ? (content || '') : redactSecrets(content || ''))
+      const body = stripInlineToolCalls(cfg.redactSecrets === false ? (content || '') : redactSecrets(content || '')).replace(/\s+$/, '')
       // 收尾流式：发完剩余增量并等待发送队列结算（完成屏障）。只有全部分片确认送达、且流式全文
       // 与最终正文一致，才算"已投递"从而跳过整段最终回复；存在失败/未决/缺片一律不算成功。
       const streamState = await streamer.finish()

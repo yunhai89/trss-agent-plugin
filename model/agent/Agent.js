@@ -217,6 +217,8 @@ export class Agent {
     // OpenAI 官方 prompt_cache_key（稳定会话路由键；仅 provider.cacheCaps.promptCacheKey=true 时下发，绝不发给 DeepSeek/兼容网关）
     this.promptCacheKey = config.promptCacheKey === true
     this.reflectMaxIterations = config.reflectMaxIterations ?? 1
+    // 收尾（finalizer）输出上限：异常停止后最后一次交付，太小会把总结/子代理报告截断（默认 2048，可配）
+    this.finalizeMaxTokens = Math.max(256, Number(config.finalizeMaxTokens) || 2048)
 
     // 回退 provider 列表（每条 {provider, model}，独立 baseURL/apiKey/protocol，可跨厂商）；主模型失败时依次尝试
     this.fallbackProviders = Array.isArray(config.fallbackProviders) ? config.fallbackProviders : []
@@ -335,7 +337,7 @@ export class Agent {
         ...(this._cacheControlFor(this.provider) ? { cacheControl: true } : {}),
         ...(this._promptCacheKeyFor(this.provider, this.model)),
         temperature: this.temperature,
-        max_tokens: Math.min(this.maxTokens ?? 1024, 1024), // 收尾只需简短总结，防吞掉预留
+        max_tokens: Math.min(this.maxTokens ?? this.finalizeMaxTokens, this.finalizeMaxTokens), // 收尾上限可配（默认 2048）：太小会把总结/子代理报告截断
         ...this._finalizeReasoningOpts(),
         signal: finCtl.signal,
         stream: false,
