@@ -40,6 +40,7 @@ import {
   TaskStore,
   scopeKeyOfCtx,
   resolveExecutionMeta,
+  RuntimeScope,
 } from '../model/agent/index.js'
 import { presets as openaiPresets } from '../model/openai/index.js'
 import { stripInlineToolCalls } from '../model/openai/helpers.js'
@@ -377,6 +378,7 @@ let _runtime = null
 let _runtimePromise = null // in-flight buildRuntime()，并发安全：多调用方共享同一次构建
 let _runtimeFailed = null  // buildRuntime 失败原因缓存；非 null 则 getRuntime 直接抛、不再重试，避免每条消息刷屏重建
 let _runtimeGen = 0        // 运行时代际：invalidateRuntime 递增；在途构建据此丢弃旧配置结果，防止热重载后复活旧运行时
+let _closingPromise = null // 旧运行时 scope.close() 的在途 Promise：getRuntime 在重建前 await，避免旧资源与新运行时并存
 let _initErrLogged = false // 初始化失败日志限首（防每条消息重复打 ERRO）
 const _initFailNotified = new Set() // 已提示过"初始化失败"的用户(每用户仅提示一次，防刷屏)；runtime 重建时清
 const _clearPending = new Map() // userId → 确认清空的时间戳（2 步确认）
@@ -459,6 +461,17 @@ async function makeSearchFetch(proxyFetch) {
 }
 
 async function buildRuntime() {
+  // P0-4：为本次构建创建资源作用域；构建失败按逆序回滚已获取资源，避免半成品残留。
+  const scope = new RuntimeScope({ name: 'runtime' })
+  try {
+    return await _buildRuntime(scope)
+  } catch (e) {
+    try { await scope.close('build_failed') } catch { /* noop */ }
+    throw e
+  }
+}
+
+async function _buildRuntime(scope) {
   const cfg = Config.get().agent || {}
   const startupInfo = {} // 运行时构建期采集的摘要信息（供末尾统一面板输出）
   // cfg.protocol/preset/baseURL/apiKey/model 是「基础模型引用」的解析镜像（由 Config 按 agent.providerId/modelId 回填）
@@ -1210,11 +1223,33 @@ async function buildRuntime() {
     ['面板', cfg.webApi?.enable !== false ? `:${cfg.webApi?.port || 6098}` : 'off'],
   ])
 
-  return { agentConfig, makeAgent, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore }
+  // P0-4：按依赖顺序登记清理（order 小先关）。toolEvo 先于 sandbox（runner 依赖其 transport），
+  // 关闭幂等且 await 资源真正退出；热重载/退出只调 scope.close()，不再散落手工关闭。
+  scope.register(() => { try { schedule?.shutdown?.() } catch { /* noop */ } }, { name: 'schedule' })
+  scope.register(() => { try { knowledge?.shutdown?.() } catch { /* noop */ } }, { name: 'knowledge' })
+  scope.register(async () => {
+    try { toolEvo?.runner?.stop?.() } catch { /* noop */ }
+    try { await toolEvo?.closeDb?.() } catch { /* noop */ }
+  }, { name: 'toolEvo' })
+  scope.register(() => { try { stagehand?.sessionMgr?.closeAll?.() } catch { /* noop */ } }, { name: 'stagehand' })
+  scope.register(() => { try { diagram?.stop?.() } catch { /* noop */ } }, { name: 'diagram' })
+  scope.register(async () => {
+    try { await usageStats?.flushNow?.() } catch { /* noop */ }
+    try { usageStats?.stop?.() } catch { /* noop */ }
+  }, { name: 'usageStats' })
+  scope.register(() => {
+    try { const n = multiagent?.shutdown?.(); if (n) Log.info(`[multiagent] 运行时失效：已终止 ${n} 个在跑子代理`) } catch { /* noop */ }
+  }, { name: 'multiagent' })
+  scope.register(async () => { try { await taskStore?.close?.() } catch { /* noop */ } }, { name: 'taskStore' })
+  scope.register(async () => { try { await sandbox?.shutdown?.() } catch { /* noop */ } }, { name: 'sandbox' })
+
+  return { agentConfig, makeAgent, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore, scope }
 }
 
 const getRuntime = async () => {
   if (_runtime) return _runtime
+  // 旧运行时 scope 正在清理：等待其完成再重建，避免旧资源（Worker/浏览器/沙箱）与新运行时并存
+  if (_closingPromise) { try { await _closingPromise } catch { /* noop */ } }
   // 失败缓存：apiKey 等配置类错误一旦发生，直接抛缓存原因，不再每条消息重新 buildRuntime
   // （否则每条群消息都重建+抛错+回复，刷屏 + 日志爆炸）。配置热加载后 invalidateRuntime 清缓存重试。
   if (_runtimeFailed) {
@@ -1252,46 +1287,38 @@ const getRuntime = async () => {
   return _runtimePromise
 }
 
-/** 失效运行时单例（下一次 getRuntime 用新配置重建） */
+/** 失效运行时单例（下一次 getRuntime 用新配置重建）。返回旧 scope 清理的 Promise（可等待）。 */
 function invalidateRuntime() {
-  // 取消旧运行时的定时调度 job（提醒/定时任务链 + KB 刷新）：node-schedule 的 job 不会随对象失效自动停，
-  // 不取消会在热重载后继续触发（生产事故：同一任务被重复注册 → 到点并发触发 N 次）。
-  if (_runtime?.schedule?.shutdown) { try { _runtime.schedule.shutdown() } catch { /* noop */ } }
-  if (_runtime?.knowledge?.shutdown) { try { _runtime.knowledge.shutdown() } catch { /* noop */ } }
-  if (_runtime?.toolEvo) {
-    try { _runtime.toolEvo.runner?.stop?.() } catch { /* noop */ } // 关闭隔离 worker（审计 §4.2）
-    // closeDb 内部会先停落盘定时器并 flush 队列再关库（审计 P1-8），不会丢 2s 窗口内的埋点
-    try { Promise.resolve(_runtime.toolEvo.closeDb?.()).catch(() => {}) } catch { /* noop */ }
-  }
-  if (_runtime?.stagehand?.sessionMgr) {
-    try { _runtime.stagehand.sessionMgr.closeAll() } catch { /* noop */ } // 关闭所有浏览器会话
-  }
-  if (_runtime?.diagram) {
-    try { _runtime.diagram.stop() } catch { /* noop */ } // 停 diagram 临时目录 TTL 清理定时器（unref 过，防御性显式停）
-  }
-  if (_runtime?.usageStats) {
-    // 统计缓冲落 KV 后停采集器（2s 窗口内未 flush 的数据不丢）
-    try { _runtime.usageStats.flushNow().catch(() => {}) } catch { /* noop */ }
-    try { _runtime.usageStats.stop() } catch { /* noop */ }
-  }
-  // 在跑子代理：热重载/退出时终止，避免后台继续烧 token/占用并发
-  if (_runtime?.multiagent?.shutdown) {
-    try { const n = _runtime.multiagent.shutdown(); if (n) Log.info(`[multiagent] 运行时失效：已终止 ${n} 个在跑子代理`) } catch { /* noop */ }
-  }
-  // 沙箱必须最后关：toolEvo.runner 依赖 sandbox.transport，先关 transport 会让 runner 停止时操作已失效沙箱
-  if (_runtime?.sandbox?.manager) {
-    try { _runtime.sandbox.shutdown().catch(() => {}) } catch { /* noop */ }
-  }
-  // 任务账本（P0-3）：刷队列后关闭 sqlite 句柄（异步；调用方不等待，但 close 内部已串行化）
-  if (_runtime?.taskStore) {
-    try { Promise.resolve(_runtime.taskStore.close()).catch(() => {}) } catch { /* noop */ }
-  }
+  const rt = _runtime
   _runtime = null
   _runtimePromise = null
   _runtimeFailed = null  // 配置已变更：清失败缓存，下次 getRuntime 用新配置重试
   _runtimeGen++          // 在途 buildRuntime 据此丢弃旧配置结果，防止旧运行时被复活
   _initErrLogged = false // 允许再次记录初始化失败（若仍失败）
   _initFailNotified.clear() // runtime 重建：重置"已提示"标记，下次失败可再提示用户
+
+  const p = (async () => {
+    if (rt?.scope?.close) {
+      // P0-4：统一走 scope（幂等、await 资源退出、按依赖顺序）
+      try { const s = await rt.scope.close('invalidate'); return s } catch (e) { Log.warn('[runtime] 作用域清理异常', e?.message || e) }
+    } else if (rt) {
+      // 兼容：无 scope 的旧运行时退回内联清理（尽力而为）
+      try { rt.schedule?.shutdown?.() } catch { /* noop */ }
+      try { rt.knowledge?.shutdown?.() } catch { /* noop */ }
+      try { rt.toolEvo?.runner?.stop?.() } catch { /* noop */ }
+      try { await rt.toolEvo?.closeDb?.() } catch { /* noop */ }
+      try { rt.stagehand?.sessionMgr?.closeAll?.() } catch { /* noop */ }
+      try { rt.diagram?.stop?.() } catch { /* noop */ }
+      try { await rt.usageStats?.flushNow?.() } catch { /* noop */ }
+      try { rt.usageStats?.stop?.() } catch { /* noop */ }
+      try { const n = rt.multiagent?.shutdown?.(); if (n) Log.info(`[multiagent] 运行时失效：已终止 ${n} 个在跑子代理`) } catch { /* noop */ }
+      try { await rt.taskStore?.close?.() } catch { /* noop */ }
+      try { await rt.sandbox?.shutdown?.() } catch { /* noop */ }
+    }
+  })()
+  _closingPromise = p
+  p.finally(() => { if (_closingPromise === p) _closingPromise = null })
+  return p
 }
 
 // 热加载：配置文件变更 → 失效运行时单例，下次对话用新配置重建（无需重启框架）

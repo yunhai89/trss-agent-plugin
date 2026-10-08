@@ -21,6 +21,7 @@ import { mergeTrend, summarizeKvDays } from '../agent/store/usage-stats.js'
 import { ok, fail, asyncHandler, CODE } from './response.js'
 import { listAllSuggestions, applySuggestion, removeSuggestion } from '../evolution/review.js'
 import { getStickerManager } from '../sticker/manager.js'
+import { RuntimeScope } from '../agent/runtime-scope.js'
 
 const router = express.Router()
 
@@ -243,6 +244,13 @@ router.post('/tasks/:id/resume', asyncHandler(async (req, res) => {
 router.get('/confirm', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
   return ok(res, r.confirm.list())
+}))
+
+// GET /api/runtime/scopes —— 资源作用域观测（P0-4）：未关闭 scope 数 + 当前运行时作用域统计
+router.get('/runtime/scopes', asyncHandler(async (req, res) => {
+  let r = null
+  try { r = await _runtimeProvider() } catch { r = null }
+  return ok(res, { openScopes: RuntimeScope.openCount, runtime: r?.scope?.stats?.() || null })
 }))
 
 // GET /api/suggestions?scopeId=&status= —— 进化建议（全部 status）

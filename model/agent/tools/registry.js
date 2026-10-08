@@ -79,6 +79,24 @@ export class ToolRegistry {
   }
 
   /**
+   * 作用域内注册（P0-4）：注册后把「仅移除本次注册」的清理函数登记到 scope。
+   * 旧注册的 disposer 按注册时的工具对象引用比对，不会误删同名新版本。
+   * register(...) 仍返回 this（不破坏链式调用），本方法额外返回 dispose 句柄。
+   */
+  registerScoped(scope, ...tools) {
+    const added = tools.flat(Infinity).filter(Boolean)
+    this.register(...added)
+    const captured = added.map((t) => ({ name: t.name, ref: this.tools.get(t.name) }))
+    const dispose = () => {
+      for (const { name, ref } of captured) {
+        if (this.tools.get(name) === ref) { this.tools.delete(name); this._indexDirty = true }
+      }
+    }
+    if (scope && typeof scope.register === 'function') scope.register(dispose, { name: 'tool-registry' })
+    return dispose
+  }
+
+  /**
    * 绑定工具的 toolEvo 版本身份（内置 seed / 进化 stable 共用）。
    * 使调用埋点能关联到具体版本（审计 P1-8）；不改变 execute 与权限等原始行为。
    */
