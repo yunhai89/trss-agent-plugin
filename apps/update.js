@@ -64,7 +64,12 @@ export class AgentsUpdate extends plugin {
 
     if (force) {
       type = '强制更新'
-      cm = `git reset --hard ${await this.getRemoteBranch(true, plugin)} && git pull --rebase`
+      // 先 fetch 再 reset 到远端分支：reset --hard 会覆盖「本地未跟踪但目标提交已跟踪」的文件，
+      // 避免旧代码「reset 到过期 origin/xxx 后再 pull --rebase」被未跟踪文件挡住（#agents强制更新失败）。
+      const remoteBranch = await this.getRemoteBranch(true, plugin)
+      const branch = await this.getBranch(plugin)
+      const target = remoteBranch || `origin/${branch || 'master'}`
+      cm = `git fetch --all --prune && git reset --hard ${target}`
     }
     this.oldCommitId = await this.getCommitId(plugin)
 
