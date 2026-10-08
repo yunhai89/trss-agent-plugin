@@ -46,6 +46,7 @@ tests.push(...stressTests)
 
 let passFiles = 0
 let failFiles = 0
+let skipFiles = 0
 const reSummary = /通过\s*(\d+)\s*[，,]\s*失败\s*(\d+)/
 
 // 需要先装 Yunzai 桩钩子才能跑的真实入口测试（其余 stress 文件是纯离线断言）
@@ -65,6 +66,13 @@ for (const t of tests) {
   })
   const out = (r.stdout || '') + (r.stderr || '')
   const m = out.match(reSummary)
+  // 整文件 skip（如真实浏览器集成测试缺少 STAGEHAND_BROWSER_PATH）：显式标记，不计入通过
+  const wholeSkip = /(^|\n)SKIP_FILE:/.test(out)
+  if (wholeSkip && r.status === 0) {
+    skipFiles++
+    console.log(`  ⊘ ${rel}  (skip)`)
+    continue
+  }
   // 识别常见失败标记：行首 ✗（含普通 ✗ / ✗ FAIL / ✗ THROW）与 FAIL:/THROW:
   const markerFailures = (out.match(/^\s*✗|FAIL:|THROW:/gm) || []).length
   const failedCount = Math.max(
@@ -74,7 +82,6 @@ for (const t of tests) {
   )
   if (r.status === 0 && failedCount === 0) {
     passFiles++
-    const total = m ? Number(m[1]) + Number(m[2]) : '?'
     console.log(`  ✓ ${rel}  (${m ? `${m[1]} 断言` : 'ok'})`)
   } else {
     failFiles++
@@ -84,6 +91,6 @@ for (const t of tests) {
 }
 
 console.log(`\n========================================`)
-console.log(`测试文件 通过 ${passFiles}，失败 ${failFiles}（共 ${tests.length}）`)
+console.log(`测试文件 通过 ${passFiles}，失败 ${failFiles}，跳过 ${skipFiles}（共 ${tests.length}）`)
 console.log(`========================================`)
 process.exit(failFiles > 0 ? 1 : 0)

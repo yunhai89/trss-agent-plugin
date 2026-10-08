@@ -157,10 +157,8 @@ await test('makeGenerate：HTTP 非 200 → 抛错', async () => {
   ok(threw, 'HTTP 500 抛错')
 })
 
-// ---------- 11. jsonSchemaToZod：转换正确性（需 zod）----------
-await test('jsonSchemaToZod：object/array/类型 + required（需 zod，未装则 skip）', async () => {
-  let z
-  try { z = (await import('zod')).z } catch { console.log('  ⊘ skip（zod 未装）'); return }
+// ---------- 11. jsonSchemaToZod：转换正确性（Zod 4 官方转换器）----------
+await test('jsonSchemaToZod：object/array/类型 + required（Zod 4）', async () => {
   const schema = {
     type: 'object',
     properties: {
@@ -172,7 +170,7 @@ await test('jsonSchemaToZod：object/array/类型 + required（需 zod，未装�
     },
     required: ['title', 'count'],
   }
-  const zodSchema = jsonSchemaToZod(z, schema)
+  const zodSchema = jsonSchemaToZod(schema)
   ok(typeof zodSchema?.safeParse === 'function', '产出 zod schema（有 safeParse）')
   // 合法输入通过
   const good = zodSchema.safeParse({ title: 't', count: 1, tags: ['x'], meta: { a: true } })
@@ -224,7 +222,7 @@ await test('makeStagehand：permission 控制 category；goto 拦内网；配额
 
   const tools = makeStagehand({ cfg: { permission: 'all', maxCallsPerMinute: 1 }, agent: {} }).pack.resolve({})
   const goto = tools.find((t) => t.name === 'stagehand__goto')
-  const ctx = { scopeUserId: 'u1' }
+  const ctx = { userId: 'u1', selfId: 'bot1', conversationId: 'c1' }
   const r1 = await goto.execute({ url: 'http://127.0.0.1:2536' }, ctx)
   eq(r1.ok, false, 'goto 内网被拒（未启动浏览器）')
   ok(/内网|禁止|拒绝/.test(String(r1.error || r1.message || '')), '拒绝原因可读')

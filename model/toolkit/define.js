@@ -168,7 +168,12 @@ export const param = {
 
 // ─── 响应辅助 ───
 export function ok(data, extra = {}) {
-  return { ok: true, ...(typeof data === 'string' ? { content: data } : data), ...extra }
+  // 契约：成功结果一律为对象。数组/原始值不得展开进对象（否则数字键或数据丢失），
+  // 统一收进 data 字段；字符串沿用 content。
+  if (data == null) return { ok: true, ...extra }
+  if (typeof data === 'string') return { ok: true, content: data, ...extra }
+  if (typeof data !== 'object' || Array.isArray(data)) return { ok: true, data, ...extra }
+  return { ok: true, ...data, ...extra }
 }
 export function fail(error, extra = {}) {
   return { ok: false, error: typeof error === 'string' ? error : error?.message || String(error), ...extra }

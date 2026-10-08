@@ -698,7 +698,7 @@ async function buildRuntime() {
   let stagehand = null
   if (cfg.stagehand?.enable) {
     try {
-      const { pack, sessionMgr } = makeStagehand({ cfg: cfg.stagehand, agent: cfg })
+      const { pack, sessionMgr } = makeStagehand({ cfg: cfg.stagehand, agent: cfg, fetch: proxyFetch })
       for (const t of pack.resolve({})) {
         try { tools.register(t) } catch (e) { Log.warn('[stagehand] 注册失败', t.name, e?.message || e) }
       }

@@ -362,8 +362,8 @@ agent:
     # Stagehand 浏览器自动化（act/extract/observe 自然语言原语，LLM 把指令映射到页面元素）。
     # permission=all：全部成员可用 goto/observe/extract，act 写动作仍需主人 #确认；=master：仅主人。
     # 安全：goto 强制拒绝内网/环回/元数据地址（防 SSRF），并按会员限流；本地浏览器跑在宿主进程，非沙箱。
-    # 会话 per-scopeUserId 隔离 + idle 自动关 + 全局会话上限。
-    # 依赖 @browserbasehq/stagehand + zod（云崽根 pnpm install 随 workspace 装入插件）；本地模式另需 chromium+系统库。
+    # 会话按「机器人+群/私聊+真实操作者+对话」隔离 + idle 自动关 + 全局会话上限；同会话操作串行。
+    # 依赖 @browserbasehq/stagehand + zod-stagehand（云崽根 pnpm install 随 workspace 装入插件）；本地模式另需 chromium+系统库。
     enable: false
     permission: all        # all（全部成员）| master（仅主人）
     mode: local            # local（本地 Playwright+chromium，默认）| cloud（Browserbase 云浏览器）
@@ -376,7 +376,9 @@ agent:
     modelName: ""          # Stagehand 原生模型（如 google/gemini-2.5-flash；空=复用插件 provider，仅 OpenAI 兼容；云模式空=Model Gateway 自动选）
     modelApiKey: ""        # 原生模型 apiKey（云模式部分 provider 可空）
     idleTimeoutMs: 300000  # 会话空闲多久自动关（默认 5 分钟）
-    maxSessions: 3         # 全局并发浏览器会话上限
+    maxSessions: 3         # 全局并发浏览器会话上限（含启动中/关闭中）
+    opTimeoutMs: 60000     # 单次浏览器操作截止时间（超时/取消拒绝迟到结果并清理会话）
+    llmTimeoutMs: 30000    # 单次 LLM 推理截止时间（覆盖请求 + 响应体读取）
     maxCallsPerMinute: 10  # 每会员每分钟浏览器操作上限
     maxCallsPerDay: 200    # 每会员每日浏览器操作上限
     blockedHosts: []       # 额外禁访主机（在默认内网/元数据黑名单之外）

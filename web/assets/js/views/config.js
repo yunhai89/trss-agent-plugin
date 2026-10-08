@@ -161,6 +161,8 @@
         if (form.stagehand.maxSessions == null) form.stagehand.maxSessions = 3
         if (form.stagehand.maxCallsPerMinute == null) form.stagehand.maxCallsPerMinute = 10
         if (form.stagehand.maxCallsPerDay == null) form.stagehand.maxCallsPerDay = 200
+        if (form.stagehand.opTimeoutMs == null) form.stagehand.opTimeoutMs = 60000
+        if (form.stagehand.llmTimeoutMs == null) form.stagehand.llmTimeoutMs = 30000
         if (form.stagehand.domSettleTimeoutMs == null) form.stagehand.domSettleTimeoutMs = 3000
         if (!Array.isArray(form.stagehand.blockedHosts)) form.stagehand.blockedHosts = []
         // 搜索源兜底（旧 config 无 searxng 字段时 v-model 不报错）
@@ -1763,9 +1765,9 @@
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.stagehand">
-            <div class="desc mb10">act/extract/observe 自然语言原语；permission=all 时全部成员可用（act 写动作仍需 <code>#确认</code>）。goto 强制拒绝内网/元数据地址，并按会员限流；会话 per-scope 隔离 + idle 自动关。</div>
+            <div class="desc mb10">act/extract/observe 自然语言原语；permission=all 时全部成员可用（act 写动作仍需 <code>#确认</code>）。goto 强制拒绝内网/元数据地址，并按会员限流；会话按「机器人+群/私聊+操作者+对话」隔离 + idle 自动关 + 同会话串行。</div>
             <div class="cf-grid">
-              <cfg-row name="启用浏览器自动化" desc="依赖 @browserbasehq/stagehand+zod（云崽根 pnpm install）">
+              <cfg-row name="启用浏览器自动化" desc="依赖 @browserbasehq/stagehand+zod-stagehand（云崽根 pnpm install）">
                 <v-switch v-model="form.stagehand.enable"/>
               </cfg-row>
               <cfg-row name="使用权限" desc="all=全部成员（act 仍需 #确认）| master=仅主人">
@@ -1809,6 +1811,12 @@
               </cfg-row>
               <cfg-row name="会话空闲超时(毫秒)">
                 <input type="number" class="inp" style="width:130px" min="60000" step="60000" v-model.number="form.stagehand.idleTimeoutMs">
+              </cfg-row>
+              <cfg-row name="操作截止时间(毫秒)" desc="单次浏览器操作超时（超时拒绝迟到结果并清理会话）">
+                <input type="number" class="inp" style="width:130px" min="1000" step="1000" v-model.number="form.stagehand.opTimeoutMs">
+              </cfg-row>
+              <cfg-row name="LLM 截止时间(毫秒)" desc="单次推理超时（覆盖请求+响应体读取）">
+                <input type="number" class="inp" style="width:130px" min="1000" step="1000" v-model.number="form.stagehand.llmTimeoutMs">
               </cfg-row>
               <cfg-row name="DOM 稳定等待(毫秒)" desc="domSettleTimeoutMs：页面动作后等待 DOM 稳定">
                 <input type="number" class="inp" style="width:120px" min="0" step="500" v-model.number="form.stagehand.domSettleTimeoutMs">
