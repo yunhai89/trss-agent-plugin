@@ -21,6 +21,7 @@
     {
       group: '运行时', items: [
         { id: 'schedule', name: '定时任务', icon: 'schedule' },
+        { id: 'tasks', name: '任务账本', icon: 'schedule' },
         { id: 'confirm', name: '审批门', icon: 'confirm', badge: () => (window.MOCK?.confirms || []).length },
         { id: 'suggestions', name: '进化建议', icon: 'evolution', badge: () => (window.MOCK?.suggestions || []).filter((s) => s.status === 'pending').length },
         { id: 'evolution', name: '工具进化', icon: 'tool', badge: () => (window.MOCK?.tevoTools || []).filter((v) => v.status === 'verified').length },
@@ -39,6 +40,7 @@
     sessions: ['会话回放', '对话列表与消息历史'],
     logs: ['日志时间线', 'devLog 全链路 · traceId 串联'],
     schedule: ['定时任务', '到点投递提醒'],
+    tasks: ['任务账本', '可恢复任务记录 · 阶段/事件/检查点（P0-3）'],
     confirm: ['审批门', '高危工具人工把关'],
     suggestions: ['进化建议', '自评审产出的待审改进项'],
     evolution: ['工具进化', 'Tool Evolution · 候选生成/验证/审批/版本'],

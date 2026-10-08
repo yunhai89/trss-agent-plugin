@@ -18,6 +18,8 @@ import { makeToolSearchTool } from './tools/tool_search.js'
 import { stringifyArgs, estimateMessages, mergeUsage } from './messages.js'
 import { tokenBreakdown, toolResultFields, decisionFields } from './trace/events.js'
 import { LoopGovernor } from './loop-governor.js'
+import { ToolScheduler, resolveToolConcurrency } from './tool-scheduler.js'
+import { validateToolArgs } from './tool-schema.js'
 import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 import { detectScheduleIntent } from './schedule.js'
@@ -220,6 +222,14 @@ export class Agent {
 
     // LoopGovernor：循环智能终止器（审计 §2.1）。config.loop 为假值则不启用（保持原 maxTurns 行为）
     this.governor = config.loop ? new LoopGovernor(config.loop) : null
+
+    // 工具受控并发（P0-2）：未声明并发语义的工具默认独占，内置只读工具显式并发；全局滚动池上限。
+    this.toolMaxParallel = Math.max(1, Number(config.toolConcurrency?.maxParallel) || 3)
+    this._toolScheduler = new ToolScheduler({ maxParallel: this.toolMaxParallel })
+    this.toolSchemaValidate = config.toolSchemaValidate !== false // 工具参数 schema 预校验（可关，回滚杠杆）
+    // 可恢复任务账本（P0-3，opt-in）：传入 TaskStore 时在关键边界落盘检查点；缺省不影响主流程
+    this.taskStore = config.taskStore || null
+    this._journalDegraded = false
 
     // 工具按需发现（Tool Discovery）：null=全量模式；Set=按需模式（常驻核心工具 + 命中后扩充）
     this.toolDiscovery = config.toolDiscovery || null
@@ -512,6 +522,15 @@ export class Agent {
     this._jevSelectedNames = new Set() // 每 run 重置：Jev 激活集默认不跨轮持久化
     this._ranTools = new Set() // 每 run 重置：本轮实际执行过的工具名
     this.governor?.reset()
+    // 任务账本：接受任务后、首次调用模型前登记（P0-3 必须落盘边界）
+    if (this.taskStore && ctx) {
+      this._journalDegraded = false
+      await this._journal((s) => s.begin({
+        taskId, ctx, phase: 'running',
+        runtimeGeneration: opts.runtimeGeneration ?? null,
+        providerRoute: this.model || null,
+      }))
+    }
     let usage = null
     let turns = 0
     let stopReason = null
@@ -849,16 +868,26 @@ export class Agent {
       ? [...this.activeTools].filter((n) => !this._jevSelectedNames.has(n) || this._ranTools.has(n))
       : null
     const extra = { cacheEpoch: this.cacheEpoch, ...(this._compactLedger ? { compactLedger: this._compactLedger } : {}), ...(discoveryOn && persistedTools ? { activeTools: persistedTools } : {}) }
+    let sessionPersisted = false
     if (useConv) {
       try {
         if (compactedThisRun) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
         else await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages.slice(sessStart), extra)
+        sessionPersisted = true
       } catch (e) { this.logger('warn', 'conversation 持久化失败', e) }
     } else if (sessKey) {
       try {
         if (compactedThisRun) await this.session.set(sessKey, this.messages)
         else await this.session.append(sessKey, this.messages.slice(sessStart))
+        sessionPersisted = true
       } catch (e) { this.logger('warn', 'session 持久化失败', e) }
+    }
+    // 任务账本：记录已投影到会话的游标（恢复时不重复 append；单调推进）
+    if (this.taskStore && ctx && sessionPersisted) {
+      const sessionKey = useConv
+        ? `conv:${scopeUserId}:${ctx.groupId ?? ''}:${ctx.conversationId ?? ''}`
+        : (sessKey || null)
+      await this._journal((s) => s.markSessionProjected(taskId, { sessionKey, cursor: this.messages.length }))
     }
     if (this.recall && ctx) {
       const snapshot = this.messages.slice()
@@ -884,6 +913,19 @@ export class Agent {
           this.devLog?.('recall_extract', { scopeUserId, ok: false, hasLlm: !!llm, error: e?.message || String(e) }, taskId, ctx?.devScope)
         }
       })
+    }
+
+    // 任务账本：结算（完成/等待输入/预算暂停/失败）。只有正常交付才 completed，预算耗尽为 paused。
+    if (this.taskStore && ctx) {
+      const phase = stopReason === 'clarify' ? 'waiting_input'
+        : stopReason === 'blocked' ? 'failed'
+          : GOVERNOR_STOP.has(stopReason) ? 'paused'
+            : 'completed'
+      await this._journal((s) => s.finish({
+        taskId, phase, stopReason,
+        completion: phase === 'completed' ? 'complete' : (finalContent ? 'partial' : 'none'),
+        usage,
+      }))
     }
 
     this.logger('mark', 'run end turns=', turns, 'stop=', stopReason, 'usage=', fmtUsage(usage), 'replyLen=', (finalContent || '').length, `totalMs=${Date.now() - __runStart}`)
@@ -1423,23 +1465,50 @@ export class Agent {
     const signal = execCtx?.signal || null
     // 取消边界：本轮任何工具尚未启动前若已取消 → 全部标记未执行，不产生副作用
     if (signal?.aborted) return toolCalls.map((tc) => this._cancelledToolResult(tc))
-    const hasInteractive = toolCalls.some((tc) => this.tools?.get?.(tc.name)?.meta?.interactive)
-    if (hasInteractive) {
-      // 串行（含交互式审批）：每项启动前重新检查 signal——前一项触发的取消/预算耗尽
-      // 不得让后续副作用工具开跑。向工具传 signal 只是协作提示，执行层必须自建取消边界。
-      const results = []
-      for (const tc of toolCalls) {
-        results.push(signal?.aborted ? this._cancelledToolResult(tc) : await runOne(tc))
-      }
-      return results
+    // 任务账本：副作用开始前记录 planned（先落盘，便于崩溃后判定"尚未开始"）
+    if (this.taskStore) {
+      await this._journal((s) => Promise.all(toolCalls.map((tc) => s.event({
+        taskId: execCtx.taskId, kind: 'tool_planned', callId: tc.id, payload: { name: tc.name },
+      }))))
     }
-    return Promise.all(toolCalls.map((tc) => runOne(tc)))
+    // 受控并发（P0-2）：按 meta.concurrency/resourceKeys 调度——未知工具默认独占、内置只读并发、
+    // exclusive 形成屏障、resource 按资源键串行，结果仍按原始调用顺序回插。取消后不再启动排队项。
+    const tasks = toolCalls.map((tc) => {
+      const tool = this.tools?.get?.(tc.name) ?? this._metaTools?.[tc.name]
+      const { mode, resourceKeys } = resolveToolConcurrency(tool, tc.arguments, ctx)
+      return { concurrency: mode, resourceKeys, run: () => runOne(tc) }
+    })
+    const settled = await this._toolScheduler.run(tasks, { signal })
+    // 任务账本：记录每个 tool_call 的结算（含取消），供恢复判定已提交步骤与未知副作用
+    if (this.taskStore) {
+      await this._journal((s) => Promise.all(settled.map((r, i) => s.event({
+        taskId: execCtx.taskId, kind: 'tool_result', callId: toolCalls[i].id,
+        payload: {
+          name: toolCalls[i].name,
+          cancelled: !!(r && r.cancelled),
+          ok: !!(r && !r.cancelled && !r.error),
+        },
+      }))))
+    }
+    return settled.map((r, i) => (r && r.cancelled ? this._cancelledToolResult(toolCalls[i]) : r?.value))
   }
 
   /** 回调安全调用：进度/审批等 UI 回调抛错不应打断工具循环。 */
   _safeCb(fn, ...args) {
     if (typeof fn !== 'function') return
     try { fn(...args) } catch (e) { this.logger('warn', '回调异常（已忽略）', e?.message || e) }
+  }
+
+  /**
+   * 任务账本安全写入（P0-3）：记录失败不中断对话，但标记降级——该任务不再声称"可恢复"。
+   * 调用方对关键边界（副作用前）应 await，确保先落盘再执行。
+   */
+  async _journal(fn) {
+    if (!this.taskStore) return
+    try { return await fn(this.taskStore) } catch (e) {
+      this._journalDegraded = true
+      this.logger('warn', '[task] 任务记录写入失败（该任务降级为不可恢复）', e?.message || e)
+    }
   }
 
   async _executeOne(tc, execCtx, cb, ctx) {
@@ -1471,6 +1540,22 @@ export class Agent {
         content = stringifyArgs({ error: '工具参数不是合法 JSON 对象，无法执行', got: String(tc.arguments).slice(0, 200) })
         this.logger('warn', 'tool bad_args', tc.name, brief(tc.arguments))
       } else {
+        // 参数 schema 校验（P0-2）：在副作用与审批之前校验；缺参/类型错误/多余参数结构化回报，
+        // 不静默修改模型参数、不触发副作用。schema 编译失败或无 schema 时放行（由工具自身兜底）。
+        if (this.toolSchemaValidate) {
+          const v = validateToolArgs(tool, tc.arguments)
+          if (!v.ok) {
+            content = stringifyArgs({
+              error: 'invalid_arguments',
+              reason: `参数不符合 ${tc.name} 的 schema`,
+              fields: v.fields,
+              _hint: '请按参数 schema 修正后重试；不要臆造字段或类型。',
+            })
+            this.logger('warn', 'tool invalid args', tc.name, brief(v.fields))
+            this._safeCb(cb.onToolEnd, tc, content)
+            return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
+          }
+        }
         // 调度意图硬门：本轮用户明确要"周期重复"，不得创建一次性提醒（确定性拦截，防模型选错工具）。
         // 仅在 schedule_task 已注册时拦截，避免"周期任务被关闭"时把用户堵死。
         if (tc.name === 'reminder_set' && this._scheduleIntent === 'recurring' && this.tools?.get?.('schedule_task')) {

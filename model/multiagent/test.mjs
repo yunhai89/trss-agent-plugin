@@ -6,6 +6,8 @@ import {
   Orchestrator,
   SubagentSpec,
   makeSpawnSubagentTools,
+  makeDelegationTool,
+  normalizeSubagentResult,
   pipeline,
   parallel,
   router,
@@ -370,6 +372,190 @@ await test('子代理能力可见：spawn 回报可用工具、拒绝/标注不�
   const r2 = await spawn.execute({ task: 't2', tools: ['terminal'] }, ctx)
   ok(!!r2.error && /不可用/.test(r2.error), '请求工具全不可用 → 直接拒绝')
   eq(r2.available, ['web_search'], '返回可用清单供改派/主代理自行完成')
+})
+
+// ---------- 17. Semaphore：排队可取消 + 队列上限 + 释放幂等（P0-1 / P-B）----------
+await test('Semaphore：排队可取消 + 队列上限 + 释放幂等', async () => {
+  const sem = new Semaphore(1, { queueLimit: 1 })
+  await sem.acquire()
+  eq(sem.active, 1, '占满 active=1')
+  const ac = new AbortController()
+  const pending = sem.acquire({ signal: ac.signal })
+  await delay(5)
+  eq(sem.waiting, 1, '排队 1')
+  eq(await sem.acquire(), false, '队列满 → acquire 返回 false')
+  ac.abort()
+  let err = null
+  try { await pending } catch (e) { err = e }
+  ok(err && err.name === 'AbortError', '排队取消 → AbortError')
+  eq(sem.waiting, 0, '取消后从队列移除')
+  eq(sem.active, 1, 'active 不受排队取消影响')
+  sem.release()
+  eq(sem.active, 0, '释放后 active=0')
+  sem.release()
+  eq(sem.active, 0, '多余 release 不把 active 变负（幂等）')
+})
+
+// ---------- 18. 委派工具：透传身份 ctx / 取消信号，归集用量，剔除敏感句柄（P0-1 / A01）----------
+await test('委派工具：透传身份 ctx 与取消信号，归集用量，剔除敏感字段', async () => {
+  let seen = null
+  const spec = {
+    name: 'fake', description: 'd',
+    async runTaskResult(task, opts) {
+      seen = { task, opts }
+      return { taskId: 'c1', status: 'completed', completion: 'complete', content: 'R', stopReason: 'stop', usage: { prompt_tokens: 7, completion_tokens: 3 }, turns: 1 }
+    },
+  }
+  const usages = []
+  const tool = makeDelegationTool(spec, { onUsage: (r) => usages.push(r.usage) })
+  const ac = new AbortController()
+  const ctx = { userId: 'u1', scopeUserId: 'u1', groupId: 'g1', conversationId: 'c1', scopeId: 's1', taskId: 'p1', signal: ac.signal, e: { secret: 1 }, bot: { apiKey: 'k' } }
+  const out = await tool.execute({ task: 'do' }, ctx)
+  eq(out, 'R', '返回 content')
+  eq(seen.opts.signal, ac.signal, '取消信号透传')
+  eq(seen.opts.ctx.userId, 'u1', '身份 userId 透传')
+  ok(seen.opts.ctx.e === undefined && seen.opts.ctx.bot === undefined, '不含 e/bot 敏感句柄')
+  eq(seen.opts.parentTaskId, 'p1', '父任务关联透传')
+  eq(usages.length, 1, 'usage 归集一次')
+  eq(usages[0].prompt_tokens, 7, '用量原样归集')
+})
+
+// ---------- 19. 委派工具：排队期间父任务取消 → 零启动、槽位不泄漏（P0-1 / A02 / P-B）----------
+await test('委派工具：排队期间父任务取消 → 不启动子代理', async () => {
+  let calls = 0
+  const spec = { name: 'fake', description: 'd', async runTaskResult() { calls++; return { status: 'completed', completion: 'complete', content: 'x' } } }
+  const sem = new Semaphore(1)
+  await sem.acquire()
+  const tool = makeDelegationTool(spec, { semaphore: sem })
+  const ac = new AbortController()
+  const p = tool.execute({ task: 't' }, { userId: 'u', signal: ac.signal })
+  await delay(5)
+  eq(sem.waiting, 1, '委派在排队')
+  ac.abort()
+  const r = await p
+  eq(calls, 0, '取消后零 Provider 调用')
+  eq(r.error, 'cancelled', '返回 cancelled')
+  sem.release()
+  eq(sem.active, 0, '槽位不泄漏')
+})
+
+// ---------- 20. SubagentSpec：max_turns 返回 partial 与原 stopReason（P0-1 / A04 / P-C）----------
+await test('SubagentSpec：max_turns 返回 partial + 原 stopReason/usage，不伪报完成', async () => {
+  const tools = new ToolRegistry()
+  tools.register({ name: 'noop', category: 'query', description: 'd', parameters: { type: 'object' }, async execute() { return { ok: true } } })
+  let n = 0
+  const prov = {
+    async chat() {
+      n++
+      if (n === 1) return { role: 'assistant', content: '', toolCalls: [{ id: 't1', name: 'noop', arguments: {} }], finishReason: 'tool_calls', usage: { prompt_tokens: 10, completion_tokens: 2 } }
+      return { role: 'assistant', content: '部分结果', toolCalls: [], finishReason: 'stop', usage: { prompt_tokens: 5, completion_tokens: 1 } }
+    },
+  }
+  const spec = new SubagentSpec({ name: 'p', provider: prov, model: 'm', tools, maxTurns: 1 })
+  const r = await spec.runTaskResult('task')
+  eq(r.status, 'partial', 'status=partial（预算耗尽不标 completed）')
+  eq(r.completion, 'partial', 'completion=partial')
+  eq(r.stopReason, 'max_turns', '保留原 stopReason')
+  ok(r.usage && r.usage.total > 0, 'usage 保留')
+  ok(r.turns >= 1, 'turns 保留')
+})
+
+// ---------- 21. SubagentSpec：失败/取消 runTask 上抛，结构化结果区分原因（P0-1）----------
+await test('SubagentSpec：失败/取消结构化区分，runTask 兼容上抛', async () => {
+  const badProv = { async chat() { throw new Error('boom') } }
+  const spec = new SubagentSpec({ name: 'b', provider: badProv, model: 'm', maxTurns: 1 })
+  const rr = await spec.runTaskResult('t')
+  eq(rr.status, 'failed', '结构化 failed')
+  let threw = false
+  try { await spec.runTask('t') } catch { threw = true }
+  ok(threw, 'runTask 失败上抛（兼容旧调用方）')
+
+  const ac = new AbortController()
+  const hangProv = { async chat(opts) { return new Promise((_, rej) => { opts.signal?.addEventListener('abort', () => rej(new Error('aborted'))) }) } }
+  const s2 = new SubagentSpec({ name: 'h', provider: hangProv, model: 'm', maxTurns: 1 })
+  const p = s2.runTaskResult('t', { signal: ac.signal })
+  setTimeout(() => ac.abort(), 10)
+  const r2 = await p
+  eq(r2.status, 'cancelled', '取消 → cancelled（不伪报完成）')
+})
+
+// ---------- 22. Orchestrator：信号/身份透传 + 子代理用量归集（P0-1 / A05）----------
+await test('Orchestrator：信号/身份透传到委派，子代理用量归集根任务', async () => {
+  let childOpts = null
+  const spec = {
+    name: 'w', description: 'worker',
+    async runTaskResult(task, opts) {
+      childOpts = opts
+      return { taskId: 'c', parentTaskId: opts.parentTaskId, status: 'completed', completion: 'complete', content: '子结果', stopReason: 'stop', usage: { prompt_tokens: 100, completion_tokens: 20 }, turns: 1 }
+    },
+  }
+  const orchProv = mockProvider([
+    { toolCalls: [{ id: 'd1', name: 'delegate__w', arguments: { task: '子任务' } }], finishReason: 'tool_calls', usage: { prompt_tokens: 50, completion_tokens: 5 } },
+    { content: '综合', finishReason: 'stop', usage: { prompt_tokens: 60, completion_tokens: 6 } },
+  ])
+  const orch = new Orchestrator({ provider: orchProv, model: 'm', subagents: [spec], maxTurns: 4 })
+  const ac = new AbortController()
+  const r = await orch.run('总任务', { ctx: { userId: 'u', groupId: 'g', conversationId: 'c' }, signal: ac.signal, taskId: 'root1' })
+  eq(r.content, '综合', '综合结果')
+  ok(childOpts && childOpts.signal && childOpts.signal.aborted === false, '父任务工作取消信号已下传（未取消时非 aborted）')
+  ok(childOpts.ctx && childOpts.ctx.groupId === 'g', '身份 ctx 透传')
+  eq(childOpts.parentTaskId, 'root1', '父任务 ID 透传')
+  eq(r.subagents.length, 1, '子任务记录 1 条')
+  eq(r.subagentUsage.total, 120, 'subagentUsage 独立可查')
+  ok(r.usage && r.usage.total >= 120, '子代理用量并入根任务 usage')
+})
+
+// ---------- 22b. Orchestrator：父任务取消传播到在途子代理（A03）----------
+await test('Orchestrator：父任务取消传播到在途委派', async () => {
+  let childSignal = null
+  let childResolve
+  const childStarted = new Promise((r) => { childResolve = r })
+  const spec = {
+    name: 'w', description: 'worker',
+    async runTaskResult(task, opts) {
+      childSignal = opts.signal
+      childResolve()
+      await new Promise((res) => {
+        if (opts.signal?.aborted) return res()
+        opts.signal?.addEventListener('abort', () => res(), { once: true })
+        setTimeout(res, 500) // 兜底，避免测试挂死
+      })
+      return { status: opts.signal?.aborted ? 'cancelled' : 'completed', completion: 'none', content: '' }
+    },
+  }
+  const orchProv = mockProvider([
+    { toolCalls: [{ id: 'd1', name: 'delegate__w', arguments: { task: '子任务' } }], finishReason: 'tool_calls', usage: null },
+    { content: '综合', finishReason: 'stop', usage: null },
+  ])
+  const orch = new Orchestrator({ provider: orchProv, model: 'm', subagents: [spec], maxTurns: 4 })
+  const ac = new AbortController()
+  const p = orch.run('总任务', { ctx: { userId: 'u', conversationId: 'c' }, signal: ac.signal })
+  await childStarted
+  ac.abort()
+  let aborted = false
+  try { await p } catch (e) { aborted = /aborted/i.test(e?.message || '') }
+  ok(childSignal?.aborted === true, '父任务取消传播到子代理工作信号')
+  ok(aborted, '父任务取消使编排 run 以 aborted 结束（不交付过期结果）')
+})
+
+// ---------- 23. 归一函数：完成语义与 Promise 是否 resolve 分开 ----------
+await test('normalizeSubagentResult：status/completion 映射', async () => {
+  eq(normalizeSubagentResult({ content: 'a', stopReason: 'stop' }).status, 'completed', '正常停止 → completed')
+  eq(normalizeSubagentResult({ content: 'a', stopReason: 'time_budget' }).completion, 'partial', '预算耗尽 → partial')
+  eq(normalizeSubagentResult({ content: '', stopReason: 'max_turns' }).status, 'failed', '无内容异常停止 → failed')
+  eq(normalizeSubagentResult({ content: 'q', stopReason: 'clarify' }).status, 'waiting_input', 'clarify → waiting_input')
+  eq(normalizeSubagentResult({ content: 'b', stopReason: 'blocked' }).status, 'blocked', 'blocked → blocked')
+})
+
+// ---------- 24. pipeline：取消信号透传到 step（P0-1 相邻路径）----------
+await test('pipeline：取消信号透传到 SubagentSpec step（相邻路径）', async () => {
+  let seen = null
+  const spec = { name: 's', async runTask(input, opts) { seen = opts; return 'ok' } }
+  const pipe = pipeline([spec])
+  const ac = new AbortController()
+  await pipe.run('x', { signal: ac.signal, userId: 'u' })
+  eq(seen.signal, ac.signal, 'signal 透传到 step')
+  eq(seen.ctx.userId, 'u', 'ctx 仍原样透传')
 })
 
 // ---------- 总结 ----------

@@ -223,6 +223,10 @@
         if (!form.miyoushe) form.miyoushe = {}
         if (!form.vision) form.vision = {}
         if (!form.tools) form.tools = {}
+        if (!form.toolConcurrency) form.toolConcurrency = {}
+        if (form.toolConcurrency.maxParallel == null) form.toolConcurrency.maxParallel = 3
+        if (form.toolSchemaValidate == null) form.toolSchemaValidate = true
+        if (!form.taskStore) form.taskStore = {}
         if (!form.skill) form.skill = {}
         if (!form.compaction) form.compaction = {}
         // 思考自动决策兜底（UI 绑定需完整对象树）
@@ -1203,6 +1207,18 @@
             </cfg-row>
             <cfg-row name="工具结果字符上限" desc="超出截断,防爆 context">
               <input type="number" class="inp" style="width:130px" min="100" v-model.number="form.maxToolResultChars">
+            </cfg-row>
+            <cfg-row name="工具并发上限" desc="单批只读工具滚动池上限;未声明并发语义的工具默认独占">
+              <input type="number" class="inp" style="width:110px" min="1" max="16" v-model.number="form.toolConcurrency.maxParallel">
+            </cfg-row>
+            <cfg-row name="工具参数校验" desc="副作用前校验 schema(缺参/类型/多余参数结构化回报)">
+              <v-switch v-model="form.toolSchemaValidate"/>
+            </cfg-row>
+            <cfg-row name="任务账本" desc="可恢复任务记录(P0-3)：关键边界落盘;重启标记未结算任务,不自动重放">
+              <v-switch v-model="form.taskStore.enable"/>
+            </cfg-row>
+            <cfg-row name="任务库目录" desc="taskStore.dir（留空=默认 data/tasks）">
+              <input class="inp mono" style="width:200px" v-model="form.taskStore.dir" placeholder="data/tasks">
             </cfg-row>
             <cfg-row name="反思模式" desc="回复前自检回环；jev=由 Jev 判断是否需要反思（需开启 Jev）">
               <select class="sel" style="width:150px" v-model="form.reflect"><option v-for="o in reflectOptions" :value="o[0]">{{ o[1] }}</option></select>

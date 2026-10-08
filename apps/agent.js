@@ -37,6 +37,8 @@ import {
   createPolicy,
   buildChatListHtml,
   buildPersonaListHtml,
+  TaskStore,
+  scopeKeyOfCtx,
 } from '../model/agent/index.js'
 import { presets as openaiPresets } from '../model/openai/index.js'
 import { stripInlineToolCalls } from '../model/openai/helpers.js'
@@ -74,7 +76,7 @@ import { createJevClient, makeJevTool, JEV_MODEL_DEFAULT, resolveThresholds } fr
 import { createSandboxRuntime, sessionKeyOf } from '../model/sandbox/index.js'
 import { makeStagehand } from '../model/stagehand/index.js'
 import { makeDownloadTool } from '../model/download/index.js'
-import { makeSpawnSubagentTools, Semaphore, Orchestrator, SubagentSpec } from '../model/multiagent/index.js'
+import { makeSpawnSubagentTools, Semaphore, Orchestrator, SubagentSpec, buildWorkerTools, normalizeSubagentResult } from '../model/multiagent/index.js'
 import { calcTool } from '../model/calc/index.js'
 import { sendFileTool } from '../model/document/sendfile.js'
 import { readPdfTool } from '../model/document/pdf.js'
@@ -555,6 +557,22 @@ async function buildRuntime() {
   // 用量统计采集器：对话/工具用量按本地日聚合写 KV（Web 端 overview 趋势主数据源，替代读日志的不稳定路径）
   const usageStats = createUsageStats({ kv: K, logger: Log })
   const session = new SessionStore({ kv: K })
+
+  // 可恢复任务账本（P0-3，opt-in）：任务事件/检查点落 sqlite 事务；重启把未结算任务标 interrupted
+  // （默认不自动重放副作用）。与 SessionStore（对话历史投影）职责分离。
+  let taskStore = null
+  if (cfg.taskStore?.enable === true) {
+    try {
+      taskStore = new TaskStore({ dir: path.resolve(PLUGIN_ROOT, cfg.taskStore?.dir || 'data/tasks'), logger: Log.tag('task') })
+      await taskStore.open()
+      const n = await taskStore.markInterrupted({ runtimeGeneration: _runtimeGen })
+      if (n) Log.info(`[task] 重启：${n} 个未结算任务已标记 interrupted（默认不自动重放）`)
+      Log.debug('[task] 任务账本已启用')
+    } catch (e) {
+      Log.warn('[task] 任务账本初始化失败，降级为不可恢复模式', e?.message || e)
+      taskStore = null
+    }
+  }
   // 召回记忆威胁扫描：复用同一 threatScanFn，按 0.6 更严阈值判定（召回内容会进上下文）
   const recallScanFn = threatScanFn ? (text) => {
     try {
@@ -991,6 +1009,10 @@ async function buildRuntime() {
     contextWindow: cfg.contextWindow || null,
     compactArchive, // 无损压缩归档（null=无归档压缩；见上方装配说明）
     maxToolResultChars: cfg.maxToolResultChars ?? 4000,
+    // 工具受控并发（P0-2）：全局滚动池上限；未声明并发语义的工具默认独占
+    toolConcurrency: { maxParallel: Math.max(1, Number(cfg.toolConcurrency?.maxParallel) || 3) },
+    toolSchemaValidate: cfg.toolSchemaValidate !== false, // 工具参数 schema 预校验（默认开；关=回滚杠杆）
+    taskStore, // 可恢复任务账本（P0-3；null=关闭）
     keepReasoning: cfg.keepReasoning === true,
     // 工具按需发现：LLM 只常驻少数核心工具，其余经 tool_search 检索后动态注入（默认开；关则回退全量常驻）
     toolDiscovery: {
@@ -1079,16 +1101,16 @@ async function buildRuntime() {
   if (cfg.multiagent?.enable !== false && cfg.multiagent?.topology === 'orchestrator') {
     try {
       // Orchestrator 编排模式：注册一个同步 `orchestrate` 工具（flagship 分解 → 通用 worker 委派 → 综合）
-      const workerReg = new ToolRegistry()
-      for (const t of tools.list()) {
-        if (t.name === 'tool_search') continue
-        if ((t.category || 'query') === 'query') workerReg.register(t)
-      }
+      // worker 工具集复用 spawn 的同一能力判定（见 worker-context.js），而不是只按 category=query 粗筛
+      const queryNames = tools.list()
+        .filter((t) => t.name !== 'tool_search' && (t.category || 'query') === 'query')
+        .map((t) => t.name)
+      const { registry: workerReg, granted: workerGranted, dropped: workerDropped } = buildWorkerTools(tools, queryNames, queryNames)
       const worker = new SubagentSpec({
         name: 'worker',
         description: '通用子代理：只做被委派的独立子任务，返回精炼结果',
         systemPrompt: '你是独立子任务子代理。只完成被委派的任务，直接给出结果，不解释过程；任务自包含（你看不到主对话）。',
-        tools: workerReg.list().length ? workerReg : null,
+        tools: workerGranted.length ? workerReg : null,
         model: workerTarget.model || null,
         provider: workerTarget.provider, maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
       })
@@ -1109,12 +1131,24 @@ async function buildRuntime() {
         async execute(params = {}, ctx) {
           const task = String(params.task || '').trim()
           if (!task) return { error: 'task 不能为空' }
-          const r = await orch.run(task, { ctx })
-          return { result: r?.content || '', turns: r?.turns, stopReason: r?.stopReason }
+          // P0-1：把父任务取消信号与关联 ID 传入编排链（否则父任务取消后编排器仍继续跑）
+          const r = await orch.run(task, { ctx, signal: ctx?.signal || null, taskId: ctx?.taskId || null })
+          // 复用同一归一：预算/异常停止只标 partial，绝不把部分完成当完整完成
+          const norm = normalizeSubagentResult({ content: r?.content, stopReason: r?.stopReason, usage: r?.usage, turns: r?.turns })
+          return {
+            result: norm.content,
+            status: norm.status,
+            completion: norm.completion,
+            stopReason: r?.stopReason, turns: r?.turns, usage: r?.usage || null,
+            ...(r?.subagents?.length ? { subagents: r.subagents } : {}),
+          }
         },
       })
       startupInfo.multiagent = 'orchestrator'
-      Log.debug('[multiagent] 编排模式（topology=orchestrator）：orchestrate 工具已注册')
+      Log.debug(
+        `[multiagent] 编排模式（topology=orchestrator）：orchestrate 工具已注册（worker 工具 ${workerGranted.length} 个`
+        + `${workerDropped.length ? `，剔除 ${workerDropped.length} 个不可达` : ''}）`,
+      )
     } catch (e) { Log.warn('[multiagent] 编排模式装配失败', e?.message || e) }
   } else if (cfg.multiagent?.enable !== false) {
     try {
@@ -1175,7 +1209,7 @@ async function buildRuntime() {
     ['面板', cfg.webApi?.enable !== false ? `:${cfg.webApi?.port || 6098}` : 'off'],
   ])
 
-  return { agentConfig, makeAgent, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent }
+  return { agentConfig, makeAgent, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore }
 }
 
 const getRuntime = async () => {
@@ -1246,6 +1280,10 @@ function invalidateRuntime() {
   // 沙箱必须最后关：toolEvo.runner 依赖 sandbox.transport，先关 transport 会让 runner 停止时操作已失效沙箱
   if (_runtime?.sandbox?.manager) {
     try { _runtime.sandbox.shutdown().catch(() => {}) } catch { /* noop */ }
+  }
+  // 任务账本（P0-3）：刷队列后关闭 sqlite 句柄（异步；调用方不等待，但 close 内部已串行化）
+  if (_runtime?.taskStore) {
+    try { Promise.resolve(_runtime.taskStore.close()).catch(() => {}) } catch { /* noop */ }
   }
   _runtime = null
   _runtimePromise = null
@@ -1457,6 +1495,10 @@ export class Chat extends plugin {
         { reg: '^#忘记画像\\s+(.+)', fnc: 'forgetProfile' },
         { reg: '^#我的提醒$', fnc: 'myReminders' },
         { reg: '^#取消提醒\\s*(\\d+)', fnc: 'cancelReminder' },
+        { reg: '^#任务列表$', fnc: 'listTasks' },
+        { reg: '^#任务状态\\s+(\\S+)', fnc: 'taskStatus' },
+        { reg: '^#取消任务\\s+(\\S+)', fnc: 'cancelTask' },
+        { reg: '^#继续任务\\s+(\\S+)', fnc: 'resumeTask' },
         { reg: '^#清空所有记录$', fnc: 'clearMyData' },
         // —— 人设 ——（更具体的规则在前，避免被 #人设+id 吞掉）
         { reg: '^#人设列表$', fnc: 'personaList' },
@@ -2891,6 +2933,73 @@ export class Chat extends plugin {
     return true
   }
 
+  // —— 任务账本（P0-3）：列表 / 状态 / 取消 / 继续 ——
+  async _taskScope() {
+    const rt = await getRuntime()
+    const ctx = ctxOf(this.e)
+    try { ctx.conversationId = await rt.session.getActiveConversation(ctx.scopeUserId, ctx.groupId) } catch { /* 无活动会话按默认 */ }
+    return { rt, scopeKey: scopeKeyOfCtx(ctx) }
+  }
+
+  async _resolveTaskId(rt, scopeKey, input) {
+    if (!input) return null
+    if (await rt.taskStore.get(input, { scopeKey })) return input
+    const list = await rt.taskStore.list({ scopeKey, limit: 200 })
+    const hits = list.filter((t) => String(t.taskId).startsWith(input))
+    return hits.length === 1 ? hits[0].taskId : null
+  }
+
+  async listTasks() {
+    const { rt, scopeKey } = await this._taskScope()
+    if (!rt.taskStore) return this.e.reply('任务账本未启用（config agent.taskStore.enable=true）'), true
+    const tasks = await rt.taskStore.list({ scopeKey, limit: 20 })
+    if (!tasks.length) return this.e.reply('当前会话暂无任务记录'), true
+    const icon = (p) => ({ completed: '✅', paused: '⏸️', interrupted: '⚠️', failed: '❌', cancelled: '🚫', running: '▶️', waiting_input: '💬', queued: '🕒' }[p] || '·')
+    const lines = tasks.map((t) => `${icon(t.phase)} ${t.taskId} [${t.phase}]${t.stopReason ? ` ${t.stopReason}` : ''}`)
+    await this.e.reply(`任务记录（${tasks.length}，最近在前）：\n${lines.join('\n')}\n\n#任务状态 <id> · #取消任务 <id> · #继续任务 <id>`)
+    return true
+  }
+
+  async taskStatus() {
+    const { rt, scopeKey } = await this._taskScope()
+    if (!rt.taskStore) return this.e.reply('任务账本未启用（config agent.taskStore.enable=true）'), true
+    const input = (this.e.msg.match(/^#任务状态\s+(\S+)/) || [])[1]
+    const id = await this._resolveTaskId(rt, scopeKey, input)
+    if (!id) return this.e.reply('未找到任务（可能不属于当前会话或不存在）'), true
+    const t = await rt.taskStore.get(id, { scopeKey })
+    const events = await rt.taskStore.listEvents(id)
+    const recent = events.slice(-8).map((e) => `  · ${e.kind}${e.callId ? `(${e.callId})` : ''}${e.phase ? ` →${e.phase}` : ''}`)
+    await this.e.reply([
+      `任务 ${t.taskId}`,
+      `状态：${t.phase}${t.stopReason ? `（${t.stopReason}）` : ''} · completion=${t.completion || '-'}`,
+      `事件 ${events.length} 条（最近 ${recent.length}）：`, ...recent,
+    ].join('\n'))
+    return true
+  }
+
+  async cancelTask() {
+    const { rt, scopeKey } = await this._taskScope()
+    if (!rt.taskStore) return this.e.reply('任务账本未启用'), true
+    const input = (this.e.msg.match(/^#取消任务\s+(\S+)/) || [])[1]
+    const id = await this._resolveTaskId(rt, scopeKey, input)
+    if (!id) return this.e.reply('未找到任务'), true
+    const r = await rt.taskStore.cancel(id, { scopeKey })
+    await this.e.reply(r.ok ? `已取消任务 ${id}` : `无法取消：${r.code || '未知'}`)
+    return true
+  }
+
+  async resumeTask() {
+    const { rt, scopeKey } = await this._taskScope()
+    if (!rt.taskStore) return this.e.reply('任务账本未启用'), true
+    const input = (this.e.msg.match(/^#继续任务\s+(\S+)/) || [])[1]
+    const id = await this._resolveTaskId(rt, scopeKey, input)
+    if (!id) return this.e.reply('未找到任务'), true
+    const r = await rt.taskStore.resume(id, { scopeKey })
+    if (!r.ok) return this.e.reply(`无法继续：${r.code}${r.phase ? `（${r.phase}）` : ''}`), true
+    await this.e.reply(`任务 ${id} 当前阶段 ${r.task.phase}；已完成步骤约 ${r.checkpoint.completedSteps} 个。\n阶段一仅恢复检查点、不自动重放副作用；请直接重新发起该任务，或让 AI 依据任务记录继续。`)
+    return true
+  }
+
   // —— 清空自己的所有记录（不含配置文件；2 步确认）——
   async clearMyData() {
     const rt = await getRuntime()
@@ -2952,6 +3061,17 @@ export class Chat extends plugin {
       const rems = await rt.schedule.listByUser(uid)
       for (const r of rems) await rt.schedule.cancel(r.id)
       if (rems.length) cleared.push(`提醒(${rems.length})`)
+      // 任务账本（P0-3）：清理归属当前用户的任务记录（群共享任务不清，避免一人清全群）
+      if (rt.taskStore) {
+        let nTask = 0
+        for (const t of await rt.taskStore.list({ limit: 500 })) {
+          const au = t.scope?.userId != null ? String(t.scope.userId) : ''
+          const su = t.scope?.scopeUserId != null ? String(t.scope.scopeUserId) : ''
+          if (su === '__group__') continue
+          if (au === uid || su === uid) { const r = await rt.taskStore.remove(t.taskId, { scopeKey: t.scopeKey }); if (r.ok) nTask++ }
+        }
+        if (nTask) cleared.push(`任务记录(${nTask})`)
+      }
       // 人设绑定
       await rt.persona.resetActive(uid); cleared.push('人设绑定')
       await this.e.reply('✅ 已清空你的所有记录：' + cleared.join('、') + '\n（配置文件未动）')

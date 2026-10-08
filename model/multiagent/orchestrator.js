@@ -11,6 +11,7 @@
  */
 import { Agent } from '../agent/Agent.js'
 import { ToolRegistry } from '../agent/tools/registry.js'
+import { mergeUsage } from '../agent/messages.js'
 import { makeDelegationTool } from './subagent.js'
 import { Semaphore, Trace } from './support.js'
 import { TEMPLATES } from '../prompt/index.js'
@@ -47,8 +48,21 @@ export class Orchestrator {
 
   async run(task, opts = {}) {
     const registry = new ToolRegistry()
+    // 子代理用量归集（P0-1：主/子/反思/压缩用量都算 rootTask 预算，不漏计）
+    let subagentUsage = null
+    const subagentCalls = []
     for (const spec of this.subagents) {
-      registry.register(makeDelegationTool(spec, { semaphore: this._semaphore, trace: this.trace }))
+      registry.register(makeDelegationTool(spec, {
+        semaphore: this._semaphore,
+        trace: this.trace,
+        onUsage: (r) => {
+          if (r?.usage) subagentUsage = mergeUsage(subagentUsage, r.usage)
+          subagentCalls.push({
+            subagent: spec.name, taskId: r?.taskId || null, status: r?.status || null,
+            completion: r?.completion || null, stopReason: r?.stopReason || null, usage: r?.usage || null,
+          })
+        },
+      }))
     }
     if (this.tools) {
       for (const t of this.tools.list()) {
@@ -72,8 +86,10 @@ export class Orchestrator {
       ...this.agentConfig,
     })
 
+    // 全链路传递取消与关联：opts.signal/opts.taskId 原样进 Agent.run；opts.ctx 供委派工具取身份
     const result = await agent.run(task, opts)
-    this.trace.emit('orchestrator:end', { turns: result.turns, stopReason: result.stopReason })
-    return { ...result, trace: this.trace }
+    const usage = subagentUsage ? mergeUsage(result.usage, subagentUsage) : (result.usage || null)
+    this.trace.emit('orchestrator:end', { turns: result.turns, stopReason: result.stopReason, usage })
+    return { ...result, usage, subagentUsage, subagents: subagentCalls, trace: this.trace }
   }
 }

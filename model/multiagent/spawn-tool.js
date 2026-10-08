@@ -17,7 +17,7 @@
  */
 import { SubagentSpec } from './subagent.js'
 import { Semaphore, Trace } from './support.js'
-import { ToolRegistry } from '../agent/tools/registry.js'
+import { buildWorkerTools, scopeKeyOf, workerCtxOf } from './worker-context.js'
 import Log from '../../utils/Log.js'
 
 const FOCUS_PROMPTS = {
@@ -28,77 +28,10 @@ const FOCUS_PROMPTS = {
   default: '你是一个独立子代理。只做被委派的任务，直接给出结果。不要解释过程，不要做超出任务范围的事。任务自包含——你看不到主对话的上下文。',
 }
 
-const ALLOWED_TOOL_CATEGORIES = new Set(['query'])
-
-/** 子代理 run 时只注入身份字段（见 workerCtxOf）；这些是「可用 ctx 键」集合 */
-const WORKER_CTX_KEYS = new Set(['userId', 'scopeUserId', 'scopeId', 'groupId', 'conversationId'])
-
-/**
- * 依赖运行时句柄（e/bot/sandbox/media/fetcher/miyoushe…）的 query 类工具。
- * 子代理拿不到这些句柄，调用必然失败——下发给子代理只会空转/浪费轮次，故排除。
- * 新增此类工具时请同步登记（或在工具 meta.requires 里声明所需 ctx 键）。
- */
-const WORKER_CTX_UNSUPPORTED = new Set([
-  'terminal',                 // ctx.sandbox
-  'read_attachment',          // ctx.media
-  'list_group_folder', 'get_group_file_url', // ctx.e/bot
-  'get_chat_history', 'get_forward_msg', 'analyze_chat_record', 'get_group_notice', // ctx.e/bot/quoted
-  'group_info', 'group_member', 'user_info', // ctx.bot
-  'get_ai_characters', 'ai_tts', // ctx.e/bot（AI 语音通道）
-  'read_pdf', 'create_excel', 'send_file', 'file_to_pdf', // ctx.e / ctx.media
-  'miyoushe_search', 'miyoushe_post', 'miyoushe_replies', // ctx.miyoushe/fetcher/e
-  'pixiv__search', 'pixiv__illust', 'pixiv__ranking', 'pixiv__user', 'pixiv__tags', // ctx.e（外置工具包）
-])
-
 const MIN_BUDGET_MS = 10000
 const MAX_BUDGET_MS = 600000
 const HARD_GRACE_MS = 30000 // 预算到点（协作取消）后，最多再等这么久；仍不结算就强制判超时并释放并发槽
 const STALE_MS = 10 * 60 * 1000 // 终态任务保留时长 / 会话配额记录过期时长
-
-/**
- * 按白名单 + 可达性构建子代理工具集。
- * @returns {{ registry: ToolRegistry|null, granted: string[], dropped: string[] }}
- *   granted=实际下发的工具名；dropped=请求了但不可用的工具名（供主代理据此改派/自己完成）。
- */
-function buildWorkerTools(sourceRegistry, names, defaultNames) {
-  if (!sourceRegistry) return { registry: null, granted: [], dropped: [] }
-  const wanted = (Array.isArray(names) && names.length ? names : defaultNames).map(String)
-  const workerReg = new ToolRegistry()
-  const granted = []
-  const dropped = []
-  for (const name of wanted) {
-    if (name === 'spawn_subagent' || name === 'check_subagent' || name === 'extend_subagent') { dropped.push(name); continue }
-    if (WORKER_CTX_UNSUPPORTED.has(name)) { dropped.push(name); continue } // 依赖子代理没有的运行时句柄 → 剔除
-    const tool = sourceRegistry.get(name)
-    if (!tool) { dropped.push(name); continue }
-    if (!ALLOWED_TOOL_CATEGORIES.has(tool.category || 'query')) { dropped.push(name); continue }
-    // 声明式能力校验：meta.requires 里有子代理 ctx 不提供的键 → 不下发
-    if (Array.isArray(tool.meta?.requires) && tool.meta.requires.some((k) => !WORKER_CTX_KEYS.has(k))) { dropped.push(name); continue }
-    if (!workerReg.has(name)) { workerReg.register(tool); granted.push(name) }
-  }
-  return { registry: workerReg, granted, dropped }
-}
-
-/** 会话作用域键：配额与任务归属都按它隔离（与 Agent/session 的群:用户:会话同源） */
-function scopeKeyOf(ctx) {
-  if (!ctx) return 'global'
-  const gid = ctx.groupId ? String(ctx.groupId) : 'private'
-  const uid = String(ctx.scopeUserId || ctx.userId || 'unknown')
-  const conv = ctx.conversationId != null ? String(ctx.conversationId) : 'default'
-  return `${gid}:${uid}:${conv}`
-}
-
-/** 传给子代理的身份上下文子集：让 memory_search 等 query 工具可用，同时不带事件句柄/权限对象 */
-function workerCtxOf(ctx) {
-  if (!ctx) return undefined
-  return {
-    userId: ctx.userId,
-    scopeUserId: ctx.scopeUserId,
-    scopeId: ctx.scopeId,
-    groupId: ctx.groupId,
-    conversationId: ctx.conversationId,
-  }
-}
 
 /**
  * 构造子代理三件套工具（spawn + check + extend）。
@@ -309,6 +242,7 @@ export function makeSpawnSubagentTools({
       const abort = new AbortController()
       const taskInfo = {
         id: taskId, task: task.slice(0, 80), scope, createdAt: Date.now(), startedAt: null, finishedAt: null,
+        status: 'queued', // 入场状态显式化（此前隐式 undefined，导致排队可取消的入场检查误判）
         budgetMs, abort, _budgetTimer: null, _hardTimer: null, _hardReject: null,
         _waiters: new Set(), result: null, error: null, specName,
         consumed: false, runEnded: false, _settled: false, deliverCtx,
@@ -322,8 +256,10 @@ export function makeSpawnSubagentTools({
       ;(async () => {
         let slotHeld = false
         try {
-          await sem.acquire()
+          // 排队可取消（P0-1）：shutdown/预算取消时从队列移除，避免唤醒后仍调用 Provider
+          await sem.acquire({ signal: abort.signal })
           slotHeld = true
+          if (taskInfo.status !== 'queued') return // 排队期间已被 shutdown 等置为终态 → 不再启动
           taskInfo.status = 'running'
           taskInfo.startedAt = Date.now() // 预算从真正开始运行起算（排队时间不计）
           _armTimers(taskId, taskInfo)
@@ -334,18 +270,21 @@ export function makeSpawnSubagentTools({
             runPromise.then(resolve, reject)
           })
           taskInfo._hardReject = null
+          if (taskInfo.status !== 'running') return // 已被取消（cancelled）→ 不覆盖终态、不交付过期结果
           taskInfo.status = 'done'
           taskInfo.result = result
           trace.emit('delegate:end', { subagent: specName, resultLength: (result || '').length })
           Log.mark('[spawn_subagent]', `${taskId} 完成 len=${(result || '').length}`)
         } catch (e) {
           taskInfo._hardReject = null
-          // 停止原因按 AbortController 状态判定，不再靠错误文本正则（避免把含 abort/budget/signal 的普通失败误判为超时）
-          const timedOut = abort.signal.aborted
-          taskInfo.status = timedOut ? 'timeout' : 'failed'
-          taskInfo.error = e?.message || String(e)
-          trace.emit('delegate:error', { subagent: specName, error: taskInfo.error, timedOut })
-          Log.warn('[spawn_subagent]', `${taskId} ${taskInfo.status}:`, String(taskInfo.error || '').slice(0, 80))
+          // 已由 shutdown 等置为终态（cancelled）时不覆盖；否则按 AbortController 状态判定停止原因
+          if (taskInfo.status === 'queued' || taskInfo.status === 'running') {
+            const timedOut = abort.signal.aborted
+            taskInfo.status = timedOut ? 'timeout' : 'failed'
+            taskInfo.error = e?.message || String(e)
+            trace.emit('delegate:error', { subagent: specName, error: taskInfo.error, timedOut })
+            Log.warn('[spawn_subagent]', `${taskId} ${taskInfo.status}:`, String(taskInfo.error || '').slice(0, 80))
+          }
         } finally {
           taskInfo.finishedAt = Date.now()
           clearTimeout(taskInfo._budgetTimer)

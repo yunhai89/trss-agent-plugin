@@ -35,6 +35,8 @@ export { ScheduleStore, nodeScheduleAdapter, reminderSetTool, reminderListTool, 
 export { checkInput, analyze, isolate, tagUntrusted, screenUntrusted, systemHardening, normalizeForScan, assessPersonaPrompt, PERSONA_FORBIDDEN_CATS, PATTERNS, SENSITIVITY } from './guard.js'
 export { decide, roleRank, categoryMinRole, visibleCategories, roleLabel, createPolicy, RANK, CATEGORY_MIN } from './policy.js'
 export { ConfirmStore } from './confirm.js'
+export { ToolScheduler, resolveToolConcurrency, READ_PARALLEL_TOOLS } from './tool-scheduler.js'
+export { TaskStore, TASK_SCHEMA_VERSION, TASK_PHASES, TERMINAL_PHASES, scopeKeyOfCtx } from './task-store.js'
 export { buildHelpHtml, buildChatListHtml, buildPersonaListHtml } from './render.js'
 
 export {

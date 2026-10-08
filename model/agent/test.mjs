@@ -146,6 +146,7 @@ await test('并行工具：并发执行 + 按原序回插', async () => {
     name: 'slow',
     description: '慢工具',
     parameters: { type: 'object', properties: { city: { type: 'string' } } },
+    meta: { concurrency: 'parallel' },
     async execute(p) {
       active++
       maxActive = Math.max(maxActive, active)
@@ -1953,6 +1954,129 @@ await test('provider：x-opencode-session / UA 头部下发（OpenCode Go）', a
   await p.chat({ messages: [{ role: 'user', content: 'hi' }], sessionId: 'conv-9' })
   eq(cap.opts.sessionId, 'conv-9', 'provider → client opts.sessionId')
   ok(!('sessionId' in cap.body), 'sessionId 不泄漏进请求体')
+})
+
+// ---------- 受控并发（P0-2 / F03）----------
+await test('受控并发：未声明工具默认独占（串行）', async () => {
+  let active = 0, maxActive = 0
+  const tools = new ToolRegistry().register({
+    name: 'unknown_write', description: 'd', parameters: { type: 'object' },
+    async execute() { active++; maxActive = Math.max(maxActive, active); await delay(15); active--; return { ok: true } },
+  })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'unknown_write', arguments: {} }, { id: 'c2', name: 'unknown_write', arguments: {} }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const res = await new Agent({ provider, tools, maxTurns: 5 }).run('写两次')
+  eq(maxActive, 1, '未声明并发语义 → 串行（防同资源竞态）')
+  eq(res.messages[2].tool_call_id, 'c1', '结果仍按原序 c1')
+  eq(res.messages[3].tool_call_id, 'c2', '结果仍按原序 c2')
+})
+
+await test('受控并发：只读白名单工具并行（保留性能）', async () => {
+  let active = 0, maxActive = 0
+  const tools = new ToolRegistry().register({
+    name: 'web_search', description: 'd', parameters: { type: 'object' },
+    async execute() { active++; maxActive = Math.max(maxActive, active); await delay(15); active--; return { ok: true } },
+  })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'web_search', arguments: {} }, { id: 'c2', name: 'web_search', arguments: {} }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  await new Agent({ provider, tools, maxTurns: 5 }).run('搜两次')
+  eq(maxActive, 2, '白名单只读工具并发')
+})
+
+await test('受控并发：resource 键同页串行、异页并发', async () => {
+  const perKey = new Map()
+  let overlapSameKey = false, maxActive = 0, active = 0
+  const tools = new ToolRegistry().register({
+    name: 'browser_op', description: 'd', parameters: { type: 'object', properties: { page: { type: 'string' } } },
+    meta: { concurrency: 'resource', resourceKeys: (a) => ['browser:' + a.page] },
+    async execute(p) {
+      const c = (perKey.get(p.page) || 0) + 1
+      perKey.set(p.page, c)
+      if (c > 1) overlapSameKey = true
+      active++; maxActive = Math.max(maxActive, active)
+      await delay(20)
+      active--; perKey.set(p.page, perKey.get(p.page) - 1)
+      return { page: p.page }
+    },
+  })
+  const provider = mockProvider([
+    { toolCalls: [
+      { id: 'c1', name: 'browser_op', arguments: { page: 'A' } },
+      { id: 'c2', name: 'browser_op', arguments: { page: 'A' } },
+      { id: 'c3', name: 'browser_op', arguments: { page: 'B' } },
+    ], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const res = await new Agent({ provider, tools, maxTurns: 5 }).run('三页操作')
+  ok(!overlapSameKey, '同一页面（资源键）无重叠')
+  eq(maxActive, 2, '不同页面可并发')
+  eq(res.messages.slice(2, 5).map((m) => m.tool_call_id), ['c1', 'c2', 'c3'], '结果按原序')
+})
+
+await test('受控并发：全局并发池上限', async () => {
+  let active = 0, maxActive = 0
+  const tools = new ToolRegistry().register({
+    name: 'web_search', description: 'd', parameters: { type: 'object' },
+    async execute() { active++; maxActive = Math.max(maxActive, active); await delay(20); active--; return { ok: true } },
+  })
+  const provider = mockProvider([
+    { toolCalls: [1, 2, 3, 4, 5].map((i) => ({ id: 'c' + i, name: 'web_search', arguments: {} })), finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  await new Agent({ provider, tools, maxTurns: 5, toolConcurrency: { maxParallel: 2 } }).run('搜五次')
+  eq(maxActive, 2, '并发不超过配置上限 2')
+})
+
+// ---------- 参数校验（P0-2 / 统一执行门）----------
+await test('参数校验：schema 非法在副作用前结构化拒绝', async () => {
+  let calls = 0
+  const tools = new ToolRegistry().register({
+    name: 'needs_city', description: 'd',
+    parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false },
+    async execute() { calls++; return { ok: true } },
+  })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'needs_city', arguments: { city: 123 } }], finishReason: 'tool_calls' },
+    { toolCalls: [{ id: 'c2', name: 'needs_city', arguments: { city: '北京', extra: 1 } }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const res = await new Agent({ provider, tools, maxTurns: 6 }).run('非法参数')
+  eq(calls, 0, '非法参数不产生副作用')
+  eq(JSON.parse(res.messages[2].content).error, 'invalid_arguments', '类型错误结构化拒绝')
+  eq(JSON.parse(res.messages[4].content).error, 'invalid_arguments', '多余参数结构化拒绝')
+  ok(Array.isArray(JSON.parse(res.messages[2].content).fields), '返回字段级错误供模型修正')
+})
+
+await test('参数校验：合法参数正常执行；关闭开关可回滚', async () => {
+  let calls = 0
+  const tools = new ToolRegistry().register({
+    name: 'needs_city', description: 'd',
+    parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false },
+    async execute(p) { calls++; return { city: p.city } },
+  })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'needs_city', arguments: { city: '北京' } }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  await new Agent({ provider, tools, maxTurns: 4 }).run('北京')
+  eq(calls, 1, '合法参数执行一次')
+
+  let calls2 = 0
+  const tools2 = new ToolRegistry().register({
+    name: 'needs_city', description: 'd',
+    parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false },
+    async execute() { calls2++; return {} },
+  })
+  const provider2 = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'needs_city', arguments: { city: 123 } }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  await new Agent({ provider: provider2, tools: tools2, maxTurns: 4, toolSchemaValidate: false }).run('关闭校验')
+  eq(calls2, 1, '关闭校验时按其自身逻辑执行（回滚杠杆）')
 })
 
 // ---------- 总结 ----------

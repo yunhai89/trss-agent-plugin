@@ -196,6 +196,41 @@ router.get('/schedule', asyncHandler(async (req, res) => {
   return ok(res, list)
 }))
 
+// GET /api/tasks?scopeKey=&phase=&limit= —— 任务账本列表（P0-3；未启用返回 enabled:false）
+router.get('/tasks', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.taskStore) return ok(res, { enabled: false, tasks: [] })
+  const phases = req.query.phase ? String(req.query.phase).split(',').map((s) => s.trim()).filter(Boolean) : null
+  const tasks = await r.taskStore.list({ scopeKey: req.query.scopeKey || null, phases, limit: Number(req.query.limit) || 50 })
+  return ok(res, { enabled: true, tasks })
+}))
+
+// GET /api/tasks/:id —— 任务详情 + 事件（P0-3）
+router.get('/tasks/:id', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.taskStore) return fail(res, CODE.NOTFOUND, '任务账本未启用')
+  const t = await r.taskStore.get(req.params.id, { scopeKey: req.query.scopeKey || null })
+  if (!t) return fail(res, CODE.NOTFOUND, '任务不存在或无权访问')
+  const events = await r.taskStore.listEvents(t.taskId)
+  return ok(res, { task: t, events })
+}))
+
+// POST /api/tasks/:id/cancel —— 取消任务（P0-3）
+router.post('/tasks/:id/cancel', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.taskStore) return fail(res, CODE.NOTFOUND, '任务账本未启用')
+  const out = await r.taskStore.cancel(req.params.id, { scopeKey: req.body?.scopeKey || req.query.scopeKey || null })
+  return out.ok ? ok(res, out) : fail(res, CODE.BAD, `无法取消：${out.code}`)
+}))
+
+// POST /api/tasks/:id/resume —— 恢复检查点（P0-3 阶段一：不自动重放副作用）
+router.post('/tasks/:id/resume', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.taskStore) return fail(res, CODE.NOTFOUND, '任务账本未启用')
+  const out = await r.taskStore.resume(req.params.id, { scopeKey: req.body?.scopeKey || req.query.scopeKey || null })
+  return out.ok ? ok(res, out) : fail(res, CODE.BAD, `无法继续：${out.code}`)
+}))
+
 // GET /api/confirm —— 待审批队列（内存态）
 router.get('/confirm', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return

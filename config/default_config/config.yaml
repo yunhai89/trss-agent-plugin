@@ -96,6 +96,12 @@ agent:
     enable: true            # 窗口内留结构化台账 + context_recall 工具按 ref/关键词恢复；false 关闭归档与恢复工具（回滚杠杆）
     archiveDir: "data/context-archive"  # 压缩原文归档目录（按会话分目录，独立于会话数据生命周期）
   maxToolResultChars: 8000  # 单条工具结果字符上限（内容获取类工具可经 meta.resultCap 单独放宽到 12000）
+  toolConcurrency:          # 单批工具调用的受控并发（审计 §F03）：未声明并发语义的工具默认独占，内置只读工具显式并发
+    maxParallel: 3          # 全局滚动并发池上限（同一批只读工具最多同时执行多少个；独占/资源类工具另行串行）
+  toolSchemaValidate: true  # 工具参数 schema 预校验（缺参/类型错误/多余参数在副作用前结构化回报；关=回滚杠杆）
+  taskStore:                # 可恢复任务账本（P0-3）：任务事件/检查点落 sqlite 事务；重启把未结算任务标 interrupted
+    enable: false           # 默认关闭（开发阶段开关；开启后写入任务库，写操作默认不自动重放）
+    dir: "data/tasks"       # 任务库目录
   keepReasoning: false      # 是否把推理(reasoning_content)回灌历史（默认 false 省 context）
   stream: false             # 逐字流式输出（依赖适配器、不稳，默认关）
   reflect: auto             # 自我反思/自纠：off=关 | auto=仅多轮/用工具时(默认) | always=每次最终回复都反思 | jev=由 Jev 判断是否需要反思
