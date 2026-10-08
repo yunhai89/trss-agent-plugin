@@ -1210,6 +1210,9 @@
             <cfg-row name="反思回环次数" desc="reflectMaxIterations">
               <input type="number" class="inp" style="width:110px" min="1" max="5" v-model.number="form.reflectMaxIterations">
             </cfg-row>
+            <cfg-row name="收尾输出上限" desc="finalizeMaxTokens：异常停止后最后一次交付的 token 上限；太小会截断总结/子代理报告">
+              <input type="number" class="inp" style="width:130px" min="256" max="8192" v-model.number="form.finalizeMaxTokens">
+            </cfg-row>
             <cfg-row name="回灌推理到历史" desc="默认关:省 context">
               <v-switch v-model="form.keepReasoning"/>
             </cfg-row>
