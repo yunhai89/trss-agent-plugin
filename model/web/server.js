@@ -5,12 +5,15 @@
  * 幂等启动；仅 webApi.{enable,port} 变化才重启（不随常规配置热加载重启）。
  */
 import express from 'express'
+import fs from 'node:fs'
 import path from 'node:path'
 import Config from '../../utils/Config.js'
 import Log from '../../utils/Log.js'
+import { VERSION } from '../../utils/version.js'
 import { authMiddleware } from './auth.js'
 import { errorMiddleware } from './response.js'
 import { buildApiRouter } from './api.js'
+import { versionAssetUrls } from './asset-version.js'
 
 let _server = null
 let _curPort = null
@@ -26,11 +29,21 @@ export async function startServer() {
   app.disable('x-powered-by')
   app.use(express.json({ limit: '1mb' }))
   app.use('/api', authMiddleware, buildApiRouter())
+  // index.html 始终现读 + 注入资源版本 + 不缓存：避免发版后浏览器命中旧 HTML/旧 assets
+  const indexPath = path.join(webDir, 'index.html')
+  const sendIndex = (res, next) => {
+    fs.readFile(indexPath, 'utf8', (err, html) => {
+      if (err) return next(err)
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate')
+      res.type('html').send(versionAssetUrls(html, VERSION))
+    })
+  }
+  app.get(['/', '/index.html'], (req, res, next) => sendIndex(res, next))
   app.use(express.static(webDir))
   // SPA 兜底（支持 ?token= 直进首页）；/api 未匹配已在 router 内返 JSON 404
   app.use((req, res, next) => {
     if (req.method !== 'GET' || req.path.startsWith('/api')) return next()
-    res.sendFile(path.join(webDir, 'index.html'), (err) => { if (err) next(err) })
+    sendIndex(res, next)
   })
   app.use(errorMiddleware)
 
