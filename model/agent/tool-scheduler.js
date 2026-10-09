@@ -26,8 +26,8 @@ const RESOURCE = 'resource'
  * 依赖运行时句柄或会写外部状态（浏览器页面、群管理、文件、笔记）的工具不在其中。
  */
 export const READ_PARALLEL_TOOLS = new Set([
-  // 检索 / 知识
-  'web_search', 'web_crawl', 'web_extract', 'web_download',
+  // 检索 / 知识（web_download 会发送文件 → 不在此列）
+  'web_search', 'web_crawl', 'web_extract',
   'memory_search', 'kb_search', 'context_recall', 'tool_search', 'skill',
   // 纯计算 / 环境
   'calc', 'calculate', 'get_weather',
@@ -36,8 +36,8 @@ export const READ_PARALLEL_TOOLS = new Set([
   // 只读群信息
   'group_info', 'group_member', 'group_members', 'user_info',
   'list_group_files', 'get_group_file', 'get_group_file_url', 'get_group_notice',
-  // 只读媒体读取
-  'read_excel', 'read_pdf', 'read_attachment', 'transcribe_media',
+  // 只读媒体读取（read_pdf 会发送渲染图 → 不在此列）
+  'read_excel', 'read_attachment', 'transcribe_media',
   // 只读第三方内容检索
   'miyoushe_search', 'miyoushe_post', 'miyoushe_replies',
   // 定时任务只读

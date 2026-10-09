@@ -11,7 +11,7 @@ export const readPdfTool = {
   name: 'read_pdf',
   description: '读取 PDF 文件：提取全文文本 + 渲染前几页为图片发送给用户。何时用：用户发了 PDF 让你查看内容、提取信息、总结时。',
   category: 'query',
-  meta: { summary: '读取 PDF 文本+页面图', resultCap: 12000 },
+  meta: { summary: '读取 PDF 文本+页面图', resultCap: 12000, effect: 'external', replay: 'never' },
   parameters: {
     type: 'object',
     properties: {

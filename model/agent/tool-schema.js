@@ -29,19 +29,33 @@ function validatorFor(tool) {
 }
 
 /**
- * @returns {{ ok: true } | { ok: false, fields: Array<{path:string,keyword:string,message:string}> }}
+ * @returns {{ ok: true } | { ok: false, code?: string, fields: Array<{path:string,keyword:string,message:string}> }}
  */
 export function validateToolArgs(tool, args) {
   const schema = tool?.parameters
-  if (!schema || typeof schema !== 'object' || schema.type !== 'object') return { ok: true }
+  if (!schema || typeof schema !== 'object') return { ok: true } // 无 schema：显式放行（旧工具兼容模式）
+  // 顶层合约要求 JSON 对象；校验「实际执行的同一个值」，不再把数组/原始类型偷偷换成 {}
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return {
+      ok: false,
+      code: 'invalid_arguments',
+      fields: [{ path: '/', keyword: 'type', message: `参数必须是 JSON 对象（收到 ${Array.isArray(args) ? 'array' : typeof args}）` }],
+    }
+  }
   const validate = validatorFor(tool)
-  if (!validate) return { ok: true } // schema 编译失败：不阻断（工具自身仍需兜底）
-  const payload = (args && typeof args === 'object' && !Array.isArray(args)) ? args : {}
-  if (validate(payload)) return { ok: true }
+  if (!validate) {
+    // schema 存在但无法编译 → 工具契约错误，fail-closed（不静默放行）
+    return {
+      ok: false,
+      code: 'schema_invalid',
+      fields: [{ path: '/', keyword: 'schema', message: '工具参数 schema 无法编译（工具契约错误）' }],
+    }
+  }
+  if (validate(args)) return { ok: true }
   const fields = (validate.errors || []).slice(0, 8).map((e) => ({
     path: e.instancePath || '/',
     keyword: e.keyword,
     message: e.message || '',
   }))
-  return { ok: false, fields }
+  return { ok: false, code: 'invalid_arguments', fields }
 }

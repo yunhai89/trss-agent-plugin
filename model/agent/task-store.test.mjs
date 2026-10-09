@@ -271,6 +271,58 @@ await test('Agent + TaskStore：记录 tool_started 与 effectState', async () =
   await store.close()
 })
 
+// ---------- 15. F03：失败/拒绝/非法参数记为非成功且不 applied ----------
+await test('F03：工具失败/拒绝/非法参数不记成功、不 applied', async () => {
+  const dir = tmp()
+  const store = new TaskStore({ dir }); await store.open()
+  let deniedBody = 0
+  const tools = new ToolRegistry().register(
+    { name: 'throws', description: 'd', parameters: { type: 'object' }, async execute() { throw new Error('boom') } },
+    { name: 'soft_fail', description: 'd', parameters: { type: 'object' }, async execute() { return { ok: false, error: 'timeout' } } },
+    { name: 'denied', description: 'd', parameters: { type: 'object' }, async execute() { deniedBody++; return 'ok' } },
+    { name: 'bad_args', description: 'd', parameters: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] }, async execute() { return 'ok' } },
+  )
+  const names = ['throws', 'soft_fail', 'denied', 'bad_args']
+  const provider = mockProvider([
+    { toolCalls: names.map((n, i) => ({ id: 'c' + i, name: n, arguments: {} })), finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const agent = new Agent({ provider, tools, taskStore: store, policy: { decide: (_c, t) => ({ decision: t.name === 'denied' ? 'deny' : 'allow', reason: 'audit' }) }, maxTurns: 3 })
+  const r = await agent.run('x', { ctx: CTX })
+  const entries = (await store.listEvents(r.taskId)).filter((e) => e.kind === 'tool_result').map((e) => e.payload)
+  eq(deniedBody, 0, 'deny 工具体未执行')
+  ok(entries.length === 4 && entries.every((e) => e.ok === false), '四项全部记为失败')
+  ok(entries.every((e) => e.effectState !== 'applied'), '没有 applied')
+  eq(entries.find((e) => e.name === 'denied').effectState, 'none', '策略拒绝 → none')
+  eq(entries.find((e) => e.name === 'bad_args').effectState, 'none', '参数非法 → none')
+  eq(entries.find((e) => e.name === 'throws').effectState, 'unknown', '执行抛错（写）→ unknown')
+  const plan = (await store.recoveryPlan(r.taskId)).plan
+  eq(plan.counts.reuse, 0, '恢复计划不复用失败结果')
+  await store.close()
+})
+
+// ---------- 16. F04：关键账本写失败阻止副作用 ----------
+await test('F04：关键账本写失败 → 阻止副作用且不标 completed', async () => {
+  const dir = tmp()
+  const store = new TaskStore({ dir }); await store.open()
+  const orig = store.event.bind(store)
+  store.event = (e) => (e.kind === 'tool_started' ? Promise.reject(new Error('injected SQLITE_FULL')) : orig(e))
+  let count = 0
+  const tools = new ToolRegistry().register({ name: 'write_one', description: 'd', parameters: { type: 'object' }, async execute() { count++; return 'ok' } })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'write_one', arguments: {} }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const agent = new Agent({ provider, tools, taskStore: store, maxTurns: 3 })
+  const r = await agent.run('x', { ctx: CTX })
+  eq(count, 0, '关键账本失败 → 副作用未执行')
+  eq(r.journalDegraded, true, '结果暴露降级标记')
+  const t = await store.get(r.taskId)
+  eq(t.phase, 'failed', '不标 completed')
+  eq(t.stopReason, 'journal_degraded', 'stopReason=journal_degraded')
+  await store.close()
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)

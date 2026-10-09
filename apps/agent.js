@@ -40,6 +40,7 @@ import {
   TaskStore,
   scopeKeyOfCtx,
   resolveExecutionMeta,
+  validateToolArgs,
   RuntimeScope,
 } from '../model/agent/index.js'
 import { presets as openaiPresets } from '../model/openai/index.js'
@@ -2969,7 +2970,7 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     const ctx = ctxOf(this.e)
     try { ctx.conversationId = await rt.session.getActiveConversation(ctx.scopeUserId, ctx.groupId) } catch { /* 无活动会话按默认 */ }
-    return { rt, scopeKey: scopeKeyOfCtx(ctx) }
+    return { rt, ctx, scopeKey: scopeKeyOfCtx(ctx) }
   }
 
   async _resolveTaskId(rt, scopeKey, input) {
@@ -3052,12 +3053,19 @@ export class Chat extends plugin {
       return true
     }
     if (!p.autoResumable) return this.e.reply(`任务 ${id} 无可自动恢复的只读步骤（复用 ${p.counts.reuse}）`), true
-    // 有限自动恢复：仅重跑「仍为只读」且可安全重放的步骤；执行前用实时工具重新校验 effect
+    // 有限自动恢复：仅重跑「仍为只读」且可安全重放的步骤；执行前用实时工具重新校验 effect，
+    // 并走与普通执行相同的门（schema 校验 + 权限策略），不得绕过（F08）。
     const exec = async (step) => {
       const tool = rt.tools.get(step.name)
       if (!tool) throw new Error(`工具 ${step.name} 已不存在`)
       const meta = resolveExecutionMeta(tool, step.args || {}, ctx)
       if (meta.effect !== 'read' || meta.replay !== 'safe') throw new Error(`工具 ${step.name} 当前不再是只读可重放，已中止`)
+      const v = validateToolArgs(tool, step.args || {})
+      if (!v.ok) throw new Error(`参数校验失败：${(v.fields || []).map((f) => f.message).join('；') || v.code || 'invalid'}`)
+      if (rt.agentConfig?.policy) {
+        const dec = rt.agentConfig.policy.decide(ctx, tool)
+        if (dec?.decision === 'deny') throw new Error(`权限拒绝：${dec.reason || 'policy'}`)
+      }
       const toolCtx = Object.assign({}, ctx, { signal: null, taskId: id })
       return await tool.execute(step.args || {}, toolCtx)
     }

@@ -352,9 +352,12 @@ export class TaskStore {
       if (step.action !== 'retry') { applied.push({ callId: step.callId, applied: false, reason: 'not_auto' }); continue }
       if (step.effect && step.effect !== 'read') { applied.push({ callId: step.callId, applied: false, reason: 'not_read_only' }); continue }
       try {
-        await execute(step)
-        await this.event({ taskId, kind: 'tool_result', callId: step.callId, payload: { name: step.name, ok: true, recovered: true, effectState: 'none' } })
-        applied.push({ callId: step.callId, applied: true })
+        const res = await execute(step)
+        // F03/C06：恢复执行返回的错误对象（{error}/{ok:false}）不得记成成功
+        const failed = res != null && typeof res === 'object' && (res.error != null || res.ok === false)
+        const errMsg = failed ? (res.error || 'recovery_failed') : null
+        await this.event({ taskId, kind: 'tool_result', callId: step.callId, payload: { name: step.name, ok: !failed, recovered: true, effectState: 'none', ...(failed ? { error: errMsg } : {}) } })
+        applied.push({ callId: step.callId, applied: !failed, ...(failed ? { error: errMsg } : {}) })
       } catch (e) {
         await this.event({ taskId, kind: 'tool_result', callId: step.callId, payload: { name: step.name, ok: false, recovered: true, effectState: 'none', error: e?.message || String(e) } })
         applied.push({ callId: step.callId, applied: false, error: e?.message || String(e) })

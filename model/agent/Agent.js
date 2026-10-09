@@ -68,6 +68,12 @@ function isToolError(content) {
   return typeof content === 'string' && /"error"\s*:/.test(content)
 }
 
+/** 这些错误码表示工具「未执行」（策略/校验/审批拒绝、未启动取消、账本阻断）→ effectState=none。 */
+const NOT_EXECUTED_ERRORS = new Set([
+  'invalid_arguments', 'schema_invalid', 'rejected_by_policy', 'rejected_by_confirm',
+  'rejected_by_shell_intercept', 'journal_unavailable', 'cancelled',
+])
+
 /** 工具结果签名（LoopGovernor 判"新事实"用）：长度 + 首尾片段 + 简单散列，
  *  区分"同参同结果空转"与"轮询状态变化"。结果已被 resultCap 截断，O(n) 开销可忽略。 */
 function resultSignature(content) {
@@ -919,13 +925,17 @@ export class Agent {
     }
 
     // 任务账本：结算（完成/等待输入/预算暂停/失败）。只有正常交付才 completed，预算耗尽为 paused。
+    // F04：账本降级（关键写失败）时不得声称 completed/可恢复。
     if (this.taskStore && ctx) {
-      const phase = stopReason === 'clarify' ? 'waiting_input'
-        : stopReason === 'blocked' ? 'failed'
-          : GOVERNOR_STOP.has(stopReason) ? 'paused'
-            : 'completed'
+      const degraded = this._journalDegraded
+      const phase = degraded ? 'failed'
+        : stopReason === 'clarify' ? 'waiting_input'
+          : stopReason === 'blocked' ? 'failed'
+            : GOVERNOR_STOP.has(stopReason) ? 'paused'
+              : 'completed'
       await this._journal((s) => s.finish({
-        taskId, phase, stopReason,
+        taskId, phase,
+        stopReason: degraded ? 'journal_degraded' : stopReason,
         completion: phase === 'completed' ? 'complete' : (finalContent ? 'partial' : 'none'),
         usage,
       }))
@@ -941,6 +951,8 @@ export class Agent {
     return {
       content: finalContent || '', messages: this.messages, usage, turns, taskId, stopReason,
       ...(finalizedVia ? { finalized: finalizedVia } : {}),
+      // F04：账本降级可见（任务不可恢复）；应用层/UI 据此提示，不静默当成功
+      ...(this._journalDegraded ? { journalDegraded: true } : {}),
       // 本轮思考决策（供应用层日志/观测）：auto 生效时有 depth/budget/source/style
       ...(this.thinkInfo ? { think: this.thinkInfo } : {}),
     }
@@ -1477,11 +1489,13 @@ export class Agent {
       const payload = { name: tc.name, ...exec, ...(exec.effect === 'read' ? { args: tc.arguments } : { argsHash: shortHash(JSON.stringify(tc.arguments ?? {})) }) }
       return { mode, resourceKeys, exec, payload }
     })
-    // 任务账本：副作用开始前记录 planned（先落盘，便于崩溃后判定"尚未开始"）
+    // 任务账本：副作用开始前记录 planned（先落盘，便于崩溃后判定"尚未开始"）。
+    // F04：关键账本写失败 → 阻止本批新副作用（不执行任何工具），保留已知状态。
     if (this.taskStore) {
-      await this._journal((s) => Promise.all(toolCalls.map((tc, i) => s.event({
+      const plannedOk = await this._journalCritical((s) => Promise.all(toolCalls.map((tc, i) => s.event({
         taskId: execCtx.taskId, kind: 'tool_planned', callId: tc.id, payload: metas[i].payload,
       }))))
+      if (!plannedOk) return toolCalls.map((tc) => this._blockedToolResult(tc, '任务账本写入失败，已阻止本批工具执行以保护可恢复性'))
     }
     // 受控并发（P0-2）：按 meta.concurrency/resourceKeys 调度——未知工具默认独占、内置只读并发、
     // exclusive 形成屏障、resource 按资源键串行，结果仍按原始调用顺序回插。取消后不再启动排队项。
@@ -1490,33 +1504,51 @@ export class Agent {
       resourceKeys: metas[i].resourceKeys,
       exec: metas[i].exec,
       run: async () => {
-        // 任务账本：副作用开始前记录 started（崩溃后可判定"已开始但结果未知"）
+        // F04：started 关键落盘失败 → 不执行该工具（避免"副作用已发生但账本没有 started"）
         if (this.taskStore) {
-          await this._journal((s) => s.event({
+          const startedOk = await this._journalCritical((s) => s.event({
             taskId: execCtx.taskId, kind: 'tool_started', callId: tc.id, payload: metas[i].payload,
           }))
+          if (!startedOk) return this._blockedToolResult(tc, '任务账本写入失败，已阻止该工具执行以保护可恢复性')
         }
         return runOne(tc)
       },
     }))
     const settled = await this._toolScheduler.run(tasks, { signal })
-    // 任务账本：记录每个 tool_call 的结算（含取消/effectState），供恢复判定已提交步骤与未知副作用
+    // 任务账本：记录每个 tool_call 的业务结算（F03：以工具真实结果判定，而非"Promise 正常 resolve"）
     if (this.taskStore) {
       await this._journal((s) => Promise.all(settled.map((r, i) => {
-        const cancelled = !!(r && r.cancelled)
-        const ok = !!(r && !r.cancelled && !r.error)
+        const cancelled = !!(r && r.cancelled) // 未启动即取消：无副作用
+        const msg = r?.value
+        const content = typeof msg?.content === 'string' ? msg.content : ''
+        const toolFailed = !cancelled && (!!r?.error || isToolError(content))
+        const ok = !cancelled && !toolFailed
         const effect = metas[i].exec.effect
-        const effectState = cancelled ? 'unknown' : (ok ? (effect === 'read' ? 'none' : 'applied') : 'unknown')
+        const code = (content.match(/"error"\s*:\s*"([^"]+)"/) || [])[1] || null
+        // 未执行（策略拒绝/参数校验/审批拒绝/未启动取消/账本阻断）→ effectState=none（确无副作用）
+        const notExecuted = cancelled || (toolFailed && code != null && NOT_EXECUTED_ERRORS.has(code))
+        // 成功：只读 none / 写与外部 applied；执行后失败/未知：只读 none / 写与外部 unknown
+        const effectState = ok ? (effect === 'read' ? 'none' : 'applied')
+          : notExecuted ? 'none'
+            : (effect === 'read' ? 'none' : 'unknown')
         return s.event({
           taskId: execCtx.taskId, kind: 'tool_result', callId: toolCalls[i].id,
           payload: {
-            name: toolCalls[i].name, cancelled, ok,
+            name: toolCalls[i].name, cancelled, ok, failed: toolFailed, errorCode: code,
             effect, replay: metas[i].exec.replay, effectState,
           },
         })
       })))
     }
     return settled.map((r, i) => (r && r.cancelled ? this._cancelledToolResult(toolCalls[i]) : r?.value))
+  }
+
+  /** 账本不可用时阻止工具执行的配对结果（不伪装成功、不触发副作用）。 */
+  _blockedToolResult(tc, reason) {
+    return {
+      role: 'tool', tool_call_id: tc.id, name: tc.name,
+      content: stringifyArgs({ error: 'journal_unavailable', reason, _hint: TOOL_FAIL_HINT }),
+    }
   }
 
   /** 回调安全调用：进度/审批等 UI 回调抛错不应打断工具循环。 */
@@ -1534,6 +1566,19 @@ export class Agent {
     try { return await fn(this.taskStore) } catch (e) {
       this._journalDegraded = true
       this.logger('warn', '[task] 任务记录写入失败（该任务降级为不可恢复）', e?.message || e)
+    }
+  }
+
+  /**
+   * 关键账本写入（F04）：副作用前必须成功。失败返回 false 并标记降级，调用方据此阻止新副作用。
+   * 返回 true 表示已落盘或未启用账本（未启用时不改变原行为）。
+   */
+  async _journalCritical(fn) {
+    if (!this.taskStore) return true
+    try { await fn(this.taskStore); return true } catch (e) {
+      this._journalDegraded = true
+      this.logger('warn', '[task] 关键账本写入失败，阻止新副作用', e?.message || e)
+      return false
     }
   }
 
