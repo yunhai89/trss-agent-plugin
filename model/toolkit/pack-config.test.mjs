@@ -3,6 +3,8 @@
  * 运行：node model/toolkit/pack-config.test.mjs
  */
 import path from 'node:path'
+import fs from 'node:fs'
+import os from 'node:os'
 import Config from '../../utils/Config.js'
 import {
   discoverToolPacks, getToolConfig, normalizeSchema, normalizeInfo,
@@ -49,34 +51,50 @@ await test('loadPackConfigDir：无配置文件返回 null', async () => {
   eq(r, null, '根目录无 tool.config.js → null')
 })
 
-await test('discoverToolPacks：发现 qqmusic 并登记 schema', async () => {
-  const packs = await discoverToolPacks(path.join(Config.path.plugin, 'tools'))
-  const qq = packs.find((p) => p.name === 'qqmusic')
-  okf(!!qq, '发现 qqmusic')
-  if (!qq) return
-  okf(qq.config.some((f) => f.key === 'enable' && f.type === 'boolean'), '包含 enable 开关')
-  okf(qq.config.some((f) => f.key === 'cookie' && f.secret === true), 'cookie 标记 secret')
-  okf(qq.config.some((f) => f.key === 'quality' && f.type === 'enum'), 'quality 为 enum')
-  eq(qq.info.title, 'QQ 音乐', '标题')
-  eq(qq.info.icon, 'music', 'icon 透传（约定字段）')
-  okf(!('dir' in qq), '不泄露内部 dir 字段')
+await test('discoverToolPacks：发现临时夹具包并登记 schema', async () => {
+  // 自足夹具：不依赖开发机 tools/ 下未入库的工具包
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'packcfg-'))
+  const packDir = path.join(root, 'fixture_pack')
+  fs.mkdirSync(packDir)
+  fs.writeFileSync(path.join(packDir, 'tool.config.js'),
+    `export default { info: { title: '夹具包', icon: 'music' }, config: [ { key: 'enable', type: 'boolean', label: '启用', default: true }, { key: 'cookie', type: 'string', label: 'Cookie', secret: true }, { key: 'quality', type: 'enum', label: '音质', options: ['320', 'flac'], default: '320' } ] }\n`)
+  const packs = await discoverToolPacks(root)
+  const p = packs.find((x) => x.name === 'fixture_pack')
+  okf(!!p, '发现夹具包')
+  if (!p) return
+  okf(p.config.some((f) => f.key === 'enable' && f.type === 'boolean'), '包含 enable 开关')
+  okf(p.config.some((f) => f.key === 'cookie' && f.secret === true), 'cookie 标记 secret')
+  okf(p.config.some((f) => f.key === 'quality' && f.type === 'enum'), 'quality 为 enum')
+  eq(p.info.title, '夹具包', '标题')
+  eq(p.info.icon, 'music', 'icon 透传（约定字段）')
+  okf(!('dir' in p), '不泄露内部 dir 字段')
 })
 
 await test('getToolConfig：schema 默认值 ⊕ 用户值（agent.tools.<包名>）', () => {
+  registerPackConfig({
+    name: 'fixture_cfg', info: normalizeInfo(null, 'fixture_cfg'),
+    config: normalizeSchema([
+      { key: 'enable', type: 'boolean', default: true },
+      { key: 'quality', type: 'enum', options: ['320', 'flac'], default: '320' },
+      { key: 'maxResults', type: 'number', default: 10 },
+      { key: 'timeout', type: 'number', default: 15000 },
+      { key: 'cookie', type: 'string', default: '' },
+    ]),
+  })
   // 注入内存用户值（不落盘，测试进程内）
   const cfg = Config.get()
   if (!cfg.agent) cfg.agent = {}
   if (!cfg.agent.tools || typeof cfg.agent.tools !== 'object') cfg.agent.tools = {}
-  cfg.agent.tools.qqmusic = { quality: 'flac', maxResults: 25 }
+  cfg.agent.tools.fixture_cfg = { quality: 'flac', maxResults: 25 }
   try {
-    const merged = getToolConfig('qqmusic')
+    const merged = getToolConfig('fixture_cfg')
     eq(merged.enable, true, '默认 enable=true')
     eq(merged.quality, 'flac', '用户值覆盖默认 quality')
     eq(merged.maxResults, 25, '用户值覆盖默认 maxResults')
     eq(merged.timeout, 15000, '未覆盖字段取默认')
     eq(merged.cookie, '', 'cookie 默认空串')
   } finally {
-    delete cfg.agent.tools.qqmusic
+    delete cfg.agent.tools.fixture_cfg
   }
 })
 

@@ -108,7 +108,14 @@ export class ToolRegistry {
         const t0 = Date.now()
         if (isMcp) lg('info', `调用 ${name}`, '参数=', brief(params))
         else self.logger('debug', 'tool call', name, 'args=', brief(params))
-        const sink = (extra) => { if (self._invSink) self._invSink({ versionId: meta.toolEvoVersionId || null, toolName: name, args: params, ...extra }) }
+        // 观测埋点隔离（F21）：sink 同步抛错或异步 reject 都不得污染工具真实执行结果。
+        const sink = (extra) => {
+          if (!self._invSink) return
+          try {
+            const p = self._invSink({ versionId: meta.toolEvoVersionId || null, toolName: name, args: params, ...extra })
+            if (p && typeof p.then === 'function') p.catch(() => { /* 异步观测失败忽略 */ })
+          } catch { /* 同步观测失败忽略 */ }
+        }
         try {
           const r = await orig.call(this, params, ctx)
           const ms = Date.now() - t0
