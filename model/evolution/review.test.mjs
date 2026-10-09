@@ -121,6 +121,29 @@ await test('applySuggestion：promptDir 不存在时自动创建并落盘（修 
   fs.rmSync(base, { recursive: true, force: true })
 })
 
+await test('applySuggestion 落盘失败：抛错、不改内存 registry、suggestion 保留（可重试）', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'rev-fail-'))
+  const blocker = path.join(base, 'blocker')
+  fs.writeFileSync(blocker, 'x') // 父路径是文件 → mkdirSync(recursive) 必失败
+  const promptDir = path.join(blocker, 'prompts')
+  const suggestionDir = path.join(base, 'sugg')
+  fs.mkdirSync(path.join(suggestionDir, 'u1'), { recursive: true })
+  fs.writeFileSync(path.join(suggestionDir, 'u1', 's1.json'), JSON.stringify({ id: 's1', scopeId: 'u1', kind: 'prompt', status: 'pending' }))
+  const tpl = {
+    id: 'agent', system: 'old', version: '1.0.0', changelog: [],
+    toJSON() { return { id: this.id, system: this.system, version: this.version, changelog: this.changelog } },
+    addChange(v, c) { this.changelog.unshift({ version: v, change: c }); this.version = v },
+  }
+  const rt = { promptRegistry: { get: (k) => (k === 'agent' ? tpl : null) }, memory: null, promptDir, suggestionDir }
+  let threw = false
+  try { await applySuggestion(rt, { id: 's1', scopeId: 'u1', kind: 'prompt', action: 'update', target: 'agent', payload: 'new', rationale: 'x' }) }
+  catch { threw = true }
+  ok(threw, '落盘失败抛错')
+  ok(tpl.system === 'old' && tpl.version === '1.0.0' && tpl.changelog.length === 0, '内存 registry 未被改动（写前不 mutate）')
+  ok(fs.existsSync(path.join(suggestionDir, 'u1', 's1.json')), 'suggestion 保留（未静默丢失，可重试）')
+  fs.rmSync(base, { recursive: true, force: true })
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)
