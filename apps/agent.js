@@ -477,6 +477,8 @@ async function buildRuntime() {
 
 async function _buildRuntime(scope) {
   const cfg = Config.get().agent || {}
+  // F14：最先登记——关闭时取消并等待在途 Agent run 退出，再关依赖资源/账本（关库晚于最后写账本者）
+  scope.register(async () => { try { const n = await abortAllActiveRuns(); if (n) Log.info(`[runtime] 关闭：已取消并等待 ${n} 个在途任务退出`) } catch { /* noop */ } }, { name: 'active-runs', order: -1 })
   const startupInfo = {} // 运行时构建期采集的摘要信息（供末尾统一面板输出）
   // cfg.protocol/preset/baseURL/apiKey/model 是「基础模型引用」的解析镜像（由 Config 按 agent.providerId/modelId 回填）
   if (!cfg.apiKey) throw new Error(`未选定可用的基础模型：请在 Web 配置中心「厂商配置」维护厂商（填 baseURL + API Key）、「模型列表」挂模型，再到「基础 / 模型」选中厂商与模型（等价于 config.yaml 的 agent.providerId / agent.modelId）。当前 agent.apiKey 为空——它是上面引用的解析结果，直接改它会在下次加载被覆盖。`)
@@ -574,6 +576,8 @@ async function _buildRuntime(scope) {
   const K = getKv()
   // 用量统计采集器：对话/工具用量按本地日聚合写 KV（Web 端 overview 趋势主数据源，替代读日志的不稳定路径）
   const usageStats = createUsageStats({ kv: K, logger: Log })
+  // F16：获取即登记清理（带 order），构建中途失败时也可回滚
+  scope.register(async () => { try { await usageStats?.flushNow?.() } catch { /* noop */ } ; try { usageStats?.stop?.() } catch { /* noop */ } }, { name: 'usageStats', order: 70 })
   const session = new SessionStore({ kv: K })
 
   // 可恢复任务账本（P0-3，opt-in）：任务事件/检查点落 sqlite 事务；重启把未结算任务标 interrupted
@@ -587,6 +591,7 @@ async function _buildRuntime(scope) {
       if (n) Log.info(`[task] 重启：${n} 个未结算任务已标记 interrupted（默认不自动重放）`)
       // F02：取消落账后联动中止在途 Agent run（QQ/Web 取消真正停止执行）
       taskStore.setCancelHook((id) => { try { abortActiveRun(id) } catch { /* noop */ } })
+      scope.register(async () => { try { await taskStore?.close?.() } catch { /* noop */ } }, { name: 'taskStore', order: 90 })
       Log.debug('[task] 任务账本已启用')
     } catch (e) {
       Log.warn('[task] 任务账本初始化失败，降级为不可恢复模式', e?.message || e)
@@ -626,10 +631,12 @@ async function _buildRuntime(scope) {
     chunkSize: cfg.kb?.chunkSize, chunkOverlap: cfg.kb?.chunkOverlap,
     topK: cfg.kb?.topK, minScore: cfg.kb?.minScore,
   })
+  scope.register(() => { try { knowledge?.shutdown?.() } catch { /* noop */ } }, { name: 'knowledge', order: 20 })
   // confirmTimeout 配置单位是「秒」，ConfirmStore 用「毫秒」，这里换算（默认 300 秒）
   const confirm = new ConfirmStore({ timeout: (cfg.confirmTimeout || 300) * 1000 })
   const scheduler = await nodeScheduleAdapter()
   const schedule = new ScheduleStore({ kv: K, scheduler })
+  scope.register(() => { try { schedule?.shutdown?.() } catch { /* noop */ } }, { name: 'schedule', order: 10 })
   knowledge.attachScheduler(scheduler) // KB URL 定时刷新复用同一 scheduler（注册/恢复 refresh job）
   const persona = new PersonaService({ store: personaStore, kv: K })
 
@@ -665,6 +672,7 @@ async function _buildRuntime(scope) {
   // ── E2B 沙箱运行时（terminal 的唯一执行面 + toolEvo 的隔离面）──
   // 装配失败不抛穿：mode=off 或初始化失败都返回 manager:null，由工具层给 fail-closed 结果
   const sandbox = await createSandboxRuntime(cfg.sandbox, { logger: Log.tag('sandbox') })
+  scope.register(async () => { try { await sandbox?.shutdown?.() } catch { /* noop */ } }, { name: 'sandbox', order: 100 })
   if (cfg.terminal?.enable === true && !sandbox.enabled) {
     Log.warn('[migrate] agent.terminal 已废弃：终端执行改为 E2B 沙箱。请改用 agent.sandbox.mode=e2b + apiKey（当前 terminal 工具不会注册），并删除 config.yaml 里残留的 terminal 段')
   }
@@ -745,6 +753,7 @@ async function _buildRuntime(scope) {
       Log.debug(`[stagehand] 已启用浏览器自动化工具（${cfg.stagehand.mode || 'local'} 模式；4 个工具 stagehand__goto/observe/extract/act）`)
     } catch (e) { Log.warn('[stagehand] 初始化失败（@browserbasehq/stagehand 未装或浏览器不可用？）', e?.message || e) }
   }
+  scope.register(async () => { try { await stagehand?.sessionMgr?.closeAll?.() } catch { /* noop */ } }, { name: 'stagehand', order: 50 })
 
   // Python 精确计算工具（数学/统计等；沙箱内执行，默认开）
   if (cfg.calc?.enable !== false) tools.register(calcTool)
@@ -769,6 +778,7 @@ async function _buildRuntime(scope) {
       Log.debug(`[diagram] 已启用示意图工具 diagram_render（引擎 ${eng}；endpoint=${diagram.kroki?.endpointId || '-'}）`)
     } catch (e) { Log.warn('[diagram] 初始化失败，工具不注册', e?.message || e) }
   }
+  scope.register(() => { try { diagram?.stop?.() } catch { /* noop */ } }, { name: 'diagram', order: 60 })
 
   // skill 工具：模型主动调用 skill 的通道（按 name 加载说明书正文）—— 渐进式披露的载入入口
   tools.register(makeSkillTool(skills))
@@ -801,6 +811,7 @@ async function _buildRuntime(scope) {
   tools.register(makeInstallSkillTool({ skillsDir, registry: skills, logger: Log.tag('skill') }))
 
   const mcp = new McpManager({ registry: tools, logger: Log.tag('mcp'), requestTimeout: cfg.mcp?.requestTimeout })
+  scope.register(async () => { try { await mcp?.stop?.() } catch { /* noop */ } }, { name: 'mcp', order: 30 })
   mcp.start(cfg.mcp?.servers || {}).catch((e) => Log.error('[mcp] 启动失败', e?.message || e))
 
   // 工具按需发现：检索 embedding（可选，复用上面的 embedFn）；未填则 registry 用纯关键词 jaccard
@@ -936,6 +947,10 @@ async function _buildRuntime(scope) {
       Log.debug(`[toolEvo] 已初始化（内置 ${builtins.length} 个 · 本次 seed ${seeded}（已入库则跳过）· stable 进化 ${stableCount} 经隔离执行面 ${startupInfo.toolEvo.backend}）`)
     } catch (e) { Log.warn('[toolEvo] 初始化失败（sqlite3 未装？）', e?.message || e) }
   }
+  scope.register(async () => {
+    try { await toolEvo?.runner?.stop?.() } catch { /* noop */ }
+    try { await toolEvo?.closeDb?.() } catch { /* noop */ }
+  }, { name: 'toolEvo', order: 40 })
 
   // 模型注册表参数覆盖：当前主模型在 agent.llmModels 有登记且显式指定 thinking/温度/maxTokens 时覆盖全局
   // （web「模型列表 → 编辑」弹窗设置的参数在此生效；仅对主对话链路，各旁路功能仍用自己的配置）
@@ -1050,6 +1065,7 @@ async function _buildRuntime(scope) {
     promptCacheKey: cfg.promptCacheKey === true, // OpenAI 官方 prompt_cache_key 稳定会话路由（仅官方 preset 下发）
     reflectMaxIterations: cfg.reflectMaxIterations ?? 1,
     finalizeMaxTokens: cfg.finalizeMaxTokens ?? 2048, // 收尾输出上限（异常停止后交付；防子代理报告被截断）
+    rootTokenBudget: Number(cfg.rootTokenBudget) > 0 ? Number(cfg.rootTokenBudget) : null, // F13：根任务 token 预算（含嵌套预留）
     stickers: getStickerManager({ logger: Log.tag('sticker') }), // 表情包清单注入（_assembleSystem 用 catalog()）
     devLog: (event, data, traceId, scope) => devLog(event, data, traceId, scope), // 详细 trace（框架无关，pino 文件）；库零依赖，由 apps 注入
     logger: Log.tag('agent'),
@@ -1154,12 +1170,23 @@ async function _buildRuntime(scope) {
         async execute(params = {}, ctx) {
           const task = String(params.task || '').trim()
           if (!task) return { error: 'task 不能为空' }
+          const agent = ctx?.executionContext?.agent
+          // F13：嵌套工作开始前先预留根任务预算；不足则不启动（避免执行阶段超预算）
+          const reserve = Math.max(0, Number(cfg.multiagent?.reserveTokens) || 8000)
+          if (agent && typeof agent.reserveBudget === 'function' && !agent.reserveBudget(reserve)) {
+            return { error: 'budget_exhausted', reason: `根任务 token 预算不足（需预留 ${reserve}），未启动编排。请缩小任务或提高 agent.rootTokenBudget。` }
+          }
           // P0-1：把父任务取消信号与关联 ID 传入编排链（否则父任务取消后编排器仍继续跑）
-          const r = await orch.run(task, { ctx, signal: ctx?.signal || null, taskId: ctx?.taskId || null })
+          let r
+          try {
+            r = await orch.run(task, { ctx, signal: ctx?.signal || null, taskId: ctx?.taskId || null })
+          } finally {
+            agent?.releaseBudget?.(reserve) // 释放预留（实际用量经 noteExternalUsage 计入 consumed）
+          }
           // 复用同一归一：预算/异常停止只标 partial，绝不把部分完成当完整完成
           const norm = normalizeSubagentResult({ content: r?.content, stopReason: r?.stopReason, usage: r?.usage, turns: r?.turns })
           // F13：把编排/子代理实际用量归集到根任务（否则只进工具正文，根 usage/预算漏计）
-          try { ctx?.executionContext?.agent?.noteExternalUsage?.(r?.usage) } catch { /* 归集失败不影响结果 */ }
+          try { agent?.noteExternalUsage?.(r?.usage) } catch { /* 归集失败不影响结果 */ }
           return {
             result: norm.content,
             status: norm.status,
@@ -1209,6 +1236,9 @@ async function _buildRuntime(scope) {
       Log.debug('[multiagent] spawn_subagent + check_subagent + extend_subagent 已注册（异步委派 + 预算控制）')
     } catch (e) { Log.warn('[multiagent] 子代理工具注册失败', e?.message || e) }
   }
+  scope.register(() => {
+    try { const n = multiagent?.shutdown?.(); if (n) Log.info(`[multiagent] 运行时失效：已终止 ${n} 个在跑子代理`) } catch { /* noop */ }
+  }, { name: 'multiagent', order: 80 })
 
   // ── 启动摘要面板：把散落的模块初始化结果汇总成一份对齐清单（各模块细节日志已降为 debug 级，
   // 需要排查时把日志级别调到 debug 即可查看）。仅在运行时构建成功时输出一次。
@@ -1235,29 +1265,6 @@ async function _buildRuntime(scope) {
     ['其他', extras.join(' / ') || '-'],
     ['面板', cfg.webApi?.enable !== false ? `:${cfg.webApi?.port || 6098}` : 'off'],
   ])
-
-  // P0-4：按依赖顺序登记清理（order 小先关）。toolEvo 先于 sandbox（runner 依赖其 transport），
-  // 关闭幂等且 await 资源真正退出；热重载/退出只调 scope.close()，不再散落手工关闭。
-  // F14：先取消并等待在途 Agent run 退出，再关依赖资源/账本（关库晚于最后一个写账本的执行体）
-  scope.register(async () => { try { const n = await abortAllActiveRuns(); if (n) Log.info(`[runtime] 关闭：已取消并等待 ${n} 个在途任务退出`) } catch { /* noop */ } }, { name: 'active-runs', order: -1 })
-  scope.register(() => { try { schedule?.shutdown?.() } catch { /* noop */ } }, { name: 'schedule' })
-  scope.register(() => { try { knowledge?.shutdown?.() } catch { /* noop */ } }, { name: 'knowledge' })
-  scope.register(async () => { try { await mcp?.stop?.() } catch { /* noop */ } }, { name: 'mcp' }) // F15：登记 MCP 关闭
-  scope.register(async () => {
-    try { await toolEvo?.runner?.stop?.() } catch { /* noop */ } // F15：await 隔离 worker 真正退出
-    try { await toolEvo?.closeDb?.() } catch { /* noop */ }
-  }, { name: 'toolEvo' })
-  scope.register(async () => { try { await stagehand?.sessionMgr?.closeAll?.() } catch { /* noop */ } }, { name: 'stagehand' }) // F15：await 浏览器会话退出
-  scope.register(() => { try { diagram?.stop?.() } catch { /* noop */ } }, { name: 'diagram' })
-  scope.register(async () => {
-    try { await usageStats?.flushNow?.() } catch { /* noop */ }
-    try { usageStats?.stop?.() } catch { /* noop */ }
-  }, { name: 'usageStats' })
-  scope.register(() => {
-    try { const n = multiagent?.shutdown?.(); if (n) Log.info(`[multiagent] 运行时失效：已终止 ${n} 个在跑子代理`) } catch { /* noop */ }
-  }, { name: 'multiagent' })
-  scope.register(async () => { try { await taskStore?.close?.() } catch { /* noop */ } }, { name: 'taskStore' })
-  scope.register(async () => { try { await sandbox?.shutdown?.() } catch { /* noop */ } }, { name: 'sandbox' })
 
   return { agentConfig, makeAgent, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore, scope }
 }
@@ -3047,7 +3054,7 @@ export class Chat extends plugin {
   }
 
   async resumeTask() {
-    const { rt, scopeKey } = await this._taskScope()
+    const { rt, ctx, scopeKey } = await this._taskScope()
     if (!rt.taskStore) return this.e.reply('任务账本未启用'), true
     const input = (this.e.msg.match(/^#继续任务\s+(\S+)/) || [])[1]
     const id = await this._resolveTaskId(rt, scopeKey, input)
@@ -3055,8 +3062,25 @@ export class Chat extends plugin {
     const r = await rt.taskStore.resume(id, { scopeKey })
     if (!r.ok) return this.e.reply(`无法继续：${r.code}${r.phase ? `（${r.phase}）` : ''}`), true
     const p = r.plan
-    const planLine = p ? `\n恢复计划：复用 ${p.counts.reuse} · 可重试 ${p.counts.retry} · 需核实 ${p.counts.reconcile} · 阻断 ${p.counts.block}` : ''
-    await this.e.reply(`任务 ${id} 当前阶段 ${r.task.phase}；已完成步骤约 ${r.checkpoint.completedSteps} 个。${planLine}\n阶段一仅恢复检查点、不自动重放副作用；#恢复任务 ${id} 可对只读步骤做有限自动恢复。`)
+    const planLine = p ? `恢复计划：复用 ${p.counts.reuse} · 可重试 ${p.counts.retry} · 需核实 ${p.counts.reconcile} · 阻断 ${p.counts.block}` : ''
+    // 存在未知写副作用 → 不自动续跑，先人工核实（与恢复门一致）
+    if (p?.hasBlocking) {
+      const lines = p.steps.map((s) => `· ${s.name || s.callId} → ${s.action}（${s.reason}）`)
+      await this.e.reply([`任务 ${id} 存在未知写副作用，禁止自动续跑：`, planLine, ...lines, '⚠️ 请先人工核实外部实际状态。'].join('\n'))
+      return true
+    }
+    // F06：从检查点重建已提交步骤并续跑同一任务（新 run 关联 parentTaskId）
+    const cp = await rt.taskStore.getCheckpoint(id, { scopeKey })
+    if (!cp.ok) return this.e.reply(`无法读取检查点：${cp.code}`), true
+    await this.e.reply(`任务 ${id} 续跑中（${planLine || '无已完成步骤'}）…`)
+    try {
+      const agent = rt.makeAgent()
+      const out = await agent.continueFrom(cp, { ctx, parentTaskId: id, runtimeGeneration: _runtimeGen })
+      const body = stripMarkers(redactSecrets(out?.content || '')).trim()
+      await this.e.reply(body || '续跑未产出内容（可查看任务状态或重新发起）。')
+    } catch (e) {
+      await this.e.reply(`续跑失败：${e?.message || e}`)
+    }
     return true
   }
 

@@ -2153,6 +2153,38 @@ await test('F10：跨 Agent 共享调度器同资源互斥', async () => {
   eq(peak, 1, '跨 Agent 同资源无重叠')
 })
 
+// ---------- F13：根任务预算预留 ----------
+await test('F13：reserveBudget/releaseBudget + noteExternalUsage 计入 consumed', async () => {
+  const agent = new Agent({ provider: mockProvider([{ content: 'x' }]), rootTokenBudget: 100 })
+  eq(agent.reserveBudget(60), true, '预留 60 成功')
+  eq(agent.reserveBudget(60), false, '60+60>100 拒绝')
+  agent.releaseBudget(60)
+  eq(agent.reserveBudget(90), true, '释放后再预留 90 成功')
+  agent.noteExternalUsage({ input: 20, output: 5 })
+  eq(agent._budget.consumed, 25, '嵌套用量计入 consumed')
+  eq(agent.reserveBudget(10), false, '25(consumed)+90(reserved)+10>100 拒绝')
+  agent.releaseBudget(90)
+  eq(agent.reserveBudget(70), true, '释放预留后可再预留')
+})
+
+await test('F13：未配置预算时 reserveBudget 恒 true', async () => {
+  const agent = new Agent({ provider: mockProvider([{ content: 'x' }]) })
+  eq(agent.reserveBudget(999999), true, '无上限恒放行')
+})
+
+// ---------- F06：从检查点续跑 ----------
+await test('F06：continueFrom 用检查点重建历史并续跑', async () => {
+  let seen = null
+  const provider = { async chat(o) { seen = o.messages; return { role: 'assistant', content: '续跑完成', toolCalls: [], finishReason: 'stop', usage: null, rawMessage: {} } } }
+  const agent = new Agent({ provider, maxTurns: 2 })
+  const cp = { input: '原任务描述', steps: [{ callId: 'c1', name: 'web_search', args: { q: 'x' }, ok: true, resultPreview: '{"found":1}' }] }
+  const r = await agent.continueFrom(cp)
+  eq(r.content, '续跑完成', '续跑返回')
+  ok(Array.isArray(seen), 'provider 收到消息')
+  ok(seen.some((m) => m.role === 'tool' && String(m.content).includes('found')), '历史含已提交只读结果')
+  ok(seen.some((m) => m.role === 'user' && String(m.content).includes('原任务描述')), '历史含原始输入')
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

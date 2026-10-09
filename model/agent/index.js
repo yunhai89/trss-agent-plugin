@@ -39,6 +39,7 @@ export { ToolScheduler, resolveToolConcurrency, READ_PARALLEL_TOOLS } from './to
 export { RuntimeScope } from './runtime-scope.js'
 export { resolveExecutionMeta } from './tool-effects.js'
 export { validateToolArgs } from './tool-schema.js'
+export { buildResumeMessages, classifySteps } from './continuation.js'
 export { planRecovery } from './recovery.js'
 export { TaskStore, TASK_SCHEMA_VERSION, TASK_PHASES, TERMINAL_PHASES, scopeKeyOfCtx } from './task-store.js'
 export { buildHelpHtml, buildChatListHtml, buildPersonaListHtml } from './render.js'

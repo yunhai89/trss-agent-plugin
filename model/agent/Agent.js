@@ -18,6 +18,7 @@ import { makeToolSearchTool } from './tools/tool_search.js'
 import { stringifyArgs, estimateMessages, mergeUsage } from './messages.js'
 import { tokenBreakdown, toolResultFields, decisionFields } from './trace/events.js'
 import { LoopGovernor } from './loop-governor.js'
+import { buildResumeMessages } from './continuation.js'
 import { ToolScheduler, resolveToolConcurrency } from './tool-scheduler.js'
 import { resolveExecutionMeta } from './tool-effects.js'
 import { validateToolArgs } from './tool-schema.js'
@@ -255,6 +256,9 @@ export class Agent {
     // F10：优先复用注入的共享调度器（同一运行时跨 Agent 共享资源锁与并发额度）
     this._toolScheduler = config.toolScheduler || new ToolScheduler({ maxParallel: this.toolMaxParallel })
     this.toolSchemaValidate = config.toolSchemaValidate !== false // 工具参数 schema 预校验（可关，回滚杠杆）
+    // F13：根任务 token 预算上限（null=不限）；嵌套编排/子代理开始前预留、结算并入 consumed
+    this._rootTokenBudget = Number(config.rootTokenBudget) > 0 ? Number(config.rootTokenBudget) : null
+    this._budget = { limit: this._rootTokenBudget, consumed: 0, reserved: 0 }
     // 可恢复任务账本（P0-3，opt-in）：传入 TaskStore 时在关键边界落盘检查点；缺省不影响主流程
     this.taskStore = config.taskStore || null
     this._journalDegraded = false
@@ -393,6 +397,38 @@ export class Agent {
   setHistory(messages) { this.messages = messages ? messages.map((m) => ({ ...m })) : [] }
   getHistory() { return this.messages }
   reset() { this.messages = [] }
+
+  /**
+   * F06：从任务检查点续跑——把已提交步骤重建为合法 tool_call/tool_result 配对作为历史，再继续同一任务。
+   * 调用方应先用 recovery 计划确认「无未知写副作用」；存在 block/reconcile 时不应调用。
+   */
+  async continueFrom(checkpoint, opts = {}) {
+    const messages = buildResumeMessages(checkpoint, { continuationPrompt: opts.continuationPrompt })
+    this.setHistory(messages)
+    return this.run(opts.goal || '请继续完成原任务并给出最终结果。', opts)
+  }
+
+  /** F13：根任务 token 预算——嵌套工作开始前预留，结算真实用量并释放预留。 */
+  reserveBudget(n = 0) {
+    const lim = this._budget?.limit
+    const cost = Math.max(0, Number(n) || 0)
+    if (lim != null && this._budget.consumed + this._budget.reserved + cost > lim) return false
+    this._budget.reserved += cost
+    return true
+  }
+
+  releaseBudget(n = 0) {
+    if (!this._budget) return
+    this._budget.reserved = Math.max(0, this._budget.reserved - Math.max(0, Number(n) || 0))
+  }
+
+  _usageTotal(u) {
+    if (!u) return 0
+    const inp = Number(u.input ?? u.input_tokens ?? u.prompt_tokens) || 0
+    const out = Number(u.output ?? u.output_tokens ?? u.completion_tokens) || 0
+    const tot = Number(u.total ?? u.total_tokens)
+    return Number.isFinite(tot) ? tot : inp + out
+  }
 
   /**
    * @param {string|object} input 用户文本或消息对象
@@ -557,12 +593,14 @@ export class Agent {
         taskId, ctx, phase: 'running',
         runtimeGeneration: opts.runtimeGeneration ?? null,
         providerRoute: this.model || null,
+        parentTaskId: opts.parentTaskId ?? null, // F06：续跑时关联原任务
         input: rawText, // F06：保存原始任务输入，供恢复重建
       }))
     }
     let usage = null
     let turns = 0
     this._externalUsage = null // F13：嵌套（编排/子代理）用量按 rootTask 归集，结算时并入根 usage
+    this._budget = { limit: this._rootTokenBudget, consumed: 0, reserved: 0 } // F13：根任务 token 预算（含预留）
     this._runCancelled = false // F02：运行时取消标志（abortActiveRun 置位）
     let stopReason = null
     // ── 最终答案状态机（长任务稳定性审计 P0-1：单一 lastContent 曾同时表示旁白/被否决草稿/最终答案）──
@@ -994,6 +1032,8 @@ export class Agent {
       ...(finalizedVia ? { finalized: finalizedVia } : {}),
       // F04：账本降级可见（任务不可恢复）；应用层/UI 据此提示，不静默当成功
       ...(this._journalDegraded ? { journalDegraded: true } : {}),
+      // F13：根任务 token 预算（配置上限时暴露，含 consumed/reserved）
+      ...(this._budget?.limit != null ? { tokenBudget: { ...this._budget } } : {}),
       // 本轮思考决策（供应用层日志/观测）：auto 生效时有 depth/budget/source/style
       ...(this.thinkInfo ? { think: this.thinkInfo } : {}),
     }
@@ -1629,6 +1669,7 @@ export class Agent {
   noteExternalUsage(u) {
     if (!u) return
     this._externalUsage = mergeUsage(this._externalUsage, u)
+    if (this._budget) this._budget.consumed += this._usageTotal(u)
     try { this.governor?.noteUsage(u, { scope: 'work' }) } catch { /* noop */ }
   }
 

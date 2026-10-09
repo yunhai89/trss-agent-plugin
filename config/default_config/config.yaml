@@ -106,6 +106,7 @@ agent:
   stream: false             # 逐字流式输出（依赖适配器、不稳，默认关）
   reflect: auto             # 自我反思/自纠：off=关 | auto=仅多轮/用工具时(默认) | always=每次最终回复都反思 | jev=由 Jev 判断是否需要反思
   finalizeMaxTokens: 2048   # 收尾（finalizer）输出 token 上限：异常停止后最后一次交付；太小会截断总结/子代理报告
+  rootTokenBudget: 0        # F13 根任务 token 预算上限（0=不限）：主/编排/子代理/反思合计；嵌套工作开始前预留
   cacheControl: false      # Anthropic 协议显式 prompt 缓存断点（tools/system/末消息；OpenAI 兼容端自动前缀缓存无需开）
   reflectMaxIterations: 1   # 反思回环修正最大次数（封顶防无限循环）
   progress: true            # 工具调用时推送节流进度消息（消除干等，默认开）
@@ -408,6 +409,7 @@ agent:
     maxConcurrent: 3            # 同时运行的子代理数上限
     maxSpawnsPerConversation: 5 # 单次对话最多创建几个子代理（topology=spawn 时生效）
     workerMaxTurns: 10          # 子代理工具循环上限（防失控烧 token）
+    reserveTokens: 8000         # F13：编排（orchestrate）开始前向根任务预留的 token 额度；不足则拒绝启动
     workerModel: ""             # 子代理模型（空=复用主模型；可跨厂商，填便宜模型可降本）
     defaultTools:               # 子代理默认可用工具（模型未指定时）
       - web_search
