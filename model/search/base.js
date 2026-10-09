@@ -25,7 +25,7 @@ export function formatResults(result, { maxResults = 10, maxContent = 500 } = {}
   if (parts.length) return parts.join('\n\n')
   // 所有源都返回空：给出可执行提示，避免模型直接断言"搜不到/没有相关信息"而放弃
   const sources = result.sources?.length ? result.sources.join('/') : result.provider
-  return `(无搜索结果${sources ? `：${sources} 等搜索源均未返回内容` : ''}。可尝试更换关键词/更具体的表述后重试；若多次仍为空，改用浏览器自动化（tool_search 搜“浏览器 打开网页”激活 stagehand__goto）直接打开权威页面抓取正文，或告知用户搜索暂时不可用)`
+  return `(无搜索结果${sources ? `：${sources} 等搜索源均未返回内容` : ''}。可换更短的关键词重试；国创/中国内容改用国内源——米游社 miyoushe_search、B站 bilibili、web_crawl 抓 wiki.biligame.com/萌娘百科；仍为空再考虑浏览器自动化（tool_search 搜“浏览器 打开网页”激活 stagehand__goto），或告知用户搜索暂时不可用)`
 }
 
 /** 格式化提取结果 */
