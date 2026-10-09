@@ -255,10 +255,20 @@ export async function applySuggestion(rt, s) {
     const tpl = rt.promptRegistry && rt.promptRegistry.get(key)
     if (!tpl) throw new Error(`未找到 prompt 模板：${key}`)
     const oldSystem = tpl.system
-    tpl.system = String(s.payload || '')
-    if (typeof tpl.addChange === 'function') tpl.addChange(`${tpl.version || '1.0.0'}-evolved`, `采纳：${String(s.rationale || '').slice(0, 50)}`)
-    try { fs.mkdirSync(rt.promptDir, { recursive: true }); fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(tpl.toJSON(), null, 2)) }
+    const payload = String(s.payload || '')
+    const nextVersion = `${tpl.version || '1.0.0'}-evolved`
+    const changeText = `采纳：${String(s.rationale || '').slice(0, 50)}`
+    // 先落盘、成功后再改内存 registry 并移出待审：写失败不污染内存、也不丢 suggestion（调用方置 apply_failed）
+    const next = {
+      ...tpl.toJSON(),
+      system: payload,
+      version: nextVersion,
+      changelog: [{ version: nextVersion, date: new Date().toISOString().slice(0, 10), change: changeText, evalRun: '' }, ...(tpl.changelog || [])],
+    }
+    try { fs.mkdirSync(rt.promptDir, { recursive: true }); fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(next, null, 2)) }
     catch (e) { throw new Error(`prompt 落盘失败：${e?.message || e}`) }
+    tpl.system = payload
+    if (typeof tpl.addChange === 'function') tpl.addChange(nextVersion, changeText)
     removeSuggestion(rt.suggestionDir, s.scopeId, s.id)
     return { ok: true, note: `prompt「${key}」已应用（旧：${String(oldSystem).slice(0, 40)}…）` }
   }

@@ -2547,10 +2547,20 @@ export class Chat extends plugin {
       const tpl = rt.promptRegistry.get(key)
       if (!tpl) { await this.e.reply(`未找到 prompt 模板：${key}`); return true }
       const oldSystem = tpl.system
-      tpl.system = String(s.payload || '')
-      tpl.addChange(`${tpl.version || '1.0.0'}-evolved`, `自评审采纳：${String(s.rationale || '').slice(0, 50)}`)
-      try { fs.mkdirSync(rt.promptDir, { recursive: true }); fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(tpl.toJSON(), null, 2)) }
-      catch (e) { Log.warn('[evolution] prompt 落盘失败', e?.message || e); await this.e.reply(`⚠️ 已应用但落盘失败：${e?.message || e}`) }
+      const payload = String(s.payload || '')
+      const nextVersion = `${tpl.version || '1.0.0'}-evolved`
+      const changeText = `自评审采纳：${String(s.rationale || '').slice(0, 50)}`
+      // 先落盘、成功后再改内存并移出待审：写失败不再丢 suggestion、也不谎报「已采纳」
+      const next = {
+        ...tpl.toJSON(),
+        system: payload,
+        version: nextVersion,
+        changelog: [{ version: nextVersion, date: new Date().toISOString().slice(0, 10), change: changeText, evalRun: '' }, ...(tpl.changelog || [])],
+      }
+      try { fs.mkdirSync(rt.promptDir, { recursive: true }); fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(next, null, 2)) }
+      catch (e) { Log.warn('[evolution] prompt 落盘失败', e?.message || e); await this.e.reply(`⚠️ 采纳失败（落盘错误，suggestion 保留，可稍后重试）：${e?.message || e}`); return true }
+      tpl.system = payload
+      tpl.addChange(nextVersion, changeText)
       removeSuggestion(rt.suggestionDir, ctx.scopeId, s.id)
       await this.e.reply(`✅ 已采纳 prompt suggestion（${key}），下轮对话生效。可用 #回滚 ${key} 恢复。\n旧版首句：${oldSystem.slice(0, 50)}…`)
       return true
@@ -2616,7 +2626,10 @@ export class Chat extends plugin {
       const tpl = rt.promptRegistry.get(key)
       const base = tpl ? tpl.toJSON() : { id: key, system: TEMPLATES[key]?.system || '' }
       const evolved = { ...base, system: result.best.text, version: `${base.version || '1.0.0'}-evolved-${Date.now().toString(36)}` }
-      try { fs.mkdirSync(rt.promptDir, { recursive: true }); fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(evolved, null, 2)) } catch (e) { Log.warn('[evolution] 落盘失败', e?.message || e) }
+      let writeErr = null
+      try { fs.mkdirSync(rt.promptDir, { recursive: true }); fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(evolved, null, 2)) }
+      catch (e) { writeErr = e; Log.warn('[evolution] 落盘失败', e?.message || e) }
+      if (writeErr) { await this.e.reply(`⚠️ 进化完成但落盘失败（未写入 prompts/，请检查目录权限）：${writeErr?.message || writeErr}`); return true }
       await this.e.reply(`✅ 进化完成：best=${(result.best.score || 0).toFixed(3)}（baseline=${(result.baseline?.score || 0).toFixed(3)}，${result.improved ? '✨已提升' : '未提升'}）\n已写入 data/evolution/prompts/${key}.json（待审）。\n#审阅进化 → #采纳 <id> 应用，#回滚 ${key} 恢复。`)
     } catch (e) { await this.e.reply(`进化失败：${e?.message || e}`) }
     return true
