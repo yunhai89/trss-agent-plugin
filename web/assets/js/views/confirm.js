@@ -1,4 +1,4 @@
-/** 视图:审批门(§3.5 · 纯内存,重启清空) */
+/** 视图:审批门(§3.5 · 工具确认=纯内存重启清空；人设采纳=持久化待审) */
 (function () {
   window.VIEWS = window.VIEWS || {}
 
@@ -13,6 +13,8 @@
 
       /* 直接读 MOCK.confirms:侧边栏徽标/概览计数联动更新 */
       const items = computed(() => M.confirms)
+      /* 人设资料采纳待审（持久化，须批准才 draft→active） */
+      const adoptions = computed(() => (M.personaAdoptions || []).filter((p) => p.status === 'pending'))
       const tick = ref(0)
       const timer = setInterval(() => tick.value++, 1000)
       let pollTimer = null
@@ -30,6 +32,17 @@
         } catch (e) { toast(e.message, 'error') }
       }
 
+      /* 人设采纳待审：批准=采纳当前草稿生效；驳回=保留草稿 */
+      const decideAdopt = async (a, ok) => {
+        try {
+          const r = await window.api.post(`/persona-adoptions/${a.id}/${ok ? 'approve' : 'reject'}`, {})
+          await window.store.loadPersonaAdoptions()
+          const name = a.personaName || a.personaId
+          if (ok) toast(r?.ingestError ? `已采纳「${name}」（长尾入库提示：${r.ingestError}）` : `已采纳「${name}」，之后使用该人设以已核实事实为先`)
+          else toast(`已驳回「${name}」的采纳请求（草稿保留）`, 'info')
+        } catch (e) { toast(e.message, 'error') }
+      }
+
       // 需二次确认的工具里风险最高的几个（terminal 已沙箱化、不再走审批队列）
       const danger = (tool) => ['send_like', 'stagehand', 'stagehand_act'].includes(tool)
 
@@ -37,11 +50,15 @@
       onMounted(async () => {
         try { await window.store.loadConfig() } catch { /* 忽略 */ }
         try { await window.store.loadConfirm() } catch (e) { toast(e.message, 'error') }
-        pollTimer = setInterval(() => window.store.loadConfirm().catch(() => {}), 5000)
+        try { await window.store.loadPersonaAdoptions() } catch { /* 兼容旧后端：无人设采纳队列 */ }
+        pollTimer = setInterval(() => {
+          window.store.loadConfirm().catch(() => {})
+          window.store.loadPersonaAdoptions().catch(() => {})
+        }, 5000)
       })
       onUnmounted(() => { clearInterval(timer); if (pollTimer) clearInterval(pollTimer) })
 
-      return { items, tick, remain, remainPct, ringOffset, decide, danger, fmt, TIMEOUT }
+      return { items, adoptions, tick, remain, remainPct, ringOffset, decide, decideAdopt, danger, fmt, TIMEOUT }
     },
     template: `
     <div>
@@ -50,15 +67,51 @@
           <span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="confirm"/></span>
           <div>
             <div class="ct-t">待审批队列</div>
-            <div class="ct-s">纯内存不持久化 · 超时({{ TIMEOUT / 1000 }}s)自动拒绝 · 模拟环境不会真正执行</div>
+            <div class="ct-s">工具确认=纯内存不持久化 · 超时({{ TIMEOUT / 1000 }}s)自动拒绝；人设采纳=持久待审 · 须批准才生效</div>
           </div>
         </div>
-        <span class="pill" :class="items.length ? 'p-honey' : 'p-green'" style="font-size:13px;padding:7px 15px">
-          {{ items.length ? items.length + ' 条待审批' : '队列已清空' }}
+        <span class="pill" :class="(items.length + adoptions.length) ? 'p-honey' : 'p-green'" style="font-size:13px;padding:7px 15px">
+          {{ (items.length + adoptions.length) ? (items.length + adoptions.length) + ' 条待审批' : '队列已清空' }}
         </span>
       </div>
 
-      <TransitionGroup name="list" tag="div" class="grid g2 mt16" style="position:relative">
+      <!-- 人设资料采纳待审（持久） -->
+      <div v-if="adoptions.length" class="card pad" style="margin-top:16px;--i:1">
+        <div class="ct" style="margin-bottom:12px">
+          <span class="ct-ico" style="background:var(--grad-vio)"><v-icon name="persona"/></span>
+          <div>
+            <div class="ct-t">人设资料采纳待审</div>
+            <div class="ct-s">#采纳补齐 /  Web 采纳 会先进入此队列；批准后草稿才 draft→active 并注入身份层</div>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div v-for="a in adoptions" :key="a.id" class="card pad lift">
+            <div class="row-b wrap g10">
+              <div class="row g6 wrap">
+                <span class="pill p-vio"><v-icon name="persona"/>{{ a.personaName || a.personaId }}</span>
+                <span class="pill p-line mono">#{{ a.id }}</span>
+                <span class="pill p-line mono">{{ a.personaId }}</span>
+              </div>
+              <span class="mut2" style="font-size:11.5px">{{ a.via === 'qq' ? 'QQ' : 'Web' }} 提交 · {{ a.by || '—' }} · {{ fmt.ago(a.createdAt) }}</span>
+            </div>
+            <div v-if="a.snapshot && a.snapshot.summary" class="mut mt8" style="font-size:13px">{{ a.snapshot.summary }}</div>
+            <div v-if="a.snapshot && a.snapshot.facts" class="json-block mt8" style="max-height:180px;overflow:auto;white-space:pre-wrap;font-size:12px">{{ a.snapshot.facts }}</div>
+            <div class="mut2 mt8" style="font-size:11.5px">
+              出处 {{ a.snapshot?.sourceCount || 0 }} 条 · 长尾 {{ a.snapshot?.rawNotesLen || 0 }} 字（批准后入库供检索）
+            </div>
+            <div class="row g10 mt12" style="justify-content:flex-end">
+              <button class="btn b-danger" @click="decideAdopt(a, false)"><v-icon name="x"/>驳回（保留草稿）</button>
+              <button class="btn b-ok" @click="decideAdopt(a, true)"><v-icon name="check"/>批准采纳</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="ct" v-if="items.length" style="margin:18px 2px 10px">
+        <span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="confirm"/></span>
+        <div><div class="ct-t">工具确认</div><div class="ct-s">需二次确认的工具（stagehand act / 定时任务等）</div></div>
+      </div>
+      <TransitionGroup name="list" tag="div" class="grid g2" :style="{marginTop: items.length ? '0' : '16px', position:'relative'}">
         <div v-for="(c, i) in items" :key="c.id" class="card lift pad" :style="{'--i': i + 1}">
           <div class="row g14" style="align-items:flex-start">
             <!-- 倒计时环 -->
@@ -90,7 +143,7 @@
           </div>
         </div>
       </TransitionGroup>
-      <empty-state v-if="!items.length" icon="confirm" text="暂无待审批项" sub="需二次确认的工具（如 stagehand act / 定时任务等）发起时会出现在这里；终端命令已改在 E2B 沙箱内直接执行，不走审批"/>
+      <empty-state v-if="!items.length && !adoptions.length" icon="confirm" text="暂无待审批项" sub="需二次确认的工具（如 stagehand act / 定时任务等）与人设资料采纳（#采纳补齐）发起时会出现在这里；终端命令已改在 E2B 沙箱内直接执行，不走审批"/>
     </div>`,
   }
 })()

@@ -3,7 +3,7 @@
  *
  * 流程：apps 层 `#人设补齐 <id>` → 以本模块 system 指令跑一次主 Agent（只读取材工具）
  *       → parseCompletionOutput 取结构化 JSON → buildLoreDraft 组装草稿 → PersonaLore.saveDraft。
- * 产出只作草稿，须 `#采纳补齐` 才生效（避免 AI 生成内容直接改人设）。
+ * 产出只作草稿，须 `#采纳补齐` 提交审批、经 Web 审批门批准后才生效（避免 AI 生成内容直接改人设）。
  */
 
 /**
@@ -123,6 +123,6 @@ export function formatDraftSummary(lore) {
     `🧩 人设补齐草稿（${lore?.id || ''}）${canonLine ? ` · ${canonLine}` : ''}`,
     lore?.summary ? `概述：${lore.summary}` : '',
     `事实/关系条目：${nFacts} · 出处：${nSrc}`,
-    `#查看补齐 ${lore?.id} 预览 · #采纳补齐 ${lore?.id} 生效 · #丢弃补齐 ${lore?.id} 放弃`,
+    `#查看补齐 ${lore?.id} 预览 · #采纳补齐 ${lore?.id} 提交审批 · #丢弃补齐 ${lore?.id} 放弃`,
   ].filter(Boolean).join('\n')
 }

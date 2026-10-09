@@ -4,6 +4,9 @@
 (function () {
   const { createApp, ref, computed, onMounted } = Vue
 
+  /* 审批门待审数 = 工具确认（内存）+ 人设采纳待审（持久） */
+  const pendingApprovals = () => (window.MOCK?.confirms || []).length + (window.MOCK?.personaAdoptions || []).filter((p) => p.status === 'pending').length
+
   const NAV = [
     { group: '总览', items: [{ id: 'dashboard', name: '概览', icon: 'dashboard' }] },
     {
@@ -22,7 +25,7 @@
       group: '运行时', items: [
         { id: 'schedule', name: '定时任务', icon: 'schedule' },
         { id: 'tasks', name: '任务账本', icon: 'schedule' },
-        { id: 'confirm', name: '审批门', icon: 'confirm', badge: () => (window.MOCK?.confirms || []).length },
+        { id: 'confirm', name: '审批门', icon: 'confirm', badge: pendingApprovals },
         { id: 'suggestions', name: '进化建议', icon: 'evolution', badge: () => (window.MOCK?.suggestions || []).filter((s) => s.status === 'pending').length },
         { id: 'evolution', name: '工具进化', icon: 'tool', badge: () => (window.MOCK?.tevoTools || []).filter((v) => v.status === 'verified').length },
       ],
@@ -56,7 +59,7 @@
     { id: 'dashboard', name: '概览', icon: 'home' },
     { id: 'memory', name: '记忆', icon: 'memory' },
     { id: 'sessions', name: '会话', icon: 'session' },
-    { id: 'confirm', name: '审批', icon: 'confirm', badge: () => (window.MOCK?.confirms || []).length },
+    { id: 'confirm', name: '审批', icon: 'confirm', badge: pendingApprovals },
   ]
 
   const App = {

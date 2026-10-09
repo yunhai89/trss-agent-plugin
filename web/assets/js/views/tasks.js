@@ -74,7 +74,7 @@
       <div v-if="!data.enabled" class="card pad" style="text-align:center;padding:40px">
         <v-icon name="schedule" style="font-size:34px;opacity:.5"/>
         <p class="mt12" style="font-weight:600">任务账本未启用</p>
-        <p class="mut2" style="font-size:12.5px;margin-top:6px">在「配置中心 → agent.taskStore.enable」开启后，任务会在关键边界落盘为可恢复记录。</p>
+        <p class="mut2" style="font-size:12.5px;margin-top:6px">在「配置中心 → 任务账本」（agent.taskStore.enable）开启后，任务会在关键边界落盘为可恢复记录。</p>
       </div>
 
       <template v-else>

@@ -558,6 +558,7 @@
         { id: 'features', name: '功能分配', icon: 'zap', grad: 'var(--grad-honey)' },
         { id: 'selfstate', name: '自我状态', icon: 'bot', grad: 'var(--grad-rose)' },
         { id: 'reason', name: '推理参数', icon: 'zap', grad: 'var(--grad-sky)' },
+        { id: 'task', name: '任务账本', icon: 'schedule', grad: 'var(--grad-vio)' },
         { id: 'reply', name: '进度 / 回复渲染', icon: 'send', grad: 'var(--grad-mint)' },
         { id: 'memory', name: '记忆系统', icon: 'memory', grad: 'var(--grad-honey)' },
         { id: 'evolution', name: '自进化', icon: 'evolution', grad: 'var(--grad-rose)' },
@@ -1215,12 +1216,6 @@
             <cfg-row name="工具参数校验" desc="副作用前校验 schema(缺参/类型/多余参数结构化回报)">
               <v-switch v-model="form.toolSchemaValidate"/>
             </cfg-row>
-            <cfg-row name="任务账本" desc="可恢复任务记录(P0-3)：关键边界落盘;重启标记未结算任务,不自动重放">
-              <v-switch v-model="form.taskStore.enable"/>
-            </cfg-row>
-            <cfg-row name="任务库目录" desc="taskStore.dir（留空=默认 data/tasks）">
-              <input class="inp mono" style="width:200px" v-model="form.taskStore.dir" placeholder="data/tasks">
-            </cfg-row>
             <cfg-row name="反思模式" desc="回复前自检回环；jev=由 Jev 判断是否需要反思（需开启 Jev）">
               <select class="sel" style="width:150px" v-model="form.reflect"><option v-for="o in reflectOptions" :value="o[0]">{{ o[1] }}</option></select>
             </cfg-row>
@@ -1252,6 +1247,23 @@
                 </select>
               </cfg-row>
             </div></div>
+          </div></div>
+        </div>
+
+        <!-- ===== §1.2b 任务账本 ===== -->
+        <div :id="'cfg-task'" class="card cf-sec" :class="{open: open.task}">
+          <div class="cf-sh" @click="open.task = !open.task">
+            <span class="ct-ico" style="background:var(--grad-vio)"><v-icon name="schedule"/></span>
+            <div><div class="ct-t">任务账本</div><div class="ct-s">可恢复任务记录（P0-3）：关键边界落盘，重启标记未结算任务、不自动重放副作用</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
+          </div>
+          <div class="cf-body" v-show="open.task"><div class="cf-grid">
+            <cfg-row name="任务账本" desc="可恢复任务记录(P0-3)：关键边界落盘;重启标记未结算任务,不自动重放">
+              <v-switch v-model="form.taskStore.enable"/>
+            </cfg-row>
+            <cfg-row name="任务库目录" desc="taskStore.dir（留空=默认 data/tasks）">
+              <input class="inp mono" style="width:200px" v-model="form.taskStore.dir" placeholder="data/tasks">
+            </cfg-row>
           </div></div>
         </div>
 

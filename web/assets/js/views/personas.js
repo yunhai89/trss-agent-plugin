@@ -85,8 +85,14 @@
       const doAdopt = async (p) => {
         if (busy.value) return
         busy.value = 'adopt'
-        try { const r = await window.api.post(`/persona-lore/${p.id}/adopt`, {}); await loadLore(); toast(r?.ingestError ? `已采纳（长尾入库提示：${r.ingestError}）` : '已采纳人设资料，之后使用该人设以已核实事实为先') }
-        catch (e) { toast(e.message || '采纳失败', 'error') } finally { busy.value = '' }
+        try {
+          // 采纳改为「进审批门」：提交待审项，须在审批门批准后才 draft→active
+          const r = await window.api.post('/persona-adoptions', { personaId: p.id })
+          try { await window.store.loadPersonaAdoptions() } catch { /* noop */ }
+          toast(r?.duplicated
+            ? `「${p.name}」已有待审采纳，已刷新为最新草稿，请在「审批门」批准`
+            : `已提交「${p.name}」资料采纳审批，请在「审批门」批准后生效`)
+        } catch (e) { toast(e.message || '提交采纳审批失败', 'error') } finally { busy.value = '' }
       }
       const doDiscard = async (p) => {
         if (busy.value) return
@@ -100,7 +106,7 @@
     },
     template: `
     <div>
-      <page-head title="人设库" icon="persona" desc="data/personas/&lt;id&gt;.json + data/persona-lore/&lt;id&gt;.json · 内置为代码常量(只读)，可补齐/采纳角色设定资料">
+      <page-head title="人设库" icon="persona" desc="data/personas/&lt;id&gt;.json + data/persona-lore/&lt;id&gt;.json · 内置为代码常量(只读)；资料采纳须经「审批门」批准后生效">
         <button class="btn b-pri" @click="openCreate"><v-icon name="plus"/>新建人设</button>
       </page-head>
 
@@ -157,7 +163,7 @@
           <label class="f-label" style="margin:0">角色设定资料（已核实事实）</label>
           <div class="row g6" style="flex-wrap:wrap">
             <button class="btn b-soft b-sm" :disabled="!!busy" @click="doComplete(detail)"><v-icon name="search"/>{{ busy === 'complete' ? '检索中…' : (loreOf(detail) ? '重取' : '补齐') }}</button>
-            <button v-if="loreView(detail) && (lorePending(detail) || loreView(detail).status !== 'active')" class="btn b-pri b-sm" :disabled="!!busy" @click="doAdopt(detail)"><v-icon name="check"/>采纳</button>
+            <button v-if="loreView(detail) && (lorePending(detail) || loreView(detail).status !== 'active')" class="btn b-pri b-sm" :disabled="!!busy" @click="doAdopt(detail)" title="提交到审批门，批准后生效"><v-icon name="check"/>提交采纳</button>
             <button v-if="loreView(detail)" class="btn b-line b-sm" :disabled="!!busy" @click="doDiscard(detail)"><v-icon name="trash"/>丢弃</button>
           </div>
         </div>

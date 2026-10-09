@@ -801,33 +801,69 @@ router.get('/persona-lore', asyncHandler(async (req, res) => {
   return ok(res, r.personaLore ? r.personaLore.list() : [])
 }))
 
-// POST /api/persona-lore/:id/adopt —— 采纳草稿（draft→active；新内容首次采纳把 long-tail 灌入检索库）
+// POST /api/persona-lore/:id/adopt —— 提交「采纳」审批（不再直接生效；进 Web 审批门待主人批准）
 router.post('/persona-lore/:id/adopt', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
   if (!r.personaLore) return fail(res, CODE.BAD, '人设资料库未启用')
-  const draft = r.personaLore.getDraft(req.params.id)
-  const main = r.personaLore.get(req.params.id)
-  const src = draft || main
-  if (!src) return fail(res, CODE.NOTFOUND, `人设「${req.params.id}」暂无补齐资料`)
-  const newContent = !!draft || main?.status !== 'active'
-  let lore
-  try { lore = r.personaLore.adopt(req.params.id) }
-  catch (e) { return fail(res, CODE.BAD, e.message || String(e)) }
-  let ingestError = null
-  if (newContent && src.rawNotes) {
-    const ir = await r.personaLore.ingest(req.params.id, src.rawNotes, { title: `人设资料·${req.params.id}` }).catch((e) => ({ error: e?.message || e }))
-    // 近似重复=已有等价内容，不算失败（避免 refresh→采纳 时误报）
-    if (ir?.error && !/近似重复/.test(ir.error)) { ingestError = ir.error; Log.warn('[persona] 长尾资料入库失败', req.params.id, ir.error) }
-  }
-  return ok(res, { lore, ingestError })
+  if (!r.personaAdoptionQueue) return fail(res, CODE.BAD, '人设采纳审批未启用')
+  const p = r.personaStore?.get?.(req.params.id)
+  const result = r.personaAdoptionQueue.request({ personaId: req.params.id, personaName: p?.name || null, by: req.master, via: 'web' })
+  if (result.error) return fail(res, result.code === 'no_draft' ? CODE.NOTFOUND : CODE.BAD, result.error)
+  return ok(res, { item: result.item, duplicated: !!result.duplicated }, '已提交采纳审批，请在审批门批准')
 }))
 
 // DELETE /api/persona-lore/:id —— 丢弃资料（有独立草稿时只丢草稿；否则删主资料）
 router.delete('/persona-lore/:id', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
   if (!r.personaLore) return fail(res, CODE.BAD, '人设资料库未启用')
-  try { return ok(res, { removed: r.personaLore.discard(req.params.id) }) }
-  catch (e) { return fail(res, CODE.BAD, e.message || String(e)) }
+  try {
+    const removed = r.personaLore.discard(req.params.id)
+    // 草稿丢弃同步撤销其待审采纳项，避免审批门残留已无法采纳的条目
+    if (removed) { try { r.personaAdoptionQueue?.cancelByPersona?.(req.params.id) } catch { /* noop */ } }
+    return ok(res, { removed })
+  } catch (e) { return fail(res, CODE.BAD, e.message || String(e)) }
+}))
+
+// ── 人设采纳审批队列（PersonaAdoptionQueue，持久化；采纳须经此门批准才生效）──
+// GET /api/persona-adoptions?status=pending|all&personaId= —— 待审/历史列表
+router.get('/persona-adoptions', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaAdoptionQueue) return ok(res, [])
+  const status = String(req.query.status || 'pending')
+  return ok(res, r.personaAdoptionQueue.list({
+    status: status === 'all' ? null : status,
+    personaId: req.query.personaId ? String(req.query.personaId) : null,
+  }))
+}))
+
+// POST /api/persona-adoptions —— 提交采纳审批 { personaId }（Web 人设页「采纳」按钮）
+router.post('/persona-adoptions', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaAdoptionQueue) return fail(res, CODE.BAD, '人设采纳审批未启用')
+  const personaId = String((req.body || {}).personaId || '')
+  if (!personaId) return fail(res, CODE.BAD, '缺少 personaId')
+  const p = r.personaStore?.get?.(personaId)
+  const result = r.personaAdoptionQueue.request({ personaId, personaName: p?.name || null, by: req.master, via: 'web' })
+  if (result.error) return fail(res, result.code === 'no_draft' ? CODE.NOTFOUND : CODE.BAD, result.error)
+  return ok(res, { item: result.item, duplicated: !!result.duplicated }, '已提交采纳审批')
+}))
+
+// POST /api/persona-adoptions/:id/approve —— 批准：采纳磁盘当前草稿（draft→active）+ 灌长尾
+router.post('/persona-adoptions/:id/approve', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaAdoptionQueue) return fail(res, CODE.BAD, '人设采纳审批未启用')
+  const result = await r.personaAdoptionQueue.approve(req.params.id, { by: req.master })
+  if (result.error) return fail(res, CODE.BAD, result.error)
+  return ok(res, { item: result.item, lore: result.lore, ingestError: result.ingestError })
+}))
+
+// POST /api/persona-adoptions/:id/reject —— 驳回（保留草稿，可改后重新提交）{ reason? }
+router.post('/persona-adoptions/:id/reject', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaAdoptionQueue) return fail(res, CODE.BAD, '人设采纳审批未启用')
+  const result = r.personaAdoptionQueue.reject(req.params.id, { by: req.master, reason: (req.body || {}).reason })
+  if (result.error) return fail(res, CODE.BAD, result.error)
+  return ok(res, result.item)
 }))
 
 // POST /api/persona-lore/:id/complete —— 触发补齐任务（同步等待；可能较慢，产出草稿）

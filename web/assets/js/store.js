@@ -11,7 +11,7 @@
   // 覆盖为空 reactive（mock.js 若已加载则被覆盖；视图读取零改动，loadX 后填充）
   const MOCK = window.MOCK = reactive({
     config: null, scopes: [], memories: {}, recall: {}, profile: {}, personas: [], personaLore: [], skills: [], tools: [], toolPacks: [], kb: [],
-    conversations: [], sessions: {}, logFiles: [], logFilesTotal: 0, schedules: [], confirms: [],
+    conversations: [], sessions: {}, logFiles: [], logFilesTotal: 0, schedules: [], confirms: [], personaAdoptions: [],
     suggestions: [], perceptions: [], tokenTrend: [], requestTrend: [], toolTop: [],
     totalRequests: 0, totalToolCalls: 0, totalTokens: 0,
     stickerLib: null,
@@ -23,7 +23,15 @@
     const getToken = () => localStorage.getItem(TOKEN_KEY) || ''
     const setToken = (t) => { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY) }
     const request = async (method, p, { query, body } = {}) => {
-      const url = BASE + p + (query ? '?' + new URLSearchParams(query).toString() : '')
+      // 只拼接有值的查询参数：跳过 null/undefined（否则 new URLSearchParams 会写成字面量
+      // "scopeId=undefined"，后端当有效值过滤 → 结果恒空）。空字符串仍保留（语义可能与缺省不同）。
+      let qs = ''
+      if (query) {
+        const sp = new URLSearchParams()
+        for (const [k, v] of Object.entries(query)) { if (v != null) sp.append(k, String(v)) }
+        qs = sp.toString()
+      }
+      const url = BASE + p + (qs ? '?' + qs : '')
       const opt = { method, headers: {} }
       const tk = getToken()
       if (tk) opt.headers.Authorization = 'Bearer ' + tk
@@ -87,6 +95,7 @@
     },
     async loadSchedule() { MOCK.schedules = await api.get('/schedule') },
     async loadConfirm() { MOCK.confirms = await api.get('/confirm') },
+    async loadPersonaAdoptions(status) { MOCK.personaAdoptions = await api.get('/persona-adoptions', status ? { status } : undefined) },
     async loadSuggestions(scopeId, status) { MOCK.suggestions = await api.get('/suggestions', { scopeId, status }) },
     async loadOverview(query = {}) {
       const d = await api.get('/overview', query)

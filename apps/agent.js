@@ -64,7 +64,7 @@ import { miyousheTools } from '../model/miyoushe/index.js'
 import { loadToolPacks } from '../model/toolkit/index.js'
 import { createSearchManager, makeSearchTools } from '../model/search/index.js'
 import {
-  PersonaStore, PersonaService, PersonaLore,
+  PersonaStore, PersonaService, PersonaLore, PersonaAdoptionQueue,
   groundingText, PERSONA_COMPLETION_SYSTEM, buildCompletionInput,
   parseCompletionOutput, buildLoreDraft, formatDraftSummary,
 } from '../model/persona/index.js'
@@ -655,6 +655,13 @@ async function _buildRuntime(scope) {
   })
   personaLore.attachScheduler(scheduler) // 长尾/资料定时刷新复用 KB 同一 scheduler
   scope.register(() => { try { personaLore?.shutdown?.() } catch { /* noop */ } }, { name: 'personaLore', order: 25 })
+  // 人设资料「采纳」审批队列（持久化）：#采纳补齐 / Web 采纳按钮不再直接生效，
+  // 改为投递待审项，须在 Web 审批门批准后才 draft→active（人工复核自动补齐草稿）
+  const personaAdoptionQueue = new PersonaAdoptionQueue({
+    dir: path.resolve(PLUGIN_ROOT, cfg.personaLore?.adoptionsDir || 'data/persona-adoptions'),
+    personaLore,
+    logger: Log,
+  })
 
   // Skill（说明书 / 指令包）：从 skills/ 目录加载 .md/.js，按用户输入匹配后注入 prompt
   const skills = new SkillRegistry()
@@ -1144,10 +1151,12 @@ async function _buildRuntime(scope) {
     if (!parsed.ok) return { error: `补齐失败：${parsed.error}`, taskId }
     try {
       const lore = personaLore.saveDraft(p.id, buildLoreDraft({ data: parsed.data, by, model: cfg.model }))
+      // 该人设已有待审采纳项时刷新快照：审批门看到的始终是当前草稿
+      try { personaAdoptionQueue.refreshPending(p.id, { personaName: p.name }) } catch { /* noop */ }
       return { persona: p, lore, taskId }
     } catch (e) { return { error: `补齐产出未通过安全校验：${e?.message || e}`, code: e?.code, taskId } }
   }
-  // 定时刷新回调：周期重跑补齐 → 出新草稿（仍需 #采纳补齐 / 面板采纳才生效）
+  // 定时刷新回调：周期重跑补齐 → 出新草稿（仍需 #采纳补齐 / 面板采纳提交审批，批准后才生效）
   personaLore.setRefreshHandler((id) => completePersona(id, { by: 'schedule' }))
 
   // 视觉子模型（A 方案）：主模型不支持视觉时，由它把图片转成文本描述喂给主模型。
@@ -1344,7 +1353,7 @@ async function _buildRuntime(scope) {
     ['面板', cfg.webApi?.enable !== false ? `:${cfg.webApi?.port || 6098}` : 'off'],
   ])
 
-  return { agentConfig, makeAgent, completePersona, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, personaLore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore, scope }
+  return { agentConfig, makeAgent, completePersona, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, personaLore, personaAdoptionQueue, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore, scope }
 }
 
 const getRuntime = async () => {
@@ -3489,7 +3498,7 @@ export class Chat extends plugin {
     if (!cron) return this.e.reply(`无法识别时间「${m[2]}」，支持：每天8点/每2小时/工作日9点/每周一8点30/每30分钟`), true
     const r = await rt.personaLore.setRefresh(p.id, cron)
     if (r.error) return this.e.reply(r.error), true
-    await this.e.reply(`✓ 已为「${p.name}」（#${p.id}）设定人设资料定时刷新：${m[2].trim()}\n到点会重新检索并产出新草稿（需 #采纳补齐 生效）`)
+    await this.e.reply(`✓ 已为「${p.name}」（#${p.id}）设定人设资料定时刷新：${m[2].trim()}\n到点会重新检索并产出新草稿（需 #采纳补齐 提交审批、经审批门批准后生效）`)
     return true
   }
 
@@ -3541,25 +3550,14 @@ export class Chat extends plugin {
   async personaDraftAdopt() {
     const rt = await getRuntime()
     if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    if (!rt.personaAdoptionQueue) return this.e.reply('人设采纳审批未启用'), true
     const idOrName = this.e.msg.replace(/^#采纳补齐\s+/, '').trim()
     const p = this._resolvePersonaRef(rt, idOrName)
     if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
-    const draft = rt.personaLore.getDraft(p.id)
-    const main = rt.personaLore.get(p.id)
-    const src = draft || main
-    if (!src) return this.e.reply(`人设「${p.name}」暂无补齐资料`), true
-    // 仅当采纳的是新内容（独立草稿，或主文件尚为草稿）时才灌长尾库
-    const newContent = !!draft || main?.status !== 'active'
-    try {
-      rt.personaLore.adopt(p.id)
-    } catch (e) {
-      return this.e.reply(`采纳失败：${e?.message || e}`), true
-    }
-    if (newContent && src.rawNotes) {
-      const r = await rt.personaLore.ingest(p.id, src.rawNotes, { title: `人设资料·${p.name}` })
-      if (r?.error && !/近似重复/.test(r.error)) Log.warn('[persona] 长尾资料入库失败', r.error)
-    }
-    await this.e.reply(`✓ 已采纳人设资料：${p.name}（#${p.id}）。之后使用该人设时会以这些已核实事实为先。`)
+    // 采纳改为「进审批门」：不再直接生效，投递待审项，主人批准后才 draft→active
+    const res = rt.personaAdoptionQueue.request({ personaId: p.id, personaName: p.name, by: String(this.e.user_id || ''), via: 'qq' })
+    if (res.error) return this.e.reply(`提交采纳审批失败：${res.error}`), true
+    await this.e.reply(`📥 已将「${p.name}」（#${p.id}）的资料采纳提交审批（单号 ${res.item.id}）${res.duplicated ? '（已有待审项，已刷新为最新草稿）' : ''}。\n请在 Web 面板「审批门」批准后生效。`)
     return true
   }
 
@@ -3571,6 +3569,8 @@ export class Chat extends plugin {
     if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
     const isDraft = !!rt.personaLore.getDraft(p.id)
     const ok = rt.personaLore.discard(p.id)
+    // 草稿丢弃同步撤销其待审采纳项，避免审批门残留已无法采纳的条目
+    if (ok) { try { rt.personaAdoptionQueue?.cancelByPersona?.(p.id) } catch { /* noop */ } }
     await this.e.reply(ok ? `已丢弃人设资料${isDraft ? '（草稿）' : ''}：#${p.id}` : `人设「${p.name}」暂无补齐资料`)
     return true
   }

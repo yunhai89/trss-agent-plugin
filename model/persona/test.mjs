@@ -5,7 +5,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { PersonaStore, PersonaService, slugify, normalizePersona, BUILTIN_PERSONAS, PersonaLore, groundingText, assertSafeLore, parseCompletionOutput, buildLoreDraft } from './index.js'
+import { PersonaStore, PersonaService, slugify, normalizePersona, BUILTIN_PERSONAS, PersonaLore, PersonaAdoptionQueue, groundingText, assertSafeLore, parseCompletionOutput, buildLoreDraft } from './index.js'
 import { memoryKv } from '../agent/store/kv.js'
 
 let passed = 0
@@ -393,6 +393,87 @@ await test('PersonaService.resolveRef：序号与 id 一致', async () => {
   eq(svc.resolveRef('raiden-ei')?.id, 'raiden-ei', '按 id')
   ok(!!svc.resolveRef('猫娘'), '按名称模糊')
   eq(svc.resolveRef(''), null, '空 → null')
+})
+
+// ---------- 10. 采纳审批队列（PersonaAdoptionQueue）----------
+await test('采纳审批：提交→批准生效（draft→active）+ 持久化', async () => {
+  const loreDir = tmpDir()
+  const adoptDir = tmpDir()
+  const lore = new PersonaLore({ dir: loreDir, kv: memoryKv() })
+  lore.saveDraft('raiden-ei', { facts: '- 事实', rawNotes: '长尾资料', sources: [{ type: 'web', ref: 'x', title: '出处' }] })
+  const q = new PersonaAdoptionQueue({ dir: adoptDir, personaLore: lore })
+
+  const r = q.request({ personaId: 'raiden-ei', personaName: '雷电将军', by: 'u1', via: 'qq' })
+  ok(!r.error && r.item && r.item.status === 'pending', '提交生成 pending 待审项')
+  eq(r.item.personaName, '雷电将军', '人设名透传')
+  eq(q.pendingCount(), 1, '待审数 1')
+  eq(lore.get('raiden-ei').status, 'draft', '提交后草稿仍未生效')
+
+  // 持久化：新实例读取同一文件
+  const q2 = new PersonaAdoptionQueue({ dir: adoptDir, personaLore: lore })
+  eq(q2.pendingCount(), 1, '重开仍读到待审项（持久化）')
+
+  const ap = await q2.approve(r.item.id, { by: 'master' })
+  ok(!ap.error && ap.item.status === 'applied', '批准 → applied')
+  eq(lore.get('raiden-ei').status, 'active', '批准后草稿生效 active')
+  eq(q2.pendingCount(), 0, '待审清空')
+  // 幂等：重复批准报错、不重复副作用
+  const again = await q2.approve(r.item.id, { by: 'master' })
+  ok(again.error, '重复批准被拒（已处理）')
+  fs.rmSync(loreDir, { recursive: true, force: true })
+  fs.rmSync(adoptDir, { recursive: true, force: true })
+})
+
+await test('采纳审批：同一人设重复提交只保留一条并刷新快照', async () => {
+  const lore = new PersonaLore({ dir: tmpDir() })
+  const q = new PersonaAdoptionQueue({ dir: tmpDir(), personaLore: lore })
+  lore.saveDraft('p1', { facts: '- v1' })
+  const a = q.request({ personaId: 'p1' })
+  lore.saveDraft('p1', { facts: '- v2', summary: '新版' })
+  const b = q.request({ personaId: 'p1' })
+  ok(b.duplicated, '第二次提交标记 duplicated')
+  eq(b.item.id, a.item.id, '复用同一待审 id（不产生重复项）')
+  eq(q.pendingCount(), 1, '仍只有一条待审')
+  ok(b.item.snapshot.facts.includes('v2'), '快照刷新为最新草稿')
+  fs.rmSync(lore.dir, { recursive: true, force: true })
+  fs.rmSync(q.dir, { recursive: true, force: true })
+})
+
+await test('采纳审批：刷新快照 refreshPending / 驳回保留草稿 / 撤销', async () => {
+  const lore = new PersonaLore({ dir: tmpDir() })
+  const q = new PersonaAdoptionQueue({ dir: tmpDir(), personaLore: lore })
+  lore.saveDraft('p1', { facts: '- v1' })
+  const { item } = q.request({ personaId: 'p1' })
+  lore.saveDraft('p1', { facts: '- v2' })
+  ok(q.refreshPending('p1', { personaName: 'N' }), 'refreshPending 命中待审项')
+  eq(q.get(item.id).snapshot.facts.includes('v2'), true, '快照更新为 v2')
+
+  const rj = q.reject(item.id, { by: 'master', reason: '不准确' })
+  ok(!rj.error && rj.item.status === 'rejected', '驳回 → rejected')
+  eq(lore.get('p1').status, 'draft', '驳回保留草稿（未生效）')
+  ok(lore.getDraft('p1') === null, '主文件草稿仍在（无独立槽位时）')
+
+  // 撤销（草稿丢弃场景）
+  q.request({ personaId: 'p1' })
+  eq(q.cancelByPersona('p1'), 1, 'cancelByPersona 撤销 1 条')
+  eq(q.pendingCount(), 0, '待审清空')
+  fs.rmSync(lore.dir, { recursive: true, force: true })
+  fs.rmSync(q.dir, { recursive: true, force: true })
+})
+
+await test('采纳审批：无可采纳草稿 / 非法 id / 草稿消失', async () => {
+  const lore = new PersonaLore({ dir: tmpDir() })
+  const q = new PersonaAdoptionQueue({ dir: tmpDir(), personaLore: lore })
+  ok(q.request({ personaId: 'nope' }).error, '无草稿 → 提交报错')
+  ok(q.request({ personaId: '../etc/passwd' }).error, '非法 id 被拒')
+  lore.saveDraft('p1', { facts: 'x' })
+  const { item } = q.request({ personaId: 'p1' })
+  lore.discard('p1')
+  const ap = await q.approve(item.id, { by: 'master' })
+  ok(ap.error, '草稿已丢弃 → 批准报错（不产出副作用）')
+  eq(q.get(item.id).status, 'pending', '未误标为 applied')
+  fs.rmSync(lore.dir, { recursive: true, force: true })
+  fs.rmSync(q.dir, { recursive: true, force: true })
 })
 
 // ---------- 总结 ----------
