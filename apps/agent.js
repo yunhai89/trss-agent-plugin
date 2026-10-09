@@ -585,6 +585,7 @@ async function _buildRuntime(scope) {
       Log.debug('[task] 任务账本已启用')
     } catch (e) {
       Log.warn('[task] 任务账本初始化失败，降级为不可恢复模式', e?.message || e)
+      try { await taskStore?.close?.() } catch { /* noop */ } // F16：初始化失败关闭已打开连接
       taskStore = null
     }
   }
@@ -1233,11 +1234,12 @@ async function _buildRuntime(scope) {
   // 关闭幂等且 await 资源真正退出；热重载/退出只调 scope.close()，不再散落手工关闭。
   scope.register(() => { try { schedule?.shutdown?.() } catch { /* noop */ } }, { name: 'schedule' })
   scope.register(() => { try { knowledge?.shutdown?.() } catch { /* noop */ } }, { name: 'knowledge' })
+  scope.register(async () => { try { await mcp?.stop?.() } catch { /* noop */ } }, { name: 'mcp' }) // F15：登记 MCP 关闭
   scope.register(async () => {
-    try { toolEvo?.runner?.stop?.() } catch { /* noop */ }
+    try { await toolEvo?.runner?.stop?.() } catch { /* noop */ } // F15：await 隔离 worker 真正退出
     try { await toolEvo?.closeDb?.() } catch { /* noop */ }
   }, { name: 'toolEvo' })
-  scope.register(() => { try { stagehand?.sessionMgr?.closeAll?.() } catch { /* noop */ } }, { name: 'stagehand' })
+  scope.register(async () => { try { await stagehand?.sessionMgr?.closeAll?.() } catch { /* noop */ } }, { name: 'stagehand' }) // F15：await 浏览器会话退出
   scope.register(() => { try { diagram?.stop?.() } catch { /* noop */ } }, { name: 'diagram' })
   scope.register(async () => {
     try { await usageStats?.flushNow?.() } catch { /* noop */ }
@@ -1268,9 +1270,12 @@ const getRuntime = async () => {
   if (!_runtimePromise) {
     const gen = _runtimeGen
     _runtimePromise = buildRuntime()
-      .then((rt) => {
+      .then(async (rt) => {
         // 构建期间配置被热重载（invalidateRuntime 递增 gen）→ 丢弃旧配置结果，改用新配置重建
-        if (gen !== _runtimeGen) return getRuntime()
+        if (gen !== _runtimeGen) {
+          try { await rt?.scope?.close?.('stale_build') } catch { /* noop */ } // F16：过期构建关闭资源，不遗留
+          return getRuntime()
+        }
         _runtime = rt
         _runtimeFailed = null
         // 运行时（重）建后恢复定时调度：提醒 / 定时任务链 + KB 定时刷新。
@@ -1303,7 +1308,9 @@ function invalidateRuntime() {
   _initErrLogged = false // 允许再次记录初始化失败（若仍失败）
   _initFailNotified.clear() // runtime 重建：重置"已提示"标记，下次失败可再提示用户
 
+  const prev = _closingPromise // F17：串接未完成的关闭屏障，重复 invalidate 不得绕过旧代清理
   const p = (async () => {
+    if (prev) { try { await prev } catch { /* noop */ } }
     if (rt?.scope?.close) {
       // P0-4：统一走 scope（幂等、await 资源退出、按依赖顺序）
       try { const s = await rt.scope.close('invalidate'); return s } catch (e) { Log.warn('[runtime] 作用域清理异常', e?.message || e) }
