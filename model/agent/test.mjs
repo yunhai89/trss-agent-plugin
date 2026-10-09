@@ -9,6 +9,7 @@ import path from 'node:path'
 import {
   Agent,
   ToolRegistry,
+  ToolScheduler,
   MemoryStore,
   MemoryLimitError,
   createMemoryTool,
@@ -2130,6 +2131,26 @@ await test('F13：工具上报的嵌套用量并入根 usage', async () => {
   ])
   const r = await new Agent({ provider, tools, maxTurns: 4 }).run('x')
   ok(r.usage && r.usage.input >= 100, '根 usage 含嵌套（编排/子代理）用量')
+})
+
+// ---------- F10：跨 Agent 共享调度器 ----------
+await test('F10：跨 Agent 共享调度器同资源互斥', async () => {
+  const scheduler = new ToolScheduler({ maxParallel: 1 })
+  let active = 0, peak = 0
+  const mkAgent = () => {
+    const tools = new ToolRegistry().register({
+      name: 'browser_op', description: 'd', parameters: { type: 'object' },
+      meta: { concurrency: 'resource', resourceKeys: () => ['browser:same'] },
+      async execute() { active++; peak = Math.max(peak, active); await delay(20); active--; return 'ok' },
+    })
+    const provider = mockProvider([
+      { toolCalls: [{ id: 'c', name: 'browser_op', arguments: {} }], finishReason: 'tool_calls' },
+      { content: 'done', finishReason: 'stop' },
+    ])
+    return new Agent({ provider, tools, maxTurns: 4, toolScheduler: scheduler })
+  }
+  await Promise.all([mkAgent().run('a'), mkAgent().run('b')])
+  eq(peak, 1, '跨 Agent 同资源无重叠')
 })
 
 // ---------- 总结 ----------

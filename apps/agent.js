@@ -43,6 +43,8 @@ import {
   validateToolArgs,
   RuntimeScope,
   abortActiveRun,
+  abortAllActiveRuns,
+  ToolScheduler,
 } from '../model/agent/index.js'
 import { presets as openaiPresets } from '../model/openai/index.js'
 import { stripInlineToolCalls } from '../model/openai/helpers.js'
@@ -1028,8 +1030,9 @@ async function _buildRuntime(scope) {
     contextWindow: cfg.contextWindow || null,
     compactArchive, // 无损压缩归档（null=无归档压缩；见上方装配说明）
     maxToolResultChars: cfg.maxToolResultChars ?? 4000,
-    // 工具受控并发（P0-2）：全局滚动池上限；未声明并发语义的工具默认独占
+    // 工具受控并发（P0-2/F10）：全局滚动池上限；未声明并发语义的工具默认独占；跨 Agent 共享同一调度器
     toolConcurrency: { maxParallel: Math.max(1, Number(cfg.toolConcurrency?.maxParallel) || 3) },
+    toolScheduler: new ToolScheduler({ maxParallel: Math.max(1, Number(cfg.toolConcurrency?.maxParallel) || 3) }),
     toolSchemaValidate: cfg.toolSchemaValidate !== false, // 工具参数 schema 预校验（默认开；关=回滚杠杆）
     taskStore, // 可恢复任务账本（P0-3；null=关闭）
     keepReasoning: cfg.keepReasoning === true,
@@ -1235,6 +1238,8 @@ async function _buildRuntime(scope) {
 
   // P0-4：按依赖顺序登记清理（order 小先关）。toolEvo 先于 sandbox（runner 依赖其 transport），
   // 关闭幂等且 await 资源真正退出；热重载/退出只调 scope.close()，不再散落手工关闭。
+  // F14：先取消并等待在途 Agent run 退出，再关依赖资源/账本（关库晚于最后一个写账本的执行体）
+  scope.register(async () => { try { const n = await abortAllActiveRuns(); if (n) Log.info(`[runtime] 关闭：已取消并等待 ${n} 个在途任务退出`) } catch { /* noop */ } }, { name: 'active-runs', order: -1 })
   scope.register(() => { try { schedule?.shutdown?.() } catch { /* noop */ } }, { name: 'schedule' })
   scope.register(() => { try { knowledge?.shutdown?.() } catch { /* noop */ } }, { name: 'knowledge' })
   scope.register(async () => { try { await mcp?.stop?.() } catch { /* noop */ } }, { name: 'mcp' }) // F15：登记 MCP 关闭

@@ -74,7 +74,7 @@ const NOT_EXECUTED_ERRORS = new Set([
   'rejected_by_shell_intercept', 'journal_unavailable', 'cancelled',
 ])
 
-/** 运行时在途任务注册表（F02）：taskId → { cancel }；供 QQ/Web 取消真正中止在途模型/工具/排队。 */
+/** 运行时在途任务注册表（F02）：taskId → { cancel, done }；供 QQ/Web 取消真正中止在途模型/工具/排队。 */
 const _activeRuns = new Map()
 export function abortActiveRun(taskId) {
   const h = _activeRuns.get(taskId)
@@ -83,6 +83,14 @@ export function abortActiveRun(taskId) {
   return true
 }
 export function isAgentRunActive(taskId) { return _activeRuns.has(taskId) }
+
+/** F14：中止并等待所有在途 run 结算（热重载/关闭时先于关库调用）。 */
+export async function abortAllActiveRuns() {
+  const handles = [..._activeRuns.values()]
+  for (const h of handles) { try { h.cancel() } catch { /* noop */ } }
+  await Promise.allSettled(handles.map((h) => h.done))
+  return handles.length
+}
 
 /** 工具结果签名（LoopGovernor 判"新事实"用）：长度 + 首尾片段 + 简单散列，
  *  区分"同参同结果空转"与"轮询状态变化"。结果已被 resultCap 截断，O(n) 开销可忽略。 */
@@ -244,7 +252,8 @@ export class Agent {
 
     // 工具受控并发（P0-2）：未声明并发语义的工具默认独占，内置只读工具显式并发；全局滚动池上限。
     this.toolMaxParallel = Math.max(1, Number(config.toolConcurrency?.maxParallel) || 3)
-    this._toolScheduler = new ToolScheduler({ maxParallel: this.toolMaxParallel })
+    // F10：优先复用注入的共享调度器（同一运行时跨 Agent 共享资源锁与并发额度）
+    this._toolScheduler = config.toolScheduler || new ToolScheduler({ maxParallel: this.toolMaxParallel })
     this.toolSchemaValidate = config.toolSchemaValidate !== false // 工具参数 schema 预校验（可关，回滚杠杆）
     // 可恢复任务账本（P0-3，opt-in）：传入 TaskStore 时在关键边界落盘检查点；缺省不影响主流程
     this.taskStore = config.taskStore || null
@@ -620,8 +629,10 @@ export class Agent {
       signal.addEventListener('abort', onUserAbort, { once: true })
     }
     const workSignal = workCtl.signal
-    // F02：注册在途任务，使 QQ/Web 取消能真正中止本 run（模型/工具经 workSignal 协作取消）
-    _activeRuns.set(taskId, { cancel: () => { this._runCancelled = true; try { workCtl.abort({ kind: 'user' }) } catch { /* noop */ } } })
+    // F02/F14：注册在途任务（含完成 promise），使 QQ/Web 取消与运行时关闭能真正中止并等待本 run
+    let runDoneResolve = () => {}
+    const runDone = new Promise((r) => { runDoneResolve = r })
+    _activeRuns.set(taskId, { cancel: () => { this._runCancelled = true; try { workCtl.abort({ kind: 'user' }) } catch { /* noop */ } }, done: runDone })
     let workTimer = null
     if (this.governor?.timeBudgetMs) {
       workTimer = setTimeout(() => {
@@ -871,6 +882,7 @@ export class Agent {
       if (workTimer) clearTimeout(workTimer) // 工作计时到点即清——收尾走独立宽限窗
       if (signal) signal.removeEventListener('abort', onUserAbort)
       _activeRuns.delete(taskId) // F02：run 结束注销在途登记
+      try { runDoneResolve() } catch { /* noop */ }
     }
 
     if (!stopReason) {

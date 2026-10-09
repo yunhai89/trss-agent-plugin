@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import sqlite3 from 'sqlite3'
 import { TaskStore, scopeKeyOfCtx } from './task-store.js'
-import { Agent, abortActiveRun } from './Agent.js'
+import { Agent, abortActiveRun, abortAllActiveRuns } from './Agent.js'
 import { ToolRegistry } from './tools/registry.js'
 
 let passed = 0
@@ -438,6 +438,23 @@ await test('F07：execution 完成与 delivery 状态分开入账', async () => 
   eq(t.phase, 'completed', '执行仍为 completed')
   ok(Array.isArray(t.deliveries) && t.deliveries[0].status === 'failed', 'deliveries 记 failed')
   ok((await s.listEvents('t')).some((e) => e.kind === 'delivery'), '写入 delivery 事件')
+  await s.close()
+})
+
+// ---------- 23. F14：关闭时取消并等待在途 run ----------
+await test('F14：abortAllActiveRuns 取消并等待在途 run', async () => {
+  const dir = tmp()
+  const s = new TaskStore({ dir }); await s.open()
+  let startedResolve
+  const started = new Promise((r) => { startedResolve = r })
+  const provider = { async chat(o) { startedResolve(); return new Promise((_, rej) => { o.signal.addEventListener('abort', () => rej(new Error('aborted')), { once: true }) }) } }
+  const agent = new Agent({ provider, taskStore: s })
+  const p = agent.run('x', { taskId: 't', ctx: CTX }).catch(() => {})
+  await started
+  const n = await abortAllActiveRuns()
+  eq(n, 1, '取消并等待 1 个在途 run')
+  await p
+  eq((await s.get('t')).phase, 'cancelled', 'run 已结算终态')
   await s.close()
 })
 

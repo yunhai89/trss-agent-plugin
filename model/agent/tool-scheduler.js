@@ -82,99 +82,93 @@ export function resolveToolConcurrency(tool, args, ctx) {
  * @typedef {{ concurrency: string, resourceKeys?: string[], run: () => any }} SchedulerTask
  * @typedef {{ ok: boolean, value?: any, cancelled?: boolean, error?: any }} SchedulerResult
  */
+
+/**
+ * ToolScheduler —— 单实例内**跨 run / 跨 Agent 共享**的受控并发门（F10）。
+ * active 计数与资源锁是实例级：同一运行时的多个 Agent 共享同一个实例，因此
+ * 相同资源键跨 Agent 互斥、全局并发受 maxParallel 约束。生产装配注入单例。
+ */
 export class ToolScheduler {
   constructor({ maxParallel = 3 } = {}) {
     this.maxParallel = Math.max(1, Number(maxParallel) || 1)
+    this._active = 0
+    this._held = new Map() // key -> refcount
+    this._queue = [] // { task, signal, settle }
+    this._exclusiveActive = false
+  }
+
+  _keysFree(keys) { return keys.every((k) => !this._held.has(k)) }
+  _take(keys) { for (const k of keys) this._held.set(k, (this._held.get(k) || 0) + 1) }
+  _free(keys) {
+    for (const k of keys) {
+      const c = (this._held.get(k) || 0) - 1
+      if (c <= 0) this._held.delete(k)
+      else this._held.set(k, c)
+    }
   }
 
   /**
-   * 按原始顺序调度一批任务。
+   * 提交一批任务；结果按 tasks 原序返回。同一实例的并发 run 共享额度与资源锁。
    * @param {SchedulerTask[]} tasks
    * @param {{ signal?: AbortSignal }} [opts]
-   * @returns {Promise<SchedulerResult[]>} 与 tasks 同序
+   * @returns {Promise<SchedulerResult[]>}
    */
-  async run(tasks, { signal = null } = {}) {
+  run(tasks, { signal = null } = {}) {
+    if (!tasks.length) return Promise.resolve([])
     const results = new Array(tasks.length).fill(null)
+    const n = tasks.length
+    let completed = 0
+    return new Promise((resolve) => {
+      const settleAt = (idx, res) => { results[idx] = res; if (++completed === n) resolve(results) }
+      tasks.forEach((task, idx) => this._queue.push({ task, signal, settle: (res) => settleAt(idx, res) }))
+      this._pump()
+    })
+  }
+
+  _pump() {
+    if (this._exclusiveActive) return // 独占运行中：屏障，后续全部等待
     let i = 0
-    while (i < tasks.length) {
-      const t = tasks[i]
-      if (t.concurrency === EXCLUSIVE) {
-        results[i] = await this._runExclusive(t, signal)
-        i++
+    while (i < this._queue.length) {
+      const item = this._queue[i]
+      const task = item.task
+      if (item.signal?.aborted) { // 取消：排队项不启动，标记 cancelled（在跑项已由各自 finally 处理）
+        this._queue.splice(i, 1)
+        item.settle({ ok: false, cancelled: true })
         continue
       }
-      // 收集连续的非 exclusive 任务为一个并发组（exclusive 作为屏障分隔）
-      const group = []
-      while (i < tasks.length && tasks[i].concurrency !== EXCLUSIVE) {
-        group.push({ task: tasks[i], idx: i })
-        i++
-      }
-      await this._runGroup(group, results, signal)
-    }
-    return results
-  }
-
-  async _runExclusive(task, signal) {
-    if (signal?.aborted) return { ok: false, cancelled: true }
-    try { return { ok: true, value: await task.run() } } catch (error) { return { ok: false, error } }
-  }
-
-  async _runGroup(group, results, signal) {
-    const pending = [...group]
-    const active = new Map() // promise -> { idx, keys }
-    const held = new Map() // key -> refcount
-
-    const keysFree = (keys) => keys.every((k) => !held.has(k))
-    const takeKeys = (keys) => { for (const k of keys) held.set(k, (held.get(k) || 0) + 1) }
-    const freeKeys = (keys) => {
-      for (const k of keys) {
-        const c = (held.get(k) || 0) - 1
-        if (c <= 0) held.delete(k)
-        else held.set(k, c)
-      }
-    }
-
-    while (pending.length || active.size) {
-      if (signal?.aborted) {
-        // 取消：排队项不再启动，标记为 cancelled（已在跑的等待结算）
-        while (pending.length) {
-          const e = pending.shift()
-          results[e.idx] = { ok: false, cancelled: true }
-        }
-      }
-      // 在并发上限内，挑选资源键可用的最早任务启动
-      let started = false
-      while (!signal?.aborted && active.size < this.maxParallel && pending.length) {
-        let pick = -1
-        for (let p = 0; p < pending.length; p++) {
-          if (keysFree(pending[p].task.resourceKeys || [])) { pick = p; break }
-        }
-        if (pick < 0) break
-        const entry = pending.splice(pick, 1)[0]
-        const keys = entry.task.resourceKeys || []
-        takeKeys(keys)
-        const p = Promise.resolve()
-          .then(() => entry.task.run())
-          .then(
-            (value) => { results[entry.idx] = { ok: true, value } },
-            (error) => { results[entry.idx] = { ok: false, error } },
-          )
-          .finally(() => { freeKeys(keys); active.delete(p) })
-        active.set(p, entry)
-        started = true
-      }
-      if (!active.size) {
-        if (pending.length && !signal?.aborted) {
-          // 理论不可达（无 active 时资源键必空闲）。防御：按序强制启动，避免死锁。
-          const entry = pending.shift()
-          try { results[entry.idx] = { ok: true, value: await entry.task.run() } }
-          catch (error) { results[entry.idx] = { ok: false, error } }
-          continue
+      if (task.concurrency === EXCLUSIVE) {
+        // 独占屏障：必须全局空闲才能启动；未空闲则阻塞其后所有任务（不跳过）
+        if (this._active === 0 && this._held.size === 0) {
+          this._queue.splice(i, 1)
+          this._start(item, true)
         }
         break
       }
-      if (!started && active.size) { /* 等待现有任务让出资源/槽位 */ }
-      await Promise.race([...active.keys()])
+      const keys = task.resourceKeys || []
+      if (this._active < this.maxParallel && this._keysFree(keys)) {
+        this._queue.splice(i, 1)
+        this._start(item, false)
+        continue
+      }
+      i++
     }
   }
+
+  _start(item, exclusive) {
+    const keys = item.task.resourceKeys || []
+    this._active++
+    this._take(keys)
+    if (exclusive) this._exclusiveActive = true
+    Promise.resolve()
+      .then(() => item.task.run())
+      .then((value) => item.settle({ ok: true, value }), (error) => item.settle({ ok: false, error }))
+      .finally(() => {
+        this._active--
+        this._free(keys)
+        if (exclusive) this._exclusiveActive = false
+        this._pump()
+      })
+  }
+
+  stats() { return { maxParallel: this.maxParallel, active: this._active, waiting: this._queue.length, held: [...this._held.keys()] } }
 }

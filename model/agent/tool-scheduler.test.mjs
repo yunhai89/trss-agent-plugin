@@ -101,6 +101,18 @@ await test('ToolScheduler：已取消的 exclusive 不执行', async () => {
   eq(out[0].cancelled, true, 'cancelled')
 })
 
+await test('ToolScheduler：同一实例跨 run 共享资源锁与额度（F10）', async () => {
+  const s = new ToolScheduler({ maxParallel: 1 })
+  let active = 0, peak = 0
+  const mk = () => ({ concurrency: 'resource', resourceKeys: ['browser:same'], run: async () => { active++; peak = Math.max(peak, active); await delay(20); active--; return 'ok' } })
+  await Promise.all([s.run([mk()]), s.run([mk()])])
+  eq(peak, 1, '跨 run 同资源峰值 1（全局互斥）')
+  let active2 = 0, peak2 = 0
+  const mk2 = () => ({ concurrency: 'parallel', resourceKeys: [], run: async () => { active2++; peak2 = Math.max(peak2, active2); await delay(20); active2--; return 'ok' } })
+  await Promise.all([s.run([mk2(), mk2()]), s.run([mk2(), mk2()])])
+  eq(peak2, 1, '跨 run 共享全局并发上限 1')
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)
