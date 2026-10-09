@@ -1087,39 +1087,60 @@ async function _buildRuntime(scope) {
 
   /**
    * 人设补齐：跑一次"资料员"任务（只读取材）→ 解析结构化产出 → 存草稿（不自动生效）。
-   * 供 #人设补齐 命令、Web 面板、定时刷新共用。用独立 scratch 作用域，不污染用户会话/记忆。
+   * 供 #人设补齐 命令、Web 面板、定时刷新共用。
+   * 复用主 Agent 任务系统：传入调用方真实 ctx 时，任务按同一 scopeKey 记入任务账本
+   * （#任务列表/#任务状态/#取消任务/#继续任务 可见可管），并保留真实身份使浏览器等工具可用；
+   * run 以 ephemeral 模式执行——不读写会话历史、不注入/抽取召回记忆与画像，避免污染用户长期上下文。
+   * @param {string} idOrName
+   * @param {{ by?: string|null, ctx?: object|null }} opts
    * @returns {Promise<{ persona?, lore?, error?, code? }>}
    */
-  const completePersona = async (idOrName, { by = null } = {}) => {
+  const completePersona = async (idOrName, { by = null, ctx: baseCtx = null } = {}) => {
     const p = personaStore.get(idOrName)
     if (!p) return { error: `未找到人设「${idOrName}」` }
+    let botUin = ''
+    try { botUin = String((typeof Bot !== 'undefined' && (Bot.uin || Bot.uins?.[0])) || '') } catch { /* noop */ }
+    const b = (baseCtx && typeof baseCtx === 'object') ? baseCtx : {}
     const completionCtx = {
-      userId: '__persona_complete__', groupId: null, isGroup: false, isMaster: false, role: 'member',
-      isGroupAdmin: false, isolation: true,
-      // 每 persona 独立 scratch 作用域：防 A 角色补齐抽取的记忆被 B 角色补齐召回（串号）
-      scopeUserId: `__persona_complete__:${p.id}`, scopeId: `persona_complete_${p.id}`,
-      conversationId: `persona-complete:${p.id}`,
-      notify: () => {}, fetcher: (typeof fetch !== 'undefined' && fetch) || null,
-      // 剥离事件 e：防只读取材工具（miyoushe_post 发图）把内容误发到群/好友
-      miyoushe: { cookie: cfg.miyoushe?.cookie || '', defaultGid: cfg.miyoushe?.defaultGid || 2 },
-      replyMode: 'text', selfId: '',
+      ...b,
+      // 剥离事件 e：防只读取材工具（miyoushe_post 发图）把内容误发到群/好友；
+      // 浏览器/工具身份改由下面显式 userId/selfId 提供，不依赖 e。
+      e: undefined,
+      userId: String(b.userId || `__persona_complete__:${p.id}`),
+      selfId: String(b.selfId || botUin || ''),
+      isMaster: b.isMaster === true,
+      role: b.role || (b.isMaster === true ? 'owner' : 'member'),
+      // 安全：补齐是"读外部资料"的自动化任务，即便发起者是主人也不给"免确认直执行"——
+      // 状态类工具(terminal/浏览器/群管等)一律走审批门，防外部网页经注入驱动副作用。
+      masterSelfSkip: false,
+      groupId: b.groupId != null ? b.groupId : null,
+      scopeUserId: String(b.scopeUserId || b.userId || `__persona_complete__:${p.id}`),
+      scopeId: String(b.scopeId || `persona_complete_${p.id}`),
+      // 传入真实会话时复用其 scopeKey → 任务落进该会话的主任务账本
+      conversationId: b.conversationId != null ? b.conversationId : `persona-complete:${p.id}`,
+      notify: typeof b.notify === 'function' ? b.notify : (() => {}),
+      fetcher: b.fetcher || ((typeof fetch !== 'undefined' && fetch) || null),
+      miyoushe: b.miyoushe || { cookie: cfg.miyoushe?.cookie || '', defaultGid: cfg.miyoushe?.defaultGid || 2 },
+      replyMode: 'text',
     }
     let out
+    const taskId = randomUUID()
     try {
-      out = await makeAgent({ maxTurns: cfg.schedule?.taskMaxTurns || 15 }).run(buildCompletionInput(p), {
+      out = await makeAgent({ maxTurns: cfg.schedule?.taskMaxTurns || 15, masterSkipConfirm: false }).run(buildCompletionInput(p), {
         ctx: completionCtx,
         systemPrompt: PERSONA_COMPLETION_SYSTEM, // 身份层替换为资料员；工具/防护仍照常追加
+        ephemeral: true, // 借用真实身份/任务账本，但不污染会话历史/记忆
         // 有界运行：即便被外部资料诱导触发审批类工具，也最多等 signal 超时，不会卡满审批超时(默认 300s)
         signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(180000) : null,
-        taskId: randomUUID(),
+        taskId,
       })
-    } catch (e) { return { error: `补齐任务失败：${e?.message || e}` } }
+    } catch (e) { return { error: `补齐任务失败：${e?.message || e}`, taskId } }
     const parsed = parseCompletionOutput(out?.content || '')
-    if (!parsed.ok) return { error: `补齐失败：${parsed.error}` }
+    if (!parsed.ok) return { error: `补齐失败：${parsed.error}`, taskId }
     try {
       const lore = personaLore.saveDraft(p.id, buildLoreDraft({ data: parsed.data, by, model: cfg.model }))
-      return { persona: p, lore }
-    } catch (e) { return { error: `补齐产出未通过安全校验：${e?.message || e}`, code: e?.code } }
+      return { persona: p, lore, taskId }
+    } catch (e) { return { error: `补齐产出未通过安全校验：${e?.message || e}`, code: e?.code, taskId } }
   }
   // 定时刷新回调：周期重跑补齐 → 出新草稿（仍需 #采纳补齐 / 面板采纳才生效）
   personaLore.setRefreshHandler((id) => completePersona(id, { by: 'schedule' }))
@@ -3326,6 +3347,14 @@ export class Chat extends plugin {
     return rt.persona.resolveRef(input)
   }
 
+  /** 补齐任务的真实 ctx（含活动会话 + 机器人身份）：使任务并入主任务账本、浏览器等工具可用。 */
+  async _personaCompletionCtx(rt) {
+    const base = ctxOf(this.e)
+    try { base.conversationId = await rt.session.getActiveConversation(base.scopeUserId, base.groupId) } catch { /* 用默认 */ }
+    base.selfId = String(this.e.self_id || this.e.selfId || '')
+    return base
+  }
+
   async personaSwitch() {
     const input = this.e.msg.replace(/^#人设\s+/, '').trim()
     const rt = await getRuntime()
@@ -3422,9 +3451,9 @@ export class Chat extends plugin {
     const p = this._resolvePersonaRef(rt, idOrName)
     if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
     await this.e.reply(`🔎 已启动人设补齐任务（${p.name}），正在检索角色资料，请稍候…`)
-    const r = await rt.completePersona(p.id, { by: String(this.e.user_id || '') })
+    const r = await rt.completePersona(p.id, { by: String(this.e.user_id || ''), ctx: await this._personaCompletionCtx(rt) })
     if (r.error) return this.e.reply(`${r.error}（可重试 #人设补齐 ${p.id}）`), true
-    await this.e.reply(formatDraftSummary(r.lore))
+    await this.e.reply(formatDraftSummary(r.lore) + (r.taskId ? `\n任务：${r.taskId}（#任务状态 ${r.taskId}）` : ''))
     return true
   }
 
@@ -3435,9 +3464,9 @@ export class Chat extends plugin {
     const p = this._resolvePersonaRef(rt, idOrName)
     if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
     await this.e.reply(`🔁 正在为人设「${p.name}」重新检索资料…`)
-    const r = await rt.completePersona(p.id, { by: String(this.e.user_id || '') })
+    const r = await rt.completePersona(p.id, { by: String(this.e.user_id || ''), ctx: await this._personaCompletionCtx(rt) })
     if (r.error) return this.e.reply(`${r.error}`), true
-    await this.e.reply(formatDraftSummary(r.lore))
+    await this.e.reply(formatDraftSummary(r.lore) + (r.taskId ? `\n任务：${r.taskId}` : ''))
     return true
   }
 

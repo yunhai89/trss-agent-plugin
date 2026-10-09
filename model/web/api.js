@@ -834,9 +834,15 @@ router.delete('/persona-lore/:id', asyncHandler(async (req, res) => {
 router.post('/persona-lore/:id/complete', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
   if (!r.completePersona) return fail(res, CODE.BAD, '人设补齐未启用')
-  const result = await r.completePersona(req.params.id, { by: req.master })
+  // 传入发起者（master）真实身份 ctx：任务并入主任务账本（Web 任务账本可见），浏览器等工具可用
+  const ctx = {
+    userId: String(req.master), isMaster: true, role: 'owner',
+    scopeUserId: String(req.master), scopeId: `u_${req.master}`,
+    groupId: null, conversationId: 'persona-complete',
+  }
+  const result = await r.completePersona(req.params.id, { by: req.master, ctx })
   if (result.error) return fail(res, CODE.BAD, result.error)
-  return ok(res, result.lore)
+  return ok(res, { ...result.lore, taskId: result.taskId })
 }))
 
 // POST /api/persona-lore/:id/refresh —— 设定时刷新 { cron }（null/省略=取消）；接受自然语言或 5 段 cron

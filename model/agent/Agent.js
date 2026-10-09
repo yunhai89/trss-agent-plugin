@@ -454,6 +454,9 @@ export class Agent {
     const systemPromptOverride = opts.systemPrompt || null
     // 情境感知（skill 注入）：如"首次入群"获取的群信息/聊天记录
     const context = opts.context || null
+    // 临时任务模式（如人设补齐）：借用真实 ctx 的身份/权限/任务账本，但不读写会话历史、
+    // 不注入/抽取召回记忆与画像——避免把一次性研究污染用户长期上下文。
+    const ephemeral = opts.ephemeral === true
 
     const rawText = this._inputText(input)
     this._lastUserText = rawText // 本轮用户原始文本（反思 Jev 判定用）
@@ -523,7 +526,9 @@ export class Agent {
     const scopeId = ctx?.scopeId
     const useConv = !!(this.session && ctx && ctx.conversationId != null && typeof this.session.getConversation === 'function')
     let sessKey = null
-    if (useConv) {
+    if (ephemeral) {
+      this.messages = [] // 临时任务：不加载会话历史（任务账本仍按 ctx 的 scopeKey 记账）
+    } else if (useConv) {
       try { this.messages = await this.session.getConversation(scopeUserId, ctx.groupId, ctx.conversationId) } catch { this.messages = [] }
     } else if (this.session && ctx) {
       sessKey = this.session.key(ctx.groupId, scopeUserId)
@@ -532,9 +537,9 @@ export class Agent {
     const sessStart = this.messages.length
     // prompt_cache_key 的会话标识（_promptCacheKeyFor 读取）：多对话模式用 群:用户:会话id，
     // 群:用户 模式用 sessKey。此前从未赋值 → 不同会话算出同一个键，会话级路由隔离失效。
-    this._curConvId = useConv
-      ? `${ctx.groupId || 'p'}:${scopeUserId}:${ctx.conversationId}`
-      : (sessKey || null)
+    this._curConvId = ephemeral
+      ? `ephemeral:${taskId}`
+      : (useConv ? `${ctx.groupId || 'p'}:${scopeUserId}:${ctx.conversationId}` : (sessKey || null))
     let compactedThisRun = false // 本 run 发生过滞回压缩 → 持久化走全量覆写（slice(sessStart) 会错位）
 
     // 清理历史中的空 assistant 消息（之前 bug 可能产生），给占位避免 API 报 "content or tool_calls must be set"
@@ -551,7 +556,7 @@ export class Agent {
     // 前缀缓存，system 尾部若有每轮必变的内容（时间/情境），其后全部历史都 miss。
     let memories = null
     let injectedMemoryIds = []
-    if (this.recall && ctx) {
+    if (this.recall && ctx && !ephemeral) {
       try { memories = await this.recall.retrieve(rawText, scopeUserId, this.recallTopK) } catch { memories = null }
     }
     let recalledMemory = ''
@@ -561,7 +566,7 @@ export class Agent {
     }
     // 统一用户画像：结构化长期归纳（身份/沟通风格/偏好/忌讳），只作偏置参考，与召回记忆同走不可信边界
     let profileBlock = ''
-    if (this.profile && scopeUserId) {
+    if (this.profile && scopeUserId && !ephemeral) {
       try { profileBlock = await this.profile.build(scopeUserId) } catch { profileBlock = '' }
     }
     const dynParts = []
@@ -954,7 +959,9 @@ export class Agent {
       : null
     const extra = { cacheEpoch: this.cacheEpoch, ...(this._compactLedger ? { compactLedger: this._compactLedger } : {}), ...(discoveryOn && persistedTools ? { activeTools: persistedTools } : {}) }
     let sessionPersisted = false
-    if (useConv) {
+    if (ephemeral) {
+      // 临时任务：不持久化会话历史
+    } else if (useConv) {
       try {
         if (compactedThisRun) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
         else await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages.slice(sessStart), extra)
@@ -974,7 +981,7 @@ export class Agent {
         : (sessKey || null)
       await this._journal((s) => s.markSessionProjected(taskId, { sessionKey, cursor: this.messages.length }))
     }
-    if (this.recall && ctx) {
+    if (this.recall && ctx && !ephemeral) {
       const snapshot = this.messages.slice()
       const llm = this.recallLlm || null
       // 异步抽取记忆：可观测（原空 catch 吞错，现记 logger + devLog，便于排查抽取失败/验证触发）

@@ -29,12 +29,14 @@ personaLore.setRefreshHandler(() => Promise.resolve())
 
 const personas = { 'raiden-ei': { id: 'raiden-ei', name: '雷电将军' } }
 const personaStore = { get: (id) => personas[id] || null }
-// 桩 completePersona：模拟真实补齐产出草稿
-const completePersona = async (id, { by } = {}) => {
+// 桩 completePersona：模拟真实补齐产出草稿；记录收到的 ctx 以断言端点透传主任务 ctx
+let lastCompleteCtx = null
+const completePersona = async (id, { by, ctx } = {}) => {
   const p = personaStore.get(id)
   if (!p) return { error: `未找到人设「${id}」` }
+  lastCompleteCtx = ctx
   const lore = personaLore.saveDraft(id, { summary: '稻妻雷神', facts: '- 挡下无想一刀的是枫原万叶', rawNotes: '枫原万叶用亡友的神之眼挡下无想的一刀。', sources: [{ type: 'miyoushe', ref: '123', title: '考据' }], canonical: { ip: '原神', game: '原神' }, by })
-  return { persona: p, lore }
+  return { persona: p, lore, taskId: 'task-test-1' }
 }
 
 const runtimeProvider = async () => ({ personaLore, personaStore, completePersona })
@@ -58,6 +60,8 @@ await test('POST /api/persona-lore/:id/complete —— 补齐产出草稿', asyn
   const r = await post('/api/persona-lore/raiden-ei/complete')
   ok(r.status === 200 && r.body.code === 0, `补齐成功（${r.status}/${r.body.code} ${r.body.msg || ''}）`)
   ok(r.body.data?.status === 'draft', '返回草稿')
+  ok(r.body.data?.taskId === 'task-test-1', '返回 taskId（可并入主任务账本管理）')
+  ok(lastCompleteCtx && lastCompleteCtx.conversationId === 'persona-complete', '端点透传主任务 ctx')
   const g = await get('/api/persona-lore')
   ok(g.body.data.some((l) => l.id === 'raiden-ei' && l.status === 'draft'), '列表含草稿')
 })
