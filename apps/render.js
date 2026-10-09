@@ -15,6 +15,25 @@ import { inlineImages } from '../model/render/inline-images.js'
 
 let _shotSeq = 0
 
+/** 渲染总超时（毫秒）：防弱服务器上 puppeteer 卡死导致指令永不返回（超时→调用方降级文本）。 */
+function renderTimeoutMs() {
+  const t = Number(Config.get()?.agent?.render?.timeoutMs)
+  return t > 0 ? t : 15000
+}
+
+/** 给任意 Promise 加总超时：超时 resolve(null)，不阻塞调用方（底层 Promise 仍会自行收尾）。 */
+function withTimeout(promise, ms, tag) {
+  if (!(ms > 0)) return promise
+  let timer = null
+  return Promise.race([
+    Promise.resolve(promise).finally(() => { if (timer) clearTimeout(timer) }),
+    new Promise((resolve) => {
+      timer = setTimeout(() => { try { Log.warn(`[render] ${tag} 超时(${ms}ms)，降级`) } catch { /* noop */ } ; resolve(null) }, ms)
+      timer.unref?.()
+    }),
+  ])
+}
+
 /**
  * 经 Yunzai 内置 renderer 截图（jpeg）。
  *
@@ -57,7 +76,12 @@ export const screenshot = async (name, html) => {
  * 把一段文本（markdown）渲染成回复图片（segment.image），失败返回 null。
  * markdown→HTML 用 marked+highlight.js（依赖缺失时自动降级为简易渲染）；截图经 Yunzai 渲染器。
  */
-export const renderReplyImage = async (content, { scale = 3, footer, extraCss, chat } = {}) => {
+export const renderReplyImage = async (content, opts = {}) => {
+  const ms = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : (Number(Config.get()?.agent?.render?.replyTimeoutMs) || 30000)
+  return withTimeout(_renderReplyImage(content, opts), ms, 'reply-image')
+}
+
+const _renderReplyImage = async (content, { scale = 3, footer, extraCss, chat } = {}) => {
   const sc = Math.min(Math.max(Number(scale) || 3, 1), 4) // clamp [1,4]，防 Chromium OOM
   try {
     const bodyHtml = await inlineImages(await mdToHtml(content)) // 远程图片下载转 base64 内联（防盗链+可靠），见 model/render/inline-images.js
@@ -105,8 +129,8 @@ export const renderReplyImage = async (content, { scale = 3, footer, extraCss, c
  * setViewport deviceScaleFactor=N → 物理像素 N 倍 → 清晰度翻倍。
  * 返回 segment.image（base64），失败 null。
  */
-async function renderHighQuality(html, { scale = 3, width = 800, imgType = 'jpeg', quality = 95 } = {}) {
-  const buff = await withPage(html, async (page) => {
+async function shotCard(html, { scale = 3, width = 800, imgType = 'jpeg', quality = 95 } = {}) {
+  return withPage(html, async (page) => {
     await page.setViewport({ width, height: 1200, deviceScaleFactor: scale })
     await page.waitForSelector('#container', { timeout: 8000 }).catch(() => {})
     await new Promise((r) => setTimeout(r, 200)) // 字体/布局/图片稳定
@@ -127,10 +151,20 @@ async function renderHighQuality(html, { scale = 3, width = 800, imgType = 'jpeg
     if (box && box.width > 0 && box.height > 0) return page.screenshot({ ...opt, clip: box })
     return null // #container 异常 → 返回 null 走降级（Yunzai 渲染器，仍截 #container），不再 fullPage
   })
+}
+
+async function renderHighQuality(html, opts = {}) {
+  const buff = await shotCard(html, opts)
   if (!buff || !Buffer.isBuffer(buff)) return null
   const seg = (typeof segment !== 'undefined' && segment) || null
   if (!seg) return null
   return seg.image(`base64://${buff.toString('base64')}`)
+}
+
+/** 渲染卡片为 Buffer（用于缓存/发送），带总超时；失败/超时返回 null。 */
+export const renderCardBuffer = async (html, opts = {}) => {
+  const ms = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : renderTimeoutMs()
+  return withTimeout(shotCard(html, opts), ms, 'card-buffer')
 }
 
 // ─── 独立 puppeteer 浏览器（懒加载单例，用于 PDF / 高清图）───
@@ -228,14 +262,17 @@ export const renderPdf = async (html, { path: outPath, format = 'A4' } = {}) => 
  * 再降级 Yunzai 渲染器（dsf 1）。用于帮助图/列表图等非 markdown 场景。
  * 返回 segment.image 或 Yunzai 渲染结果；全部失败返回 null（调用方降级文本）。
  */
-export const renderCardImage = async (html, { scale = 3, name = 'agents-plugin/card' } = {}) => {
+export const renderCardImage = async (html, { scale = 3, name = 'agents-plugin/card', timeoutMs } = {}) => {
   const sc = Math.min(Math.max(Number(scale) || 3, 1), 4) // clamp [1,4]，防 Chromium OOM
-  let img = await renderHighQuality(html, { scale: sc })
-  if (img) return img
-  Log.debug('[render] 卡片图独立浏览器渲染失败，降级 Yunzai 渲染器…')
-  img = await screenshot(name, html)
-  if (img) return img
-  return screenshot(name, html)
+  const ms = Number(timeoutMs) > 0 ? Number(timeoutMs) : renderTimeoutMs()
+  return await withTimeout((async () => {
+    let img = await renderHighQuality(html, { scale: sc })
+    if (img) return img
+    Log.debug('[render] 卡片图独立浏览器渲染失败，降级 Yunzai 渲染器…')
+    img = await screenshot(name, html)
+    if (img) return img
+    return screenshot(name, html)
+  })(), ms, 'card-image')
 }
 
 export const renderHd = async (name, html, { scale = 2, imgType = 'png', width = 820 } = {}) => {

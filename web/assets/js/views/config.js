@@ -211,6 +211,7 @@
         if (!form.selfState.replyer) form.selfState.replyer = {}
         if (!form.loop) form.loop = {}
         if (!form.multiagent) form.multiagent = {}
+        if (!form.render) form.render = {}
         if (!form.toolDiscovery) form.toolDiscovery = {}
         if (!Array.isArray(form.reasoningFields)) form.reasoningFields = []
         if (!form.kb) form.kb = {}
@@ -1259,6 +1260,15 @@
             </cfg-row>
             <cfg-row name="回复图清晰度倍率" desc="deviceScaleFactor 1~4">
               <input type="number" class="inp" style="width:110px" min="1" max="4" v-model.number="form.reply.renderScale">
+            </cfg-row>
+            <cfg-row name="帮助/列表卡片图" desc="关=直接回文本（弱服务器可关，避免卡片渲染卡死）">
+              <v-switch v-model="form.render.card"/>
+            </cfg-row>
+            <cfg-row name="卡片图渲染超时" desc="render.timeoutMs 毫秒；超时降级文本，防指令卡住">
+              <input type="number" class="inp" style="width:130px" min="1000" v-model.number="form.render.timeoutMs">
+            </cfg-row>
+            <cfg-row name="回复图渲染超时" desc="render.replyTimeoutMs 毫秒">
+              <input type="number" class="inp" style="width:130px" min="1000" v-model.number="form.render.replyTimeoutMs">
             </cfg-row>
             <cfg-row name="群聊 @ 发言人" desc="回复时 at 触发者">
               <v-switch v-model="form.reply.atSender"/>

@@ -1,7 +1,14 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import crypto from 'node:crypto'
 import plugin from '../../../lib/plugins/plugin.js'
 import Config from '../utils/Config.js'
 import { buildHelpHtml } from '../model/agent/index.js'
-import { renderCardImage } from './render.js'
+import { renderCardBuffer } from './render.js'
+
+/** 帮助卡片渲染失败后的冷却：弱服务器渲染卡死时，冷却期内直接走文本，避免每次指令都等超时。 */
+let _helpCardCooldownUntil = 0
+const HELP_CARD_COOLDOWN_MS = 5 * 60 * 1000
 
 const SECTIONS = [
   {
@@ -147,10 +154,14 @@ export class Help extends plugin {
   }
 
   async help() {
+    const render = (Config.get() || {}).agent?.render || {}
     const html = buildHelpHtml({ title: 'agents-plugin 帮助', subtitle: 'AI Agent · 工具 · 记忆 · MCP', sections: SECTIONS })
-    const img = await renderCardImage(html, { name: 'agents-plugin/help' })
-    if (img) return this.e.reply(img), true
-    // 文本回退（puppeteer 不可用时）
+    // 弱服务器可关闭卡片图（agent.render.card=false）→ 直接文本，避免渲染卡死
+    if (render.card !== false && Date.now() >= _helpCardCooldownUntil) {
+      const img = await this._helpCard(html, render)
+      if (img) return this.e.reply(img), true
+    }
+    // 文本回退（puppeteer 不可用 / 渲染超时 / 主动关闭时）
     const lines = ['#agents帮助']
     for (const s of SECTIONS) {
       lines.push(`【${s.title}】`)
@@ -158,6 +169,31 @@ export class Help extends plugin {
     }
     await this.e.reply(lines.join('\n'))
     return true
+  }
+
+  /** 帮助图渲染 + 磁盘缓存（内容静态，命中缓存可秒回，避免弱服务器每次重渲染）。 */
+  async _helpCard(html, render = {}) {
+    const key = crypto.createHash('sha256').update(html).digest('hex').slice(0, 16)
+    const dir = path.join(Config.path.temp, 'agents-help-card')
+    const file = path.join(dir, `${key}.jpg`)
+    try {
+      const buf = await fs.promises.readFile(file)
+      if (buf?.length) return segment.image(`base64://${buf.toString('base64')}`)
+    } catch { /* 未命中缓存 */ }
+
+    const buf = await renderCardBuffer(html, { scale: 3, timeoutMs: Number(render.timeoutMs) > 0 ? Number(render.timeoutMs) : 15000 })
+    if (!buf) {
+      _helpCardCooldownUntil = Date.now() + HELP_CARD_COOLDOWN_MS // 渲染失败/超时 → 冷却期内走文本
+      return null
+    }
+    try {
+      await fs.promises.mkdir(dir, { recursive: true })
+      await fs.promises.writeFile(file, buf)
+      for (const f of await fs.promises.readdir(dir)) {
+        if (f !== `${key}.jpg`) fs.promises.unlink(path.join(dir, f)).catch(() => {})
+      }
+    } catch { /* 缓存失败不影响发送 */ }
+    return segment.image(`base64://${buf.toString('base64')}`)
   }
 
   async status() {
