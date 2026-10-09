@@ -295,6 +295,17 @@ export function buildLaunchOptions(cfg = {}, profile) {
     chromiumSandbox: false, // 服务器通常无 sandbox 权限
   }
   if (cfg.executablePath) opts.executablePath = String(cfg.executablePath)
+  // 代理：浏览器访问受限站点（被墙/需代理）时与搜索/抓取一致走 agent.proxy 或环境变量代理
+  if (cfg.proxy) {
+    try {
+      const u = new URL(String(cfg.proxy))
+      opts.proxy = { server: `${u.protocol}//${u.host}` }
+      if (u.username) opts.proxy.username = decodeURIComponent(u.username)
+      if (u.password) opts.proxy.password = decodeURIComponent(u.password)
+    } catch {
+      opts.proxy = { server: String(cfg.proxy) }
+    }
+  }
   if (cfg.stealth === false) return opts
   opts.ignoreDefaultArgs = ['--enable-automation', '--disable-extensions']
   opts.locale = profile.locale || 'zh-CN'
