@@ -542,6 +542,7 @@ export class Agent {
     }
     let usage = null
     let turns = 0
+    this._externalUsage = null // F13：嵌套（编排/子代理）用量按 rootTask 归集，结算时并入根 usage
     let stopReason = null
     // ── 最终答案状态机（长任务稳定性审计 P0-1：单一 lastContent 曾同时表示旁白/被否决草稿/最终答案）──
     // narrationContent：带 toolCalls 轮次的中间播报——只允许作为进度消息（onAssistant 转发），永远不能成为最终答案；
@@ -933,6 +934,9 @@ export class Agent {
         }
       })
     }
+
+    // F13：并入嵌套（编排/子代理）上报的用量，根任务 usage/预算不漏计
+    if (this._externalUsage) usage = mergeUsage(usage, this._externalUsage)
 
     // 任务账本：结算（完成/等待输入/预算暂停/失败）。只有正常交付才 completed，预算耗尽为 paused。
     // F04：账本降级（关键写失败）时不得声称 completed/可恢复。
@@ -1590,6 +1594,13 @@ export class Agent {
       this.logger('warn', '[task] 关键账本写入失败，阻止新副作用', e?.message || e)
       return false
     }
+  }
+
+  /** F13：外部（嵌套编排/子代理）用量上报入口（工具经 ctx.executionContext.agent 调用），结算时并入根 usage。 */
+  noteExternalUsage(u) {
+    if (!u) return
+    this._externalUsage = mergeUsage(this._externalUsage, u)
+    try { this.governor?.noteUsage(u, { scope: 'work' }) } catch { /* noop */ }
   }
 
   async _executeOne(tc, execCtx, cb, ctx) {

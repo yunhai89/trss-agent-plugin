@@ -558,6 +558,63 @@ await test('pipeline：取消信号透传到 SubagentSpec step（相邻路径）
   eq(seen.ctx.userId, 'u', 'ctx 仍原样透传')
 })
 
+// ---------- 25. F11：spawn partial 不标 done ----------
+await test('F11：spawn partial 不标 done，保留 stopReason', async () => {
+  let n = 0
+  const provider = {
+    async chat() {
+      n++
+      if (n === 1) return { role: 'assistant', content: '', toolCalls: [{ id: 'c', name: 'noop', arguments: {} }], finishReason: 'tool_calls', usage: null }
+      return { role: 'assistant', content: 'partial progress', toolCalls: [], finishReason: 'stop', usage: null }
+    },
+  }
+  const reg = new ToolRegistry().register({ name: 'noop', category: 'query', description: 'd', parameters: { type: 'object' }, async execute() { return 'step' } })
+  const ctx = { userId: 'u', scopeUserId: 'u', conversationId: 'c' }
+  const ts = makeSpawnSubagentTools({ provider, sourceRegistry: reg, defaultTools: ['noop'], maxTurns: 1 })
+  const spawned = await ts[0].execute({ task: 'multi-step' }, ctx)
+  const r = await ts[1].execute({ taskId: spawned.taskId, waitMs: 2000 }, ctx)
+  eq(r.status, 'partial', 'partial 不标 done')
+  eq(r.stopReason, 'max_turns', '保留 stopReason')
+  ts.shutdown()
+})
+
+// ---------- 26. F12：附属子代理随父取消 ----------
+await test('F12：附属子代理随父任务取消', async () => {
+  const parent = new AbortController()
+  let startedResolve
+  const started = new Promise((r) => { startedResolve = r })
+  const provider = { async chat(o) { startedResolve(); return new Promise((_, rej) => { o.signal.addEventListener('abort', () => rej(new Error('aborted')), { once: true }) }) } }
+  const ts = makeSpawnSubagentTools({ provider })
+  const ctx = { userId: 'u', conversationId: 'c', signal: parent.signal }
+  const spawned = await ts[0].execute({ task: 'attached work' }, ctx)
+  await started
+  parent.abort()
+  const r = await ts[1].execute({ taskId: spawned.taskId, waitMs: 3000 }, { userId: 'u', conversationId: 'c' })
+  eq(r.status, 'cancelled', '父取消 → 子 cancelled')
+  ts.shutdown()
+})
+
+// ---------- 27. F18：spawn 尊重 Semaphore 队列满 ----------
+await test('F18：spawn 队列满时拒绝（不超并发）', async () => {
+  const sem = new Semaphore(1, { queueLimit: 0 })
+  let releaseResolve
+  const release = new Promise((r) => { releaseResolve = r })
+  let active = 0, peak = 0
+  const provider = { async chat() { active++; peak = Math.max(peak, active); await release; active--; return { role: 'assistant', content: 'ok', toolCalls: [], finishReason: 'stop', usage: null } } }
+  const ts = makeSpawnSubagentTools({ provider, semaphore: sem })
+  const ctx = { userId: 'u', conversationId: 'c' }
+  const a = await ts[0].execute({ task: 'a' }, ctx)
+  await delay(20)
+  const b = await ts[0].execute({ task: 'b' }, ctx)
+  await delay(20)
+  const rb = await ts[1].execute({ taskId: b.taskId, waitMs: 0 }, ctx)
+  eq(rb.status, 'failed', '队列满 → 第二任务失败')
+  releaseResolve()
+  await ts[1].execute({ taskId: a.taskId, waitMs: 3000 }, ctx)
+  eq(peak, 1, '并发峰值 1（未突破 max）')
+  ts.shutdown()
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

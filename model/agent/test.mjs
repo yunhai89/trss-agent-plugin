@@ -2118,6 +2118,20 @@ await test('收尾 token 上限默认 2048', async () => {
   eq(finOpts.max_tokens, 2048, '默认 2048')
 })
 
+// ---------- F13：嵌套用量并入根 usage ----------
+await test('F13：工具上报的嵌套用量并入根 usage', async () => {
+  const tools = new ToolRegistry().register({
+    name: 'orch', description: 'd', parameters: { type: 'object' },
+    async execute(_p, ctx) { (ctx.executionContext || ctx).agent?.noteExternalUsage({ input: 100, output: 20 }); return 'ok' },
+  })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'orch', arguments: {} }], finishReason: 'tool_calls', usage: { prompt_tokens: 5, completion_tokens: 1 } },
+    { content: 'done', finishReason: 'stop', usage: { prompt_tokens: 5, completion_tokens: 1 } },
+  ])
+  const r = await new Agent({ provider, tools, maxTurns: 4 }).run('x')
+  ok(r.usage && r.usage.input >= 100, '根 usage 含嵌套（编排/子代理）用量')
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

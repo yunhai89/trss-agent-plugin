@@ -1151,6 +1151,8 @@ async function _buildRuntime(scope) {
           const r = await orch.run(task, { ctx, signal: ctx?.signal || null, taskId: ctx?.taskId || null })
           // 复用同一归一：预算/异常停止只标 partial，绝不把部分完成当完整完成
           const norm = normalizeSubagentResult({ content: r?.content, stopReason: r?.stopReason, usage: r?.usage, turns: r?.turns })
+          // F13：把编排/子代理实际用量归集到根任务（否则只进工具正文，根 usage/预算漏计）
+          try { ctx?.executionContext?.agent?.noteExternalUsage?.(r?.usage) } catch { /* 归集失败不影响结果 */ }
           return {
             result: norm.content,
             status: norm.status,
@@ -1181,8 +1183,10 @@ async function _buildRuntime(scope) {
             const label = info.task ? `「${String(info.task).slice(0, 40)}」` : ''
             const head = info.status === 'done'
               ? `🤖 后台子代理任务完成${label}：`
-              : `⚠️ 后台子代理任务${info.status === 'timeout' ? '超时' : info.status === 'cancelled' ? '已中止' : '失败'}${label}：${String(info.error || '未知原因').slice(0, 200)}`
-            const body = stripMarkers(redactSecrets(info.status === 'done' ? `${head}\n${String(info.result || '').slice(0, 1800)}` : head)).trim()
+              : (info.status === 'partial' || info.status === 'waiting_input')
+                ? `⚠️ 后台子代理任务未完整完成（${info.status}）${label}：`
+                : `⚠️ 后台子代理任务${info.status === 'timeout' ? '超时' : info.status === 'cancelled' ? '已中止' : '失败'}${label}：${String(info.error || '未知原因').slice(0, 200)}`
+            const body = stripMarkers(redactSecrets((info.status === 'done' || info.status === 'partial' || info.status === 'waiting_input') ? `${head}\n${String(info.result || '').slice(0, 1800)}` : head)).trim()
             if (!body) return
             const send = (m) => (sctx?.e?.reply ? sctx.e.reply(m)
               : (sctx?.bot?.pickGroup && sctx.groupId) ? sctx.bot.pickGroup(sctx.groupId).sendMsg(m)
