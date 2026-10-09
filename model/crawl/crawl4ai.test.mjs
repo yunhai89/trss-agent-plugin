@@ -14,7 +14,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
-import { runCrawl4ai, isCrawl4aiAvailable, CRAWL4AI_TIMEOUTS } from './crawl4ai.js'
+import { runCrawl4ai, isCrawl4aiAvailable, resetCrawl4aiProbe, CRAWL4AI_TIMEOUTS } from './crawl4ai.js'
 import { crawlUrl } from './index.js'
 
 let passed = 0
@@ -177,6 +177,18 @@ process.stdout.write('0.9.2\\n')
   process.env.PROBE_MODE = 'garbage'
   const a3 = await isCrawl4aiAvailable({ python: probeStub, probeArg: [], ttl: 0 })
   ok(a3.ok, '垃圾版本串仍算可用（版本仅诊断用，判活看退出码）')
+  // 负结果短 TTL + reset：模拟「先未安装 → 安装 → #agents重载 后立即可用」
+  ok(CRAWL4AI_TIMEOUTS.probeNegativeTtlMs <= CRAWL4AI_TIMEOUTS.probeTtlMs, '负结果 TTL 不长于正结果 TTL')
+  process.env.PROBE_MODE = 'fail'
+  resetCrawl4aiProbe()
+  const neg = await isCrawl4aiAvailable({ python: probeStub, probeArg: [], ttl: 60000 })
+  ok(!neg.ok, '未安装 → 判定不可用')
+  process.env.PROBE_MODE = 'ok'
+  const stillNeg = await isCrawl4aiAvailable({ python: probeStub, probeArg: [], ttl: 60000 })
+  ok(!stillNeg.ok, 'TTL 内仍命中负缓存（不回退成可用，避免抖动）')
+  resetCrawl4aiProbe() // 等价 #agents重载 / 进程重启
+  const pos = await isCrawl4aiAvailable({ python: probeStub, probeArg: [], ttl: 60000 })
+  ok(pos.ok, 'reset（#agents重载）后立即探测到可用')
   delete process.env.PROBE_MODE
 })
 

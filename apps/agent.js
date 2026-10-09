@@ -56,7 +56,7 @@ import { primeModelCaps } from '../model/llm/caps-source.js'
 import { buildEmbed } from '../model/llm/embed-wiring.js'
 import { thinkingLogFields as fmtThinkingLogFields } from '../model/llm/thinking.js'
 import { KnowledgeStore, makeKbSearchTool } from '../model/agent/knowledge.js'
-import { webCrawlTool } from '../model/crawl/index.js' // web_crawl：抓取网页正文（常驻）
+import { webCrawlTool, resetCrawl4aiProbe } from '../model/crawl/index.js' // web_crawl：抓取网页正文（常驻）
 import { CompactionArchive } from '../model/agent/compact/archive.js' // 无损压缩：原文内容寻址归档
 import { makeContextRecallTool } from '../model/agent/compact/recall.js' // context_recall：取回归档原文
 import { groupInfoTools, groupManageTools, groupHistoryTools, groupNoticeTools, groupFileTools, aiVoiceTools, forwardTools } from '../model/group/index.js'
@@ -481,6 +481,9 @@ async function buildRuntime() {
 
 async function _buildRuntime(scope) {
   const cfg = Config.get().agent || {}
+  // 每次运行时重建（含 #agents重载）清空 crawl4ai 可用性探测缓存：
+  // 用户跑完 scripts/install-crawl4ai.sh 后发 #agents重载 即可立即启用真浏览器抓取
+  try { resetCrawl4aiProbe() } catch { /* noop */ }
   // F14：最先登记——关闭时取消并等待在途 Agent run 退出，再关依赖资源/账本（关库晚于最后写账本者）
   scope.register(async () => { try { const n = await abortAllActiveRuns(); if (n) Log.info(`[runtime] 关闭：已取消并等待 ${n} 个在途任务退出`) } catch { /* noop */ } }, { name: 'active-runs', order: -1 })
   const startupInfo = {} // 运行时构建期采集的摘要信息（供末尾统一面板输出）

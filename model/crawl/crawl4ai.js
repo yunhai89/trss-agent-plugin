@@ -29,6 +29,7 @@ export const CRAWL4AI_SCRIPT = process.env.CRAWL4AI_PYSCRIPT || path.join(PLUGIN
 export const CRAWL4AI_TIMEOUTS = {
   defaultMs: 90_000,     // 单页抓取总预算（含浏览器启动；crawlTimeout 可覆盖）
   probeTtlMs: 300_000,   // 可用性探测缓存 5 分钟（探测=spawn 一次 import 检查）
+  probeNegativeTtlMs: 30_000, // 探测「不可用」结果的短 TTL：安装/修复后尽快被识别（不必等 5 分钟或重启）
   probeRunMs: 15_000,    // 探测自身超时
   termGraceMs: 250,      // SIGTERM → SIGKILL 宽限
 }
@@ -209,16 +210,22 @@ const PROBE_CODE = 'from importlib.metadata import version; print(version("crawl
 
 let probeCache = { key: null, at: 0, result: null }
 
+/** 清空可用性探测缓存（安装 crawl4ai 后 / 运行时重建时调用，立即重新探测）。 */
+export function resetCrawl4aiProbe() { probeCache = { key: null, at: 0, result: null } }
+
 /**
  * 可用性探测（带 TTL 缓存）：venv python -c "import crawl4ai" 是否成功。
  * 版本串仅诊断用；判活看退出码（垃圾版本串仍算可用——降级判定不该被输出格式绑架）。
+ * 命中缓存 TTL：可用结果按 probeTtlMs（5min），不可用结果按 probeNegativeTtlMs（短，便于安装后尽快恢复）。
  */
 export async function isCrawl4aiAvailable({ python = null, probeArg = null, ttl = null } = {}) {
   const py = python || venvPython()
   const key = `${py}|${JSON.stringify(probeArg)}`
   const now = Date.now()
   const ttlMs = ttl ?? CRAWL4AI_TIMEOUTS.probeTtlMs
-  if (ttlMs > 0 && probeCache.key === key && now - probeCache.at < ttlMs && probeCache.result) return probeCache.result
+  const cached = probeCache.result
+  const effTtl = ttlMs <= 0 ? 0 : (cached?.ok ? ttlMs : Math.min(ttlMs, CRAWL4AI_TIMEOUTS.probeNegativeTtlMs))
+  if (effTtl > 0 && probeCache.key === key && now - probeCache.at < effTtl && cached) return cached
   const result = await new Promise((resolve) => {
     let out = ''
     let settled = false

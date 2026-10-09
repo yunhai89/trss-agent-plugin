@@ -12,7 +12,8 @@
 import { load } from 'cheerio'
 import Config from '../../utils/Config.js'
 import Log from '../../utils/Log.js'
-import { runCrawl4ai, isCrawl4aiAvailable } from './crawl4ai.js'
+import { runCrawl4ai, isCrawl4aiAvailable, resetCrawl4aiProbe } from './crawl4ai.js'
+export { resetCrawl4aiProbe }
 
 function kbCfg() {
   return Config.get?.()?.agent?.kb || {}
