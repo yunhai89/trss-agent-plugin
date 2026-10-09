@@ -175,14 +175,18 @@ export async function crawlUrl(url, opts = {}) {
   }
   let r = null
   if (engine !== 'fetch') {
-    let ok = false
-    try { ok = !!(await avail()).ok } catch { ok = false }
+    let probe = null
+    try { probe = await avail() } catch { probe = { ok: false } }
+    const ok = !!(probe && probe.ok)
     if (ok) {
       try { r = await doC4ai(url, c4aiOpts) } catch (e) { r = { success: false, code: 'crashed', error: e?.message || String(e) } }
       if (r?.success) Log.info(`[crawl] ${url} via=crawl4ai${r.extractedCount != null ? ` extracted=${r.extractedCount}` : ''} len=${r.markdown?.length ?? 0}`)
       else Log.warn(`[crawl] ${url} crawl4ai 失败（${r?.code || '?'} ${r?.error || ''}），降级 fetch`)
     } else {
-      Log.warn(`[crawl] crawl4ai 不可用（venv 未安装；跑 scripts/install-crawl4ai.sh 启用真浏览器渲染），走 fetch`)
+      // 打印探测失败原因 + 实际解释器路径：多个插件副本时能直接看出「venv 装到了另一个目录」
+      const why = probe?.reason || 'venv 未安装'
+      const py = probe?.python ? `；解释器 ${probe.python}` : ''
+      Log.warn(`[crawl] crawl4ai 不可用（${why}${py}；跑 scripts/install-crawl4ai.sh 启用真浏览器渲染），走 fetch`)
     }
   }
   if (!r?.success) {

@@ -174,6 +174,7 @@ process.stdout.write('0.9.2\\n')
   process.env.PROBE_MODE = 'fail'
   const a2 = await isCrawl4aiAvailable({ python: probeStub, probeArg: [], ttl: 0 })
   ok(!a2.ok, '非零退出 → 不可用')
+  eq2(a2.python, probeStub, '不可用结果带实际解释器路径（诊断 venv 装错目录）')
   process.env.PROBE_MODE = 'garbage'
   const a3 = await isCrawl4aiAvailable({ python: probeStub, probeArg: [], ttl: 0 })
   ok(a3.ok, '垃圾版本串仍算可用（版本仅诊断用，判活看退出码）')
