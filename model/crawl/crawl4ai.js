@@ -217,6 +217,7 @@ export function resetCrawl4aiProbe() { probeCache = { key: null, at: 0, result: 
  * 可用性探测（带 TTL 缓存）：venv python -c "import crawl4ai" 是否成功。
  * 版本串仅诊断用；判活看退出码（垃圾版本串仍算可用——降级判定不该被输出格式绑架）。
  * 命中缓存 TTL：可用结果按 probeTtlMs（5min），不可用结果按 probeNegativeTtlMs（短，便于安装后尽快恢复）。
+ * 结果对象含 python（实际探测的解释器路径）：装到别的插件副本目录时，日志能直接看出路径不符。
  */
 export async function isCrawl4aiAvailable({ python = null, probeArg = null, ttl = null } = {}) {
   const py = python || venvPython()
@@ -234,7 +235,7 @@ export async function isCrawl4aiAvailable({ python = null, probeArg = null, ttl 
     try {
       proc = spawn(py, probeArg ?? ['-c', PROBE_CODE], { stdio: ['ignore', 'pipe', 'pipe'] })
     } catch (e) {
-      return resolve({ ok: false, reason: 'spawn_failed', error: e?.message || String(e) })
+      return resolve({ ok: false, reason: 'spawn_failed', error: e?.message || String(e), python: py })
     }
     // 先挂监听再判断 pid：解释器缺失时 spawn 仍返回 ChildProcess（pid 为 undefined），
     // ENOENT/EACCES 经异步 'error' 事件上报——提前 return 会让它无监听器而打崩宿主。
@@ -247,15 +248,15 @@ export async function isCrawl4aiAvailable({ python = null, probeArg = null, ttl 
     }
     proc.stdout?.on('data', (d) => { out += d })
     proc.stderr?.on('data', () => { /* 并发 drain：探测通常无 stderr，但不能让 pipe 满堵 */ })
-    proc.on('error', (e) => settle({ ok: false, reason: 'spawn_failed', error: e?.message || String(e) }))
+    proc.on('error', (e) => settle({ ok: false, reason: 'spawn_failed', error: e?.message || String(e), python: py }))
     proc.on('exit', (code) => {
       if (!settle(code === 0
-        ? { ok: true, version: (String(out).trim().split('\n').pop() || 'unknown').slice(0, 40) }
-        : { ok: false, reason: `exit=${code}`, hint: '未安装？跑 scripts/install-crawl4ai.sh' })) return
+        ? { ok: true, version: (String(out).trim().split('\n').pop() || 'unknown').slice(0, 40), python: py }
+        : { ok: false, reason: `exit=${code}`, hint: '未安装？跑 scripts/install-crawl4ai.sh', python: py })) return
     })
     if (proc.pid == null) return // 缺 pid：等待上面的 error 事件结算
     timer = setTimeout(() => {
-      if (!settle({ ok: false, reason: 'probe_timeout' })) return
+      if (!settle({ ok: false, reason: 'probe_timeout', python: py })) return
       try { proc.kill('SIGKILL') } catch { /* 已退出 */ }
     }, CRAWL4AI_TIMEOUTS.probeRunMs)
   })
