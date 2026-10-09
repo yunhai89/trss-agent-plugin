@@ -1126,7 +1126,7 @@ async function _buildRuntime(scope) {
     let out
     const taskId = randomUUID()
     try {
-      out = await makeAgent({ maxTurns: cfg.schedule?.taskMaxTurns || 15, masterSkipConfirm: false }).run(buildCompletionInput(p), {
+      out = await makeAgent({ maxTurns: cfg.schedule?.taskMaxTurns || 200, masterSkipConfirm: false }).run(buildCompletionInput(p), {
         ctx: completionCtx,
         systemPrompt: PERSONA_COMPLETION_SYSTEM, // 身份层替换为资料员；工具/防护仍照常追加
         ephemeral: true, // 借用真实身份/任务账本，但不污染会话历史/记忆
@@ -1222,13 +1222,14 @@ async function _buildRuntime(scope) {
         systemPrompt: '你是独立子任务子代理。只完成被委派的任务，直接给出结果，不解释过程；任务自包含（你看不到主对话）。',
         tools: workerGranted.length ? workerReg : null,
         model: workerTarget.model || null,
-        provider: workerTarget.provider, maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
+        provider: workerTarget.provider, maxTurns: cfg.multiagent?.workerMaxTurns ?? 200,
+        maxTokens: cfg.multiagent?.workerMaxTokens ?? 4096,
       })
       const orch = new Orchestrator({
         provider, model: cfg.model,
         subagents: [worker],
         tools: null,
-        maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
+        maxTurns: cfg.multiagent?.workerMaxTurns ?? 200,
         maxConcurrent: cfg.multiagent?.maxConcurrent ?? 3,
         logger: Log.tag('multiagent'),
       })
@@ -1279,7 +1280,8 @@ async function _buildRuntime(scope) {
         provider: workerTarget.provider, model: workerTarget.model || null,
         sourceRegistry: tools,
         semaphore: new Semaphore(cfg.multiagent?.maxConcurrent ?? 3),
-        maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
+        maxTurns: cfg.multiagent?.workerMaxTurns ?? 200,
+        maxTokens: cfg.multiagent?.workerMaxTokens ?? 4096,
         defaultTools: cfg.multiagent?.defaultTools || ['web_search', 'memory_search'],
         maxSpawns: cfg.multiagent?.maxSpawnsPerConversation ?? 5,
         // 主循环结束后，未被 check_subagent 取走的子代理结果/失败异步回推给会话（防"后续无反应"）
@@ -1569,7 +1571,7 @@ export const makeFireDispatch = (rt) => {
       const taskId = randomUUID() // 与交互路径同源：定时任务也落 dev trace / 用量 / 采迹
       try {
         const r = await rt.makeAgent().run(info.prompt, {
-          ctx, maxTurns: cfg.schedule?.taskMaxTurns || 15, taskId,
+          ctx, maxTurns: cfg.schedule?.taskMaxTurns || 200, taskId,
           onToolEnd: (tc, content) => { try { rt.usageStats?.recordToolResult?.(tc?.name, content) } catch { /* 统计不阻塞 */ } },
         })
         // 与交互路径一致的可观测性：用量统计 + 进化采迹 + 自评审（此前定时任务全部旁路）

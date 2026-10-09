@@ -25,7 +25,7 @@ export class Orchestrator {
     systemPrompt,
     subagents = [],
     tools,
-    maxTurns = 20,
+    maxTurns = 200,
     maxConcurrent = 3,
     trace,
     logger = () => {},

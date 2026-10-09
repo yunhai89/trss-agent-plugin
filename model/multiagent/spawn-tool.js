@@ -43,7 +43,8 @@ export function makeSpawnSubagentTools({
   model = null,
   sourceRegistry = null,
   semaphore = null,
-  maxTurns = 10,
+  maxTurns = 200,
+  maxTokens = 4096,
   defaultTools = ['web_search', 'memory_search'],
   maxSpawns = 5,
   defaultBudgetMs = 600000, // 默认 10 分钟（长任务如大文件处理需要）
@@ -239,7 +240,7 @@ export function makeSpawnSubagentTools({
       const deliverCtx = ctx ? { e: ctx.e, bot: ctx.bot, groupId: ctx.groupId, userId: ctx.userId, conversationId: ctx.conversationId } : null
       const spec = new SubagentSpec({
         name: specName, description: `子代理 #${_seq}（${focus}）`,
-        systemPrompt: FOCUS_PROMPTS[focus], tools: (workerTools && workerTools.list().length) ? workerTools : null, model, provider, maxTurns,
+        systemPrompt: FOCUS_PROMPTS[focus], tools: (workerTools && workerTools.list().length) ? workerTools : null, model, provider, maxTurns, maxTokens,
       })
 
       const abort = new AbortController()

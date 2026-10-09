@@ -36,7 +36,7 @@ agent:
   fallbackProtocol: "openai"  # openai | anthropic
   proxy: ""  # HTTP/SOCKS 代理（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）；国内服务器访问 GPT/Gemini 等海外 LLM 用，留空=直连
   reasoningFields: []
-  maxTurns: 25  # 单次对话工具调用轮次预算上限（默认 25；配合下方 loop.* 智能终止，实际很少触顶）
+  maxTurns: 200  # 单次对话工具调用轮次预算上限（默认 200；配合下方 loop.* 智能终止，实际很少触顶）
   loop:                       # 循环智能终止（审计 §2.1）：独立于 maxTurns 硬上限，额外检测死循环/停滞/预算耗尽
     maxSameAction: 2          # 同工具+相同参数连续允许次数（超出 → duplicate_action 终止，防 ping 死循环）
     maxConsecutiveFailures: 3 # 连续工具失败次数上限（超出 → consecutive_failures 终止）
@@ -160,7 +160,7 @@ agent:
     minScore: 0.3           # 最低相似度（cosine；低于不返回）；embedding 复用上面的 recall.embedProvider
   schedule:
     taskEnabled: true       # 定时任务链总开关（#定时任务 cron 重复 task；false 则拒绝创建）
-    taskMaxTurns: 15        # 任务链工具调用轮次上限（防失控烧 token）
+    taskMaxTurns: 200        # 任务链工具调用轮次上限（防失控烧 token；200=给足步数，靠 loop.* 智能终止兜底）
   selfReview:
     enable: true            # 在线自进化：每 N 轮对话后台异步自我评审，产出改进 suggestion（不阻塞回复）
     every: 20               # 每 N 轮对话触发一次后台自评审（per-scope 计数）
@@ -412,7 +412,8 @@ agent:
     topology: spawn             # spawn=异步三件套 spawn/check/extend_subagent（默认）| orchestrator=同步编排工具 orchestrate
     maxConcurrent: 3            # 同时运行的子代理数上限
     maxSpawnsPerConversation: 5 # 单次对话最多创建几个子代理（topology=spawn 时生效）
-    workerMaxTurns: 10          # 子代理工具循环上限（防失控烧 token）
+    workerMaxTurns: 200          # 子代理工具循环上限（防失控烧 token；200=给足步数，靠 loop.* 智能终止兜底）
+    workerMaxTokens: 4096        # 子代理单轮最大输出 tokens（防报告被截断/空产出）
     reserveTokens: 8000         # F13：编排（orchestrate）开始前向根任务预留的 token 额度；不足则拒绝启动
     workerModel: ""             # 子代理模型（空=复用主模型；可跨厂商，填便宜模型可降本）
     defaultTools:               # 子代理默认可用工具（模型未指定时）

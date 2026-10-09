@@ -36,6 +36,7 @@ function find(dir, out, { stress = false } = {}) {
 
 const tests = []
 find(join(root, 'model'), tests)
+find(join(root, 'apps'), tests) // 入口层离线自检（apps/*.test.mjs，如更新日志转发）
 find(join(root, 'tools'), tests) // 外置工具离线自检（tools/<包>/*.test.mjs）
 const stressTests = []
 find(join(root, 'stress'), stressTests, { stress: true })
@@ -56,6 +57,8 @@ const HOOKED_STRESS = new Set([
   // 真实 Web router 测试需要 Yunzai 桩（apps/agent.js / lib 解析）
   'model/web/api.tevo.test.mjs',
   'model/web/api.persona-lore.test.mjs',
+  // 更新日志转发测试需要 Yunzai 桩（apps/update.js / lib 插件基类 + Bot）
+  'apps/update.test.mjs',
 ])
 for (const t of tests) {
   const rel = t.replace(root, '')

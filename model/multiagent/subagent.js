@@ -48,7 +48,7 @@ export class SubagentSpec {
     systemPrompt,
     tools,
     model,
-    maxTurns = 10,
+    maxTurns = 200,
     provider,
     ...agentConfig
   } = {}) {
