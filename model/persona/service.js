@@ -38,6 +38,19 @@ export class PersonaService {
     await this.kv.del(this._key(userId))
   }
 
+  /** 按 id 或名称（模糊）取人设 */
+  resolveRef(input) {
+    const s = String(input ?? '').trim()
+    if (!s) return null
+    // 数字 → #人设列表序号（1-based），与 #人设 切换一致；否则按 id/名称
+    if (/^\d+$/.test(s)) {
+      const list = this.store.list()
+      const idx = Number(s) - 1
+      return (idx >= 0 && idx < list.length) ? list[idx] : null
+    }
+    return this.store.get(s)
+  }
+
   /**
    * 解析当前生效人设。
    * @returns {Promise<{ persona: Persona|null, activeId: string|null, isDefault: boolean }>}

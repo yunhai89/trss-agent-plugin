@@ -381,6 +381,20 @@ await test('PersonaLore：re-补齐保留 createdAt', async () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+// ---------- 5d. resolveRef：序号 / id / 名称 统一解析 ----------
+await test('PersonaService.resolveRef：序号与 id 一致', async () => {
+  const store = new PersonaStore({ dir: tmpDir() })
+  const svc = new PersonaService({ store, kv: memoryKv() })
+  const list = store.list()
+  eq(svc.resolveRef('1')?.id, list[0].id, '序号 1 → 列表第 1 项')
+  eq(svc.resolveRef(String(list.length))?.id, list[list.length - 1].id, '末尾序号 → 最后一项')
+  eq(svc.resolveRef('0'), null, '序号 0 越界 → null')
+  eq(svc.resolveRef(String(list.length + 1)), null, '序号超范围 → null')
+  eq(svc.resolveRef('raiden-ei')?.id, 'raiden-ei', '按 id')
+  ok(!!svc.resolveRef('猫娘'), '按名称模糊')
+  eq(svc.resolveRef(''), null, '空 → null')
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

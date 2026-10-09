@@ -3321,6 +3321,11 @@ export class Chat extends plugin {
     return true
   }
 
+  /** 解析人设引用：数字 → #人设列表序号(1-based)，否则按 id/名称。找不到返回 null。 */
+  _resolvePersonaRef(rt, input) {
+    return rt.persona.resolveRef(input)
+  }
+
   async personaSwitch() {
     const input = this.e.msg.replace(/^#人设\s+/, '').trim()
     const rt = await getRuntime()
@@ -3388,8 +3393,8 @@ export class Chat extends plugin {
     const idOrName = this.e.msg.replace(/^#删除人设\s+/, '').trim()
     const rt = await getRuntime()
     const ctx = ctxOf(this.e)
-    const p = rt.personaStore.get(idOrName)
-    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
     if (p.builtin) return this.e.reply(`内置人设「${p.name}」不可删除`), true
     // 仅创建者或 master 可删
     if (p.creator && p.creator !== ctx.userId && !ctx.isMaster) {
@@ -3414,8 +3419,8 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     if (!rt.personaLore || !rt.completePersona) return this.e.reply('人设资料库未启用'), true
     const idOrName = this.e.msg.replace(/^#人设补齐\s+/, '').trim()
-    const p = rt.personaStore.get(idOrName)
-    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
     await this.e.reply(`🔎 已启动人设补齐任务（${p.name}），正在检索角色资料，请稍候…`)
     const r = await rt.completePersona(p.id, { by: String(this.e.user_id || '') })
     if (r.error) return this.e.reply(`${r.error}（可重试 #人设补齐 ${p.id}）`), true
@@ -3427,8 +3432,8 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     if (!rt.personaLore || !rt.completePersona) return this.e.reply('人设资料库未启用'), true
     const idOrName = this.e.msg.replace(/^#刷新人设资料\s+/, '').trim()
-    const p = rt.personaStore.get(idOrName)
-    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
     await this.e.reply(`🔁 正在为人设「${p.name}」重新检索资料…`)
     const r = await rt.completePersona(p.id, { by: String(this.e.user_id || '') })
     if (r.error) return this.e.reply(`${r.error}`), true
@@ -3442,8 +3447,8 @@ export class Chat extends plugin {
     const input = this.e.msg.replace(/^#人设资料定时\s+/, '').trim()
     const m = input.match(/^(\S+)\s+([\s\S]+)$/)
     if (!m) return this.e.reply('用法：#人设资料定时 <人设id> <时间>（如 每天8点 / 每周一8点30 / 每12小时）'), true
-    const p = rt.personaStore.get(m[1])
-    if (!p) return this.e.reply(`未找到人设「${m[1]}」`), true
+    const p = this._resolvePersonaRef(rt, m[1])
+    if (!p) return this.e.reply(`未找到人设「${m[1]}」（可用 #人设列表 的序号或 id）`), true
     const cron = parseCron(m[2].trim())
     if (!cron) return this.e.reply(`无法识别时间「${m[2]}」，支持：每天8点/每2小时/工作日9点/每周一8点30/每30分钟`), true
     const r = await rt.personaLore.setRefresh(p.id, cron)
@@ -3456,8 +3461,8 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
     const idOrName = this.e.msg.replace(/^#人设资料取消定时\s+/, '').trim()
-    const p = rt.personaStore.get(idOrName)
-    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
     await rt.personaLore.cancelRefresh(p.id)
     await this.e.reply(`已取消人设「${p.name}」的资料定时刷新`)
     return true
@@ -3477,8 +3482,8 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
     const idOrName = this.e.msg.replace(/^#查看补齐\s+/, '').trim()
-    const p = rt.personaStore.get(idOrName)
-    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
     const draft = rt.personaLore.getDraft(p.id)
     const main = rt.personaLore.get(p.id)
     const lore = draft || main
@@ -3501,8 +3506,8 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
     const idOrName = this.e.msg.replace(/^#采纳补齐\s+/, '').trim()
-    const p = rt.personaStore.get(idOrName)
-    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
     const draft = rt.personaLore.getDraft(p.id)
     const main = rt.personaLore.get(p.id)
     const src = draft || main
@@ -3526,8 +3531,8 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
     const idOrName = this.e.msg.replace(/^#丢弃补齐\s+/, '').trim()
-    const p = rt.personaStore.get(idOrName)
-    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
     const isDraft = !!rt.personaLore.getDraft(p.id)
     const ok = rt.personaLore.discard(p.id)
     await this.e.reply(ok ? `已丢弃人设资料${isDraft ? '（草稿）' : ''}：#${p.id}` : `人设「${p.name}」暂无补齐资料`)
