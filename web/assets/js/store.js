@@ -10,7 +10,7 @@
 
   // 覆盖为空 reactive（mock.js 若已加载则被覆盖；视图读取零改动，loadX 后填充）
   const MOCK = window.MOCK = reactive({
-    config: null, scopes: [], memories: {}, recall: {}, profile: {}, personas: [], skills: [], tools: [], toolPacks: [], kb: [],
+    config: null, scopes: [], memories: {}, recall: {}, profile: {}, personas: [], personaLore: [], skills: [], tools: [], toolPacks: [], kb: [],
     conversations: [], sessions: {}, logFiles: [], logFilesTotal: 0, schedules: [], confirms: [],
     suggestions: [], perceptions: [], tokenTrend: [], requestTrend: [], toolTop: [],
     totalRequests: 0, totalToolCalls: 0, totalTokens: 0,
@@ -70,6 +70,7 @@
     async loadRecall(userId) { MOCK.recall[userId] = await api.get('/recall', { userId }) },
     async loadProfile(userId) { MOCK.profile[userId] = await api.get('/profile', { userId }) },
     async loadPersonas() { MOCK.personas = await api.get('/personas') },
+    async loadPersonaLore() { MOCK.personaLore = await api.get('/persona-lore') },
     async loadSkills() { MOCK.skills = await api.get('/skills') },
     async loadConversations(userId, groupId) { MOCK.conversations = userId ? await api.get('/conversations', { userId, groupId }) : await api.get('/conversations') },
     async loadSession(convId, userId, groupId) { MOCK.sessions[convId] = await api.get('/sessions', { convId, userId, groupId }) },

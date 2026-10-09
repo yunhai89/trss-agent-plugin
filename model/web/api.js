@@ -9,6 +9,7 @@ import express from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
 import Config from '../../utils/Config.js'
+import Log from '../../utils/Log.js'
 import { setPath } from '../../utils/path.js'
 import { presets as openaiPresets } from '../openai/presets.js'
 import { presets as anthropicPresets } from '../anthropic/presets.js'
@@ -791,6 +792,72 @@ router.delete('/personas/:id', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
   try { return ok(res, { removed: r.personaStore.remove(req.params.id) }) }
   catch (e) { const msg = e.message || ''; return fail(res, /内置/.test(msg) ? CODE.READONLY : CODE.BAD, msg) }
+}))
+
+// ── 人设资料库（PersonaLore，按人设 id 独立；草稿/生效/定时刷新）──
+// GET /api/persona-lore —— 全部资料
+router.get('/persona-lore', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  return ok(res, r.personaLore ? r.personaLore.list() : [])
+}))
+
+// POST /api/persona-lore/:id/adopt —— 采纳草稿（draft→active；新内容首次采纳把 long-tail 灌入检索库）
+router.post('/persona-lore/:id/adopt', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaLore) return fail(res, CODE.BAD, '人设资料库未启用')
+  const draft = r.personaLore.getDraft(req.params.id)
+  const main = r.personaLore.get(req.params.id)
+  const src = draft || main
+  if (!src) return fail(res, CODE.NOTFOUND, `人设「${req.params.id}」暂无补齐资料`)
+  const newContent = !!draft || main?.status !== 'active'
+  let lore
+  try { lore = r.personaLore.adopt(req.params.id) }
+  catch (e) { return fail(res, CODE.BAD, e.message || String(e)) }
+  let ingestError = null
+  if (newContent && src.rawNotes) {
+    const ir = await r.personaLore.ingest(req.params.id, src.rawNotes, { title: `人设资料·${req.params.id}` }).catch((e) => ({ error: e?.message || e }))
+    // 近似重复=已有等价内容，不算失败（避免 refresh→采纳 时误报）
+    if (ir?.error && !/近似重复/.test(ir.error)) { ingestError = ir.error; Log.warn('[persona] 长尾资料入库失败', req.params.id, ir.error) }
+  }
+  return ok(res, { lore, ingestError })
+}))
+
+// DELETE /api/persona-lore/:id —— 丢弃资料（有独立草稿时只丢草稿；否则删主资料）
+router.delete('/persona-lore/:id', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaLore) return fail(res, CODE.BAD, '人设资料库未启用')
+  try { return ok(res, { removed: r.personaLore.discard(req.params.id) }) }
+  catch (e) { return fail(res, CODE.BAD, e.message || String(e)) }
+}))
+
+// POST /api/persona-lore/:id/complete —— 触发补齐任务（同步等待；可能较慢，产出草稿）
+router.post('/persona-lore/:id/complete', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.completePersona) return fail(res, CODE.BAD, '人设补齐未启用')
+  const result = await r.completePersona(req.params.id, { by: req.master })
+  if (result.error) return fail(res, CODE.BAD, result.error)
+  return ok(res, result.lore)
+}))
+
+// POST /api/persona-lore/:id/refresh —— 设定时刷新 { cron }（null/省略=取消）；接受自然语言或 5 段 cron
+router.post('/persona-lore/:id/refresh', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaLore) return fail(res, CODE.BAD, '人设资料库未启用')
+  const raw = (req.body || {}).cron
+  const norm = raw ? (parseCron(String(raw)) || String(raw)) : null
+  let result
+  try { result = await r.personaLore.setRefresh(req.params.id, norm) }
+  catch (e) { return fail(res, CODE.BAD, e.message || String(e)) }
+  if (result.error) return fail(res, CODE.BAD, result.error)
+  return ok(res, result)
+}))
+
+// DELETE /api/persona-lore/:id/refresh —— 取消定时刷新
+router.delete('/persona-lore/:id/refresh', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaLore) return fail(res, CODE.BAD, '人设资料库未启用')
+  try { return ok(res, await r.personaLore.cancelRefresh(req.params.id)) }
+  catch (e) { return fail(res, CODE.BAD, e.message || String(e)) }
 }))
 
 // POST /api/schedule —— 新建任务（type='task'=cron 重复任务链；默认=一次性提醒）

@@ -34,7 +34,7 @@
     memory: ['声明式记忆', 'MEMORY.md / USER.md · 按 scope 隔离'],
     recall: ['长期记忆', 'LLM 抽取沉淀 · L2/L3/L4 分层'],
     profile: ['用户画像', '统一用户模型 · 分面/证据/置信/纠错'],
-    personas: ['人设库', '内置 + 自定义人设'],
+    personas: ['人设库', '内置 + 自定义人设 · 角色设定资料'],
     skills: ['技能', 'skills/*.md · 按需/常驻注入'],
     kb: ['知识库', '全局文档库 · embedding RAG'],
     sessions: ['会话回放', '对话列表与消息历史'],

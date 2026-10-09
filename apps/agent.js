@@ -63,7 +63,11 @@ import { groupInfoTools, groupManageTools, groupHistoryTools, groupNoticeTools, 
 import { miyousheTools } from '../model/miyoushe/index.js'
 import { loadToolPacks } from '../model/toolkit/index.js'
 import { createSearchManager, makeSearchTools } from '../model/search/index.js'
-import { PersonaStore, PersonaService } from '../model/persona/index.js'
+import {
+  PersonaStore, PersonaService, PersonaLore,
+  groundingText, PERSONA_COMPLETION_SYSTEM, buildCompletionInput,
+  parseCompletionOutput, buildLoreDraft, formatDraftSummary,
+} from '../model/persona/index.js'
 import { VisionService, describeImages } from '../model/vision/index.js'
 import { getStickerManager } from '../model/sticker/manager.js'
 import { isStickerOnly, stripMarkers } from '../model/sticker/parser.js'
@@ -639,6 +643,13 @@ async function _buildRuntime(scope) {
   scope.register(() => { try { schedule?.shutdown?.() } catch { /* noop */ } }, { name: 'schedule', order: 10 })
   knowledge.attachScheduler(scheduler) // KB URL 定时刷新复用同一 scheduler（注册/恢复 refresh job）
   const persona = new PersonaService({ store: personaStore, kv: K })
+  // 人设资料库（按 id 独立，内置人设也可叠加补丁）：核心事实静态接地 + 长尾知识检索
+  const personaLore = new PersonaLore({
+    dir: path.resolve(PLUGIN_ROOT, cfg.personaLore?.dir || 'data/persona-lore'),
+    kv: K, embedFn,
+  })
+  personaLore.attachScheduler(scheduler) // 长尾/资料定时刷新复用 KB 同一 scheduler
+  scope.register(() => { try { personaLore?.shutdown?.() } catch { /* noop */ } }, { name: 'personaLore', order: 25 })
 
   // Skill（说明书 / 指令包）：从 skills/ 目录加载 .md/.js，按用户输入匹配后注入 prompt
   const skills = new SkillRegistry()
@@ -1072,7 +1083,46 @@ async function _buildRuntime(scope) {
   }
   // 多例：每请求 new Agent（共享 provider/tools/session 等引用，但 this.messages 各自独立）
   // → 并发 run 不再互相覆盖 this.messages，根治串会话/艾特错人，且不同用户真并发（不排队）
-  const makeAgent = () => new Agent(agentConfig)
+  const makeAgent = (overrides) => new Agent(overrides ? { ...agentConfig, ...overrides } : agentConfig)
+
+  /**
+   * 人设补齐：跑一次"资料员"任务（只读取材）→ 解析结构化产出 → 存草稿（不自动生效）。
+   * 供 #人设补齐 命令、Web 面板、定时刷新共用。用独立 scratch 作用域，不污染用户会话/记忆。
+   * @returns {Promise<{ persona?, lore?, error?, code? }>}
+   */
+  const completePersona = async (idOrName, { by = null } = {}) => {
+    const p = personaStore.get(idOrName)
+    if (!p) return { error: `未找到人设「${idOrName}」` }
+    const completionCtx = {
+      userId: '__persona_complete__', groupId: null, isGroup: false, isMaster: false, role: 'member',
+      isGroupAdmin: false, isolation: true,
+      // 每 persona 独立 scratch 作用域：防 A 角色补齐抽取的记忆被 B 角色补齐召回（串号）
+      scopeUserId: `__persona_complete__:${p.id}`, scopeId: `persona_complete_${p.id}`,
+      conversationId: `persona-complete:${p.id}`,
+      notify: () => {}, fetcher: (typeof fetch !== 'undefined' && fetch) || null,
+      // 剥离事件 e：防只读取材工具（miyoushe_post 发图）把内容误发到群/好友
+      miyoushe: { cookie: cfg.miyoushe?.cookie || '', defaultGid: cfg.miyoushe?.defaultGid || 2 },
+      replyMode: 'text', selfId: '',
+    }
+    let out
+    try {
+      out = await makeAgent({ maxTurns: cfg.schedule?.taskMaxTurns || 15 }).run(buildCompletionInput(p), {
+        ctx: completionCtx,
+        systemPrompt: PERSONA_COMPLETION_SYSTEM, // 身份层替换为资料员；工具/防护仍照常追加
+        // 有界运行：即便被外部资料诱导触发审批类工具，也最多等 signal 超时，不会卡满审批超时(默认 300s)
+        signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(180000) : null,
+        taskId: randomUUID(),
+      })
+    } catch (e) { return { error: `补齐任务失败：${e?.message || e}` } }
+    const parsed = parseCompletionOutput(out?.content || '')
+    if (!parsed.ok) return { error: `补齐失败：${parsed.error}` }
+    try {
+      const lore = personaLore.saveDraft(p.id, buildLoreDraft({ data: parsed.data, by, model: cfg.model }))
+      return { persona: p, lore }
+    } catch (e) { return { error: `补齐产出未通过安全校验：${e?.message || e}`, code: e?.code } }
+  }
+  // 定时刷新回调：周期重跑补齐 → 出新草稿（仍需 #采纳补齐 / 面板采纳才生效）
+  personaLore.setRefreshHandler((id) => completePersona(id, { by: 'schedule' }))
 
   // 视觉子模型（A 方案）：主模型不支持视觉时，由它把图片转成文本描述喂给主模型。
   // 注意：vision.model 留空时"复用主模型"只对本身支持视觉的主模型成立。主模型若是纯文本模型，
@@ -1266,7 +1316,7 @@ async function _buildRuntime(scope) {
     ['面板', cfg.webApi?.enable !== false ? `:${cfg.webApi?.port || 6098}` : 'off'],
   ])
 
-  return { agentConfig, makeAgent, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore, scope }
+  return { agentConfig, makeAgent, completePersona, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, personaLore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore, scope }
 }
 
 const getRuntime = async () => {
@@ -1299,6 +1349,8 @@ const getRuntime = async () => {
         // restore 已幂等：重复调用不会叠加 job（见 ScheduleStore.restore）。
         try { rt.schedule?.restore?.(makeFireDispatch(rt)).catch(() => {}) } catch { /* noop */ }
         try { rt.knowledge?.restoreRefreshJobs?.((id) => rt.knowledge.refreshDoc(id).catch((e) => Log.warn('[kb] 定时刷新失败', id, e?.message || e))).catch(() => {}) } catch { /* noop */ }
+        // 人设资料定时刷新：重启/热重载后重排 job（周期重跑补齐 → 出新草稿）
+        try { rt.personaLore?.restoreRefreshJobs?.((id) => Promise.resolve(rt.completePersona?.(id, { by: 'schedule' })).catch((e) => Log.warn('[persona] 定时刷新失败', id, e?.message || e))).catch(() => {}) } catch { /* noop */ }
         return rt
       })
       .catch((e) => {
@@ -1460,7 +1512,34 @@ function ctxFromInfo(info) {
   }
 }
 
-// 统一 fire 分发：type='task' → 跑 Agent 任务链（makeAgent().run(prompt)）+ 发结果；否则 fireReminder 静态
+/**
+ * 解析当前用户激活的人设接地（身份层 systemPrompt + 长尾检索 context），
+ * 供交互对话与 #继续任务 续跑等入口统一复用（避免两处接地语义漂移）。
+ * @returns {Promise<{ personaId: string|null, systemPrompt: string|undefined, context: string|undefined }>}
+ */
+async function resolvePersonaGrounding(rt, ctx, queryText) {
+  const none = { personaId: null, systemPrompt: undefined, context: undefined }
+  try {
+    const { persona } = await rt.persona.resolve(ctx.userId)
+    if (!persona) return none
+    const lore = rt.personaLore?.get?.(persona.id)
+    const active = lore && lore.status === 'active' ? lore : null
+    const systemPrompt = [persona.systemPrompt, active ? groundingText(active) : ''].filter(Boolean).join('\n\n') || undefined
+    let context
+    if (active) {
+      const hits = await rt.personaLore.retrieve(active.id, queryText, 3).catch(() => [])
+      if (hits.length) {
+        context = '【角色设定·长尾资料（检索，仅供参考；与已核实事实冲突时以已核实事实为准）】\n'
+          + hits.map((h) => `- ${h.text}`).join('\n')
+      }
+    }
+    return { personaId: persona.id, systemPrompt, context }
+  } catch (e) {
+    Log.warn('[persona] 接地解析失败', e?.message || e)
+    return none
+  }
+}
+
 export const makeFireDispatch = (rt) => {
   return async (info) => {
     if (info.type === 'task' && info.prompt) {
@@ -1562,6 +1641,14 @@ export class Chat extends plugin {
         { reg: '^#人设详情\\s+(.+)', fnc: 'personaDetail' },
         { reg: '^#新建人设\\s+(.+)', fnc: 'personaCreate' },
         { reg: '^#删除人设\\s+(.+)', fnc: 'personaDelete' },
+        { reg: '^#人设补齐\\s+(.+)', fnc: 'personaComplete', permission: 'master' },
+        { reg: '^#查看补齐\\s+(.+)', fnc: 'personaDraftView', permission: 'master' },
+        { reg: '^#采纳补齐\\s+(.+)', fnc: 'personaDraftAdopt', permission: 'master' },
+        { reg: '^#丢弃补齐\\s+(.+)', fnc: 'personaDraftDiscard', permission: 'master' },
+        { reg: '^#刷新人设资料\\s+(.+)', fnc: 'personaDraftRefresh', permission: 'master' },
+        { reg: '^#人设资料定时列表$', fnc: 'personaDraftScheduleList', permission: 'master' },
+        { reg: '^#人设资料取消定时\\s+(.+)', fnc: 'personaDraftCancelSchedule', permission: 'master' },
+        { reg: '^#人设资料定时\\s+(.+)', fnc: 'personaDraftSchedule', permission: 'master' },
         { reg: '^#重置人设$', fnc: 'personaReset' },
         { reg: '^#人设$', fnc: 'personaList' },
         { reg: '^#人设\\s+(.+)', fnc: 'personaSwitch' },
@@ -1865,13 +1952,15 @@ export class Chat extends plugin {
       return true
     }
 
-    // —— 人设：解析当前用户激活的人设，覆盖身份层 systemPrompt ——
+    // —— 人设：解析当前用户激活的人设 + 已采纳资料接地（静态核心事实 + 长尾检索）——
     let systemPrompt
     let personaId = null
+    let personaGroundingContext = null
     try {
-      const { persona } = await rt.persona.resolve(ctx.userId)
-      systemPrompt = persona?.systemPrompt || undefined
-      personaId = persona?.id || null
+      const pg = await resolvePersonaGrounding(rt, ctx, text)
+      personaId = pg.personaId
+      systemPrompt = pg.systemPrompt || undefined
+      personaGroundingContext = pg.context || null
     } catch (e) {
       Log.warn('[persona] 解析失败，用默认', e?.message || e)
     }
@@ -1908,6 +1997,10 @@ export class Chat extends plugin {
       }
     } catch (e) {
       Log.warn('[perception/skill] 注入失败', e?.message || e)
+    }
+    // —— 人设长尾资料：按本轮问题检索 per-persona 知识库，动态注入本轮上下文（核心事实已在身份层静态接地）——
+    if (personaGroundingContext) {
+      context = context ? `${context}\n\n${personaGroundingContext}` : personaGroundingContext
     }
     // 盲媒体防臆测（问题1）：模型看不到图/视频时，明确告知"无法识别"，杜绝从历史/上下文臆测内容
     if (blindMedia) {
@@ -3075,7 +3168,12 @@ export class Chat extends plugin {
     await this.e.reply(`任务 ${id} 续跑中（${planLine || '无已完成步骤'}）…`)
     try {
       const agent = rt.makeAgent()
-      const out = await agent.continueFrom(cp, { ctx, parentTaskId: id, runtimeGeneration: _runtimeGen })
+      // 与人设接地统一：续跑也应用当前用户激活人设（静态核心事实 + 按原任务输入的长尾检索）
+      const pg = await resolvePersonaGrounding(rt, ctx, String(cp?.input || ''))
+      const out = await agent.continueFrom(cp, {
+        ctx, parentTaskId: id, runtimeGeneration: _runtimeGen,
+        systemPrompt: pg.systemPrompt, context: pg.context,
+      })
       const body = stripMarkers(redactSecrets(out?.content || '')).trim()
       await this.e.reply(body || '续跑未产出内容（可查看任务状态或重新发起）。')
     } catch (e) {
@@ -3308,6 +3406,131 @@ export class Chat extends plugin {
     const ctx = ctxOf(this.e)
     await rt.persona.resetActive(ctx.userId)
     await this.e.reply('已恢复默认人设')
+    return true
+  }
+
+  // —— 人设补齐 / 资料草稿管理（主人；AI 只产出草稿，须采纳才生效）——
+  async personaComplete() {
+    const rt = await getRuntime()
+    if (!rt.personaLore || !rt.completePersona) return this.e.reply('人设资料库未启用'), true
+    const idOrName = this.e.msg.replace(/^#人设补齐\s+/, '').trim()
+    const p = rt.personaStore.get(idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    await this.e.reply(`🔎 已启动人设补齐任务（${p.name}），正在检索角色资料，请稍候…`)
+    const r = await rt.completePersona(p.id, { by: String(this.e.user_id || '') })
+    if (r.error) return this.e.reply(`${r.error}（可重试 #人设补齐 ${p.id}）`), true
+    await this.e.reply(formatDraftSummary(r.lore))
+    return true
+  }
+
+  async personaDraftRefresh() {
+    const rt = await getRuntime()
+    if (!rt.personaLore || !rt.completePersona) return this.e.reply('人设资料库未启用'), true
+    const idOrName = this.e.msg.replace(/^#刷新人设资料\s+/, '').trim()
+    const p = rt.personaStore.get(idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    await this.e.reply(`🔁 正在为人设「${p.name}」重新检索资料…`)
+    const r = await rt.completePersona(p.id, { by: String(this.e.user_id || '') })
+    if (r.error) return this.e.reply(`${r.error}`), true
+    await this.e.reply(formatDraftSummary(r.lore))
+    return true
+  }
+
+  async personaDraftSchedule() {
+    const rt = await getRuntime()
+    if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    const input = this.e.msg.replace(/^#人设资料定时\s+/, '').trim()
+    const m = input.match(/^(\S+)\s+([\s\S]+)$/)
+    if (!m) return this.e.reply('用法：#人设资料定时 <人设id> <时间>（如 每天8点 / 每周一8点30 / 每12小时）'), true
+    const p = rt.personaStore.get(m[1])
+    if (!p) return this.e.reply(`未找到人设「${m[1]}」`), true
+    const cron = parseCron(m[2].trim())
+    if (!cron) return this.e.reply(`无法识别时间「${m[2]}」，支持：每天8点/每2小时/工作日9点/每周一8点30/每30分钟`), true
+    const r = await rt.personaLore.setRefresh(p.id, cron)
+    if (r.error) return this.e.reply(r.error), true
+    await this.e.reply(`✓ 已为「${p.name}」（#${p.id}）设定人设资料定时刷新：${m[2].trim()}\n到点会重新检索并产出新草稿（需 #采纳补齐 生效）`)
+    return true
+  }
+
+  async personaDraftCancelSchedule() {
+    const rt = await getRuntime()
+    if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    const idOrName = this.e.msg.replace(/^#人设资料取消定时\s+/, '').trim()
+    const p = rt.personaStore.get(idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    await rt.personaLore.cancelRefresh(p.id)
+    await this.e.reply(`已取消人设「${p.name}」的资料定时刷新`)
+    return true
+  }
+
+  async personaDraftScheduleList() {
+    const rt = await getRuntime()
+    if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    const list = rt.personaLore.listRefresh()
+    if (!list.length) return this.e.reply('暂无人设资料定时刷新任务'), true
+    const lines = list.map((l) => `· ${l.id} · ${l.cron} · ${l.status === 'active' ? '已生效' : '草稿'}`)
+    await this.e.reply(['人设资料定时刷新：', ...lines].join('\n'))
+    return true
+  }
+
+  async personaDraftView() {
+    const rt = await getRuntime()
+    if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    const idOrName = this.e.msg.replace(/^#查看补齐\s+/, '').trim()
+    const p = rt.personaStore.get(idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    const draft = rt.personaLore.getDraft(p.id)
+    const main = rt.personaLore.get(p.id)
+    const lore = draft || main
+    if (!lore) return this.e.reply(`人设「${p.name}」暂无补齐资料`), true
+    const status = draft ? '待采纳草稿' : (lore.status === 'active' ? '已生效' : '草稿')
+    const src = lore.sources.map((s, i) => `[${i + 1}] ${s.title || s.ref}（${s.ref}）`).join('\n')
+    const lines = [
+      `🧩 人设资料 · ${p.name}（#${p.id}）· ${status}${draft && main?.status === 'active' ? '（另有一份已生效版本）' : ''}`,
+      lore.summary ? `概述：${lore.summary}` : '',
+      lore.systemPromptPatch ? `风格补充：${lore.systemPromptPatch}` : '',
+      '—— 事实 ——', lore.facts || '（无）',
+      src ? '—— 出处 ——' : '', src,
+      lore.rawNotes ? `—— 长尾资料（${lore.rawNotes.length} 字，采纳后入库供检索） ——` : '',
+    ].filter(Boolean)
+    await this.e.reply(lines.join('\n'))
+    return true
+  }
+
+  async personaDraftAdopt() {
+    const rt = await getRuntime()
+    if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    const idOrName = this.e.msg.replace(/^#采纳补齐\s+/, '').trim()
+    const p = rt.personaStore.get(idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    const draft = rt.personaLore.getDraft(p.id)
+    const main = rt.personaLore.get(p.id)
+    const src = draft || main
+    if (!src) return this.e.reply(`人设「${p.name}」暂无补齐资料`), true
+    // 仅当采纳的是新内容（独立草稿，或主文件尚为草稿）时才灌长尾库
+    const newContent = !!draft || main?.status !== 'active'
+    try {
+      rt.personaLore.adopt(p.id)
+    } catch (e) {
+      return this.e.reply(`采纳失败：${e?.message || e}`), true
+    }
+    if (newContent && src.rawNotes) {
+      const r = await rt.personaLore.ingest(p.id, src.rawNotes, { title: `人设资料·${p.name}` })
+      if (r?.error && !/近似重复/.test(r.error)) Log.warn('[persona] 长尾资料入库失败', r.error)
+    }
+    await this.e.reply(`✓ 已采纳人设资料：${p.name}（#${p.id}）。之后使用该人设时会以这些已核实事实为先。`)
+    return true
+  }
+
+  async personaDraftDiscard() {
+    const rt = await getRuntime()
+    if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    const idOrName = this.e.msg.replace(/^#丢弃补齐\s+/, '').trim()
+    const p = rt.personaStore.get(idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    const isDraft = !!rt.personaLore.getDraft(p.id)
+    const ok = rt.personaLore.discard(p.id)
+    await this.e.reply(ok ? `已丢弃人设资料${isDraft ? '（草稿）' : ''}：#${p.id}` : `人设「${p.name}」暂无补齐资料`)
     return true
   }
 }

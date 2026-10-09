@@ -221,6 +221,12 @@
     { id: 'translator', name: '译·同传君', description: '自定义:中日英三语互译,保留语气与梗', tags: ['翻译', '自定义'], avatar: '🌐', greeting: '把要翻译的内容发给我就好。', systemPrompt: '你是专业同传。用户发来中日英任意语言,自动识别并互译为另外两种语言,保留语气、梗和排版。', builtin: false, creator: '2854196310', createdAt: now - 7 * D },
   ]
 
+  /* ---------- §2.2b 人设资料库（PersonaLore，按 id 独立） ---------- */
+  const personaLore = [
+    { id: 'catgirl', status: 'active', summary: '活泼粘人的猫娘', facts: '- 句尾带「喵~」\n- 性格粘人、爱撒娇，技术问题仍认真', sources: [{ type: 'manual', ref: '—', title: '人工设定' }], canonical: { ip: '', game: '', aliases: [] }, rawNotes: '', refreshCron: null, by: '2854196310', createdAt: now - 6 * D, updatedAt: now - 6 * D, adoptedAt: now - 6 * D },
+    { id: 'senpai', status: 'draft', summary: '严厉但靠谱的技术前辈', facts: '- 语气犀利直接\n- 先指出坏习惯，再给出正确解法', sources: [{ type: 'web', ref: 'https://example.com', title: '示例来源' }], canonical: { ip: '', game: '', aliases: [] }, rawNotes: '', refreshCron: '0 8 * * *', by: '2854196310', createdAt: now - 1 * D, updatedAt: now - 1 * D, adoptedAt: null },
+  ]
+
   /* ---------- §2.3 技能 ---------- */
   const skills = [
     { name: 'capability-inquiry', description: '机器人能力询问:能做什么、有哪些工具、MCP 状态', when: { always: false, keywords: ['功能', 'MCP', '能做什么'], regex: ['你会(啥|什么)', 'help'] }, priority: 10, body: '# 能力询问\n\n当用户询问机器人能力时,列出当前可用工具分类:\n\n- 搜索类:web_search / deep_research\n- 媒体类:看图、识图、表情包\n- 计算类:Python 沙盒\n- 终端类(E2B 沙箱)\n\n回答控制在 8 行以内。' },
@@ -381,7 +387,7 @@
     { id: 'tv_draft011', tool_id: 'text_normalize', semver: '0.1.0', status: 'draft', source_hash: 'j0k1l2', generator_model: 'deepseek-chat', created_at: now - 30 * M },
   ]
   window.MOCK = Vue.reactive({
-    config, scopes, memories, recall, profile, personas, skills,
+    config, scopes, memories, recall, profile, personas, personaLore, skills,
     conversations, sessions, logFiles, schedules, confirms,
     suggestions, perceptions, tokenTrend, requestTrend, toolTop,
     totalRequests, totalToolCalls, totalTokens, tevoTools,

@@ -12,8 +12,15 @@
       const M = window.MOCK
 
       const personas = computed(() => M.personas)
+      const personaLore = computed(() => M.personaLore || [])
+      const loreMap = computed(() => Object.fromEntries(personaLore.value.map((l) => [l.id, l])))
+      const loreOf = (p) => (p && p.id ? loreMap.value[p.id] : null) || null
+      // 合并结构：有独立草稿时主资料带 .draft 字段；展示以草稿优先（待采纳内容）
+      const lorePending = (p) => { const l = loreOf(p); return !!(l && l.draft) }
+      const loreView = (p) => { const l = loreOf(p); return l ? (l.draft || l) : null }
       const detail = ref(null)
       const editor = ref({ show: false, idx: -1, form: null })
+      const busy = ref('')
 
       const openCreate = () => {
         editor.value = { show: true, idx: -1, form: { id: '', name: '', description: '', tags: [], avatar: '🙂', greeting: '', systemPrompt: '', builtin: false, creator: '2854196310', createdAt: Date.now() } }
@@ -62,13 +69,38 @@
         }
       }
 
-      onMounted(async () => { try { await window.store.loadPersonas() } catch (e) { toast(e.message, 'error') } })
+      onMounted(async () => {
+        try { await window.store.loadPersonas() } catch (e) { toast(e.message, 'error') }
+        try { await window.store.loadPersonaLore() } catch { /* 兼容旧后端：无人设资料库 */ }
+      })
 
-      return { personas, detail, editor, openCreate, openEdit, tagInput, addTag, applyEdit, del, AVA_BG, fmt }
+      // —— 人设资料库：补齐 / 采纳 / 丢弃（草稿须采纳才生效）——
+      const loadLore = async () => { try { await window.store.loadPersonaLore() } catch { /* noop */ } }
+      const doComplete = async (p) => {
+        if (busy.value) return
+        busy.value = 'complete'
+        try { await window.api.post(`/persona-lore/${p.id}/complete`, {}); await loadLore(); toast(`已为「${p.name}」生成补齐草稿，预览后采纳生效`) }
+        catch (e) { toast(e.message || '补齐失败', 'error') } finally { busy.value = '' }
+      }
+      const doAdopt = async (p) => {
+        if (busy.value) return
+        busy.value = 'adopt'
+        try { const r = await window.api.post(`/persona-lore/${p.id}/adopt`, {}); await loadLore(); toast(r?.ingestError ? `已采纳（长尾入库提示：${r.ingestError}）` : '已采纳人设资料，之后使用该人设以已核实事实为先') }
+        catch (e) { toast(e.message || '采纳失败', 'error') } finally { busy.value = '' }
+      }
+      const doDiscard = async (p) => {
+        if (busy.value) return
+        busy.value = 'discard'
+        const wasDraft = lorePending(p)
+        try { await window.api.del(`/persona-lore/${p.id}`); await loadLore(); toast(wasDraft ? '已丢弃待审草稿（生效资料保留）' : '已丢弃人设资料', 'info') }
+        catch (e) { toast(e.message || '丢弃失败', 'error') } finally { busy.value = '' }
+      }
+
+      return { personas, personaLore, loreOf, lorePending, loreView, detail, editor, openCreate, openEdit, tagInput, addTag, applyEdit, del, busy, doComplete, doAdopt, doDiscard, AVA_BG, fmt }
     },
     template: `
     <div>
-      <page-head title="人设库" icon="persona" desc="data/personas/&lt;id&gt;.json · 内置为代码常量(只读)，自定义可编辑">
+      <page-head title="人设库" icon="persona" desc="data/personas/&lt;id&gt;.json + data/persona-lore/&lt;id&gt;.json · 内置为代码常量(只读)，可补齐/采纳角色设定资料">
         <button class="btn b-pri" @click="openCreate"><v-icon name="plus"/>新建人设</button>
       </page-head>
 
@@ -78,6 +110,9 @@
             <div class="ps-ava" :style="{background: AVA_BG[i % AVA_BG.length]}">{{ p.avatar }}</div>
             <span v-if="p.builtin" class="pill p-line"><v-icon name="lock"/>内置</span>
             <span v-else class="pill p-vio">自定义</span>
+            <span v-if="lorePending(p)" class="pill p-pri" style="font-size:10px">待审草稿</span>
+            <span v-else-if="loreOf(p) && loreOf(p).status === 'active'" class="pill p-mint" style="font-size:10px">资料✓</span>
+            <span v-else-if="loreOf(p)" class="pill p-pri" style="font-size:10px">资料草稿</span>
           </div>
           <div>
             <div style="font-weight:800;font-size:15px">{{ p.name }}</div>
@@ -117,6 +152,29 @@
           <label class="f-label">systemPrompt</label>
           <pre class="code" style="white-space:pre-wrap">{{ detail.systemPrompt }}</pre>
         </div>
+        <div class="hr"></div>
+        <div class="row-b">
+          <label class="f-label" style="margin:0">角色设定资料（已核实事实）</label>
+          <div class="row g6" style="flex-wrap:wrap">
+            <button class="btn b-soft b-sm" :disabled="!!busy" @click="doComplete(detail)"><v-icon name="search"/>{{ busy === 'complete' ? '检索中…' : (loreOf(detail) ? '重取' : '补齐') }}</button>
+            <button v-if="loreView(detail) && (lorePending(detail) || loreView(detail).status !== 'active')" class="btn b-pri b-sm" :disabled="!!busy" @click="doAdopt(detail)"><v-icon name="check"/>采纳</button>
+            <button v-if="loreView(detail)" class="btn b-line b-sm" :disabled="!!busy" @click="doDiscard(detail)"><v-icon name="trash"/>丢弃</button>
+          </div>
+        </div>
+        <div v-if="!loreView(detail)" class="mut2 mt8" style="font-size:12.5px">暂无资料。点「补齐」让 Agent 检索角色设定并生成草稿（也可在群里发 <span class="mono">#人设补齐 {{ detail.id }}</span>）。</div>
+        <template v-else>
+          <div class="row g6 wrap mt8">
+            <span class="pill" :class="loreView(detail).status === 'active' && !lorePending(detail) ? 'p-mint' : 'p-pri'">{{ lorePending(detail) ? '待采纳草稿' : (loreView(detail).status === 'active' ? '已生效' : '草稿（未生效）') }}</span>
+            <span v-if="loreOf(detail) && loreOf(detail).refreshCron" class="pill p-vio">定时：{{ loreOf(detail).refreshCron }}</span>
+          </div>
+          <p v-if="loreView(detail).summary" class="mut mt8" style="font-size:13px">{{ loreView(detail).summary }}</p>
+          <label class="f-label mt16">事实</label>
+          <pre class="code" style="white-space:pre-wrap">{{ loreView(detail).facts || '（无）' }}</pre>
+          <template v-if="loreView(detail).sources && loreView(detail).sources.length">
+            <label class="f-label mt16">出处</label>
+            <div v-for="(s, i) in loreView(detail).sources" :key="i" class="mut2" style="font-size:12px">[{{ i + 1 }}] {{ s.title || s.ref }}<span v-if="s.ref && s.title">（{{ s.ref }}）</span></div>
+          </template>
+        </template>
         <div class="mut2 mt16" style="font-size:11.5px">id: <span class="mono">{{ detail.id }}</span> · creator: {{ detail.creator || '—' }} · {{ new Date(detail.createdAt).toLocaleString('zh-CN') }}</div>
       </v-modal>
 

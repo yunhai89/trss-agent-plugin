@@ -55,6 +55,7 @@ const HOOKED_STRESS = new Set([
   'stress/e2e/compaction-clear.mjs', // F02：清空记录必须连同压缩归档一起清理 + 会话 id 不复用
   // 真实 Web router 测试需要 Yunzai 桩（apps/agent.js / lib 解析）
   'model/web/api.tevo.test.mjs',
+  'model/web/api.persona-lore.test.mjs',
 ])
 for (const t of tests) {
   const rel = t.replace(root, '')
