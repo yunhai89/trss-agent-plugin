@@ -2,21 +2,29 @@
 (function () {
   window.VIEWS = window.VIEWS || {}
 
+  /* 覆盖后端 ALLOWED_KIND=['memory','skill','prompt','tool'] 与 suggestion.action
+     （add/replace/remove/update/create）；未知值走 *_meta 兜底，绝不因缺映射抛错把整页刷空。 */
   const KIND = {
     memory: { name: '记忆', cls: 'p-honey', icon: 'memory' },
     skill: { name: '技能', cls: 'p-vio', icon: 'skill' },
     prompt: { name: 'Prompt', cls: 'p-sky', icon: 'edit' },
+    tool: { name: '工具', cls: 'p-mint', icon: 'tool' },
   }
   const ACTION = {
     add: { name: '新增', cls: 'p-green' },
     remove: { name: '删除', cls: 'p-rose' },
     replace: { name: '替换', cls: 'p-honey' },
+    update: { name: '更新', cls: 'p-sky' },
+    create: { name: '创建', cls: 'p-green' },
   }
   const STATUS = {
     pending: { name: '待审', cls: 'p-honey' },
     applied: { name: '已应用', cls: 'p-green' },
     apply_failed: { name: '应用失败', cls: 'p-rose' },
   }
+  const kindMeta = (k) => KIND[k] || { name: String(k || '?'), cls: 'p-line', icon: 'tool' }
+  const actionMeta = (a) => ACTION[a] || { name: String(a || '?'), cls: 'p-line' }
+  const statusMeta = (s) => STATUS[s] || { name: String(s || '?'), cls: 'p-line' }
 
   window.VIEWS.suggestions = {
     name: 'SuggestionsView',
@@ -50,7 +58,7 @@
       /* 惰性加载:拉全部建议(scopeId/status 均可选);status/kind 为纯客户端筛选 */
       onMounted(async () => { try { await window.store.loadSuggestions() } catch (e) { toast(e.message, 'error') } })
 
-      return { list, status, kind, decide, pendingCount, KIND, ACTION, STATUS, fmt }
+      return { list, status, kind, decide, pendingCount, KIND, ACTION, STATUS, kindMeta, actionMeta, statusMeta, fmt }
     },
     template: `
     <div>
@@ -78,16 +86,16 @@
         <div v-for="(s, i) in list" :key="s.id" class="card pad lift" :style="{'--i': i + 1}">
           <div class="row-b wrap g10">
             <div class="row g6 wrap">
-              <span class="pill" :class="KIND[s.kind].cls"><v-icon :name="KIND[s.kind].icon"/>{{ KIND[s.kind].name }}</span>
-              <span class="pill" :class="ACTION[s.action].cls">{{ ACTION[s.action].name }}</span>
+              <span class="pill" :class="kindMeta(s.kind).cls"><v-icon :name="kindMeta(s.kind).icon"/>{{ kindMeta(s.kind).name }}</span>
+              <span class="pill" :class="actionMeta(s.action).cls">{{ actionMeta(s.action).name }}</span>
               <span class="pill p-line">target: {{ s.target }}</span>
-              <span class="pill" :class="STATUS[s.status].cls">{{ STATUS[s.status].name }}</span>
+              <span class="pill" :class="statusMeta(s.status).cls">{{ statusMeta(s.status).name }}</span>
             </div>
             <div class="row g10">
               <div class="meter" style="width:90px" :class="s.confidence > 0.85 ? 'm-mint' : s.confidence > 0.65 ? '' : 'm-honey'">
-                <i :style="{width: s.confidence * 100 + '%'}"></i>
+                <i :style="{width: (s.confidence || 0) * 100 + '%'}"></i>
               </div>
-              <span class="mut num" style="font-size:11.5px">置信 {{ (s.confidence * 100).toFixed(0) }}%</span>
+              <span class="mut num" style="font-size:11.5px">置信 {{ ((s.confidence || 0) * 100).toFixed(0) }}%</span>
             </div>
           </div>
 
