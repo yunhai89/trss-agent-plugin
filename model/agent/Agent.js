@@ -597,7 +597,13 @@ export class Agent {
     const workCtl = new AbortController()
     const onUserAbort = () => workCtl.abort({ kind: 'user' })
     if (signal) {
-      if (signal.aborted) throw new Error('aborted')
+      if (signal.aborted) {
+        // F02：启动前即取消也要落终态（否则任务永久 running）
+        if (this.taskStore && ctx) {
+          await this._journal((s) => s.finish({ taskId, phase: 'cancelled', stopReason: 'cancelled', completion: 'none' }))
+        }
+        throw new Error('aborted')
+      }
       signal.addEventListener('abort', onUserAbort, { once: true })
     }
     const workSignal = workCtl.signal
@@ -836,6 +842,10 @@ export class Agent {
       //  - 其余异常原样上抛（run_error）。
       if (signal?.aborted) {
         this.devLog?.('cancel', { at: 'loop', error: e?.message || String(e) }, taskId, ctx?.devScope)
+        // F02：用户取消必须落终态（否则任务永久 running）。终态保护在 TaskStore.finish 内。
+        if (this.taskStore && ctx) {
+          await this._journal((s) => s.finish({ taskId, phase: 'cancelled', stopReason: 'cancelled', completion: 'none' }))
+        }
         throw new Error('aborted')
       }
       if (workSignal.aborted) {

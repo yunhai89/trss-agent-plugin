@@ -55,14 +55,15 @@ const DDL = [
     task_id TEXT NOT NULL,
     kind TEXT NOT NULL,
     call_id TEXT,
+    attempt INTEGER NOT NULL DEFAULT 0,
     phase TEXT,
     stop_reason TEXT,
     completion TEXT,
     payload_json TEXT,
     created_at INTEGER NOT NULL
   )`,
-  // 同一任务同一 kind+call_id 只记一次（迟到/重复结算不改账本）
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedupe ON task_events(task_id, kind, call_id) WHERE call_id IS NOT NULL`,
+  // 同一任务同一 kind+call_id+attempt 只记一次（迟到/重复结算不改账本；不同 attempt 可分别记录）
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedupe ON task_events(task_id, kind, call_id, attempt) WHERE call_id IS NOT NULL`,
 ]
 
 function runP(db, sql, params = []) {
@@ -126,6 +127,7 @@ export class TaskStore {
     this.logger = logger
     this._db = null
     this._writeChain = Promise.resolve() // 写事务串行化，防 BEGIN/COMMIT 交错
+    this._projChain = new Map() // 每 taskId 投影串行化（projectOnce 读-执行-写不交错）
   }
 
   async open() {
@@ -138,6 +140,15 @@ export class TaskStore {
     await execP(this._db, 'PRAGMA journal_mode=WAL;')
     await execP(this._db, 'PRAGMA foreign_keys=ON;')
     for (const sql of DDL) await execP(this._db, sql)
+    // 迁移：旧库 task_events 缺 attempt 列 → 补列并重建去重索引（含 attempt，支持失败→重试成功分别落账）
+    try {
+      const cols = await allP(this._db, `PRAGMA table_info(task_events)`)
+      if (!cols.some((c) => c.name === 'attempt')) {
+        await runP(this._db, `ALTER TABLE task_events ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0`)
+        await execP(this._db, `DROP INDEX IF EXISTS idx_events_dedupe`)
+        await execP(this._db, `CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedupe ON task_events(task_id, kind, call_id, attempt) WHERE call_id IS NOT NULL`)
+      }
+    } catch { /* 迁移失败：后续 event 写入会暴露，不静默假装成功 */ }
     const versionRow = await getP(this._db, `SELECT value FROM store_meta WHERE key='schema_version'`)
     if (versionRow) {
       const v = Number(versionRow.value)
@@ -202,14 +213,14 @@ export class TaskStore {
   }
 
   /**
-   * 追加任务事件并推进快照。call_id 非空时按 (task_id, kind, call_id) 去重（重复/迟到结算不重复计数）。
-   * 事件审计记录失败视为关键写失败，调用方应停止新的副作用。
+   * 追加任务事件并推进快照。call_id 非空时按 (task_id, kind, call_id, attempt) 去重
+   * （同一尝试的重复/迟到结算不重复计数；不同 attempt 可分别记录，支持失败→重试成功）。
    */
-  async event({ taskId, kind, callId = null, phase = null, stopReason = null, completion = null, payload = null }) {
+  async event({ taskId, kind, callId = null, attempt = 0, phase = null, stopReason = null, completion = null, payload = null }) {
     const now = Date.now()
     return this._tx(async () => {
-      const info = await runP(this._db, `INSERT OR IGNORE INTO task_events(task_id, kind, call_id, phase, stop_reason, completion, payload_json, created_at) VALUES (?,?,?,?,?,?,?,?)`, [
-        taskId, kind, callId, phase, stopReason, completion, payload == null ? null : JSON.stringify(payload), now,
+      const info = await runP(this._db, `INSERT OR IGNORE INTO task_events(task_id, kind, call_id, attempt, phase, stop_reason, completion, payload_json, created_at) VALUES (?,?,?,?,?,?,?,?,?)`, [
+        taskId, kind, callId, Math.max(0, Number(attempt) || 0), phase, stopReason, completion, payload == null ? null : JSON.stringify(payload), now,
       ])
       const inserted = (info?.changes || 0) > 0
       if (inserted) {
@@ -225,10 +236,18 @@ export class TaskStore {
     })
   }
 
-  /** 结算任务（终态或 paused/waiting_input/interrupted）。 */
+  /** 结算任务（终态或 paused/waiting_input/interrupted）。终态不可被迟到结算覆盖（F02）。 */
   async finish({ taskId, phase, stopReason = null, completion = null, usage = null, effects = null, deliveries = null, artifactRefs = null }) {
     const now = Date.now()
     return this._tx(async () => {
+      const cur = await getP(this._db, `SELECT phase FROM tasks WHERE task_id = ?`, [taskId])
+      if (cur && TERMINAL_PHASES.has(cur.phase) && cur.phase !== phase) {
+        // 已处于终态（如 cancelled）→ 迟到 completed/failed 不得覆盖；只记录事件留痕
+        await runP(this._db, `INSERT INTO task_events(task_id, kind, phase, stop_reason, payload_json, created_at) VALUES (?,?,?,?,?,?)`, [
+          taskId, 'finish_ignored', phase, stopReason, JSON.stringify({ kept: cur.phase }), now,
+        ])
+        return { skipped: true, kept: cur.phase }
+      }
       await runP(this._db, `INSERT INTO task_events(task_id, kind, phase, stop_reason, completion, payload_json, created_at) VALUES (?,?,?,?,?,?,?)`, [
         taskId, 'finished', phase, stopReason, completion, JSON.stringify({ usage, effects, deliveries }), now,
       ])
@@ -246,6 +265,7 @@ export class TaskStore {
         artifactRefs == null ? null : JSON.stringify(artifactRefs),
         taskId,
       ])
+      return { ok: true }
     })
   }
 
@@ -260,7 +280,7 @@ export class TaskStore {
   async listEvents(taskId) {
     const rows = await allP(this._db, `SELECT * FROM task_events WHERE task_id = ? ORDER BY seq ASC`, [taskId])
     return rows.map((r) => ({
-      seq: r.seq, kind: r.kind, callId: r.call_id || null, phase: r.phase || null,
+      seq: r.seq, kind: r.kind, callId: r.call_id || null, attempt: r.attempt || 0, phase: r.phase || null,
       stopReason: r.stop_reason || null, completion: r.completion || null,
       payload: parseJson(r.payload_json), createdAt: r.created_at,
     }))
@@ -347,19 +367,24 @@ export class TaskStore {
     if (plan.hasBlocking) return { ok: false, code: 'blocked_pending_reconciliation', plan }
     if (typeof execute !== 'function') return { ok: false, code: 'no_executor', plan }
 
+    // 每个 callId 的下一 attempt = 历史最大 attempt + 1（失败→重试成功可分别落账，不被去重键吞掉）
+    const maxAttempt = new Map()
+    for (const e of events) if (e.callId) maxAttempt.set(e.callId, Math.max(maxAttempt.get(e.callId) || 0, e.attempt || 0))
+
     const applied = []
     for (const step of plan.steps) {
       if (step.action !== 'retry') { applied.push({ callId: step.callId, applied: false, reason: 'not_auto' }); continue }
       if (step.effect && step.effect !== 'read') { applied.push({ callId: step.callId, applied: false, reason: 'not_read_only' }); continue }
+      const attempt = (maxAttempt.get(step.callId) || 0) + 1
       try {
         const res = await execute(step)
         // F03/C06：恢复执行返回的错误对象（{error}/{ok:false}）不得记成成功
         const failed = res != null && typeof res === 'object' && (res.error != null || res.ok === false)
         const errMsg = failed ? (res.error || 'recovery_failed') : null
-        await this.event({ taskId, kind: 'tool_result', callId: step.callId, payload: { name: step.name, ok: !failed, recovered: true, effectState: 'none', ...(failed ? { error: errMsg } : {}) } })
+        await this.event({ taskId, kind: 'tool_result', callId: step.callId, attempt, payload: { name: step.name, ok: !failed, recovered: true, effectState: 'none', ...(failed ? { error: errMsg } : {}) } })
         applied.push({ callId: step.callId, applied: !failed, ...(failed ? { error: errMsg } : {}) })
       } catch (e) {
-        await this.event({ taskId, kind: 'tool_result', callId: step.callId, payload: { name: step.name, ok: false, recovered: true, effectState: 'none', error: e?.message || String(e) } })
+        await this.event({ taskId, kind: 'tool_result', callId: step.callId, attempt, payload: { name: step.name, ok: false, recovered: true, effectState: 'none', error: e?.message || String(e) } })
         applied.push({ callId: step.callId, applied: false, error: e?.message || String(e) })
       }
     }
@@ -391,14 +416,20 @@ export class TaskStore {
   /**
    * 幂等投影：仅当目标 cursor 超过已提交游标时才执行 fn 并推进游标。
    * 恢复流程用它保证「同一批消息只 append 一次」。
+   * F20：同一 taskId 的并发调用按进程内队列串行化（读-执行-写不再交错），避免重复 append。
    */
   async projectOnce(taskId, { sessionKey = null, cursor }, fn) {
     const c = Math.max(0, Number(cursor) || 0)
-    const cur = await this.getSessionProjection(taskId)
-    if (cur && c <= (cur.cursor || 0)) return { skipped: true, cursor: cur.cursor }
-    await fn()
-    await this.markSessionProjected(taskId, { sessionKey, cursor: c })
-    return { skipped: false, cursor: c }
+    const prev = this._projChain.get(taskId) || Promise.resolve()
+    const run = prev.then(async () => {
+      const cur = await this.getSessionProjection(taskId)
+      if (cur && c <= (cur.cursor || 0)) return { skipped: true, cursor: cur.cursor }
+      await fn()
+      await this.markSessionProjected(taskId, { sessionKey, cursor: c })
+      return { skipped: false, cursor: c }
+    })
+    this._projChain.set(taskId, run.then(() => {}, () => {}))
+    return run
   }
 
   /** 清理任务及其事件（删除会话/过期策略时调用；调用方负责不与普通 TTL 混淆）。 */

@@ -323,6 +323,69 @@ await test('F04：关键账本写失败 → 阻止副作用且不标 completed',
   await store.close()
 })
 
+// ---------- 17. F09：失败→重试成功可替换（attempt 分离） ----------
+await test('F09：失败→重试成功可替换，重复恢复不再执行', async () => {
+  const dir = tmp()
+  const s = new TaskStore({ dir }); await s.open()
+  await s.begin({ taskId: 't', ctx: CTX, phase: 'interrupted' })
+  const payload = { name: 'read', effect: 'read', replay: 'safe', args: { q: 'x' } }
+  await s.event({ taskId: 't', kind: 'tool_planned', callId: 'c1', payload })
+  await s.event({ taskId: 't', kind: 'tool_started', callId: 'c1', payload })
+  await s.event({ taskId: 't', kind: 'tool_result', callId: 'c1', payload: { ok: false, error: 'first failure' } })
+  let calls = 0
+  const execute = async () => { calls++; return { data: 'recovered payload' } }
+  const first = await s.recoverReadOnly('t', { execute })
+  eq(first.applied[0].applied, true, '恢复成功')
+  eq((await s.recoveryPlan('t')).plan.steps[0].action, 'reuse', '成功后计划为 reuse')
+  await s.recoverReadOnly('t', { execute })
+  eq(calls, 1, '再次恢复不重复执行')
+  eq((await s.listEvents('t')).filter((e) => e.kind === 'tool_result').length, 2, '两次尝试分别落账')
+  await s.close()
+})
+
+// ---------- 18. F20：projectOnce 并发幂等 ----------
+await test('F20：projectOnce 并发同 cursor 只 append 一次', async () => {
+  const dir = tmp()
+  const s = new TaskStore({ dir }); await s.open()
+  await s.begin({ taskId: 't', ctx: CTX })
+  let appends = 0
+  await Promise.all([
+    s.projectOnce('t', { cursor: 3 }, async () => { appends++; await new Promise((r) => setImmediate(r)) }),
+    s.projectOnce('t', { cursor: 3 }, async () => { appends++ }),
+  ])
+  eq(appends, 1, '并发相同 cursor 只执行一次')
+  await s.close()
+})
+
+// ---------- 19. F02：终态保护 + 取消落终态 ----------
+await test('F02：终态不被迟到 finish 覆盖', async () => {
+  const dir = tmp()
+  const s = new TaskStore({ dir }); await s.open()
+  await s.begin({ taskId: 't', ctx: CTX })
+  await s.cancel('t')
+  const r = await s.finish({ taskId: 't', phase: 'completed', stopReason: 'stop', completion: 'complete' })
+  eq(r.skipped, true, '迟到 completed 被拒')
+  eq((await s.get('t')).phase, 'cancelled', '保持 cancelled')
+  await s.close()
+})
+
+await test('F02：用户取消 → 任务落 cancelled（不永久 running）', async () => {
+  const dir = tmp()
+  const s = new TaskStore({ dir }); await s.open()
+  const ac = new AbortController()
+  let startedResolve
+  const started = new Promise((r) => { startedResolve = r })
+  const provider = { async chat(o) { startedResolve(); return new Promise((_, rej) => { o.signal?.addEventListener('abort', () => rej(new Error('aborted')), { once: true }) }) } }
+  const agent = new Agent({ provider, taskStore: s })
+  const p = agent.run('x', { taskId: 't', ctx: CTX, signal: ac.signal }).catch((e) => e.message)
+  await started
+  ac.abort()
+  const err = await p
+  eq(err, 'aborted', 'run 抛 aborted')
+  eq((await s.get('t')).phase, 'cancelled', '落 cancelled 终态')
+  await s.close()
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)
