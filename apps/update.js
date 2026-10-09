@@ -1,10 +1,15 @@
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import plugin from '../../../lib/plugins/plugin.js'
 
 let uping = false
 
+/** 插件根目录（绝对路径）——不依赖进程 cwd，避免 pm2/外部启动 cwd 非 Yunzai 根时 git 在错误目录执行。 */
+const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
 /**
  * agents-plugin 更新命令（参考 TRSS 标准更新模式，用 Bot.exec）。
- *   #agents更新 / #agents强制更新   拉取最新代码（强制=reset 后 rebase）；有改动时自动重启
+ *   #agents更新 / #agents强制更新   拉取当前分支最新代码（强制=reset 到远端）；有改动时自动重启
  *   #agents版本                     最近一次提交时间
  *   #agents更新日志                 本次更新的提交记录
  * 仅主人可用。插件目录名 agents-plugin。
@@ -28,9 +33,9 @@ export class AgentsUpdate extends plugin {
     return /^#(全部)?(安?静)/.test(this.e.msg)
   }
 
-  exec(cmd, plugin, opts = {}) {
-    if (plugin) opts.cwd = `plugins/${plugin}`
-    return Bot.exec(cmd, opts)
+  /** 始终在插件根目录执行 git（绝对 cwd）。 */
+  exec(cmd, opts = {}) {
+    return Bot.exec(cmd, { ...opts, cwd: PLUGIN_DIR })
   }
 
   async update() {
@@ -45,7 +50,7 @@ export class AgentsUpdate extends plugin {
 
     uping = true
     try {
-      await this.runUpdate('agents-plugin')
+      await this.runUpdate()
       if (this.isPkgUp) await this.updatePackage()
       if (this.isUp) this.restart()
     } catch (err) {
@@ -57,100 +62,99 @@ export class AgentsUpdate extends plugin {
     return true
   }
 
-  async runUpdate(plugin = 'agents-plugin') {
-    let cm = 'git pull'
-    let type = '更新'
+  async runUpdate() {
     const force = this.e.msg.includes('强制')
+    const type = force ? '强制更新' : '更新'
+    const branch = (await this.getBranch()) || 'master'
+    const remote = (await this.getRemote(branch)) || 'origin'
+    const target = `${remote}/${branch}`
 
-    if (force) {
-      type = '强制更新'
-      // 先 fetch 再 reset 到远端分支：reset --hard 会覆盖「本地未跟踪但目标提交已跟踪」的文件，
-      // 避免旧代码「reset 到过期 origin/xxx 后再 pull --rebase」被未跟踪文件挡住（#agents强制更新失败）。
-      const remoteBranch = await this.getRemoteBranch(true, plugin)
-      const branch = await this.getBranch(plugin)
-      const target = remoteBranch || `origin/${branch || 'master'}`
-      cm = `git fetch --all --prune && git reset --hard ${target}`
-    }
-    this.oldCommitId = await this.getCommitId(plugin)
+    this.oldCommitId = await this.getCommitId()
+    logger.mark(`[agents-plugin] 开始${type} agents-plugin（${target}）于 ${PLUGIN_DIR}`)
+    if (!this.quiet) await this.reply(`开始${type} agents-plugin（${target}）`)
 
-    logger.mark(`[agents-plugin] 开始${type} ${plugin}`)
-    if (!this.quiet) await this.reply(`开始${type} ${plugin}`)
-    const ret = await this.exec(cm, plugin)
-
-    if (ret.error && !(await this.gitErr(plugin, ret.stdout, ret.error.message))) {
-      logger.mark(`[agents-plugin] 更新失败 ${plugin}`)
+    // 先显式 fetch（不依赖 upstream 配置），fetch 失败按错误处理
+    const fetched = await this.exec(`git fetch ${remote} --prune --tags`)
+    if (fetched.error && !(await this.gitErr(fetched.stdout, fetched.error.message))) {
+      logger.mark('[agents-plugin] fetch 失败，已中止')
       return false
     }
 
-    const time = await this.getTime(plugin)
-    if (/Already up|已经是最新/.test(ret.stdout)) {
-      if (!this.quiet) await this.reply(`${plugin} 已是最新\n最后更新时间：${time}`)
-    } else {
-      this.isUp = true
-      if (/package\.json/.test(ret.stdout)) this.isPkgUp = true
-      await this.reply(`${plugin} 更新成功\n更新时间：${time}`)
-      await this.reply(await this.getLog(plugin))
+    const cm = force ? `git reset --hard ${target}` : `git merge --ff-only ${target}`
+    const ret = await this.exec(cm)
+    if (ret.error && !(await this.gitErr(ret.stdout, ret.error.message))) {
+      logger.mark('[agents-plugin] 更新失败')
+      return false
     }
 
-    logger.mark(`[agents-plugin] 最后更新时间：${time}`)
+    const after = await this.getCommitId()
+    const time = await this.getTime()
+    if (after === this.oldCommitId) {
+      if (!this.quiet) await this.reply(`agents-plugin 已是最新（${target} @ ${after}）\n最后更新时间：${time}`)
+      logger.mark(`[agents-plugin] 已是最新（${target} @ ${after}）`)
+      return true
+    }
+
+    this.isUp = true
+    const changed = (await this.exec(`git diff --name-only ${this.oldCommitId} ${after}`)).stdout
+    if (/(^|\n)package\.json($|\n)/.test(changed)) this.isPkgUp = true
+    await this.reply(`agents-plugin 更新成功：${this.oldCommitId} → ${after}\n更新时间：${time}`)
+    await this.reply(await this.getLog())
+    logger.mark(`[agents-plugin] 更新成功 ${this.oldCommitId} → ${after}，最后更新时间：${time}`)
     return true
   }
 
   async pluginVersion() {
     if (!this.e.isMaster) return false
-    const time = await this.getTime('agents-plugin')
-    await this.reply(`agents-plugin 最后更新时间：${time}`)
+    const branch = (await this.getBranch()) || '?'
+    const head = await this.getCommitId()
+    const time = await this.getTime()
+    await this.reply(`agents-plugin（${branch} @ ${head}）最后更新时间：${time}`)
     return true
   }
 
   async updateLog() {
     if (!this.e.isMaster) return false
-    const log = await this.getLog('agents-plugin')
+    const log = await this.getLog()
     await this.reply(log || '暂无更新日志')
     return true
   }
 
-  async getCommitId(...args) {
-    return (await this.exec('git rev-parse --short HEAD', ...args)).stdout
+  async getCommitId() {
+    return (await this.exec('git rev-parse --short HEAD')).stdout
   }
 
-  async getTime(...args) {
-    return (await this.exec('git log -1 --pretty=%cd --date=format:"%F %T"', ...args)).stdout
+  async getTime() {
+    return (await this.exec('git log -1 --pretty=%cd --date=format:"%F %T"')).stdout
   }
 
-  async getBranch(...args) {
-    return (await this.exec('git branch --show-current', ...args)).stdout
+  async getBranch() {
+    return (await this.exec('git branch --show-current')).stdout
   }
 
-  async getRemote(branch, ...args) {
-    return (await this.exec(`git config branch.${branch}.remote`, ...args)).stdout
-  }
-
-  async getRemoteBranch(string, ...args) {
-    const branch = await this.getBranch(...args)
-    if (!branch && string) return ''
-    const remote = await this.getRemote(branch, ...args)
-    if (!remote && string) return ''
-    return string ? `${remote}/${branch}` : { remote, branch }
+  async getRemote(branch) {
+    if (!branch) return ''
+    return (await this.exec(`git config branch.${branch}.remote`)).stdout
   }
 
   gitErrUrl(error) {
     return error.match(/'(.+?)'/g)?.[0]?.replace(/'(.+?)'/, '$1') || ''
   }
 
-  async gitErr(plugin, stdout, error) {
-    if (/unable to access|无法访问/.test(error)) {
-      await this.reply(`远程仓库连接错误：${this.gitErrUrl(error)}`)
-    } else if (/not found|未找到|does not (exist|appear)|不存在|Authentication failed|鉴权失败/.test(error)) {
-      await this.reply(`远程仓库地址错误：${this.gitErrUrl(error)}`)
-    } else if (/be overwritten by merge|被合并操作覆盖/.test(error) || /Merge conflict|合并冲突/.test(stdout)) {
-      await this.reply(`${error}\n${stdout}\n若修改过文件请手动更新，否则发送 #agents强制更新`)
-    } else if (/divergent branches|偏离的分支/.test(error)) {
-      const ret = await this.exec('git pull --rebase', plugin)
+  async gitErr(stdout, error) {
+    const errStr = String(error || '')
+    if (/unable to access|无法访问|Could not read from remote|Connection|timed out/.test(errStr)) {
+      await this.reply(`远程仓库连接错误：${this.gitErrUrl(errStr)}`)
+    } else if (/not found|未找到|does not (exist|appear)|不存在|Authentication failed|鉴权失败|repository/.test(errStr)) {
+      await this.reply(`远程仓库地址/鉴权错误：${this.gitErrUrl(errStr)}`)
+    } else if (/be overwritten by merge|被合并操作覆盖/.test(errStr) || /Merge conflict|合并冲突/.test(stdout)) {
+      await this.reply(`${errStr}\n${stdout}\n若修改过文件请手动更新，否则发送 #agents强制更新`)
+    } else if (/divergent branches|偏离的分支|not possible to fast-forward|fast-forward/.test(errStr)) {
+      const ret = await this.exec('git pull --rebase')
       if (!ret.error && /Successfully rebased|成功变基/.test(ret.stdout + ret.stderr)) return true
-      await this.reply(`${error}\n${stdout}\n若修改过文件请手动更新，否则发送 #agents强制更新`)
+      await this.reply(`${errStr}\n${stdout}\n若修改过文件请手动更新，否则发送 #agents强制更新`)
     } else {
-      await this.reply(`${error}\n${stdout}\n未知错误，可尝试发送 #agents强制更新`)
+      await this.reply(`${errStr}\n${stdout}\n未知错误，可尝试发送 #agents强制更新`)
     }
   }
 
@@ -158,7 +162,7 @@ export class AgentsUpdate extends plugin {
     const cmd = 'pnpm install'
     if (process.platform === 'win32') return this.reply(`检测到依赖更新，请 #关机 后执行 ${cmd}`)
     await this.reply('检测到依赖更新，开始安装依赖')
-    return this.exec(cmd, { cwd: 'plugins/agents-plugin' })
+    return this.exec(cmd)
   }
 
   restart() {
@@ -167,22 +171,22 @@ export class AgentsUpdate extends plugin {
     }).catch((e) => logger.warn('[agents-plugin] 自动重启失败，请手动重启以应用更新', e?.message || e))
   }
 
-  async getLog(plugin = 'agents-plugin') {
-    const cm = await this.exec('git log -100 --pretty="%h||[%cd] %s" --date=format:"%F %T"', plugin)
+  async getLog() {
+    const cm = await this.exec('git log -100 --pretty="%h||[%cd] %s" --date=format:"%F %T"')
     if (cm.error) return cm.error.message
 
     const logAll = cm.stdout.split('\n')
     if (!logAll.length) return ''
 
     const log = []
-    for (let str of logAll) {
+    for (const str of logAll) {
       const parts = str.split('||')
       if (parts[0] === this.oldCommitId) break
       if (parts[1]?.includes('Merge branch')) continue
-      log.push(parts[1])
+      if (parts[1]) log.push(parts[1])
     }
     if (log.length <= 0) return ''
 
-    return [`${plugin} 更新日志`, ...log].join('\n')
+    return [`agents-plugin 更新日志`, ...log].join('\n')
   }
 }
