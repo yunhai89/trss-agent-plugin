@@ -257,7 +257,7 @@ export async function applySuggestion(rt, s) {
     const oldSystem = tpl.system
     tpl.system = String(s.payload || '')
     if (typeof tpl.addChange === 'function') tpl.addChange(`${tpl.version || '1.0.0'}-evolved`, `采纳：${String(s.rationale || '').slice(0, 50)}`)
-    try { fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(tpl.toJSON(), null, 2)) }
+    try { fs.mkdirSync(rt.promptDir, { recursive: true }); fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(tpl.toJSON(), null, 2)) }
     catch (e) { throw new Error(`prompt 落盘失败：${e?.message || e}`) }
     removeSuggestion(rt.suggestionDir, s.scopeId, s.id)
     return { ok: true, note: `prompt「${key}」已应用（旧：${String(oldSystem).slice(0, 40)}…）` }

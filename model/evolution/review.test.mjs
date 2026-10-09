@@ -2,7 +2,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { SelfReviewer, listPendingSuggestions, removeSuggestion } from './review.js'
+import { SelfReviewer, listPendingSuggestions, removeSuggestion, applySuggestion } from './review.js'
 
 let passed = 0, failed = 0
 function ok(c, m) { if (c) { passed++; console.log('  ✓', m) } else { failed++; console.log('  ✗ FAIL', m) } }
@@ -103,6 +103,22 @@ await test('enable=false → tick 不触发', async () => {
   await tick()
   ok(chatCalled === 0, 'enable=false 完全静默')
   fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('applySuggestion：promptDir 不存在时自动创建并落盘（修 ENOENT 首次采纳崩溃）', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'rev-apply-'))
+  const promptDir = path.join(base, 'prompts-not-exist') // 故意不预建
+  const suggestionDir = path.join(base, 'sugg')
+  fs.mkdirSync(suggestionDir, { recursive: true })
+  const tpl = { id: 'agent', system: 'old', version: '1.0.0', toJSON() { return { id: this.id, system: this.system, version: this.version } }, addChange() {} }
+  const rt = { promptRegistry: { get: (k) => (k === 'agent' ? tpl : null) }, memory: null, promptDir, suggestionDir }
+  ok(!fs.existsSync(promptDir), '前置：promptDir 不存在')
+  const r = await applySuggestion(rt, { id: 's1', scopeId: 'u1', kind: 'prompt', action: 'update', target: 'agent', payload: 'new system', rationale: 'x' })
+  ok(r.ok, '应用成功（不再抛 ENOENT）')
+  const file = path.join(promptDir, 'agent.json')
+  ok(fs.existsSync(file), 'promptDir 被创建且文件已写入')
+  ok(JSON.parse(fs.readFileSync(file, 'utf8')).system === 'new system', '落盘内容正确')
+  fs.rmSync(base, { recursive: true, force: true })
 })
 
 console.log(`\n========================================`)

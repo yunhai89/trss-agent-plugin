@@ -874,6 +874,9 @@ async function _buildRuntime(scope) {
   const promptDir = path.resolve(PLUGIN_ROOT, cfg.evolution?.promptDir || 'data/evolution/prompts')
   const traceDir = path.resolve(PLUGIN_ROOT, cfg.evolution?.traceDir || 'data/evolution/traces')
   const suggestionDir = path.resolve(PLUGIN_ROOT, cfg.evolution?.suggestionDir || 'data/evolution/suggestions')
+  // 进化产出目录先建好：prompt 采纳/回滚直接 writeFileSync 到 promptDir，
+  // 目录缺省时旧代码报 ENOENT（首次采纳必崩）。trace/suggestion 也一并确保存在。
+  for (const d of [promptDir, traceDir, suggestionDir]) { try { fs.mkdirSync(d, { recursive: true }) } catch { /* noop */ } }
   const promptRegistry = new PromptRegistry()
   promptRegistry.registerAll(TEMPLATES)
   try {
@@ -2546,7 +2549,7 @@ export class Chat extends plugin {
       const oldSystem = tpl.system
       tpl.system = String(s.payload || '')
       tpl.addChange(`${tpl.version || '1.0.0'}-evolved`, `自评审采纳：${String(s.rationale || '').slice(0, 50)}`)
-      try { fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(tpl.toJSON(), null, 2)) }
+      try { fs.mkdirSync(rt.promptDir, { recursive: true }); fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(tpl.toJSON(), null, 2)) }
       catch (e) { Log.warn('[evolution] prompt 落盘失败', e?.message || e); await this.e.reply(`⚠️ 已应用但落盘失败：${e?.message || e}`) }
       removeSuggestion(rt.suggestionDir, ctx.scopeId, s.id)
       await this.e.reply(`✅ 已采纳 prompt suggestion（${key}），下轮对话生效。可用 #回滚 ${key} 恢复。\n旧版首句：${oldSystem.slice(0, 50)}…`)
@@ -2613,7 +2616,7 @@ export class Chat extends plugin {
       const tpl = rt.promptRegistry.get(key)
       const base = tpl ? tpl.toJSON() : { id: key, system: TEMPLATES[key]?.system || '' }
       const evolved = { ...base, system: result.best.text, version: `${base.version || '1.0.0'}-evolved-${Date.now().toString(36)}` }
-      try { fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(evolved, null, 2)) } catch (e) { Log.warn('[evolution] 落盘失败', e?.message || e) }
+      try { fs.mkdirSync(rt.promptDir, { recursive: true }); fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(evolved, null, 2)) } catch (e) { Log.warn('[evolution] 落盘失败', e?.message || e) }
       await this.e.reply(`✅ 进化完成：best=${(result.best.score || 0).toFixed(3)}（baseline=${(result.baseline?.score || 0).toFixed(3)}，${result.improved ? '✨已提升' : '未提升'}）\n已写入 data/evolution/prompts/${key}.json（待审）。\n#审阅进化 → #采纳 <id> 应用，#回滚 ${key} 恢复。`)
     } catch (e) { await this.e.reply(`进化失败：${e?.message || e}`) }
     return true
