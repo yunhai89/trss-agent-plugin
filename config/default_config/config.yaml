@@ -107,6 +107,10 @@ agent:
   reflect: auto             # 自我反思/自纠：off=关 | auto=仅多轮/用工具时(默认) | always=每次最终回复都反思 | jev=由 Jev 判断是否需要反思
   finalizeMaxTokens: 2048   # 收尾（finalizer）输出 token 上限：异常停止后最后一次交付；太小会截断总结/子代理报告
   rootTokenBudget: 0        # F13 根任务 token 预算上限（0=不限）：主/编排/子代理/反思合计；嵌套工作开始前预留
+  render:                   # 卡片图渲染（帮助/列表/回复图）
+    card: true              # 帮助等卡片图开关；弱服务器可置 false 直接回文本，避免渲染卡死
+    timeoutMs: 15000        # 单张卡片图渲染总超时（毫秒）：超时/失败降级文本，不让指令永久卡住
+    replyTimeoutMs: 30000   # 回复图渲染总超时（毫秒）
   cacheControl: false      # Anthropic 协议显式 prompt 缓存断点（tools/system/末消息；OpenAI 兼容端自动前缀缓存无需开）
   reflectMaxIterations: 1   # 反思回环修正最大次数（封顶防无限循环）
   progress: true            # 工具调用时推送节流进度消息（消除干等，默认开）
