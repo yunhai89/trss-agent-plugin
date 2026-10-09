@@ -42,6 +42,7 @@ import {
   resolveExecutionMeta,
   validateToolArgs,
   RuntimeScope,
+  abortActiveRun,
 } from '../model/agent/index.js'
 import { presets as openaiPresets } from '../model/openai/index.js'
 import { stripInlineToolCalls } from '../model/openai/helpers.js'
@@ -582,6 +583,8 @@ async function _buildRuntime(scope) {
       await taskStore.open()
       const n = await taskStore.markInterrupted({ runtimeGeneration: _runtimeGen })
       if (n) Log.info(`[task] 重启：${n} 个未结算任务已标记 interrupted（默认不自动重放）`)
+      // F02：取消落账后联动中止在途 Agent run（QQ/Web 取消真正停止执行）
+      taskStore.setCancelHook((id) => { try { abortActiveRun(id) } catch { /* noop */ } })
       Log.debug('[task] 任务账本已启用')
     } catch (e) {
       Log.warn('[task] 任务账本初始化失败，降级为不可恢复模式', e?.message || e)
@@ -2144,6 +2147,13 @@ export class Chat extends plugin {
         terminal('reply_failed', { mode: replyMode, stopReason, turns, replyLen: (body || '').length, error: finalOutcome?.error || 'send rejected' })
         await safeReply('⚠️ 回复已生成但发送失败，请稍后重发消息触发重试。') // best-effort 降级提示（不改变 reply_failed 终态）
       }
+      // F07：投递结果入账（execution 完成 ≠ 已送达）；QQ 超时等未知状态记 unknown
+      try {
+        if (rt.taskStore && traceId) {
+          const status = delivered ? 'sent' : (finalOutcome?.unknown ? 'unknown' : 'failed')
+          await rt.taskStore.recordDelivery(traceId, { status, mode: replyMode, detail: delivered ? null : (finalOutcome?.error || 'send rejected') })
+        }
+      } catch { /* 投递记录失败不影响回复 */ }
       // 记录群内最近活跃时间，供 perception 判断"久未发言补课"
       if (ctx.isGroup && ctx.groupId && rt.kv) {
         rt.kv.set(`perception:last_active:${ctx.groupId}`, { at: Date.now() }).catch(() => {})

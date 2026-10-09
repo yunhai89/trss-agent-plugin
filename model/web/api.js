@@ -213,7 +213,8 @@ router.get('/tasks/:id', asyncHandler(async (req, res) => {
   const t = await r.taskStore.get(req.params.id, { scopeKey: req.query.scopeKey || null })
   if (!t) return fail(res, CODE.NOTFOUND, '任务不存在或无权访问')
   const events = await r.taskStore.listEvents(t.taskId)
-  return ok(res, { task: t, events })
+  const checkpoint = await r.taskStore.getCheckpoint(t.taskId, { scopeKey: req.query.scopeKey || null }).catch(() => null)
+  return ok(res, { task: t, events, checkpoint })
 }))
 
 // GET /api/tasks/:id/recovery —— 恢复计划（P0-3 阶段二；纯推导，不执行副作用）

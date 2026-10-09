@@ -128,6 +128,7 @@ export class TaskStore {
     this._db = null
     this._writeChain = Promise.resolve() // 写事务串行化，防 BEGIN/COMMIT 交错
     this._projChain = new Map() // 每 taskId 投影串行化（projectOnce 读-执行-写不交错）
+    this._cancelHook = null // F02：取消联动回调（apps 接到 Agent.abortActiveRun）
   }
 
   async open() {
@@ -192,7 +193,7 @@ export class TaskStore {
   }
 
   /** 接受任务后、首次调用模型前登记（写入稳定标识与初始 phase）。 */
-  async begin({ taskId, rootTaskId = null, parentTaskId = null, ctx, actor = {}, phase = 'running', runtimeGeneration = null, providerRoute = null, promptVersion = null, toolSchemaSnapshotRef = null }) {
+  async begin({ taskId, rootTaskId = null, parentTaskId = null, ctx, actor = {}, phase = 'running', runtimeGeneration = null, providerRoute = null, promptVersion = null, toolSchemaSnapshotRef = null, input = null }) {
     const now = Date.now()
     const scopeKey = scopeKeyOfCtx(ctx)
     const scope = ctx ? { groupId: ctx.groupId ?? null, userId: ctx.userId ?? null, scopeUserId: ctx.scopeUserId ?? null, conversationId: ctx.conversationId ?? null, scopeId: ctx.scopeId ?? null } : null
@@ -207,7 +208,7 @@ export class TaskStore {
         phase, 0, runtimeGeneration, providerRoute, promptVersion, toolSchemaSnapshotRef, now, now,
       ])
       await runP(this._db, `INSERT INTO task_events(task_id, kind, payload_json, created_at) VALUES (?,?,?,?)`, [
-        taskId, 'accepted', JSON.stringify({ scopeKey }), now,
+        taskId, 'accepted', JSON.stringify({ scopeKey, ...(input != null ? { input: String(input).slice(0, 4000) } : {}) }), now,
       ])
     })
   }
@@ -269,12 +270,63 @@ export class TaskStore {
     })
   }
 
+  /**
+   * 记录一次投递结果（F07）：execution 完成与 delivery 分开。status = sent | failed | unknown。
+   * 只追加事件 + 更新 deliveries_json；不覆盖 execution phase。
+   */
+  async recordDelivery(taskId, { status, mode = null, detail = null } = {}) {
+    const now = Date.now()
+    return this._tx(async () => {
+      const row = await getP(this._db, `SELECT deliveries_json FROM tasks WHERE task_id = ?`, [taskId])
+      if (!row) return { ok: false, code: 'not_found' }
+      let list = parseJson(row.deliveries_json)
+      if (!Array.isArray(list)) list = []
+      list.push({ status, mode, at: now, ...(detail ? { detail } : {}) })
+      if (list.length > 50) list = list.slice(-50)
+      await runP(this._db, `INSERT INTO task_events(task_id, kind, payload_json, created_at) VALUES (?,?,?,?)`, [taskId, 'delivery', JSON.stringify({ status, mode }), now])
+      await runP(this._db, `UPDATE tasks SET deliveries_json=?, updated_at=?, revision=revision+1 WHERE task_id=?`, [JSON.stringify(list), now, taskId])
+      return { ok: true }
+    })
+  }
+
   /** 取任务；传 scopeKey 时做归属校验（跨 scope 返回 null）。 */
   async get(taskId, { scopeKey = null } = {}) {
     const row = await getP(this._db, `SELECT * FROM tasks WHERE task_id = ?`, [taskId])
     if (!row) return null
     if (scopeKey != null && row.scope_key !== scopeKey) return null
     return rowToTask(row)
+  }
+
+  /**
+   * 重建任务检查点（F06）：原始输入 + 各 step 的调用/参数/结果预览（按最新 attempt 折叠）。
+   * 写操作不落正文，其 args 仅有哈希 → 该步不可从记录完整恢复（如实体现）。
+   */
+  async getCheckpoint(taskId, { scopeKey = null } = {}) {
+    const row = await getP(this._db, `SELECT * FROM tasks WHERE task_id = ?`, [taskId])
+    if (!row) return { ok: false, code: 'not_found' }
+    if (scopeKey != null && row.scope_key !== scopeKey) return { ok: false, code: 'forbidden' }
+    const events = await this.listEvents(taskId)
+    const accepted = events.find((e) => e.kind === 'accepted')
+    const byCall = new Map()
+    for (const e of events) {
+      if (!e.callId) continue
+      const cur = byCall.get(e.callId) || { callId: e.callId, name: null, args: null, ok: null, effectState: null, resultPreview: null, errorCode: null, attempt: -1 }
+      if ((e.attempt || 0) < cur.attempt) continue
+      if (e.kind === 'tool_planned' || e.kind === 'tool_started') {
+        if (e.payload?.name) cur.name = e.payload.name
+        if (e.payload?.args !== undefined) cur.args = e.payload.args
+        if (e.payload?.argsHash) cur.argsHash = e.payload.argsHash
+      } else if (e.kind === 'tool_result') {
+        if (e.payload?.name) cur.name = e.payload.name
+        cur.ok = e.payload?.ok ?? null
+        cur.effectState = e.payload?.effectState ?? null
+        cur.resultPreview = e.payload?.resultPreview ?? null
+        cur.errorCode = e.payload?.errorCode ?? null
+      }
+      cur.attempt = e.attempt || 0
+      byCall.set(e.callId, cur)
+    }
+    return { ok: true, task: rowToTask(row), input: accepted?.payload?.input ?? null, steps: [...byCall.values()] }
   }
 
   async listEvents(taskId) {
@@ -311,10 +363,13 @@ export class TaskStore {
     })
   }
 
-  /** 手动取消（跨 scope 拒绝）。 */
+  /** F02：设置取消联动回调（取消已入库后调用，用于中止在途 Agent run）。 */
+  setCancelHook(fn) { this._cancelHook = typeof fn === 'function' ? fn : null; return this }
+
+  /** 手动取消（跨 scope 拒绝）。取消落账后联动中止在途执行（F02）。 */
   async cancel(taskId, { scopeKey = null } = {}) {
     const now = Date.now()
-    return this._tx(async () => {
+    const out = await this._tx(async () => {
       const row = await getP(this._db, `SELECT scope_key, phase FROM tasks WHERE task_id = ?`, [taskId])
       if (!row) return { ok: false, code: 'not_found' }
       if (scopeKey != null && row.scope_key !== scopeKey) return { ok: false, code: 'forbidden' }
@@ -323,6 +378,8 @@ export class TaskStore {
       await runP(this._db, `UPDATE tasks SET phase='cancelled', updated_at=?, revision=revision+1 WHERE task_id=?`, [now, taskId])
       return { ok: true }
     })
+    if (out.ok && this._cancelHook) { try { this._cancelHook(taskId) } catch { /* 联动失败不影响取消落账 */ } }
+    return out
   }
 
   /**

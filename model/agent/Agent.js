@@ -74,6 +74,16 @@ const NOT_EXECUTED_ERRORS = new Set([
   'rejected_by_shell_intercept', 'journal_unavailable', 'cancelled',
 ])
 
+/** 运行时在途任务注册表（F02）：taskId → { cancel }；供 QQ/Web 取消真正中止在途模型/工具/排队。 */
+const _activeRuns = new Map()
+export function abortActiveRun(taskId) {
+  const h = _activeRuns.get(taskId)
+  if (!h) return false
+  try { h.cancel() } catch { /* noop */ }
+  return true
+}
+export function isAgentRunActive(taskId) { return _activeRuns.has(taskId) }
+
 /** 工具结果签名（LoopGovernor 判"新事实"用）：长度 + 首尾片段 + 简单散列，
  *  区分"同参同结果空转"与"轮询状态变化"。结果已被 resultCap 截断，O(n) 开销可忽略。 */
 function resultSignature(content) {
@@ -538,11 +548,13 @@ export class Agent {
         taskId, ctx, phase: 'running',
         runtimeGeneration: opts.runtimeGeneration ?? null,
         providerRoute: this.model || null,
+        input: rawText, // F06：保存原始任务输入，供恢复重建
       }))
     }
     let usage = null
     let turns = 0
     this._externalUsage = null // F13：嵌套（编排/子代理）用量按 rootTask 归集，结算时并入根 usage
+    this._runCancelled = false // F02：运行时取消标志（abortActiveRun 置位）
     let stopReason = null
     // ── 最终答案状态机（长任务稳定性审计 P0-1：单一 lastContent 曾同时表示旁白/被否决草稿/最终答案）──
     // narrationContent：带 toolCalls 轮次的中间播报——只允许作为进度消息（onAssistant 转发），永远不能成为最终答案；
@@ -608,6 +620,8 @@ export class Agent {
       signal.addEventListener('abort', onUserAbort, { once: true })
     }
     const workSignal = workCtl.signal
+    // F02：注册在途任务，使 QQ/Web 取消能真正中止本 run（模型/工具经 workSignal 协作取消）
+    _activeRuns.set(taskId, { cancel: () => { this._runCancelled = true; try { workCtl.abort({ kind: 'user' }) } catch { /* noop */ } } })
     let workTimer = null
     if (this.governor?.timeBudgetMs) {
       workTimer = setTimeout(() => {
@@ -625,7 +639,7 @@ export class Agent {
       this.devLog?.('run_start', { user: ctx?.userId, gid: ctx?.groupId, conv: ctx?.conversationId, scopeUserId, scopeId, model: this.model, msgs: this.messages.length, tools: this.tools?.list?.().length || 0, discoveryOn, activeTools: this.activeTools ? [...this.activeTools] : null, toolsSent: __tools0.length, toolsTokensEst: __toolsTokensEst, maxTurns: this.maxTurns, inputLen: rawText.length }, taskId, ctx?.devScope)
 
       while (turns < this.maxTurns) {
-        if (signal?.aborted) throw new Error('aborted')
+        if (signal?.aborted || this._runCancelled) throw new Error('aborted')
 
         // 预检（调模型前，长任务稳定性审计 P0-2）：时间已超，或「已用 + 预计下一轮上下文占用」超 token 预算
         // → 不再启动一轮注定超支的调用，直接进收尾（为 finalizer 保留空间）。
@@ -841,9 +855,9 @@ export class Agent {
       //  - 用户主动取消 → 上抛（apps 记 cancelled 终态，不再发送过期结果）；
       //  - 工作时间预算到点（在途模型/工具被 workSignal 中止）→ 转为 time_budget 停止，进收尾；
       //  - 其余异常原样上抛（run_error）。
-      if (signal?.aborted) {
+      if (signal?.aborted || this._runCancelled) {
         this.devLog?.('cancel', { at: 'loop', error: e?.message || String(e) }, taskId, ctx?.devScope)
-        // F02：用户取消必须落终态（否则任务永久 running）。终态保护在 TaskStore.finish 内。
+        // F02：用户/运行时取消必须落终态（否则任务永久 running）。终态保护在 TaskStore.finish 内。
         if (this.taskStore && ctx) {
           await this._journal((s) => s.finish({ taskId, phase: 'cancelled', stopReason: 'cancelled', completion: 'none' }))
         }
@@ -856,6 +870,7 @@ export class Agent {
     } finally {
       if (workTimer) clearTimeout(workTimer) // 工作计时到点即清——收尾走独立宽限窗
       if (signal) signal.removeEventListener('abort', onUserAbort)
+      _activeRuns.delete(taskId) // F02：run 结束注销在途登记
     }
 
     if (!stopReason) {
@@ -1550,6 +1565,8 @@ export class Agent {
           payload: {
             name: toolCalls[i].name, cancelled, ok, failed: toolFailed, errorCode: code,
             effect, replay: metas[i].exec.replay, effectState,
+            // F06：只读成功结果保存预览，恢复时可复用（写操作不落正文）
+            ...(ok && effect === 'read' && content ? { resultPreview: content.slice(0, 1500) } : {}),
           },
         })
       })))

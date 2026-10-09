@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import sqlite3 from 'sqlite3'
 import { TaskStore, scopeKeyOfCtx } from './task-store.js'
-import { Agent } from './Agent.js'
+import { Agent, abortActiveRun } from './Agent.js'
 import { ToolRegistry } from './tools/registry.js'
 
 let passed = 0
@@ -383,6 +383,61 @@ await test('F02：用户取消 → 任务落 cancelled（不永久 running）', 
   const err = await p
   eq(err, 'aborted', 'run 抛 aborted')
   eq((await s.get('t')).phase, 'cancelled', '落 cancelled 终态')
+  await s.close()
+})
+
+// ---------- 20. F02 完整：取消联动中止在途 run ----------
+await test('F02：cancel 联动真正中止在途模型', async () => {
+  const dir = tmp()
+  const s = new TaskStore({ dir }); await s.open()
+  s.setCancelHook((id) => { try { abortActiveRun(id) } catch { /* noop */ } })
+  let startedResolve
+  const started = new Promise((r) => { startedResolve = r })
+  let sig = null
+  const provider = { async chat(o) { sig = o.signal; startedResolve(); return new Promise((_, rej) => { o.signal.addEventListener('abort', () => rej(new Error('aborted')), { once: true }) }) } }
+  const agent = new Agent({ provider, taskStore: s })
+  const p = agent.run('x', { taskId: 't', ctx: CTX }).catch((e) => e.message)
+  await started
+  const cancelled = await s.cancel('t')
+  eq(cancelled.ok, true, '取消落账')
+  const err = await p
+  eq(err, 'aborted', '在途 run 被中止')
+  eq(sig.aborted, true, '模型 signal 被中止')
+  eq((await s.get('t')).phase, 'cancelled', '终态 cancelled')
+  await s.close()
+})
+
+// ---------- 21. F06：检查点含输入与只读结果预览 ----------
+await test('F06：检查点含原始输入、step 参数与只读结果预览', async () => {
+  const dir = tmp()
+  const s = new TaskStore({ dir }); await s.open()
+  const tools = new ToolRegistry().register({ name: 'web_search', description: 'd', parameters: { type: 'object' }, async execute() { return { found: 'hello' } } })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'web_search', arguments: { q: 'x' } }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const agent = new Agent({ provider, tools, taskStore: s })
+  const r = await agent.run('原始任务描述', { ctx: CTX })
+  const cp = await s.getCheckpoint(r.taskId)
+  eq(cp.input, '原始任务描述', '保存原始输入')
+  const step = cp.steps.find((x) => x.callId === 'c1')
+  ok(step && step.name === 'web_search', 'step 名称')
+  eq(step.args, { q: 'x' }, 'step 参数可重建')
+  ok(step.resultPreview && step.resultPreview.includes('hello'), '只读结果预览可复用')
+  await s.close()
+})
+
+// ---------- 22. F07：投递结果入账 ----------
+await test('F07：execution 完成与 delivery 状态分开入账', async () => {
+  const dir = tmp()
+  const s = new TaskStore({ dir }); await s.open()
+  await s.begin({ taskId: 't', ctx: CTX })
+  await s.finish({ taskId: 't', phase: 'completed', stopReason: 'stop', completion: 'complete' })
+  await s.recordDelivery('t', { status: 'failed', mode: 'text', detail: 'send rejected' })
+  const t = await s.get('t')
+  eq(t.phase, 'completed', '执行仍为 completed')
+  ok(Array.isArray(t.deliveries) && t.deliveries[0].status === 'failed', 'deliveries 记 failed')
+  ok((await s.listEvents('t')).some((e) => e.kind === 'delivery'), '写入 delivery 事件')
   await s.close()
 })
 
