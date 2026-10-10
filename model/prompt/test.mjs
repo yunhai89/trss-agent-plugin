@@ -49,7 +49,7 @@ await test('TEMPLATES：预优化模板', async () => {
   for (const k of ['agent', 'orchestrator', 'researcher', 'scope', 'synthesis', 'citation', 'judge']) {
     ok(TEMPLATES[k], `模板 ${k} 存在`)
   }
-  ok(TEMPLATES.agent.version === '1.2.0', 'agent 版本')
+  ok(TEMPLATES.agent.version === '1.3.0', 'agent 版本')
   ok(!TEMPLATES.agent.system.includes('CRITICAL'), 'agent 无激进')
   ok(TEMPLATES.researcher.system.includes('先宽后窄'), 'researcher 先宽后窄')
 })
