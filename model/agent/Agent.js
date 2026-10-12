@@ -23,7 +23,7 @@ import { ToolScheduler, resolveToolConcurrency } from './tool-scheduler.js'
 import { resolveExecutionMeta } from './tool-effects.js'
 import { validateToolArgs } from './tool-schema.js'
 import { compactMessages } from './compact/index.js'
-import { TEMPLATES, SERVICE_DIRECTIVE, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
+import { TEMPLATES, SERVICE_DIRECTIVE, SEARCH_VERIFICATION, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 import { detectScheduleIntent } from './schedule.js'
 import { decideThinkingSmart, encodeThinking, classifyComplexity } from '../llm/thinking.js'
 import { decideThinkingWithJev, selectToolsWithJev, assessShellRiskWithJev, decideReflectWithJev, evaluateShellRisk } from './jev/index.js'
@@ -1128,14 +1128,14 @@ export class Agent {
     })
     // token 分段估算（供 token_breakdown；toolListTokens 在 run 处每轮补，因 _assembleSystem 早于 toolList 合成）
     const breakdown = tokenBreakdown({
-      identity, service: SERVICE_DIRECTIVE, context: '', guard: guardHardening,
+      identity, service: SERVICE_DIRECTIVE + '\n\n' + SEARCH_VERIFICATION, context: '', guard: guardHardening,
       toolCatalog, toolListTokens: 0,
       recalledMemory: '', memorySnapshot, skills: skillsSection, sticker: stickerSection,
       conversationTokens: this._estimateMessagesTokens(),
     }, this.estimateTokens)
     // 前缀指纹（P2 版本化）：只记 hash 不重复写 prompt 原文；与上次比对，变化即记 cacheBreakReason
     const fp = {
-      systemHash: shortHash(identity + SERVICE_DIRECTIVE),
+      systemHash: shortHash(identity + SERVICE_DIRECTIVE + SEARCH_VERIFICATION),
       toolHash: shortHash(toolCatalog),
       memoryVersion: shortHash(memorySnapshot),
       stickerVersion: shortHash(stickerSection),

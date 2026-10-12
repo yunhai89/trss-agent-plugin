@@ -5,6 +5,7 @@
 import {
   createSearchManager,
   SearchManager,
+  mergeSearchResults,
   makeSearchTools,
   createTavilyProvider,
   createExaProvider,
@@ -258,6 +259,70 @@ await test('manager：仅 DDG 且被反爬 → 聚合错误而非"无结果"', a
   let err = null
   try { await mgr.search('王者荣耀') } catch (e) { err = e }
   ok(err && /ddg/i.test(err.message), `抛出聚合失败原因（实际 ${err && err.message}）`)
+})
+
+// ---------- 12. 多查询并行 + 去重合并（防信息茧房：多面获取/交叉验证）----------
+await test('mergeSearchResults：URL 去重（大小写/hash/尾斜杠）+ 上限 + 失败单列', async () => {
+  const merged = mergeSearchResults([
+    { query: 'q1', result: { provider: 'tavily', answer: '答1', results: [{ title: 'A', url: 'https://A.com/x#frag', content: 'c1' }, { title: 'B', url: 'https://b.com/', content: 'c2' }] } },
+    { query: 'q2', result: { provider: 'brave', results: [{ title: 'A2', url: 'https://a.com/x', content: 'dup' }, { title: 'C', url: 'https://c.com', content: 'c3' }] } },
+    { query: 'q3', error: 'ddg: fetch failed' },
+  ])
+  eq(merged.results.length, 3, '重复 URL 只保留一次（A/B/C）')
+  eq(merged.results[0].source, 'tavily', '标注来源源名')
+  eq(merged.results[0].query, 'q1', '标注命中查询')
+  eq(merged.answers[0].answer, '答1', 'answers 汇总')
+  eq(merged.failures.length, 1, '失败查询单列（覆盖缺口可见）')
+  eq(merged.sources.sort().join(','), 'brave,tavily', 'sources 汇总去重源')
+  const capped = mergeSearchResults([{ query: 'q', result: { provider: 'p', results: Array.from({ length: 30 }, (_, i) => ({ title: `t${i}`, url: `https://x.com/${i}`, content: 'c' })) } }], { maxResults: 12 })
+  eq(capped.results.length, 12, '结果上限截断')
+})
+
+await test('SearchManager.searchMany：并行多查询、单查询失败不影响其他、最多 4 条', async () => {
+  const calls = []
+  const p1 = { name: 'p1', available: () => true, async search(q) { calls.push(q); if (q === 'bad') throw new Error('boom'); return { provider: 'p1', query: q, results: [{ title: q, url: `https://site.com/${encodeURIComponent(q)}`, content: q }] } } }
+  const mgr = new SearchManager({ providers: [p1] })
+  const r = await mgr.searchMany(['a', 'b', 'bad', 'c', 'd', 'e'])
+  eq(calls.length, 4, '最多并行 4 条查询')
+  eq(r.results.length, 3, '成功查询结果保留（a/b/c）')
+  eq(r.failures.length, 1, '失败查询进 failures')
+  ok(/boom/.test(r.failures[0].error), '失败原因透出')
+  let err = null
+  try { await mgr.searchMany([]) } catch (e) { err = e }
+  ok(err && /缺少查询词/.test(err.message), '空查询列表报错')
+})
+
+await test('web_search：queries 多角度并行 + 去重合并；无查询词给提示', async () => {
+  const p = {
+    name: 'p', available: () => true,
+    async search(q) {
+      if (q.includes('反证')) throw new Error('反证查询失败')
+      return { provider: 'p', query: q, results: [{ title: q, url: 'https://same.com', content: q }, { title: q + '-2', url: `https://other.com/${encodeURIComponent(q)}`, content: q }] }
+    },
+  }
+  const mgr = new SearchManager({ providers: [p] })
+  const tool = makeSearchTools(mgr)[0]
+  ok(tool.parameters.properties.queries && !tool.parameters.required, 'schema 支持 queries 且不强制 query')
+  const text = await tool.execute({ queries: ['官方 公告', '辟谣 反证'] })
+  ok(text.includes('官方 公告') && text.includes('来源: p'), '多查询结果合并 + 来源标注')
+  eq((text.match(/https:\/\/same\.com/g) || []).length, 1, '跨查询相同 URL 去重')
+  ok(/部分查询未成功/.test(text), '覆盖缺口显式提示')
+  const empty = await tool.execute({})
+  ok(/未提供查询词/.test(empty), '无查询词提示')
+  const single = await tool.execute({ query: '单查询' })
+  ok(single.includes('单查询'), '单查询向后兼容')
+})
+
+await test('formatResults：合并形态（answers/failures/来源时间元信息）', async () => {
+  const text = formatResults({
+    provider: 'multi',
+    answers: [{ query: 'q1', answer: '答1' }],
+    results: [{ title: 'A', url: 'https://a.com', content: 'c', source: 'tavily', published: '2026-10-01', score: 0.9 }],
+    failures: [{ query: 'q2', error: 'timeout' }],
+  })
+  ok(text.includes('💡 [q1] 答1'), 'answers 带查询标签')
+  ok(text.includes('来源: tavily') && text.includes('时间: 2026-10-01'), '来源/时间元信息')
+  ok(text.includes('⚠️ 部分查询未成功') && text.includes('q2'), '失败提示')
 })
 
 // ---------- 总结 ----------

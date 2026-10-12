@@ -18,7 +18,7 @@
  */
 
 export { formatResults, formatExtract } from './base.js'
-export { SearchManager, createSearchManager } from './manager.js'
+export { SearchManager, createSearchManager, mergeSearchResults } from './manager.js'
 export { makeSearchTools } from './tools.js'
 export { createTavilyProvider } from './providers/tavily.js'
 export { createExaProvider } from './providers/exa.js'
