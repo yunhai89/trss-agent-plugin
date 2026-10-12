@@ -13,6 +13,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { IndexTtsClient, clampVector, vectorToObject, VECTOR_ZH } from './indextts.js'
+import { DoubaoTtsClient, DOUBAO_ENDPOINT } from './doubao.js'
+import { MinimaxTtsClient, MINIMAX_ENDPOINT } from './minimax.js'
+import { MimoTtsClient, MIMO_ENDPOINT } from './mimo.js'
+import {
+  PROVIDER_IDS, providerCaps, providerConfigured, labelFor, doubaoScaleFor, styleInstructionFor, langFor,
+} from './providers.js'
 import { planEmotion, splitByPunctuation, normalizeContext, MAX_SEGMENTS, MAX_SEGMENT_CHARS } from './emotion.js'
 import { stripForSpeech } from './speech-text.js'
 import { RefLibrary } from './refs.js'
@@ -49,14 +55,67 @@ export const TTS_DEFAULTS = {
     durationFactor: 1.0,
     maxTextTokensPerSegment: 100,
   },
+  // 云服务商（默认关闭/未配置状态；enable 总开关 + provider 选中 + 密钥/音色齐全才会真正出网）
+  doubao: {
+    endpoint: DOUBAO_ENDPOINT,
+    apiKey: '',
+    resourceId: 'seed-tts-2.0',   // seed-tts-2.0 | seed-tts-1.0 | seed-tts-1.0-concurr
+    speaker: '',                  // 音色 ID（控制台音色库 voice_type）
+    model: '',                    // '' | seed-tts-2.0-standard | seed-tts-2.0-expressive
+    autoEmotion: true,            // LLM 判定情绪（2.0→语音指令 / 1.0→情感标签）
+    instruct: '',                 // 固定语音指令（context_texts；留空=LLM 判定生成）
+    emotion: '',                  // 固定情感标签（1.0；LLM 失败/关闭时回退）
+    emotionScale: 0,              // 0=按判定强度自动；1~5=固定 emotion_scale
+    speechRate: 0,                // -50~100（100=2 倍速）
+    loudnessRate: 0,              // -50~100（100=2 倍音量）
+    sampleRate: 24000,
+    format: 'wav',                // wav | mp3
+    useTagParser: false,          // 声音复刻 2.0 表现力增强版 Cot 标签解析
+    tier: 'pro',                  // pro=整段一次 | max=LLM 分段逐段情绪后 ffmpeg 合并
+    timeoutMs: 120000,
+  },
+  minimax: {
+    endpoint: MINIMAX_ENDPOINT,
+    apiKey: '',
+    groupId: '',                  // 旧版账号查询参数（可选）
+    model: 'speech-2.8-hd',
+    voiceId: '',                  // 系统音色/复刻音色 ID
+    autoEmotion: true,            // LLM 判定 8 维情绪 → MiniMax 标签
+    emotion: '',                  // 固定情绪标签（LLM 失败/关闭时回退）
+    speed: 1.0,
+    vol: 1.0,
+    pitch: 0,
+    sampleRate: 32000,
+    format: 'wav',                // wav | mp3 | flac
+    bitrate: 128000,              // 仅 mp3 生效
+    languageBoost: '',            // ''=自动 | Chinese/English/... | auto
+    tier: 'pro',
+    timeoutMs: 120000,
+  },
+  mimo: {
+    endpoint: MIMO_ENDPOINT,
+    apiKey: '',
+    model: 'mimo-v2.5-tts',       // mimo-v2.5-tts | mimo-v2.5-tts-voicedesign
+    voice: 'mimo_default',        // 预置音色（voicedesign 模型忽略）
+    autoEmotion: true,            // LLM 判定 → 自然语言风格指令
+    style: '',                    // 固定风格/音色描述指令（留空=LLM 判定生成；voicedesign 必填）
+    format: 'wav',                // wav | mp3
+    tier: 'pro',
+    timeoutMs: 120000,
+  },
+  judgeModel: '',                 // 情绪判定模型（留空=indextts.model → utilityModel → 主模型）
+  judgeTimeoutMs: 30000,          // 情绪判定总预算（毫秒；对全部服务商生效）
 }
 
 const _isObj = (v) => v && typeof v === 'object' && !Array.isArray(v)
 
-/** 归一配置：缺省回落默认（旧配置/面板缺字段均安全） */
+/** 归一配置：缺省回落默认（旧配置/面板缺字段均安全；各服务商子配置同样补齐） */
 export function normalizeTtsConfig(cfg = {}) {
-  const out = { ...TTS_DEFAULTS, ...(cfg || {}) }
-  out.indextts = { ...TTS_DEFAULTS.indextts, ...(cfg?.indextts || {}) }
+  const src = cfg || {}
+  const out = { ...TTS_DEFAULTS, ...src }
+  for (const id of ['indextts', 'doubao', 'minimax', 'mimo']) {
+    out[id] = { ...TTS_DEFAULTS[id], ...(src[id] || {}) }
+  }
   return out
 }
 
@@ -88,19 +147,39 @@ export class TtsService {
     this.refs = new RefLibrary({ dir: this.dataDir, logger: this.logger })
     this.lock = createKeyedLock({ maxKeys: 4 })
     const ix = this.cfg.indextts
-    this.client = new IndexTtsClient({ endpoint: ix.endpoint, apiKey: ix.apiKey, timeoutMs: ix.timeoutMs, fetchImpl, logger: this.logger })
+    // 各服务商客户端（构造无网络请求；只在实际调用时才出网，未配置的服务商不会产生任何流量）
+    this.clients = {
+      indextts: new IndexTtsClient({ endpoint: ix.endpoint, apiKey: ix.apiKey, timeoutMs: ix.timeoutMs, fetchImpl, logger: this.logger }),
+      doubao: new DoubaoTtsClient({ ...this.cfg.doubao, fetchImpl, logger: this.logger }),
+      minimax: new MinimaxTtsClient({ ...this.cfg.minimax, fetchImpl, logger: this.logger }),
+      mimo: new MimoTtsClient({ ...this.cfg.mimo, fetchImpl, logger: this.logger }),
+    }
+    this.client = this.clients.indextts // 兼容既有引用（IndexTTS 主客户端）
     this.ffmpegRunner = ffmpegRunner || runFfmpeg
   }
 
-  /** 当前服务商 id（多服务商预留；尚未接第二个时恒为 indextts） */
-  get provider() { return this.cfg.provider || 'indextts' }
+  /** 当前服务商 id（非法值安全回落 indextts） */
+  get provider() {
+    const id = String(this.cfg.provider || '').trim()
+    return PROVIDER_IDS.includes(id) ? id : 'indextts'
+  }
 
-  /** 参考音频列表（可按 kind 过滤） */
-  voices(kind) { return this.refs.list(kind) }
+  /** 当前服务商能力（tools/服务路由用） */
+  capabilities() { return providerCaps(this.provider) }
 
-  /** 连通性自检（Web「测试连接」+ 服务状态） */
-  async check() {
-    return this.client.check()
+  /** 当前服务商配置是否齐全（启动日志/面板状态） */
+  status() {
+    const st = providerConfigured(this.provider, this.cfg)
+    return { provider: this.provider, ...st }
+  }
+
+  /** 参考音频列表（可按 kind 过滤；云服务商不用参考库，恒为空） */
+  voices(kind) { return this.capabilities().refs ? this.refs.list(kind) : [] }
+
+  /** 连通性自检（Web「测试连接」+ 服务状态）；默认当前服务商 */
+  async check(providerId) {
+    const id = PROVIDER_IDS.includes(providerId) ? providerId : this.provider
+    return this.clients[id].check()
   }
 
   /** 解析音色参考：参数（名字/id）> 配置默认名 > 最新 voice 条目 */
@@ -132,7 +211,6 @@ export class TtsService {
   }
 
   async _synthesize(p) {
-    const ix = this.cfg.indextts
     const notes = []
     const fail = (msg) => { this.logger('warn', `[tts] 合成未执行：${msg}`); return { ok: false, error: msg } }
     const rawText = String(p.text || '').trim()
@@ -143,6 +221,13 @@ export class TtsService {
     const text = stripForSpeech(rawText, { maxChars: Number(p.maxChars) || 0 })
     if (!text) return fail('文本清洗后无可朗读内容（仅符号/代码/链接？）')
 
+    if (this.provider !== 'indextts') return this._synthesizeCloud(text, p, { fail, notes })
+    return this._synthesizeIndexTts(text, p, { fail, notes })
+  }
+
+  /** IndexTTS 专属路径（参考音频库 + same/audio/vector 模式 + pro/max 档位） */
+  async _synthesizeIndexTts(text, p, { fail, notes }) {
+    const ix = this.cfg.indextts
     const voice = this._resolveVoice(p.voice)
     if (!voice) {
       const want = String(p.voice || '').trim()
@@ -316,6 +401,178 @@ export class TtsService {
       this.logger('warn', '[tts] 合成失败：', e?.message || e)
       return { ok: false, error: e?.message || String(e) }
     }
+  }
+
+  /* ── 云服务商通用路径（豆包 / MiniMax / MiMo）──
+   * 情绪判定仍走 emotion.js 的 LLM 链路（与 IndexTTS 同一套提示词与向量），
+   * 再由 providers.js 映射为目标服务商参数：离散标签（豆包 1.0 / MiniMax）或
+   * 自然语言指令（豆包 2.0 context_texts / MiMo user 指令）。 */
+
+  /** 解析云端音色（参数覆盖 > 配置默认）；未配置返回 null */
+  _resolveCloudVoice(id, override) {
+    const key = String(override || '').trim()
+    const dft = { doubao: this.cfg.doubao.speaker, minimax: this.cfg.minimax.voiceId, mimo: this.cfg.mimo.voice }
+    const voice = key || String(dft[id] || '').trim()
+    return voice || null
+  }
+
+  /** 情绪判定预算（全局 judgeTimeoutMs → 历史 indextts.judgeTimeoutMs → 默认 30s） */
+  _judgeTimeoutMs() {
+    return Math.max(1000, Number(this.cfg.judgeTimeoutMs) || Number(this.cfg.indextts.judgeTimeoutMs) || TTS_DEFAULTS.judgeTimeoutMs)
+  }
+
+  async _synthesizeCloud(text, p, { fail, notes }) {
+    const id = this.provider
+    const cfgProv = this.cfg[id] || {}
+    const voice = this._resolveCloudVoice(id, p.voice)
+    if (!voice) {
+      const missing = providerConfigured(id, this.cfg).missing.join('、')
+      return fail(`${this._providerName(id)} 未配置${missing ? `（缺少：${missing}）` : ''}；请到 Web 面板「语音合成 → ${this._providerName(id)}」补全`)
+    }
+    const auto = cfgProv.autoEmotion !== false && !!this.llm
+    const tier = ['pro', 'max'].includes(p.tier) ? p.tier : (['pro', 'max'].includes(cfgProv.tier) ? cfgProv.tier : 'pro')
+    const explicitVec = parseVectorParam(p.vector)
+    let planVector = explicitVec
+    let segments = null
+    let reason = ''
+    if (explicitVec) {
+      reason = '调用方显式指定向量'
+    } else if (auto) {
+      const plan = await planEmotion(this.llm, {
+        text, tier: tier === 'max' ? 'max' : 'pro',
+        voiceName: voice, logger: this.logger,
+        context: normalizeContext(p.context?.messages),
+        timeoutMs: this._judgeTimeoutMs(),
+        maxSegments: MAX_SEGMENTS, maxSegmentChars: MAX_SEGMENT_CHARS,
+      })
+      if (plan?.vector) {
+        planVector = clampVector(plan.vector)
+        reason = plan.reason || ''
+        segments = plan.segments ? plan.segments.map((s) => ({ text: s.text, vector: clampVector(s.vector) })) : null
+      } else {
+        notes.push('情绪判定不可用，已按配置默认情绪回退')
+      }
+    }
+    const emoDesc = explicitVec ? '显式向量' : (planVector ? 'LLM自动判定' : '固定/关闭')
+    this.logger('info', `[tts] 合成开始：服务商=${id} 音色=${voice} 情绪=${emoDesc} 档位=${tier} 文本=${text.length}字`)
+
+    const t0 = this.now()
+    const outDir = path.join(this.dataDir, 'out')
+    const writeOut = (buf, ext) => {
+      fs.mkdirSync(outDir, { recursive: true })
+      this._pruneOut(outDir)
+      const f = path.join(outDir, `tts_${this.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`)
+      fs.writeFileSync(f, buf)
+      return f
+    }
+    const _segReturn = (segs) => ({
+      segments: segs.map((s) => ({ text: s.text, ...(s.vector ? { vector: vectorToObject(s.vector) } : {}) })),
+    })
+    try {
+      if (tier === 'max') {
+        const segs = (segments && segments.length)
+          ? segments
+          : splitByPunctuation(text, MAX_SEGMENT_CHARS).slice(0, MAX_SEGMENTS).map((t) => ({ text: t, vector: planVector }))
+        if (segs.length > 1) {
+          if (!segments) notes.push(`已按标点拆分为 ${segs.length} 段`)
+          const tmpDir = path.join(this.dataDir, 'tmp')
+          fs.mkdirSync(tmpDir, { recursive: true })
+          const files = []
+          try {
+            for (let i = 0; i < segs.length; i++) {
+              const r = await this._cloudCall(id, { text: segs[i].text, voice, vector: segs[i].vector || planVector, p, forceWav: true })
+              const f = path.join(tmpDir, `cloud_${this.now()}_${process.pid}_${i}.${r.ext}`)
+              fs.writeFileSync(f, r.buffer)
+              files.push(f)
+            }
+            fs.mkdirSync(outDir, { recursive: true })
+            this._pruneOut(outDir)
+            const finalFile = path.join(outDir, `tts_${this.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`)
+            const merged = await concatSegments(files, finalFile, {
+              gapMs: Number(cfgProv.segmentGapMs) || 300, tempDir: tmpDir, runner: this.ffmpegRunner, logger: this.logger,
+              sampleRate: Number(cfgProv.sampleRate) || 24000,
+            })
+            if (!merged.ok) return { ok: false, error: `分段合成完成但合并失败：${merged.error}` }
+            const hd = await this._applyHd(finalFile)
+            this.logger('info', `[tts] 合成完成：${id}/max ${files.length}段 音色=${voice} ${text.length}字 用时=${Date.now() - t0}ms${hd.enhanced ? '（已高清增强）' : ''}`)
+            return {
+              ok: true, file: hd.file, rawFile: finalFile, enhanced: hd.enhanced, tier: 'max', mode: 'cloud', voice, chars: text.length,
+              ..._segReturn(segs),
+              ...(planVector ? { vector: vectorToObject(planVector) } : {}),
+              ...(reason ? { reason } : {}),
+              notes,
+            }
+          } finally {
+            for (const f of files) { try { fs.unlinkSync(f) } catch { /* noop */ } }
+          }
+        }
+        // 单段等同 pro：继续走下方一次合成
+      }
+      const r = await this._cloudCall(id, { text, voice, vector: planVector, p })
+      const file = writeOut(r.buffer, r.ext)
+      const hd = await this._applyHd(file)
+      this.logger('info', `[tts] 合成完成：${id}/${tier} 音色=${voice} ${text.length}字 用时=${Date.now() - t0}ms${hd.enhanced ? '（已高清增强）' : ''}`)
+      return {
+        ok: true, file: hd.file, rawFile: file, enhanced: hd.enhanced, tier, mode: 'cloud', voice, chars: text.length,
+        ...(planVector ? { vector: vectorToObject(planVector) } : {}),
+        ...(segments?.length ? _segReturn(segments) : {}),
+        ...(reason ? { reason } : {}),
+        notes,
+      }
+    } catch (e) {
+      this.logger('warn', '[tts] 合成失败：', e?.message || e)
+      return { ok: false, error: e?.message || String(e) }
+    }
+  }
+
+  /** 构造目标服务商的合成参数并调用（text 为已清洗讲稿） */
+  async _cloudCall(id, { text, voice, vector, p, forceWav = false }) {
+    const cfgProv = this.cfg[id] || {}
+    const format = forceWav ? 'wav' : (['wav', 'mp3', 'flac'].includes(cfgProv.format) ? cfgProv.format : 'wav')
+    const overrideEmotion = String(p.emotion || '').trim()
+    const overrideStyle = String(p.style || '').trim()
+    const lang = langFor(id, p.lang)
+    if (id === 'doubao') {
+      const is20 = String(cfgProv.resourceId || '').startsWith('seed-tts-2.0')
+      const instruct = is20
+        ? (overrideStyle || overrideEmotion || String(cfgProv.instruct || '').trim() || (vector ? styleInstructionFor(vector) : ''))
+        : ''
+      const label = overrideEmotion || String(cfgProv.emotion || '').trim()
+        || (!is20 && vector ? labelFor('doubao', vector) : '')
+      const scale = Number(cfgProv.emotionScale) > 0 ? Number(cfgProv.emotionScale) : (vector ? doubaoScaleFor(vector) : 0)
+      const out = await this.clients.doubao.synthesize({
+        text, speaker: voice, format,
+        sampleRate: Number(cfgProv.sampleRate) || 24000,
+        speechRate: Number(cfgProv.speechRate) || 0,
+        loudnessRate: Number(cfgProv.loudnessRate) || 0,
+        emotionLabel: label, emotionScale: scale, instruct,
+        useTagParser: cfgProv.useTagParser === true,
+        explicitLanguage: lang,
+      })
+      return { ...out, ext: format }
+    }
+    if (id === 'minimax') {
+      const emotion = overrideEmotion || String(cfgProv.emotion || '').trim() || (vector ? labelFor('minimax', vector) : '')
+      const out = await this.clients.minimax.synthesize({
+        text, voiceId: voice, emotion, format,
+        sampleRate: Number(cfgProv.sampleRate) || 32000,
+        bitrate: Number(cfgProv.bitrate) || 128000,
+        speed: Number(cfgProv.speed), vol: Number(cfgProv.vol), pitch: Number(cfgProv.pitch),
+        languageBoost: String(cfgProv.languageBoost || '').trim() || lang,
+      })
+      return { ...out, ext: format }
+    }
+    // mimo
+    const isDesign = cfgProv.model === 'mimo-v2.5-tts-voicedesign'
+    const style = overrideStyle || overrideEmotion || String(cfgProv.style || '').trim()
+      || (!isDesign && vector ? styleInstructionFor(vector) : '')
+    const out = await this.clients.mimo.synthesize({ text, style, voice, format })
+    return { ...out, ext: format }
+  }
+
+  /** 服务商中文名（错误信息用） */
+  _providerName(id) {
+    return { indextts: 'IndexTTS', doubao: '豆包语音合成', minimax: 'MiniMax 语音', mimo: '小米 MiMo TTS' }[id] || id
   }
 
   /** 高清化（agent.tts.hdVoice）：响度标准化 + 存在感补偿；失败回退原始文件（不阻断发送） */

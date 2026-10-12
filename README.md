@@ -65,7 +65,7 @@
 | 🔌 MCP | 完整 MCP 客户端（stdio / HTTP）、多服务端、按工具 RBAC | ✅ 稳定 |
 | 👥 群聊工具 | 群信息 / 群管理 / 米游社搜索 | ✅ 稳定 |
 | 📥 媒体下载 | 基于 yt-dlp 的视频/音频下载（受约束，仅主人），支持 YouTube/B站/抖音等 1000+ 站点 | ✅ 稳定 |
-| 🗣️ 语音合成 | IndexTTS 2.5：文字转语音发到聊天（`tts_speak`）；音色/情绪参考音频 + 8 维情绪向量；pro/max 档位、LLM 结合上下文自动调节情绪（需自备服务） | ✅ 可用 |
+| 🗣️ 语音合成 | 四家服务商：IndexTTS 2.5（本地）/ 豆包 / MiniMax / MiMo；`tts_speak` 点播 + 自动语音；情绪统一由 LLM 结合上下文判定（8 维向量 → 各服务商语音指令/情感标签）；pro/max 档位 | ✅ 可用 |
 | 💻 终端执行 | **E2B 沙箱执行**（Firecracker microVM；全员可用 + 出口白名单 + 命令数/并发上限）；服务端用 **E2B 云**或**自托管（需 KVM，普通云主机不支持）** | ⚠️ 高危可选 |
 | 🌐 浏览器自动化 | **Stagehand**：goto/observe/extract/act 自然语言原语，本地或 Browserbase 云，会话跨调用保持 | 🧪 早期 |
 | 🎭 表情包 | 自动发现（群聊被动采集→视觉打标→入库）+ 手动安装 + LLM 自主引用 `[sticker:名称]` | ✅ 稳定 |
@@ -468,17 +468,19 @@ mcp:
 > 2. **改用绝对路径**：若容器别处有 `npx`/`node`，把 `command` 换成绝对路径（如 `/usr/local/bin/npx`）。
 > 3. **绕开 npx**：容器内 `npm i -g <mcp包>` 全局安装后，用 `command: "/usr/bin/node"` + `args: ["<全局模块入口 js 的绝对路径>"]` 直接跑；或改用 `transport: "http"` 连远程 MCP，本地无需任何进程。
 
-### `agent.tts` —— 语音合成（IndexTTS 2.5）
+### `agent.tts` —— 语音合成（IndexTTS 2.5 / 豆包 / MiniMax / MiMo）
 
-把文字合成为语音发到聊天（Agent 工具 `tts_speak`）。需自备 IndexTTS 服务（本机 / 内网 / 反向代理地址均可）。**总开关默认关（opt-in）**：需在 Web 面板「语音合成」或配置里显式 `enable: true` 后，`tts_speak` 才会注册、自动语音才生效。
+把文字合成为语音发到聊天（Agent 工具 `tts_speak`）。四家服务商任选其一（`provider` 切换）：**IndexTTS 2.5**（本机/内网自托管，音色参考 + 情绪参考/向量）、**豆包**（火山引擎 Seed-TTS，语音指令 / 多情感标签）、**MiniMax**（speech-2.8/2.6/02，9 种情绪标签）、**MiMo**（小米 MiMo-V2.5-TTS，预置音色 + 自然语言风格指令）。**总开关默认关（opt-in）**：需在 Web 面板「语音合成」或配置里显式 `enable: true` 后，`tts_speak` 才会注册、自动语音才生效；云服务商仅在「总开关开 + 选中该服务商 + 密钥/音色齐全」时才会把讲稿发往对应平台。
 
 ```yaml
 tts:
   enable: false            # 总开关（默认关，opt-in）；开启后 tts_speak 才注册、自动语音才生效
-  provider: indextts
+  provider: indextts       # indextts | doubao | minimax | mimo
   autoReply: true          # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
   replyMaxChars: 300       # 自动语音最大字符数（超长按句截断；0=不限）
   hdVoice: true            # 发送前高清化：响度标准化 + 存在感补偿（需宿主 ffmpeg，失败自动回退）
+  judgeModel: ""           # 情绪判定模型（四家统一；留空=indextts.model→utilityModel→主模型）
+  judgeTimeoutMs: 30000    # 情绪判定总预算（毫秒，四家统一）
   indextts:
     endpoint: "http://127.0.0.1:7860"   # IndexTTS 服务地址（Web 面板「语音合成」可测试连接）
     apiKey: ""               # 鉴权网关 API Key（可选，itts_xxx；v1.2 起网关版必填，官方无鉴权留空）
@@ -492,12 +494,54 @@ tts:
     segmentGapMs: 300        # max 档段间静音
     model: ""                # 情绪判定用模型（模型条目 id/模型名；留空=utilityModel→主模型）
     judgeTimeoutMs: 30000    # 情绪判定单次调用总预算（毫秒；超时中止请求并回退默认向量；快失败在预算内重试一次）
+  doubao:                  # 豆包语音合成（火山引擎 Seed-TTS，HTTP Chunked 单向流式）
+    apiKey: ""             # 火山引擎 API Key（新版控制台 → API Key 管理，按资源开通「语音合成」）
+    resourceId: seed-tts-2.0  # seed-tts-2.0 | seed-tts-1.0 | seed-tts-1.0-concurr（决定可用音色与计费）
+    speaker: ""            # 音色 ID（控制台音色库 voice_type，如 zh_female_vv_uranus_bigtts）
+    model: ""              # ""=默认 | seed-tts-2.0-standard | seed-tts-2.0-expressive（语音指令建议 expressive）
+    autoEmotion: true      # LLM 判定情绪：2.0 音色→context_texts 语音指令；1.0 音色→emotion 标签
+    instruct: ""           # 固定语音指令（留空=LLM 判定生成，仅 2.0 音色）
+    emotion: ""            # 固定情感标签（1.0 多情感音色；LLM 失败/关闭时回退）
+    emotionScale: 0        # 0=按判定强度自动（1~5）；手动=固定 emotion_scale
+    speechRate: 0          # 语速 -50~100（100=2 倍速）
+    loudnessRate: 0        # 音量 -50~100（100=2 倍音量）
+    sampleRate: 24000
+    format: wav            # wav | mp3（max 档分段拼接固定 wav）
+    useTagParser: false    # 声音复刻 2.0 表现力增强版 Cot 标签解析
+    tier: pro              # pro=整段一次 | max=LLM 分段逐段情绪 + ffmpeg 合并
+  minimax:                 # MiniMax 语音（T2A V2）
+    endpoint: "https://api.minimaxi.com/v1/t2a_v2"   # 国际站 https://api.minimax.io/v1/t2a_v2
+    apiKey: ""             # MiniMax API Key（平台 → 接口密钥）
+    groupId: ""            # 可选：旧版账号 URL 查询参数 GroupId
+    model: speech-2.8-hd   # 2.6/2.8 支持全部 9 种情绪
+    voiceId: ""            # 音色 ID（系统音色或复刻音色，如 male-qn-qingse）
+    autoEmotion: true      # LLM 判定 → happy/sad/angry/fearful/disgusted/surprised/calm
+    emotion: ""            # 固定情绪标签（回退用）
+    speed: 1.0             # 0.5~2.0 | vol 音量 | pitch 音调 -12~12
+    sampleRate: 32000
+    format: wav            # wav | mp3 | flac（max 档固定 wav）
+    languageBoost: ""      # 语种增强：留空=自动；Chinese/English/Japanese/Arabic/Spanish/auto
+    tier: pro
+  mimo:                    # 小米 MiMo TTS（MiMo-V2.5-TTS，OpenAI 兼容）
+    endpoint: "https://api.xiaomimimo.com/v1"
+    apiKey: ""             # MiMo 开放平台 API Key
+    model: mimo-v2.5-tts   # mimo-v2.5-tts（预置音色）| mimo-v2.5-tts-voicedesign（文字设计音色，style 必填）
+    voice: mimo_default    # 预置音色：mimo_default/冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean
+    autoEmotion: true      # LLM 判定情绪 → 自然语言风格指令（user message）
+    style: ""              # 固定风格/音色描述指令（留空=LLM 生成；voicedesign 必填）
+    format: wav            # wav | mp3（max 档固定 wav）
+    tier: pro
 ```
 
-- 配置入口：Web 管理面板 → **语音合成**（服务卡片 → 弹窗配置：接口地址 / API Key / 测试连接 / 参考音频上传+命名 / 情绪模式与 8 维滑块）。
+- 配置入口：Web 管理面板 → **语音合成**（服务卡片 → 弹窗配置：接口地址 / API Key / 音色 ID / 测试连接 / 参考音频上传+命名 / 情绪模式与 8 维滑块）。云服务商的「测试连接」会真实合成 2 个字（官方唯一可探活方式，极少计费）。
 - **鉴权（可选）**：IndexTTS 服务若套了鉴权网关（v1.2+，官方本体无认证），填 `agent.tts.indextts.apiKey`（`itts_xxx`），请求统一带 `X-API-Key` 头；`401`＝Key 缺失/错误、`429`＝失败限流、`503`＝网关配置故障、`502/504`＝上游未就绪，错误信息会直接提示对应处理方式。本插件可直连 `127.0.0.1:7862` 本体（同机部署可绕过网关，key 留空）。
 - **自动语音**（`autoReply`，默认开）：每条最终回复自动追加语音——文字/图片照常发送，语音内容是正文剥除 markdown/代码/链接/表格/emoji 后的文本（超长按句截断，`replyMaxChars`）；合成全过程有 `[tts] 合成开始/完成` 日志。`tts_speak` 工具保留给指定音色/情绪的点播（本轮已点播则不重复补发）。**讲稿清洗在合成入口统一执行**（点播同样生效），破折号（——）会转成停顿而不是被读成"减减"。
-- **情绪判定**（`vector` 模式）：由一次旁路 LLM 调用结合文本与近期对话判定情绪；`model` 可指定更快/更便宜的小模型（留空=`utilityModel`→主模型），`judgeTimeoutMs` 控制单次判定总预算（默认 30s）——超时会中止请求并回退默认向量（`vector` 配置项），快失败（网络/限流）会在剩余预算内自动重试一次；判定失败只影响情绪、不影响出语音，日志会给出预算与耗时便于排查。
+- **情绪判定（四家共用一条 LLM 链路）**：由一次旁路 LLM 调用结合文本与近期对话判定 8 维情绪（高兴/愤怒/悲伤/害怕/厌恶/忧郁/惊讶/平静），再映射为目标服务商参数——IndexTTS 直接下发向量；豆包 1.0 → `emotion` 标签 + `emotion_scale`（由向量强度换算）；豆包 2.0 → `context_texts` 自然语言语音指令；MiniMax → 9 标签之一（忧郁→sad）；MiMo → 自然语言风格指令。`judgeModel` 可指定更快/更便宜的小模型，`judgeTimeoutMs` 控制单次判定总预算（默认 30s）——超时会中止请求并回退，快失败（网络/限流）会在剩余预算内自动重试一次；判定失败只影响情绪、不影响出语音，日志会给出预算与耗时便于排查。
+- **云服务商接入要点**：
+  - **豆包**（[文档](https://docs.volcengine.com/docs/DoubaoVoice/unidirectional-streaming-text-to-speech-http?lang=zh)）：HTTP Chunked 单向流式（NDJSON，base64 分片按序拼接，`code 20000000` 结束）；新版控制台只需 `X-Api-Key` + 资源版本；`resourceId` 决定可用音色（2.0 音色以 `_uranus_bigtts` 结尾）与计费；语音指令仅 2.0/复刻 2.0 支持（建议 `model: seed-tts-2.0-expressive`）。
+  - **MiniMax**（[文档](https://platform.minimaxi.com/docs/api-reference/speech-t2a-http)）：`POST /v1/t2a_v2`（Bearer 鉴权；旧版账号可填 `groupId`），响应 `data.audio` 为 **hex** 编码；情绪仅 `speech-2.6/2.8` 全量支持（`fluent/whisper` 仅 2.6；2.8 不支持 whisper）。
+  - **MiMo**（[文档](https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/speech-synthesis-v2.5)）：OpenAI 兼容 `chat/completions`，朗读文本必须放在 `assistant` 消息、风格指令放 `user` 消息，响应 `choices[0].message.audio.data`（base64）；`voicedesign` 模型用「固定风格指令」描述音色。
+  - 三家云服务的 API Key 保存在插件本机 `config/config.yaml`（与 LLM Key 同机制），面板/错误信息会回显配置本身但不会把密钥写入日志；讲稿仅在选中该服务商且配置齐全时才发送到对应平台。
 - **高清语音**（`hdVoice`，默认开）：发送前经 ffmpeg 做响度标准化（-15 LUFS / 真峰 -1.5dB）+ 存在感补偿（4kHz +5dB、6kHz 高架 +4dB）+ 24kHz 对齐——TTS 输出普遍偏轻偏闷，这一步显著提升清晰度；失败自动回退原始音频（需宿主 ffmpeg）。
 - 三种情绪模式：`same` 沿用音色参考的情绪；`audio` 另给一段情绪参考音频（`emotionWeight` 调影响强度）；`vector` 保留音色、用 8 维向量控制高兴/愤怒/悲伤/害怕/厌恶/忧郁/惊讶/平静，默认由 LLM 自动调节。
 - 档位：`pro` 一次合成（快）；`max` LLM 按需拆分、逐段情绪分别合成后用 **ffmpeg** 拼接（更细腻、更耗时，宿主要装 ffmpeg）。

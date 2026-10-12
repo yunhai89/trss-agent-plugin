@@ -716,14 +716,15 @@ async function buildRuntime() {
   tools.register(createExcelTool) // create_excel：创建带样式 Excel
   tools.register(readExcelTool) // read_excel：读取 Excel 为表格文本
   if (cfg.stt?.enable !== false) tools.register(transcribeMediaTool) // transcribe_media：音视频转文字(STT)
-  // TTS 语音合成（tts_speak）：IndexTTS 2.5 等；vector 情绪默认由 LLM 结合文本+上下文自动调节
-  // （情绪判定模型：agent.tts.indextts.model → utilityModel → 主模型，同 recall/thinkingAuto 的旁路通道）
+  // TTS 语音合成（tts_speak）：IndexTTS 2.5 / 豆包 / MiniMax / MiMo；情绪（8 维向量）默认由 LLM
+  // 结合文本+上下文自动判定（四家服务商共用一条判定链路）。
+  // （情绪判定模型：agent.tts.judgeModel → agent.tts.indextts.model → utilityModel → 主模型，同旁路通道）
   // tts 服务实例暴露到运行时：自动回复语音（agent.tts.autoReply）在主回复管线里直接调用。
   // 总开关默认关（opt-in，严格 === true）：未显式开启 → 不注册工具、不合成（旧配置缺字段也静默）。
   let tts = null
   if (cfg.tts?.enable === true) {
     try {
-      const ttsTarget = modelRouter.resolve(cfg.tts?.indextts?.model || cfg.utilityModel || cfg.model)
+      const ttsTarget = modelRouter.resolve(cfg.tts?.judgeModel || cfg.tts?.indextts?.model || cfg.utilityModel || cfg.model)
       tts = new TtsService(cfg.tts || {}, {
         dataDir: Config.path.tts,
         logger: Log.tag('tts'),
@@ -737,9 +738,10 @@ async function buildRuntime() {
         },
       })
       tools.register(makeTtsSpeakTool(tts))
+      const st = tts.status()
       const voiceCount = tts.voices('voice').length
-      startupInfo.tts = { provider: tts.provider, voices: voiceCount, endpoint: !!cfg.tts?.indextts?.endpoint, judgeModel: ttsTarget.model || cfg.model }
-      if (!cfg.tts?.indextts?.endpoint) Log.debug('[tts] tts_speak 已注册，但 IndexTTS 接口地址未配置（Web 面板 → 语音合成）')
+      startupInfo.tts = { provider: st.provider, configured: st.configured, missing: st.missing, voices: voiceCount, judgeModel: ttsTarget.model || cfg.model }
+      if (!st.configured) Log.debug(`[tts] tts_speak 已注册（服务商 ${st.provider}），但配置未齐全：${st.missing.join('、')}（Web 面板 → 语音合成）`)
     } catch (e) { Log.warn('[tts] 初始化失败（tts_speak 不注册）', e?.message || e) }
   }
   tools.register(fileToPdfTool) // file_to_pdf：任意文件转 PDF 并发送
@@ -1192,7 +1194,7 @@ async function buildRuntime() {
   if (startupInfo.diagram) extras.push(`示意图(${startupInfo.diagram})`)
   if (cfg.sticker?.enable) extras.push('表情包')
   if (cfg.stt?.enable !== false) extras.push('STT')
-  if (startupInfo.tts) extras.push(`TTS(${startupInfo.tts.provider}${startupInfo.tts.endpoint ? '' : '·未配地址'}·音色${startupInfo.tts.voices})`)
+  if (startupInfo.tts) extras.push(`TTS(${startupInfo.tts.provider}${startupInfo.tts.configured ? '' : `·待配置${startupInfo.tts.missing?.length ? ':' + startupInfo.tts.missing.join('/') : ''}`}·音色${startupInfo.tts.voices})`)
   if (cfg.multiagent?.enable !== false) extras.push(`多代理(${startupInfo.multiagent || 'spawn'})`)
   const mcpNames = Object.keys(cfg.mcp?.servers || {})
   Log.panel(`运行时就绪 · ${cfg.model}`, [
