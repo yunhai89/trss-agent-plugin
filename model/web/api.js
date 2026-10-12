@@ -814,7 +814,7 @@ const ttsRefs = () => new RefLibrary({ dir: Config.path.tts })
 function ttsPayload() {
   const cfg = normalizeTtsConfig(Config.get().agent?.tts || {})
   return {
-    enable: cfg.enable !== false,
+    enable: cfg.enable === true,
     provider: cfg.provider || 'indextts',
     autoReply: cfg.autoReply !== false,
     replyMaxChars: Number(cfg.replyMaxChars ?? 300) || 0,

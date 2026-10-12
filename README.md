@@ -470,11 +470,11 @@ mcp:
 
 ### `agent.tts` —— 语音合成（IndexTTS 2.5）
 
-把文字合成为语音发到聊天（Agent 工具 `tts_speak`）。需自备 IndexTTS 服务（本机 / 内网 / 反向代理地址均可）：
+把文字合成为语音发到聊天（Agent 工具 `tts_speak`）。需自备 IndexTTS 服务（本机 / 内网 / 反向代理地址均可）。**总开关默认关（opt-in）**：需在 Web 面板「语音合成」或配置里显式 `enable: true` 后，`tts_speak` 才会注册、自动语音才生效。
 
 ```yaml
 tts:
-  enable: true
+  enable: false            # 总开关（默认关，opt-in）；开启后 tts_speak 才注册、自动语音才生效
   provider: indextts
   autoReply: true          # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
   replyMaxChars: 300       # 自动语音最大字符数（超长按句截断；0=不限）

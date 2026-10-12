@@ -25,7 +25,7 @@ export const TTS_TEXT_MAX = 5000
 
 /** 配置默认值（config/default_config/config.yaml 的 agent.tts 同口径） */
 export const TTS_DEFAULTS = {
-  enable: true,
+  enable: false,          // 总开关默认关（opt-in）：开启后才注册 tts_speak 且自动语音才生效
   provider: 'indextts',
   autoReply: true,        // 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
   replyMaxChars: 300,     // 自动语音最大字符数（超长按句截断；0=不限）

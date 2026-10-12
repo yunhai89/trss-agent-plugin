@@ -719,8 +719,9 @@ async function buildRuntime() {
   // TTS 语音合成（tts_speak）：IndexTTS 2.5 等；vector 情绪默认由 LLM 结合文本+上下文自动调节
   // （情绪判定模型：agent.tts.indextts.model → utilityModel → 主模型，同 recall/thinkingAuto 的旁路通道）
   // tts 服务实例暴露到运行时：自动回复语音（agent.tts.autoReply）在主回复管线里直接调用。
+  // 总开关默认关（opt-in，严格 === true）：未显式开启 → 不注册工具、不合成（旧配置缺字段也静默）。
   let tts = null
-  if (cfg.tts?.enable !== false) {
+  if (cfg.tts?.enable === true) {
     try {
       const ttsTarget = modelRouter.resolve(cfg.tts?.indextts?.model || cfg.utilityModel || cfg.model)
       tts = new TtsService(cfg.tts || {}, {

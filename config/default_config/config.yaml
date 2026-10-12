@@ -326,7 +326,7 @@ agent:
     model: "whisper-1"     # 模型名
     language: ""            # 语言提示（如 zh/en，留空自动检测）
   tts:                     # 语音合成（tts_speak 工具）：当前内置 IndexTTS 2.5（Gradio HTTP），多服务商预留 provider
-    enable: true           # 关=tts_speak 工具不注册
+    enable: false          # 总开关（默认关，opt-in）：开=注册 tts_speak 并允许自动语音；关=完全静默（不注册、不合成）
     provider: indextts     # 当前服务商（后续接入其它 TTS 服务时在此切换）
     autoReply: true        # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
     replyMaxChars: 300     # 自动语音的最大字符数（超长按句截断，防合成出几分钟语音；0=不限）
