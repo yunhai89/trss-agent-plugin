@@ -10,7 +10,7 @@ import {
   IndexTtsClient, clampVector, vectorToObject, fileData, VECTOR_KEYS,
   RefLibrary, normalizeTtsConfig, parseVectorParam, TtsService, makeTtsSpeakTool,
   planEmotion, parsePlan, splitByPunctuation, buildConcatListContent, buildConcatArgs, concatSegments,
-  stripForSpeech,
+  stripForSpeech, enhanceVoice, buildEnhanceArgs, presenceGainFor, measurePresenceRatio, HD_LOUDNORM,
 } from './index.js'
 
 let passed = 0
@@ -265,12 +265,49 @@ await test('concatSegments：静音插入顺序 + 单段短路 + runner 注入',
   ok(buildConcatArgs('l.txt', 'o.mp3').includes('-safe'), 'concat 带 -safe 0')
 })
 
+// ─────────────────────── 5.5 高清增强（发送前） ───────────────────────
+await test('enhanceVoice：响度标准化固定 + 存在感补偿自适应（0~+6dB 夹取）；失败回退', async () => {
+  const args = buildEnhanceArgs('/a/in.wav', '/a/in.hd.wav', 4)
+  ok(args.includes('24000') && args.includes('pcm_s16le'), '输出对齐 24kHz s16le')
+  const af = args[args.indexOf('-af') + 1]
+  ok(/loudnorm/.test(af) && /equalizer/.test(af) && /highshelf/.test(af) && /g=4\b/.test(af), `滤镜链含响度+4dB 存在感（${af}）`)
+  eq(args[args.length - 1], '/a/in.hd.wav', '输出路径为末参')
+
+  eq(presenceGainFor(-21.4), 6, '偏闷音色补满上限 +6dB')
+  eq(presenceGainFor(-12), 0, '已达标不加色彩')
+  eq(presenceGainFor(-15), 3, '不足部分补足')
+  eq(presenceGainFor(null), 0, '测量不可用 → 0')
+
+  const measureRunner = async (a) => ({ ok: true, stderr: a.some((x) => String(x).includes('highpass')) ? 'mean_volume: -32.0 dB' : 'mean_volume: -18.0 dB' })
+  eq(await measurePresenceRatio('/x.wav', { runner: measureRunner }), -14, '倾斜测量 = 4~8k − 0~4k')
+
+  const dir = path.join(tmp, 'hd')
+  fs.mkdirSync(dir, { recursive: true })
+  const src = path.join(dir, 'v.wav'); fs.writeFileSync(src, Buffer.alloc(100, 1))
+  const seen = []
+  const runner = async (a) => {
+    seen.push(a)
+    if (a.some((x) => String(x).includes('volumedetect'))) return measureRunner(a)
+    fs.writeFileSync(a[a.length - 1], Buffer.alloc(80, 2))
+    return { ok: true, stderr: '' }
+  }
+  const r1 = await enhanceVoice(src, { runner })
+  ok(r1.ok && r1.path.endsWith('.hd.wav') && fs.existsSync(r1.path), '成功产出 .hd.wav')
+  eq(r1.presenceDb, 2, '自适应增益写入结果（-14dB 倾斜 → +2dB）')
+  const enc = seen.find((a) => !a.some((x) => String(x).includes('volumedetect')))
+  ok(/g=2\b/.test(enc[enc.indexOf('-af') + 1]), '编码滤镜使用自适应增益')
+
+  const r2 = await enhanceVoice(src, { runner: async () => ({ ok: false, stderr: 'no ffmpeg' }), logger: () => {} })
+  ok(!r2.ok && r2.path === src, '失败回退原始文件（不阻断发送）')
+})
+
 // ─────────────────────── 6. 服务编排 ───────────────────────
 function makeService({ cfg = {}, llm = null, ffmpegRunner } = {}) {
   const dataDir = fs.mkdtempSync(path.join(tmp, 'svc-'))
   const { fetchImpl, calls } = fakeGradio()
-  // 服务层测试统一带上假端点（协议细节已由 IndexTtsClient 测试覆盖）
-  const merged = { ...cfg, indextts: { endpoint: 'http://fake-indextts:7860', ...(cfg.indextts || {}) } }
+  // 服务层测试统一带上假端点（协议细节已由 IndexTtsClient 测试覆盖）；
+  // 默认关闭高清增强保持确定性，HD 专项用例显式打开并注入 fake ffmpeg。
+  const merged = { hdVoice: false, ...cfg, indextts: { endpoint: 'http://fake-indextts:7860', ...(cfg.indextts || {}) } }
   const svc = new TtsService(merged, { dataDir, llm, fetchImpl, ffmpegRunner })
   return { svc, calls, dataDir }
 }
@@ -376,6 +413,28 @@ await test('TtsService：缺音色参考 / 传错音色名 / 超长文本 → �
   ok(!tooLong.ok && /过长/.test(tooLong.error), '超长文本报错')
 })
 
+await test('TtsService：hdVoice 开启 → 发送前高清增强（输出 .hd.wav）；失败回退原始并如实标记', async () => {
+  const seen = []
+  const hdRunner = async (args) => {
+    seen.push(args)
+    if (args.some((x) => String(x).includes('volumedetect'))) return { ok: true, stderr: 'mean_volume: -20.0 dB' }
+    fs.writeFileSync(args[args.length - 1], Buffer.alloc(88, 3))
+    return { ok: true, stderr: '' }
+  }
+  const { svc } = makeService({ cfg: { hdVoice: true }, ffmpegRunner: hdRunner })
+  await svc.refs.add({ name: '甲', kind: 'voice', filename: 'v.wav', buffer: REF })
+  const r = await svc.synthesize({ text: '高清测试。', voice: '甲', emotionMode: 'same' })
+  ok(r.ok && r.enhanced === true, 'enhanced 标记为 true')
+  ok(r.file.endsWith('.hd.wav') && fs.existsSync(r.file), '发送文件为增强产物')
+  ok(r.rawFile && fs.existsSync(r.rawFile), '原始合成文件保留（调试/回退）')
+  ok(seen.some((a) => String(a[a.indexOf('-af') + 1] || '').includes('loudnorm')), '调用增强滤镜链')
+
+  const { svc: svc2 } = makeService({ cfg: { hdVoice: true }, ffmpegRunner: async () => ({ ok: false, stderr: 'no ffmpeg' }) })
+  await svc2.refs.add({ name: '乙', kind: 'voice', filename: 'v.wav', buffer: REF })
+  const r2 = await svc2.synthesize({ text: '回退测试。', voice: '乙', emotionMode: 'same' })
+  ok(r2.ok && r2.enhanced === false && r2.file === r2.rawFile, '失败回退原始文件')
+})
+
 // ─────────────────────── 7. Agent 工具 ───────────────────────
 await test('tts_speak 工具：合成成功 → 发送语音；描述含音色名单与模式说明', async () => {
   const { svc } = makeService()
@@ -455,6 +514,7 @@ await test('normalizeTtsConfig：缺省字段回落默认（旧配置安全）',
   eq(c.provider, 'indextts', 'provider 默认')
   eq(c.autoReply, true, '自动语音回复默认开')
   eq(c.replyMaxChars, 300, '自动语音字数上限默认 300')
+  eq(c.hdVoice, true, '高清语音默认开')
   eq(c.indextts.endpoint, 'http://a:1', '覆盖端点保留')
   eq(c.indextts.emotionMode, 'same', '情绪模式默认 same')
   eq(c.indextts.tier, 'pro', '档位默认 pro')
