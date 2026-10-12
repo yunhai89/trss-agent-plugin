@@ -52,6 +52,7 @@ await test('GET /api/tts：默认配置 + 服务商列表 + 空参考库', async
   ok(r.body.data.enable === true, 'enable 默认开')
   ok(r.body.data.autoReply === true, '自动语音回复默认开')
   ok(r.body.data.replyMaxChars === 300, '自动语音字数上限默认 300')
+  ok(r.body.data.hdVoice === true, '高清语音默认开')
   ok(r.body.data.provider === 'indextts', '默认服务商 indextts')
   ok(r.body.data.providers?.[0]?.id === 'indextts' && r.body.data.providers[0].configured === false, '服务商卡片数据（未配置）')
   ok(Array.isArray(r.body.data.refs) && r.body.data.refs.length === 0, '参考库空')
@@ -95,6 +96,7 @@ await test('PUT /api/tts/config：白名单点路径写入（enable/provider/ind
     provider: 'indextts',
     autoReply: false,
     replyMaxChars: 123,
+    hdVoice: false,
   } })
   ok(r.status === 200 && r.body.code === 0, `保存成功（${r.status}/${r.body.code}）`)
   const cfg = __state.config.agent.tts
@@ -103,9 +105,11 @@ await test('PUT /api/tts/config：白名单点路径写入（enable/provider/ind
   ok(Array.isArray(cfg.indextts.vector) && cfg.indextts.vector[7] === 0.3, '向量写入')
   ok(cfg.autoReply === false, '自动语音开关写入')
   ok(cfg.replyMaxChars === 123, '自动语音上限写入（数值化）')
+  ok(cfg.hdVoice === false, '高清语音开关写入')
   const payload = await get('/api/tts')
   ok(payload.body.data.providers[0].configured === true, 'configured 状态随配置刷新')
   ok(payload.body.data.autoReply === false && payload.body.data.replyMaxChars === 123, 'payload 回读一致')
+  ok(payload.body.data.hdVoice === false, 'payload 高清语音回读一致')
 
   const over = await put('/api/tts/config', { changes: { replyMaxChars: 99999 } })
   ok(over.status === 200 && __state.config.agent.tts.replyMaxChars === 5000, '超范围夹到 5000')

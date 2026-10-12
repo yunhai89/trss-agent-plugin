@@ -16,6 +16,7 @@ import { IndexTtsClient, clampVector, vectorToObject, VECTOR_ZH } from './indext
 import { planEmotion, splitByPunctuation, normalizeContext, MAX_SEGMENTS, MAX_SEGMENT_CHARS } from './emotion.js'
 import { RefLibrary } from './refs.js'
 import { concatSegments, runFfmpeg } from './audio.js'
+import { enhanceVoice } from './enhance.js'
 import { createKeyedLock } from '../agent/store/lock.js'
 
 export const TTS_LANGS = ['ZH', 'EN', 'JA', 'AR', 'ES']
@@ -27,6 +28,7 @@ export const TTS_DEFAULTS = {
   provider: 'indextts',
   autoReply: true,        // 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
   replyMaxChars: 300,     // 自动语音最大字符数（超长按句截断；0=不限）
+  hdVoice: true,          // 发送前高清化：响度标准化 + 存在感补偿（失败自动回退原始音频）
   indextts: {
     endpoint: '',
     lang: 'ZH',
@@ -221,9 +223,10 @@ export class TtsService {
           durationFactor: ix.durationFactor, maxTextTokensPerSegment: ix.maxTextTokensPerSegment,
         })
         const file = _writeOut(r.buffer, 'wav')
-        this.logger('info', `[tts] 合成完成：${mode}/${tier} 音色=${voice.name} ${text.length}字 用时=${Date.now() - t0}ms`)
+        const hd = await this._applyHd(file)
+        this.logger('info', `[tts] 合成完成：${mode}/${tier} 音色=${voice.name} ${text.length}字 用时=${Date.now() - t0}ms${hd.enhanced ? '（已高清增强）' : ''}`)
         return {
-          ok: true, file, tier, mode, voice: voice.name, lang,
+          ok: true, file: hd.file, rawFile: file, enhanced: hd.enhanced, tier, mode, voice: voice.name, lang,
           ...(mode === 'vector' && vectorArr ? { vector: vectorToObject(vectorArr) } : {}),
           ...(reason ? { reason } : {}),
           notes,
@@ -288,9 +291,10 @@ export class TtsService {
           })
           if (!merged.ok) return { ok: false, error: `分段合成完成但合并失败：${merged.error}` }
         }
-        this.logger('info', `[tts] 合成完成：${mode}/max ${files.length}段 音色=${voice.name} ${text.length}字 用时=${Date.now() - t0}ms`)
+        const hd = await this._applyHd(finalFile)
+        this.logger('info', `[tts] 合成完成：${mode}/max ${files.length}段 音色=${voice.name} ${text.length}字 用时=${Date.now() - t0}ms${hd.enhanced ? '（已高清增强）' : ''}`)
         return {
-          ok: true, file: finalFile, tier: 'max', mode, voice: voice.name, lang,
+          ok: true, file: hd.file, rawFile: finalFile, enhanced: hd.enhanced, tier: 'max', mode, voice: voice.name, lang,
           segments: segments.map((s) => ({ text: s.text, vector: vectorToObject(s.vector) })),
           ...(baseVector ? { vector: vectorToObject(baseVector) } : {}),
           ...(reason ? { reason } : {}),
@@ -303,6 +307,13 @@ export class TtsService {
       this.logger('warn', '[tts] 合成失败：', e?.message || e)
       return { ok: false, error: e?.message || String(e) }
     }
+  }
+
+  /** 高清化（agent.tts.hdVoice）：响度标准化 + 存在感补偿；失败回退原始文件（不阻断发送） */
+  async _applyHd(file) {
+    if (this.cfg.hdVoice === false) return { file, enhanced: false }
+    const r = await enhanceVoice(file, { runner: this.ffmpegRunner, logger: this.logger, timeout: 90 })
+    return r.ok ? { file: r.path, enhanced: true } : { file, enhanced: false }
   }
 
   /** 输出目录清理：只保留最近 200 个文件 / 7 天（best-effort，失败不影响合成） */

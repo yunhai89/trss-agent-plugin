@@ -18,3 +18,4 @@ export {
   MAX_SEGMENTS, MAX_SEGMENT_CHARS,
 } from './emotion.js'
 export { concatSegments, runFfmpeg, buildConcatArgs, buildSilenceArgs, buildConcatListContent } from './audio.js'
+export { enhanceVoice, buildEnhanceArgs, hdOutputPath, hdFilter, presenceGainFor, measurePresenceRatio, HD_LOUDNORM } from './enhance.js'

@@ -335,8 +335,9 @@ agent:
   tts:                     # 语音合成（tts_speak 工具）：当前内置 IndexTTS 2.5（Gradio HTTP），多服务商预留 provider
     enable: true           # 关=tts_speak 工具不注册
     provider: indextts     # 当前服务商（后续接入其它 TTS 服务时在此切换）
-    autoReply: true        # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
+    autoReply: true,        # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
     replyMaxChars: 300     # 自动语音的最大字符数（超长按句截断，防合成出几分钟语音；0=不限）
+    hdVoice: true          # 发送前高清化：响度标准化 + 存在感补偿（需宿主 ffmpeg，失败自动回退原始音频）
     indextts:
       endpoint: ""         # 接口地址（如 http://127.0.0.1:7860）
       lang: ZH             # 合成语言：ZH/EN/JA/AR/ES

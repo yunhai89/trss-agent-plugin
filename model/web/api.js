@@ -979,6 +979,7 @@ function ttsPayload() {
     provider: cfg.provider || 'indextts',
     autoReply: cfg.autoReply !== false,
     replyMaxChars: Number(cfg.replyMaxChars ?? 300) || 0,
+    hdVoice: cfg.hdVoice !== false,
     providers: [
       {
         id: 'indextts',
@@ -1002,7 +1003,7 @@ router.put('/tts/config', asyncHandler(async (req, res) => {
   const SAFE_KEY = (key) => {
     const parts = String(key).split('.')
     if (parts.some((s) => ['__proto__', 'constructor', 'prototype'].includes(s))) return false
-    return ['enable', 'provider', 'autoReply', 'replyMaxChars'].includes(key) || /^indextts(\.[a-zA-Z0-9_]+)+$/.test(key)
+    return ['enable', 'provider', 'autoReply', 'replyMaxChars', 'hdVoice'].includes(key) || /^indextts(\.[a-zA-Z0-9_]+)+$/.test(key)
   }
   const cfg = Config.get()
   let n = 0
@@ -1010,12 +1011,12 @@ router.put('/tts/config', asyncHandler(async (req, res) => {
     const key = String(p).replace(/^agent\.tts\./, '')
     if (!SAFE_KEY(key)) continue
     let val = v
-    if (key === 'autoReply') val = !!v
+    if (key === 'autoReply' || key === 'hdVoice') val = !!v
     if (key === 'replyMaxChars') val = Math.max(0, Math.min(5000, Number(v) || 0))
     setPath(cfg, 'agent.tts.' + key, val)
     n++
   }
-  if (!n) return fail(res, CODE.BAD, '没有可应用的字段（仅支持 agent.tts.enable / provider / autoReply / replyMaxChars / indextts.*）')
+  if (!n) return fail(res, CODE.BAD, '没有可应用的字段（仅支持 agent.tts.enable / provider / autoReply / replyMaxChars / hdVoice / indextts.*）')
   Config.save(cfg)
   Config.reload(true)
   return ok(res, { applied: n }, '已保存（已热加载）')

@@ -84,6 +84,7 @@
       const setProvider = (v) => put({ provider: v }, '已切换默认服务商')
       const toggleAutoReply = (v) => put({ autoReply: !!v }, v ? '已开启自动语音回复' : '已关闭自动语音回复')
       const saveReplyMaxChars = (v) => put({ replyMaxChars: Math.max(0, Math.min(5000, Number(v) || 0)) }, '已保存自动语音字数上限')
+      const toggleHdVoice = (v) => put({ hdVoice: !!v }, v ? '已开启高清语音' : '已关闭高清语音')
 
       /* ── 服务卡片 → 弹窗 ── */
       const openService = (p) => {
@@ -167,7 +168,7 @@
         loading, error, data, load, sections, open, jump,
         modal, form, saveModal, openService, testConn, testState,
         upload, onPick, doUpload, delRef, refUrl, refs, voiceRefs, emoRefs, kindZh, sizeKb, fileEl,
-        toggleEnable, setProvider, toggleAutoReply, saveReplyMaxChars,
+        toggleEnable, setProvider, toggleAutoReply, saveReplyMaxChars, toggleHdVoice,
         EMOTIONS, vecOf, setVec, vecSum,
       }
     },
@@ -204,6 +205,9 @@
             </cfg-row>
             <cfg-row name="自动语音字数上限" desc="超长按句子边界截断（防一条回复合成出几分钟语音）；0=不限">
               <input type="number" class="inp" style="width:120px" min="0" max="5000" step="50" :value="data?.replyMaxChars != null ? data.replyMaxChars : 300" @change="saveReplyMaxChars($event.target.value)">
+            </cfg-row>
+            <cfg-row name="高清语音" desc="发送前响度标准化 + 清晰度补偿（修 TTS 输出偏轻偏闷；需宿主 ffmpeg，失败自动回退原始音频）">
+              <v-switch :model-value="!!data?.hdVoice" @update:modelValue="toggleHdVoice"/>
             </cfg-row>
             <cfg-row name="默认服务商" desc="后续接入其它 TTS 服务时在此切换">
               <select class="sel" style="width:220px" :value="data?.provider || 'indextts'" @change="setProvider($event.target.value)" :disabled="(data?.providers || []).length < 2">
