@@ -173,17 +173,31 @@ export function parsePlan(raw, { tier = 'pro', text = '', maxSegments = MAX_SEGM
 /**
  * 带超时的 Promise（定时器必须清理：此前未 clearTimeout 导致短进程空等满超时——
  * model/tts/test.mjs 曾因此 30s 才退出，CI 被拖慢）。
+ * @param {Promise} promise
+ * @param {number} ms 超时毫秒
+ * @param {string} message 超时错误消息
+ * @param {Function} [onTimeout] 超时回调（用于中止底层调用，如 AbortController.abort——
+ *   不中止的话请求会继续跑到客户端 60s 超时/重试，白烧额度还占并发）
  */
-export function withTimeout(promise, ms, message = '超时') {
+export function withTimeout(promise, ms, message = '超时', onTimeout = null) {
   let timer
-  const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(message)), ms) })
+  const timeout = new Promise((_, rej) => {
+    timer = setTimeout(() => {
+      try { onTimeout?.() } catch { /* noop */ }
+      rej(new Error(message))
+    }, ms)
+  })
   return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer))
 }
 
 /**
  * 调 LLM 规划情绪。
- * @param {{ run: Function }|Function} llm recallLlm 风格：run(prompt) → { content }；也接受直接函数
- * @param {object} opts { text, tier, context, voiceName, maxSegmentChars, maxSegments, logger }
+ * 预算语义（默认 30000ms，tts.indextts.judgeTimeoutMs 可配）：整个判定调用受总预算约束；
+ * 单次尝试最多用一半预算，快速失败（网络/限流等）且预算尚余时再试一次——首次请求偶发
+ * 卡在连接/重试退避时，新连接往往几秒就能成功；两次都超预算则如实施加默认值回退，不拖语音。
+ * 超时会 abort 底层请求（signal 透传到 provider.chat → fetch），不再让它在后台空跑。
+ * @param {{ run: Function }|Function} llm recallLlm 风格：run(prompt, { signal }) → { content }；也接受直接函数
+ * @param {object} opts { text, tier, context, voiceName, maxSegmentChars, maxSegments, logger, timeoutMs }
  * @returns {Promise<null|{vector, segments?, reason}>} null=规划不可用（调用方按配置默认值回退）
  */
 export async function planEmotion(llm, opts = {}) {
@@ -197,12 +211,35 @@ export async function planEmotion(llm, opts = {}) {
     maxSegments: opts.maxSegments || MAX_SEGMENTS,
   })
   const prompt = `${system}\n\n${user}`
+
+  const budget = Math.max(1000, Number(timeoutMs) || 30000)
+  const sliceMs = Math.max(1000, Math.round(budget / 2))
+  const t0 = Date.now()
+  const deadline = t0 + budget
+  const MAX_ATTEMPTS = 2
   let content = ''
-  try {
-    const res = await withTimeout(run(prompt), timeoutMs, '情绪判定超时')
-    content = res?.content ?? res ?? ''
-  } catch (e) {
-    logger?.('warn', '[tts] 情绪判定调用失败，按默认值回退', e?.message || e)
+  let lastErr = ''
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const remain = deadline - Date.now()
+    if (remain < 1000) break
+    const ctrl = new AbortController()
+    try {
+      const res = await withTimeout(
+        run(prompt, { signal: ctrl.signal }),
+        Math.min(remain, sliceMs),
+        '情绪判定超时',
+        () => ctrl.abort(),
+      )
+      content = res?.content ?? res ?? ''
+      lastErr = ''
+      break
+    } catch (e) {
+      lastErr = e?.message || String(e)
+      try { ctrl.abort() } catch { /* noop */ }
+    }
+  }
+  if (lastErr) {
+    logger?.('warn', '[tts] 情绪判定调用失败，按默认值回退', `${lastErr}（预算 ${budget}ms，耗时 ${Date.now() - t0}ms）`)
     return null
   }
   const plan = parsePlan(content, { tier, text, maxSegments: opts.maxSegments || MAX_SEGMENTS, maxSegmentChars: opts.maxSegmentChars || MAX_SEGMENT_CHARS })

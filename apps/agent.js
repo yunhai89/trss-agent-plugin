@@ -798,17 +798,17 @@ async function _buildRuntime(scope) {
         dataDir: Config.path.tts,
         logger: Log.tag('tts'),
         llm: {
-          run: async (prompt) => {
-            try {
-              const res = await ttsTarget.provider.chat({ model: ttsTarget.model || cfg.model, messages: [{ role: 'user', content: prompt }], stream: false })
-              return { content: res?.content || '' }
-            } catch (e) { Log.warn('[tts] 情绪判定模型调用失败，按默认向量回退', e?.message || e); return { content: '' } }
+          // 情绪判定（旁路小调用）：signal 由 emotion.js 超时中止时触发（abort → fetch 中断，
+          // 不再让请求在后台跑到 60s/重试，白烧额度）。错误向上抛，由 planEmotion 统一记账回退。
+          run: async (prompt, { signal } = {}) => {
+            const res = await ttsTarget.provider.chat({ model: ttsTarget.model || cfg.model, messages: [{ role: 'user', content: prompt }], stream: false, signal })
+            return { content: res?.content || '' }
           },
         },
       })
       tools.register(makeTtsSpeakTool(tts))
       const voiceCount = tts.voices('voice').length
-      startupInfo.tts = { provider: tts.provider, voices: voiceCount, endpoint: !!cfg.tts?.indextts?.endpoint }
+      startupInfo.tts = { provider: tts.provider, voices: voiceCount, endpoint: !!cfg.tts?.indextts?.endpoint, judgeModel: ttsTarget.model || cfg.model }
       if (!cfg.tts?.indextts?.endpoint) Log.debug('[tts] tts_speak 已注册，但 IndexTTS 接口地址未配置（Web 面板 → 语音合成）')
     } catch (e) { Log.warn('[tts] 初始化失败（tts_speak 不注册）', e?.message || e) }
   }
