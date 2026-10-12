@@ -265,6 +265,17 @@ await test('concatSegments：静音插入顺序 + 单段短路 + runner 注入',
   ok(buildConcatArgs('l.txt', 'o.mp3').includes('-safe'), 'concat 带 -safe 0')
 })
 
+await test('TtsService：合成入口统一讲稿清洗（点播文本同样剥 md/破折号/emoji）', async () => {
+  const { svc, calls } = makeService()
+  await svc.refs.add({ name: '甲', kind: 'voice', filename: 'v.wav', buffer: Buffer.from('RIFFvoice') })
+  const r = await svc.synthesize({ text: '去看——这个 `代码` 吧 😀', voice: '甲', emotionMode: 'same' })
+  ok(r.ok, '合成成功')
+  eq(calls.joins[0].data[2], '去看，这个 代码 吧', '服务端收到的文本已清洗')
+  eq(r.chars, '去看，这个 代码 吧'.length, 'chars 为清洗后长度')
+  const pure = await svc.synthesize({ text: '```js\nconst a = 1\n```', voice: '甲', emotionMode: 'same' })
+  ok(!pure.ok && /清洗后无可朗读内容/.test(pure.error), '纯代码 → 明确报错不空合成')
+})
+
 // ─────────────────────── 5.5 高清增强（发送前） ───────────────────────
 await test('enhanceVoice：响度标准化固定 + 存在感补偿自适应（0~+6dB 夹取）；失败回退', async () => {
   const args = buildEnhanceArgs('/a/in.wav', '/a/in.hd.wav', 4)
@@ -483,6 +494,15 @@ await test('stripForSpeech：标题/列表/引用/表格/emoji 清理', () => {
   eq(stripForSpeech('# 标题\n- 项目一\n- 项目二\n\n| a | b |\n|---|---|\n| 1 | 2 |\n> 引用'), '标题。项目一。项目二。引用', 'md 块级符号与表格')
   eq(stripForSpeech('你好呀 🎉！今天很好👍'), '你好呀！今天很好', 'emoji 不朗读')
   eq(stripForSpeech('好的[sticker:猫猫]没问题'), '好的没问题', '贴纸标记兜底剥离')
+})
+
+await test('stripForSpeech：破折号（——/—/--）转逗号停顿（TTS 会读成"减减"）', () => {
+  eq(stripForSpeech('我会不耐烦——不过也就嘴上吐槽两句，不会真记仇。'), '我会不耐烦，不过也就嘴上吐槽两句，不会真记仇。', '中文双破折号')
+  eq(stripForSpeech('方案A—方案B'), '方案A，方案B', '单个 em dash')
+  eq(stripForSpeech('注意 -- 分隔'), '注意， 分隔', 'ASCII 双连字符（保留原空格）')
+  eq(stripForSpeech('他走了——'), '他走了', '句尾破折号（停顿被收敛）')
+  eq(stripForSpeech('——开场白'), '开场白', '句首破折号')
+  eq(stripForSpeech('价格 3-5 元'), '价格 3-5 元', '单个连字符（数字范围）保留')
 })
 
 await test('stripForSpeech：按句截断（maxChars）与边界', () => {

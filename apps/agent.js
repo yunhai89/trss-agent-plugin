@@ -93,7 +93,7 @@ import { readPdfTool } from '../model/document/pdf.js'
 import { createExcelTool, readExcelTool } from '../model/document/excel.js'
 import { fileToPdfTool } from '../model/document/topdf.js'
 import { transcribeMediaTool } from '../model/document/media_stt.js'
-import { TtsService, makeTtsSpeakTool, stripForSpeech } from '../model/tts/index.js'
+import { TtsService, makeTtsSpeakTool } from '../model/tts/index.js'
 import { DiagramService } from '../model/diagram/index.js'
 import { makeDiagramTool } from '../model/diagram/tool.js'
 import { makeDiagramDeliverer } from '../model/diagram/deliver.js'
@@ -2333,41 +2333,37 @@ export class Chat extends plugin {
       }
       devLog('reply', { mode: replyMode, delivered, replyLen: (body || '').length, body: body || '', turns, stopReason }, traceId, ctx.devScope)
       // ── 自动 TTS（agent.tts.autoReply，默认开）：最终回复送达后追加语音 ——
-      // 内容 = LLM 最终回复剥除 md/代码（stripForSpeech）；文字/图片照常发送，语音是补充，用户选定的形式。
+      // 内容 = LLM 最终回复经 TTS 服务合成入口统一清洗（md/代码/链接/emoji/破折号；maxChars 按句截断）；
+      // 文字/图片照常发送，语音是补充，用户选定的形式。
       // fire-and-forget：合成 7~15s，不占用会话 single-flight 队列（否则下一条消息会排队等待）；
       // 多个语音交给 TTS 服务内部串行队列按序生成。跳过：未送达 / 本轮已用 tts_speak 点播（防重复语音）/
-      // 剥除后无内容。任何失败只记日志（warn + devLog），不影响已完成的投递终态。
+      // 清洗后无内容。任何失败只记日志（warn + devLog），不影响已完成的投递终态。
       if (delivered && rt.tts && cfg.tts?.autoReply !== false && String(body || '').trim() && !agentInst?._ranTools?.has('tts_speak')) {
-        const speakText = stripForSpeech(body, { maxChars: Number(cfg.tts?.replyMaxChars ?? 300) })
-        if (speakText) {
-          const messages = Array.isArray(agentInst?.messages) ? agentInst.messages.slice(-8) : []
-          void (async () => {
-            const started = Date.now()
-            try {
-              const vr = await rt.tts.synthesize({ text: speakText, context: { messages } })
-              const ms = Date.now() - started
-              if (!vr.ok) {
-                Log.warn('[tts] 回复语音合成失败：', vr.error)
-                devLog('tts_reply', { ok: false, error: String(vr.error || '').slice(0, 200), chars: speakText.length, ms }, traceId, ctx.devScope)
-                return
-              }
-              if (typeof segment === 'undefined' || typeof segment.record !== 'function') {
-                Log.warn('[tts] 语音已生成但当前适配器不支持语音消息（segment.record 不可用）')
-                return
-              }
-              const vout = await safeReply(segment.record(vr.file))
-              devLog('tts_reply', {
-                ok: !!vout.ok, sent: !!vout.ok, voice: vr.voice, mode: vr.mode, tier: vr.tier,
-                chars: speakText.length, ms, error: vout.ok ? null : (vout.error || 'send rejected'),
-              }, traceId, ctx.devScope)
-              if (!vout.ok) Log.warn('[tts] 回复语音发送失败：', vout.error)
-            } catch (e) {
-              Log.warn('[tts] 自动语音异常（不影响回复）', e?.message || e)
+        const messages = Array.isArray(agentInst?.messages) ? agentInst.messages.slice(-8) : []
+        void (async () => {
+          const started = Date.now()
+          try {
+            const vr = await rt.tts.synthesize({ text: body, maxChars: Number(cfg.tts?.replyMaxChars ?? 300), context: { messages } })
+            const ms = Date.now() - started
+            if (!vr.ok) {
+              Log.warn('[tts] 回复语音合成失败：', vr.error)
+              devLog('tts_reply', { ok: false, error: String(vr.error || '').slice(0, 200), chars: String(body || '').length, ms }, traceId, ctx.devScope)
+              return
             }
-          })()
-        } else {
-          Log.debug('[tts] 回复剥除 md/代码后无可用语音内容，跳过自动语音')
-        }
+            if (typeof segment === 'undefined' || typeof segment.record !== 'function') {
+              Log.warn('[tts] 语音已生成但当前适配器不支持语音消息（segment.record 不可用）')
+              return
+            }
+            const vout = await safeReply(segment.record(vr.file))
+            devLog('tts_reply', {
+              ok: !!vout.ok, sent: !!vout.ok, voice: vr.voice, mode: vr.mode, tier: vr.tier,
+              chars: vr.chars || 0, ms, error: vout.ok ? null : (vout.error || 'send rejected'),
+            }, traceId, ctx.devScope)
+            if (!vout.ok) Log.warn('[tts] 回复语音发送失败：', vout.error)
+          } catch (e) {
+            Log.warn('[tts] 自动语音异常（不影响回复）', e?.message || e)
+          }
+        })()
       }
       })
       // run 正常结束：标记本轮结束，未被 check_subagent 消费的子代理终态结果异步回推

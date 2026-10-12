@@ -56,6 +56,9 @@ export function stripForSpeech(text, { maxChars = 300 } = {}) {
   s = s.replace(/~~([^~\n]+)~~/g, '$1')
   s = s.replace(/`([^`\n]*)`/g, '$1')
 
+  // 8.5) 破折号/长横线（——、—、──、-- 等）：TTS 会逐字读成"减减/减"，统一换成逗号停顿
+  s = s.replace(/(?:[—–―─━]+|-{2,})/g, '，')
+
   // 9) emoji / 零宽字符（读不出来或读出怪音）
   s = s.replace(/[\uFE0F\u200D\u200B]/g, '')
   s = s.replace(/\p{Extended_Pictographic}/gu, '')

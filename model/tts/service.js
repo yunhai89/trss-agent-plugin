@@ -14,6 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { IndexTtsClient, clampVector, vectorToObject, VECTOR_ZH } from './indextts.js'
 import { planEmotion, splitByPunctuation, normalizeContext, MAX_SEGMENTS, MAX_SEGMENT_CHARS } from './emotion.js'
+import { stripForSpeech } from './speech-text.js'
 import { RefLibrary } from './refs.js'
 import { concatSegments, runFfmpeg } from './audio.js'
 import { enhanceVoice } from './enhance.js'
@@ -132,9 +133,13 @@ export class TtsService {
     const ix = this.cfg.indextts
     const notes = []
     const fail = (msg) => { this.logger('warn', `[tts] 合成未执行：${msg}`); return { ok: false, error: msg } }
-    const text = String(p.text || '').trim()
-    if (!text) return fail('合成文本为空')
-    if (text.length > TTS_TEXT_MAX) return fail(`文本过长（${text.length} 字，上限 ${TTS_TEXT_MAX}）；请分段调用或多轮发送`)
+    const rawText = String(p.text || '').trim()
+    if (!rawText) return fail('合成文本为空')
+    if (rawText.length > TTS_TEXT_MAX) return fail(`文本过长（${rawText.length} 字，上限 ${TTS_TEXT_MAX}）；请分段调用或多轮发送`)
+    // 讲稿清洗统一在合成入口做（自动回复与 tts_speak 点播同一条链路）：剥 md/代码/链接/emoji、破折号转停顿；
+    // maxChars（自动回复传入）时按句截断，0/缺省不截断（点播原文由调用方决定长度）。
+    const text = stripForSpeech(rawText, { maxChars: Number(p.maxChars) || 0 })
+    if (!text) return fail('文本清洗后无可朗读内容（仅符号/代码/链接？）')
 
     const voice = this._resolveVoice(p.voice)
     if (!voice) {
@@ -226,7 +231,7 @@ export class TtsService {
         const hd = await this._applyHd(file)
         this.logger('info', `[tts] 合成完成：${mode}/${tier} 音色=${voice.name} ${text.length}字 用时=${Date.now() - t0}ms${hd.enhanced ? '（已高清增强）' : ''}`)
         return {
-          ok: true, file: hd.file, rawFile: file, enhanced: hd.enhanced, tier, mode, voice: voice.name, lang,
+          ok: true, file: hd.file, rawFile: file, enhanced: hd.enhanced, tier, mode, voice: voice.name, lang, chars: text.length,
           ...(mode === 'vector' && vectorArr ? { vector: vectorToObject(vectorArr) } : {}),
           ...(reason ? { reason } : {}),
           notes,
@@ -294,7 +299,7 @@ export class TtsService {
         const hd = await this._applyHd(finalFile)
         this.logger('info', `[tts] 合成完成：${mode}/max ${files.length}段 音色=${voice.name} ${text.length}字 用时=${Date.now() - t0}ms${hd.enhanced ? '（已高清增强）' : ''}`)
         return {
-          ok: true, file: hd.file, rawFile: finalFile, enhanced: hd.enhanced, tier: 'max', mode, voice: voice.name, lang,
+          ok: true, file: hd.file, rawFile: finalFile, enhanced: hd.enhanced, tier: 'max', mode, voice: voice.name, lang, chars: text.length,
           segments: segments.map((s) => ({ text: s.text, vector: vectorToObject(s.vector) })),
           ...(baseVector ? { vector: vectorToObject(baseVector) } : {}),
           ...(reason ? { reason } : {}),
