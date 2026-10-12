@@ -21,6 +21,7 @@ import { mergeTrend, summarizeKvDays } from '../agent/store/usage-stats.js'
 import { ok, fail, asyncHandler, CODE } from './response.js'
 import { listAllSuggestions, applySuggestion, removeSuggestion } from '../evolution/review.js'
 import { getStickerManager } from '../sticker/manager.js'
+import { RefLibrary, IndexTtsClient, normalizeTtsConfig } from '../tts/index.js'
 
 const router = express.Router()
 
@@ -804,6 +805,103 @@ router.delete('/suggestions/:id', asyncHandler(async (req, res) => {
   if (!s) return fail(res, CODE.NOTFOUND, 'suggestion 不存在')
   removeSuggestion(r.suggestionDir, s.scopeId, s.id)
   return ok(res, { removed: true })
+}))
+
+// ── TTS 语音合成（参考音频库 + 服务配置；前端「语音合成」页）──
+const ttsRefs = () => new RefLibrary({ dir: Config.path.tts })
+
+/** 面板展示用 TTS 现状（不含密钥；provider 列表供前端渲染服务卡片，可扩展多服务商） */
+function ttsPayload() {
+  const cfg = normalizeTtsConfig(Config.get().agent?.tts || {})
+  return {
+    enable: cfg.enable !== false,
+    provider: cfg.provider || 'indextts',
+    providers: [
+      {
+        id: 'indextts',
+        name: 'IndexTTS 2.5',
+        desc: '本地/自托管服务（Gradio HTTP）· 音色参考 + 情绪参考/向量 + pro/max 档位',
+        configured: !!cfg.indextts.endpoint,
+      },
+    ],
+    indextts: cfg.indextts,
+    refs: ttsRefs().list(),
+  }
+}
+
+// GET /api/tts —— TTS 配置 + 服务商列表 + 参考音频库
+router.get('/tts', asyncHandler(async (req, res) => ok(res, ttsPayload())))
+
+// PUT /api/tts/config —— 点路径 changes（相对 agent.tts；仅允许 enable/provider/indextts.*，拒绝原型链键）
+router.put('/tts/config', asyncHandler(async (req, res) => {
+  const { changes } = req.body || {}
+  if (!changes || typeof changes !== 'object') return fail(res, CODE.BAD, 'changes 必须是对象')
+  const SAFE_KEY = (key) => {
+    const parts = String(key).split('.')
+    if (parts.some((s) => ['__proto__', 'constructor', 'prototype'].includes(s))) return false
+    return key === 'enable' || key === 'provider' || /^indextts(\.[a-zA-Z0-9_]+)+$/.test(key)
+  }
+  const cfg = Config.get()
+  let n = 0
+  for (const [p, v] of Object.entries(changes)) {
+    const key = String(p).replace(/^agent\.tts\./, '')
+    if (!SAFE_KEY(key)) continue
+    setPath(cfg, 'agent.tts.' + key, v)
+    n++
+  }
+  if (!n) return fail(res, CODE.BAD, '没有可应用的字段（仅支持 agent.tts.enable / provider / indextts.*）')
+  Config.save(cfg)
+  Config.reload(true)
+  return ok(res, { applied: n }, '已保存（已热加载）')
+}))
+
+// POST /api/tts/refs?name=&kind=&filename= —— 上传参考音频（raw body；前端 File 直传，避免 base64 膨胀）
+router.post('/tts/refs', express.raw({ type: () => true, limit: '30mb' }), asyncHandler(async (req, res) => {
+  const buffer = Buffer.isBuffer(req.body) ? req.body : null
+  if (!buffer?.length) return fail(res, CODE.BAD, '音频内容为空（请以二进制 body 上传，并带 name/filename 查询参数）')
+  try {
+    const entry = await ttsRefs().add({
+      name: req.query.name,
+      kind: req.query.kind,
+      filename: req.query.filename,
+      buffer,
+    })
+    // 参考库变化不在 config.yaml 里：强制通知一次，让运行时重建后刷新工具描述里的音色名单
+    try { Config.reload(true) } catch { /* noop */ }
+    return ok(res, entry, `已上传「${entry.name}」`)
+  } catch (e) {
+    return fail(res, CODE.BAD, e?.message || String(e))
+  }
+}))
+
+// GET /api/tts/refs/:id/audio —— 试听/回放（<audio src> 无法带 header，auth 中间件支持 ?token=）
+router.get('/tts/refs/:id/audio', asyncHandler(async (req, res) => {
+  const lib = ttsRefs()
+  const entry = lib.get(req.params.id)
+  const file = entry && lib.filePath(entry)
+  if (!file || !fs.existsSync(file)) return fail(res, CODE.NOTFOUND, '参考音频不存在')
+  res.set('Cache-Control', 'private, max-age=300')
+  res.set('Content-Disposition', 'inline')
+  return res.type(entry.ext || path.extname(file)).sendFile(path.resolve(file))
+}))
+
+// DELETE /api/tts/refs/:id —— 删除参考音频（索引 + 文件）
+router.delete('/tts/refs/:id', asyncHandler(async (req, res) => {
+  const removed = await ttsRefs().remove(req.params.id)
+  if (!removed) return fail(res, CODE.NOTFOUND, '参考音频不存在')
+  try { Config.reload(true) } catch { /* noop */ }
+  return ok(res, { removed: true }, '已删除')
+}))
+
+// POST /api/tts/test —— 连通性自检（探 /config 并解析 fn_index/情绪选项；可带 { endpoint } 临时覆盖）
+router.post('/tts/test', asyncHandler(async (req, res) => {
+  const cfg = normalizeTtsConfig(Config.get().agent?.tts || {})
+  const endpoint = String(req.body?.endpoint || cfg.indextts.endpoint || '').trim()
+  if (!endpoint) return fail(res, CODE.BAD, '请先填写接口地址')
+  const client = new IndexTtsClient({ endpoint, timeoutMs: 15000 })
+  const r = await client.check()
+  if (!r.ok) return fail(res, CODE.INTERNAL, r.error || '连接失败')
+  return ok(res, r, `连接成功（fn_index=${r.fnIndex}）`)
 }))
 
 // 未知 /api 路径 → JSON 404（不走 SPA fallback）

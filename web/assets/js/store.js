@@ -14,7 +14,7 @@
     conversations: [], sessions: {}, logFiles: [], logFilesTotal: 0, schedules: [], confirms: [],
     suggestions: [], perceptions: [], tokenTrend: [], requestTrend: [], toolTop: [],
     totalRequests: 0, totalToolCalls: 0, totalTokens: 0,
-    stickerLib: null,
+    stickerLib: null, tts: null,
   })
 
   const TOKEN_KEY = 'agents_token'
@@ -22,7 +22,7 @@
     const BASE = '/api'
     const getToken = () => localStorage.getItem(TOKEN_KEY) || ''
     const setToken = (t) => { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY) }
-    const request = async (method, p, { query, body } = {}) => {
+    const request = async (method, p, { query, body, raw } = {}) => {
       // 只拼接有值的查询参数：跳过 null/undefined（否则 new URLSearchParams 会写成字面量
       // "scopeId=undefined"，后端当有效值过滤 → 结果恒空）。空字符串仍保留（语义可能与缺省不同）。
       let qs = ''
@@ -35,7 +35,11 @@
       const opt = { method, headers: {} }
       const tk = getToken()
       if (tk) opt.headers.Authorization = 'Bearer ' + tk
-      if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body) }
+      if (raw && raw.body !== undefined) {
+        // 二进制直传（参考音频等）：Content-Type 用文件自身类型
+        opt.headers['Content-Type'] = raw.type || 'application/octet-stream'
+        opt.body = raw.body
+      } else if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body) }
       let r
       try { r = await fetch(url, opt) }
       catch (e) { throw new Error('网络错误：' + (e?.message || e)) }
@@ -51,6 +55,8 @@
     return {
       get: (p, q) => request('GET', p, { query: q }),
       post: (p, b) => request('POST', p, { body: b }),
+      // 二进制直传（参考音频等）：body 为 File/Blob，服务端对应 raw body 路由
+      postRaw: (p, body, q) => request('POST', p, { query: q, raw: { body, type: body?.type } }),
       put: (p, b) => request('PUT', p, { body: b }),
       del: (p) => request('DELETE', p),
       getToken, setToken,

@@ -321,6 +321,7 @@ export default {
     memories: path.join(PLUGIN_DIR, 'data', 'memories'),
     personas: path.join(PLUGIN_DIR, 'data', 'personas'),
     evolution: path.join(PLUGIN_DIR, 'data', 'evolution'),
+    tts: path.join(PLUGIN_DIR, 'data', 'tts'), // TTS 参考音频库 + 合成产物
   },
   get: () => _data,
   set: (key, value) => { _data[key] = value },

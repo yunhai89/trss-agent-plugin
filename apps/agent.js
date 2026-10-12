@@ -81,6 +81,7 @@ import { readPdfTool } from '../model/document/pdf.js'
 import { createExcelTool, readExcelTool } from '../model/document/excel.js'
 import { fileToPdfTool } from '../model/document/topdf.js'
 import { transcribeMediaTool } from '../model/document/media_stt.js'
+import { TtsService, makeTtsSpeakTool } from '../model/tts/index.js'
 import { DiagramService } from '../model/diagram/index.js'
 import { makeDiagramTool } from '../model/diagram/tool.js'
 import { makeDiagramDeliverer } from '../model/diagram/deliver.js'
@@ -714,6 +715,29 @@ async function buildRuntime() {
   tools.register(createExcelTool) // create_excel：创建带样式 Excel
   tools.register(readExcelTool) // read_excel：读取 Excel 为表格文本
   if (cfg.stt?.enable !== false) tools.register(transcribeMediaTool) // transcribe_media：音视频转文字(STT)
+  // TTS 语音合成（tts_speak）：IndexTTS 2.5 等；vector 情绪默认由 LLM 结合文本+上下文自动调节
+  // （情绪判定模型：agent.tts.indextts.model → utilityModel → 主模型，同 recall/thinkingAuto 的旁路通道）
+  if (cfg.tts?.enable !== false) {
+    try {
+      const ttsTarget = modelRouter.resolve(cfg.tts?.indextts?.model || cfg.utilityModel || cfg.model)
+      const tts = new TtsService(cfg.tts || {}, {
+        dataDir: Config.path.tts,
+        logger: Log.tag('tts'),
+        llm: {
+          run: async (prompt) => {
+            try {
+              const res = await ttsTarget.provider.chat({ model: ttsTarget.model || cfg.model, messages: [{ role: 'user', content: prompt }], stream: false })
+              return { content: res?.content || '' }
+            } catch (e) { Log.warn('[tts] 情绪判定模型调用失败，按默认向量回退', e?.message || e); return { content: '' } }
+          },
+        },
+      })
+      tools.register(makeTtsSpeakTool(tts))
+      const voiceCount = tts.voices('voice').length
+      startupInfo.tts = { provider: tts.provider, voices: voiceCount, endpoint: !!cfg.tts?.indextts?.endpoint }
+      if (!cfg.tts?.indextts?.endpoint) Log.debug('[tts] tts_speak 已注册，但 IndexTTS 接口地址未配置（Web 面板 → 语音合成）')
+    } catch (e) { Log.warn('[tts] 初始化失败（tts_speak 不注册）', e?.message || e) }
+  }
   tools.register(fileToPdfTool) // file_to_pdf：任意文件转 PDF 并发送
 
   // 示意图渲染（diagram_render）：LLM 提交语义 DiagramSpec → 确定性 D2 编译 → 自托管 Kroki 渲染 SVG
@@ -1164,6 +1188,7 @@ async function buildRuntime() {
   if (startupInfo.diagram) extras.push(`示意图(${startupInfo.diagram})`)
   if (cfg.sticker?.enable) extras.push('表情包')
   if (cfg.stt?.enable !== false) extras.push('STT')
+  if (startupInfo.tts) extras.push(`TTS(${startupInfo.tts.provider}${startupInfo.tts.endpoint ? '' : '·未配地址'}·音色${startupInfo.tts.voices})`)
   if (cfg.multiagent?.enable !== false) extras.push(`多代理(${startupInfo.multiagent || 'spawn'})`)
   const mcpNames = Object.keys(cfg.mcp?.servers || {})
   Log.panel(`运行时就绪 · ${cfg.model}`, [

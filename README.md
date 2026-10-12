@@ -65,6 +65,7 @@
 | 🔌 MCP | 完整 MCP 客户端（stdio / HTTP）、多服务端、按工具 RBAC | ✅ 稳定 |
 | 👥 群聊工具 | 群信息 / 群管理 / 米游社搜索 | ✅ 稳定 |
 | 📥 媒体下载 | 基于 yt-dlp 的视频/音频下载（受约束，仅主人），支持 YouTube/B站/抖音等 1000+ 站点 | ✅ 稳定 |
+| 🗣️ 语音合成 | IndexTTS 2.5：文字转语音发到聊天（`tts_speak`）；音色/情绪参考音频 + 8 维情绪向量；pro/max 档位、LLM 结合上下文自动调节情绪（需自备服务） | ✅ 可用 |
 | 💻 终端执行 | **E2B 沙箱执行**（Firecracker microVM；全员可用 + 出口白名单 + 命令数/并发上限）；服务端用 **E2B 云**或**自托管（需 KVM，普通云主机不支持）** | ⚠️ 高危可选 |
 | 🌐 浏览器自动化 | **Stagehand**：goto/observe/extract/act 自然语言原语，本地或 Browserbase 云，会话跨调用保持 | 🧪 早期 |
 | 🎭 表情包 | 自动发现（群聊被动采集→视觉打标→入库）+ 手动安装 + LLM 自主引用 `[sticker:名称]` | ✅ 稳定 |
@@ -466,6 +467,31 @@ mcp:
 >    ⚠️ 脚本装在「运行中的容器」里，**容器一旦重建（重新 `docker run`）会丢失**，需重跑；想一劳永逸请把它加进镜像 entrypoint / Dockerfile。
 > 2. **改用绝对路径**：若容器别处有 `npx`/`node`，把 `command` 换成绝对路径（如 `/usr/local/bin/npx`）。
 > 3. **绕开 npx**：容器内 `npm i -g <mcp包>` 全局安装后，用 `command: "/usr/bin/node"` + `args: ["<全局模块入口 js 的绝对路径>"]` 直接跑；或改用 `transport: "http"` 连远程 MCP，本地无需任何进程。
+
+### `agent.tts` —— 语音合成（IndexTTS 2.5）
+
+把文字合成为语音发到聊天（Agent 工具 `tts_speak`）。需自备 IndexTTS 服务（本机 / 内网 / 反向代理地址均可）：
+
+```yaml
+tts:
+  enable: true
+  provider: indextts
+  indextts:
+    endpoint: "http://127.0.0.1:7860"   # IndexTTS 服务地址（Web 面板「语音合成」可测试连接）
+    lang: ZH
+    voice: ""                # 默认音色参考名（在 Web 面板上传参考音频时命名；留空=最新上传）
+    emotionMode: same        # same=沿用音色参考情绪 | audio=情绪参考音频 | vector=8 维情绪向量
+    emotionRef: ""           # audio 模式默认情绪参考（可来自其他说话人）
+    emotionWeight: 0.65      # audio 模式情绪影响强度 0~1
+    autoEmotion: true        # vector 模式由 LLM 结合「文本 + 近期对话上下文」自动调节情绪
+    tier: pro                # pro=整段一套情绪 | max=按需拆分逐段情绪 + ffmpeg 合并
+    segmentGapMs: 300        # max 档段间静音
+```
+
+- 配置入口：Web 管理面板 → **语音合成**（服务卡片 → 弹窗配置：接口地址 / 测试连接 / 参考音频上传+命名 / 情绪模式与 8 维滑块）。
+- 三种情绪模式：`same` 沿用音色参考的情绪；`audio` 另给一段情绪参考音频（`emotionWeight` 调影响强度）；`vector` 保留音色、用 8 维向量控制高兴/愤怒/悲伤/害怕/厌恶/忧郁/惊讶/平静，默认由 LLM 自动调节。
+- 档位：`pro` 一次合成（快）；`max` LLM 按需拆分、逐段情绪分别合成后用 **ffmpeg** 拼接（更细腻、更耗时，宿主要装 ffmpeg）。
+- 何时用语音、各模式怎么选：见技能 [`skills/tts.md`](skills/tts.md)（Agent 按需加载，不占常驻上下文）。
 
 ---
 
