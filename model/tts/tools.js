@@ -34,6 +34,7 @@ export function makeTtsSpeakTool(service) {
     name: 'tts_speak',
     description: [
       '把文字合成为语音并发送到当前聊天（TTS / IndexTTS 2.5）。仅在需要指定音色/情绪点播时调用：普通回复在开启自动语音（agent.tts.autoReply）时会自动出声，本工具调用后本轮不再自动补发。',
+      '文本会先自动清洗成讲稿（剥除 md/代码/链接/表情，破折号转停顿）再合成，无需自己处理格式。',
       voiceHint + '。',
       '情绪模式 emotionMode（默认 same）：same=沿用音色参考音频的情绪；audio=另提供情绪参考音频（emotionRef + emotionWeight 控制影响强度）' + emoHint + '；vector=8 维情绪向量（默认由 LLM 结合要说的文本与近期对话上下文自动调节，不需要手填）。',
       '档位 tier（仅 vector 模式）：pro=整段文本一套情绪一次合成（默认，快）；max=按文本语义按需拆分、逐段判定情绪分别合成再用 ffmpeg 合并（更细腻、耗时更长，适合长文本/情绪起伏大）。',
