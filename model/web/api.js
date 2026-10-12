@@ -1060,12 +1060,14 @@ router.delete('/tts/refs/:id', asyncHandler(async (req, res) => {
   return ok(res, { removed: true }, '已删除')
 }))
 
-// POST /api/tts/test —— 连通性自检（探 /config 并解析 fn_index/情绪选项；可带 { endpoint } 临时覆盖）
+// POST /api/tts/test —— 连通性自检（探 /config 并解析 fn_index/情绪选项；可带 { endpoint, apiKey } 临时覆盖）
 router.post('/tts/test', asyncHandler(async (req, res) => {
   const cfg = normalizeTtsConfig(Config.get().agent?.tts || {})
   const endpoint = String(req.body?.endpoint || cfg.indextts.endpoint || '').trim()
+  // apiKey 显式传空字符串=按"无 key"测试（面板草稿未填时）；未传=用已保存配置
+  const apiKey = String(req.body?.apiKey != null ? req.body.apiKey : (cfg.indextts.apiKey || '')).trim()
   if (!endpoint) return fail(res, CODE.BAD, '请先填写接口地址')
-  const client = new IndexTtsClient({ endpoint, timeoutMs: 15000 })
+  const client = new IndexTtsClient({ endpoint, apiKey, timeoutMs: 15000 })
   const r = await client.check()
   if (!r.ok) return fail(res, CODE.INTERNAL, r.error || '连接失败')
   return ok(res, r, `连接成功（fn_index=${r.fnIndex}）`)

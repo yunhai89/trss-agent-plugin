@@ -10,7 +10,7 @@ import {
   IndexTtsClient, clampVector, vectorToObject, fileData, VECTOR_KEYS,
   RefLibrary, normalizeTtsConfig, parseVectorParam, TtsService, makeTtsSpeakTool,
   planEmotion, parsePlan, splitByPunctuation, buildConcatListContent, buildConcatArgs, concatSegments,
-  stripForSpeech, enhanceVoice, buildEnhanceArgs, presenceGainFor, measurePresenceRatio, HD_LOUDNORM,
+  stripForSpeech, enhanceVoice, buildEnhanceArgs, presenceGainFor, measurePresenceRatio, HD_LOUDNORM, httpHint,
 } from './index.js'
 
 let passed = 0
@@ -84,10 +84,12 @@ function jsonResponse(x, status = 200) {
  *  /config 结构对齐真实服务（2026-10 实测）：依赖 id ≠ 数组下标、情绪组件 type=radio、
  *  choices 为 [label, value] 元组（取 value，界面语言无关）、另有 4 项干扰组件。
  *  noRadio=true 时去掉 radio 组件，用于验证回退英文默认。 */
-function fakeGradio({ fail = false, noRadio = false } = {}) {
-  const calls = { uploads: 0, joins: [], downloads: 0, sseOpened: 0 }
+function fakeGradio({ fail = false, noRadio = false, status = 0 } = {}) {
+  const calls = { uploads: 0, joins: [], downloads: 0, sseOpened: 0, reqHeaders: [] }
   const fetchImpl = async (url, opt = {}) => {
     const u = String(url)
+    calls.reqHeaders.push({ url: u, headers: opt.headers || {} })
+    if (status) return new Response(JSON.stringify({ error: 'unauthorized' }), { status, headers: { 'Content-Type': 'application/json' } })
     if (u.endsWith('/config')) {
       return jsonResponse({
         dependencies: [
@@ -274,6 +276,29 @@ await test('TtsService：合成入口统一讲稿清洗（点播文本同样剥 
   eq(r.chars, '去看，这个 代码 吧'.length, 'chars 为清洗后长度')
   const pure = await svc.synthesize({ text: '```js\nconst a = 1\n```', voice: '甲', emotionMode: 'same' })
   ok(!pure.ok && /清洗后无可朗读内容/.test(pure.error), '纯代码 → 明确报错不空合成')
+})
+
+await test('IndexTtsClient：API Key（网关鉴权）——全部请求带 X-API-Key；401/429/503 提示可读', async () => {
+  const { fetchImpl, calls } = fakeGradio()
+  const client = new IndexTtsClient({ endpoint: 'http://127.0.0.1:7860', apiKey: 'itts_test_123', fetchImpl })
+  await client.configInfo()
+  const ref = await client.upload(Buffer.from('x'), 'a.wav')
+  await client.synthesize({ text: '你好', refRemotePath: ref, mode: 'same' })
+  ok(calls.reqHeaders.length >= 5, `覆盖 config/upload/join/SSE/下载（${calls.reqHeaders.length} 次请求）`)
+  ok(calls.reqHeaders.every((c) => c.headers['X-API-Key'] === 'itts_test_123'), '全部请求携带 X-API-Key')
+
+  const bad = fakeGradio({ status: 401 })
+  const c2 = new IndexTtsClient({ endpoint: 'http://127.0.0.1:7860', fetchImpl: bad.fetchImpl })
+  const r = await c2.check()
+  ok(r.ok === false && /401/.test(r.error) && /API Key/.test(r.error), `401 提示可读（${r.error}）`)
+  ok(httpHint(429).includes('限流') && httpHint(503).includes('网关配置') && httpHint(502).includes('上游'), '错误码提示映射')
+})
+
+await test('TtsService：indextts.apiKey 透传到客户端（网关鉴权链路）', async () => {
+  const { svc, calls } = makeService({ cfg: { indextts: { apiKey: 'itts_svc_key' } } })
+  await svc.refs.add({ name: '甲', kind: 'voice', filename: 'v.wav', buffer: Buffer.from('RIFFvoice') })
+  const r = await svc.synthesize({ text: '鉴权透传。', voice: '甲', emotionMode: 'same' })
+  ok(r.ok && calls.reqHeaders.every((c) => c.headers['X-API-Key'] === 'itts_svc_key'), '服务层请求带 apiKey')
 })
 
 // ─────────────────────── 5.5 高清增强（发送前） ───────────────────────
