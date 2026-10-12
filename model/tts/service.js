@@ -45,6 +45,7 @@ export const TTS_DEFAULTS = {
     segmentGapMs: 300,      // max 档段间静音毫秒
     maxSegmentChars: MAX_SEGMENT_CHARS,
     model: '',              // 情绪判定用模型（模型条目 id/模型名；留空=utilityModel→主模型）
+    judgeTimeoutMs: 30000,  // 情绪判定单次调用总预算（毫秒；超时中止请求并回退默认向量，不拖语音）
     durationFactor: 1.0,
     maxTextTokensPerSegment: 100,
   },
@@ -215,6 +216,7 @@ export class TtsService {
             const plan = await planEmotion(this.llm, {
               text, tier: 'pro', voiceName: voice.name, logger: this.logger,
               context: normalizeContext(p.context?.messages),
+              timeoutMs: Number(ix.judgeTimeoutMs) || TTS_DEFAULTS.indextts.judgeTimeoutMs,
             })
             if (plan?.vector) { vectorArr = clampVector(plan.vector); reason = plan.reason }
             else notes.push('情绪判定不可用，已回退默认向量')
@@ -248,6 +250,7 @@ export class TtsService {
           text, tier: 'max', voiceName: voice.name, logger: this.logger,
           context: normalizeContext(p.context?.messages),
           maxSegments: MAX_SEGMENTS, maxSegmentChars: Number(ix.maxSegmentChars) || MAX_SEGMENT_CHARS,
+          timeoutMs: Number(ix.judgeTimeoutMs) || TTS_DEFAULTS.indextts.judgeTimeoutMs,
         })
         if (plan?.segments?.length) {
           segments = plan.segments.map((s) => ({ text: s.text, vector: clampVector(s.vector) }))

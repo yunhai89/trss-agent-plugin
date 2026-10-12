@@ -26,6 +26,7 @@
     emotionMode: 'same', emotionRef: '', emotionWeight: 0.65,
     autoEmotion: true, vector: [], tier: 'pro',
     segmentGapMs: 300, maxSegmentChars: 140, model: '',
+    judgeTimeoutMs: 30000,
     durationFactor: 1.0, maxTextTokensPerSegment: 100,
   }
 
@@ -366,6 +367,9 @@
             </cfg-row>
             <cfg-row full name="情绪判定模型" desc="vector 自动调节用的小模型（模型条目 id/模型名）；留空=utilityModel→主模型">
               <input class="inp mono" style="width:280px" v-model="form.model" placeholder="留空=utilityModel→主模型">
+            </cfg-row>
+            <cfg-row name="情绪判定超时(ms)" desc="judgeTimeoutMs：超时中止请求并回退默认向量（默认 30000；快失败会在预算内重试一次）">
+              <input type="number" class="inp" style="width:130px" min="3000" step="1000" v-model.number="form.judgeTimeoutMs">
             </cfg-row>
           </div>
           <template #foot>

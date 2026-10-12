@@ -208,6 +208,41 @@ await test('planEmotion：pro 解析（容忍围栏）+ 非法输出回退 null'
   eq(zhPlan?.vector?.happy, 0.9, 'LLM 用中文键名也归一（曾静默清零成无情绪）')
 })
 
+await test('planEmotion：预算语义——超时中止底层请求（不空转）；快失败在剩余预算内重试一次', async () => {
+  // ① 卡死的调用：到预算必须 abort 底层 signal 并回退 null
+  let aborted = false
+  let signalReceived = false
+  const hang = {
+    run: (prompt, { signal } = {}) => new Promise((_, rej) => {
+      signalReceived = !!signal
+      signal?.addEventListener('abort', () => { aborted = true; rej(Object.assign(new Error('Aborted'), { name: 'AbortError' })) })
+    }),
+  }
+  const t0 = Date.now()
+  const warned = []
+  const r = await planEmotion(hang, { text: '你好', tier: 'pro', timeoutMs: 1200, logger: (lvl, ...args) => warned.push([lvl, ...args]) })
+  const ms = Date.now() - t0
+  eq(r, null, '超时 → null（调用方回退默认向量）')
+  ok(signalReceived, 'run 收到 abort signal（可中止底层 fetch）')
+  ok(aborted, '到预算时底层请求被 abort（不再后台跑到 60s/重试）')
+  ok(ms >= 800 && ms < 3000, `在预算内返回（${ms}ms）`)
+  ok(warned.some(([lvl, msg, detail]) => lvl === 'warn' && String(msg).includes('情绪判定') && String(detail).includes('预算 1200ms')), '告警带预算与耗时（可诊断）')
+
+  // ② 首次快速失败（非超时）→ 剩余预算内重试一次并成功
+  let calls = 0
+  const flaky = {
+    run: async () => {
+      calls++
+      if (calls === 1) throw new Error('ECONNRESET')
+      return { content: '{"vector":{"happy":0.8},"reason":"重试成功"}' }
+    },
+  }
+  const r2 = await planEmotion(flaky, { text: '你真棒', tier: 'pro', timeoutMs: 4000 })
+  eq(calls, 2, '首次失败后重试一次')
+  eq(r2?.vector?.happy, 0.8, '第二次成功解析出向量')
+  eq(r2?.reason, '重试成功', 'reason 透传')
+})
+
 await test('parsePlan：别名键归一 + 全零计划拒绝（不假装有情绪）', () => {
   const zh = parsePlan('{"vector":{"高兴":0.8,"平静":0.2},"reason":"开心"}', { tier: 'pro' })
   eq(zh?.vector?.happy, 0.8, '中文键归一为 happy')
@@ -436,6 +471,25 @@ await test('TtsService：max 档 LLM 失败 → 标点分段回退并如实备�
   const r = await svc.synthesize({ text: '第一句。第二句！', voice: '甲', emotionMode: 'vector', tier: 'max' })
   ok(r.ok, '回退合成成功')
   ok(r.notes.some((n) => /标点/.test(n)), `备注标点回退（${r.notes.join('；')}）`)
+})
+
+await test('TtsService：judgeTimeoutMs 生效——判定卡死时按预算中止（abort）并回退默认向量，合成继续', async () => {
+  let aborted = false
+  const llm = {
+    run: (prompt, { signal } = {}) => new Promise((_, rej) => {
+      signal?.addEventListener('abort', () => { aborted = true; rej(Object.assign(new Error('Aborted'), { name: 'AbortError' })) })
+    }),
+  }
+  const { svc, calls } = makeService({ cfg: { indextts: { judgeTimeoutMs: 1200, vector: [0, 0, 0, 0, 0, 0, 0, 0.6] } }, llm })
+  await svc.refs.add({ name: '甲', kind: 'voice', filename: 'v.wav', buffer: REF })
+  const t0 = Date.now()
+  const r = await svc.synthesize({ text: '你好呀', voice: '甲', emotionMode: 'vector', tier: 'pro' })
+  const ms = Date.now() - t0
+  ok(r.ok, `回退后合成成功（${r.error || ''}）`)
+  ok(aborted, '到预算中止了判定请求（signal 透传到 provider.chat）')
+  ok(ms < 3000, `预算内继续合成（${ms}ms）`)
+  eq(calls.joins[0].data[13], 0.6, '回退用配置默认向量（calm，data[13]）')
+  ok(r.notes.some((n) => /情绪判定不可用/.test(n)), `备注如实说明回退（${r.notes.join('；')}）`)
 })
 
 await test('TtsService：缺音色参考 / 传错音色名 / 超长文本 → 可读错误，不假装成功', async () => {
