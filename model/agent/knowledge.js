@@ -169,7 +169,7 @@ export class KnowledgeStore {
     const exist = data.docs.find((d) => d.url === u)
     if (exist) return { error: `该 URL 已入库为「${exist.title}」(${exist.id})。如需更新请用 #知识库刷新 ${exist.id}` }
     const r = await crawlUrl(u)
-    if (!r.success || !r.markdown) return { error: `抓取失败：${r.error || '无内容'}` }
+    if (!r.success || !r.markdown) return { error: `抓取失败：${r.error || '无内容'}${r.hint ? `（${r.hint}）` : ''}` }
     const r2 = await this.ingest(r.markdown, {
       title: title || r.title || u, source: u,
       extra: { url: u, refreshCron: refreshCron || null, lastCrawled: Date.now() },
@@ -191,7 +191,7 @@ export class KnowledgeStore {
       const doc = data.docs.find((d) => d.id === docId)
       if (!doc || !doc.url) return { error: `文档 ${docId} 无 URL，不可刷新` }
       const r = await crawlUrl(doc.url)
-      if (!r.success || !r.markdown) return { error: `抓取失败：${r.error || '无内容'}` }
+      if (!r.success || !r.markdown) return { error: `抓取失败：${r.error || '无内容'}${r.hint ? `（${r.hint}）` : ''}` }
       data.chunks = data.chunks.filter((c) => c.docId !== docId) // 删旧 chunks
       const chunks = chunkText(r.markdown, this.chunkSize, this.chunkOverlap)
       if (!chunks.length) return { error: '抓取内容为空，无法分块' }

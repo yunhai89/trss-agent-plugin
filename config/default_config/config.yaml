@@ -153,6 +153,10 @@ agent:
     crawl:
       engine: crawl4ai      # 网页抓取引擎：crawl4ai（默认。真浏览器渲染，SPA/JS 动态页可抓；
                             # 需先跑 scripts/install-crawl4ai.sh，未安装自动降级 fetch）| fetch（纯 HTTP+cheerio，零依赖）
+      stealth: true         # 浏览器路径反检测（playwright-stealth + 模拟用户行为）；显式传 stealth:false 可单次关闭
+      retryBlocked: true    # 被反爬拦截（403/CF 挑战等）时自动用 undetected+stealth 强化再试一轮（最坏耗时翻倍）
+      allowPrivateHosts: false  # 允许抓取本机/内网/元数据地址（防 SSRF，默认禁）；确需抓内网页面再开
+      # proxy 复用 agent.proxy（浏览器路径与 fetch 一致；逐次生效）
     crawlTimeout: 60        # 单页抓取超时秒（慢站可调大；crawl4ai 含浏览器启停另加 30s 余量）
     chunkSize: 500          # 文档分块字符数
     chunkOverlap: 50        # 分块重叠（保上下文连贯）

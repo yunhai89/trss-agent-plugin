@@ -80,7 +80,11 @@ const killPid = (pid, sig) => { try { process.kill(pid, sig) } catch { /* 已退
  *  - jsBeforeWait: string（导航后先触发再等待——官方 goto → js_before_wait → wait_for 顺序）
  *  - delayMs: number（hydration 余量；不传用 python 侧默认 800）
  *  - cssSelector / extract({baseSelector,fields}) / links / stealth / flatShadowDom / virtualScroll
- * @returns {Promise<{success, markdown?, title?, via, code?, error?, stderrTail?, extracted?, extractedCount?, links?}>}
+ *  - undetected: 用 UndetectedAdapter 深度补丁（反爬升级档；需 venv 内 patchright 可用）
+ *  - proxy: 浏览器代理（http/socks URL；agent.proxy 透传，与 fetch 路径一致）
+ *  - waitUntil: 导航完成条件（domcontentloaded/load/networkidle/commit）
+ *  - headless / scanFullPage / maxScrollSteps / extraArgs（内部策略注入，非 LLM 参数）
+ * @returns {Promise<{success, markdown?, title?, via, code?, error?, stderrTail?, extracted?, extractedCount?, links?, stats?}>}
  *  成功形态与 crawlWithFetch 对齐（success/markdown/title + via:'crawl4ai'），crawlUrl 可统一消费。
  */
 export async function runCrawl4ai(url, {
@@ -88,6 +92,8 @@ export async function runCrawl4ai(url, {
   waitFor = null, jsCode = null, jsBeforeWait = null, delayMs = null,
   cssSelector = null, extract = null, links = false, stealth = false,
   flatShadowDom = false, virtualScroll = null,
+  undetected = false, proxy = null, waitUntil = null, headless = null,
+  scanFullPage = false, maxScrollSteps = null, extraArgs = null,
 } = {}) {
   const py = python || venvPython()
   const sc = script || CRAWL4AI_SCRIPT
@@ -161,6 +167,7 @@ export async function runCrawl4ai(url, {
           url: parsed.url || url, statusCode: parsed.status_code,
           ...(Array.isArray(parsed.extracted) ? { extracted: parsed.extracted, extractedCount: parsed.extracted_count ?? parsed.extracted.length } : {}),
           ...(parsed.links && typeof parsed.links === 'object' ? { links: parsed.links } : {}),
+          ...(parsed.crawl_stats && typeof parsed.crawl_stats === 'object' ? { stats: parsed.crawl_stats } : {}),
         })
         return
       }
@@ -195,6 +202,13 @@ export async function runCrawl4ai(url, {
       if (extract && typeof extract === 'object') req.extract = extract
       if (links) req.links = true
       if (stealth) req.stealth = true
+      if (undetected) req.undetected = true
+      if (proxy) req.proxy = String(proxy)
+      if (waitUntil) req.wait_until = String(waitUntil)
+      if (headless === false || headless === true) req.headless = headless
+      if (scanFullPage) req.scan_full_page = true
+      if (maxScrollSteps != null) req.max_scroll_steps = Number(maxScrollSteps)
+      if (Array.isArray(extraArgs) && extraArgs.length) req.extra_args = extraArgs.map(String)
       if (flatShadowDom) req.flat_shadow_dom = true
       if (virtualScroll && typeof virtualScroll === 'object') req.virtual_scroll = virtualScroll
       proc.stdin.write(JSON.stringify(req) + '\n')
