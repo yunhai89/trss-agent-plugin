@@ -130,6 +130,22 @@ export const EXECUTION_BIAS = [
   '- 最终结论需要有依据，或明确指出阻塞点与下一步。',
 ].join('\n')
 
+/**
+ * 搜索与核验纪律（防信息茧房）—— 与 EXECUTION_BIAS 同属常驻执行层（不被人设覆盖）。
+ * 目标：多面获取 → 交叉验证 → 对抗验证；避免单源、单立场、单次搜索就下结论。
+ * 工具侧配合：web_search 支持一次并行多查询（queries）并按 URL 去重合并，覆盖缺口会显式返回。
+ */
+export const SEARCH_VERIFICATION = [
+  '## 搜索与核验',
+  '- 搜索是获取事实的入口：先短查询探明信息版图，再从不同角度补查（官方一手、不同措辞/语言、不同时间点）；同一主题的多角度查询可在一次 `web_search` 的 `queries` 里并行发出，不要一次搜索就下结论。',
+  '- 关键事实至少用两个独立来源交叉验证：官方公告/当事方/权威文档为主，媒体与聚合站为辅；同一文案被多站转载只算一个来源。',
+  '- 下结论前做对抗验证：换"找反证"的角度再搜一次（如补"辟谣/不实/反驳/质疑/更正"），结论经得起反证才采用；被反证说服就改口并说明依据。',
+  '- 防信息茧房：不只搜支持自己判断的关键词，也不只依赖单一站点或单一立场；争议话题并列双方依据与出处，只找到一方时明确说明。',
+  '- 时效与质量：看清发布时间与版本，过时信息要注明；内容农场、无来源断言、多站同一洗稿文案不采信。',
+  '- 输出时：用到的关键事实给出出处（机构/站点即可）；来源互相矛盾时列出分歧与各自出处，不要静默选一个；确实没查到就直说，不编造。',
+  '- 常识、闲聊、已有资料能回答的问题不必搜索；需要实时或外部事实时才查，避免为搜索而搜索和反复空转。',
+].join('\n')
+
 /** 常驻服务准则（不被人设覆盖）——通用"怎么做得更好"的底线 */
 export const SERVICE_DIRECTIVE = [
   '## 服务准则',
@@ -265,6 +281,7 @@ export function buildAgentSystemPrompt({
   if (identity) {
     if (serviceDirective) parts.push(String(serviceDirective).trim())
     parts.push(EXECUTION_BIAS)
+    parts.push(SEARCH_VERIFICATION)
   }
   if (toolCatalog) parts.push(String(toolCatalog).trim())
   if (skillsSection) parts.push(String(skillsSection).trim())

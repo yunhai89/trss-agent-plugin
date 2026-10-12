@@ -2,7 +2,7 @@
 import {
   inject, SystemPromptBuilder, ToolPromptBuilder, assembleSystem,
   TEMPLATES, fromTemplate,
-  EXECUTION_BIAS, SERVICE_DIRECTIVE, buildSkillsPromptSection, buildToolCatalogSection, buildAgentSystemPrompt,
+  EXECUTION_BIAS, SEARCH_VERIFICATION, SERVICE_DIRECTIVE, buildSkillsPromptSection, buildToolCatalogSection, buildAgentSystemPrompt,
   PromptTemplate, PromptRegistry, runFixtures, runEval, regressionGate,
   evolveTemplate, evolveTemplates,
 } from './index.js'
@@ -259,6 +259,20 @@ await test('buildSkillsPromptSection：目录为空则不生成段', async () =>
 await test('EXECUTION_BIAS：含行动偏向文案', async () => {
   ok(EXECUTION_BIAS.includes('立刻动手'), '偏向立即行动')
   ok(EXECUTION_BIAS.includes('实时核验'), '工具核验')
+})
+
+await test('SEARCH_VERIFICATION：防信息茧房（多面获取/交叉验证/对抗验证）', async () => {
+  ok(SEARCH_VERIFICATION.includes('交叉验证'), '要求交叉验证')
+  ok(SEARCH_VERIFICATION.includes('对抗验证'), '要求对抗验证')
+  ok(SEARCH_VERIFICATION.includes('信息茧房'), '点名防信息茧房')
+  ok(SEARCH_VERIFICATION.includes('两个独立来源'), '量化独立来源要求')
+  ok(SEARCH_VERIFICATION.includes('辟谣'), '给出找反证的具体做法')
+  ok(SEARCH_VERIFICATION.includes('不要静默选一个'), '冲突必须并列而非静默选择')
+  ok(SEARCH_VERIFICATION.includes('queries'), '与 web_search 多查询参数呼应')
+  // 常驻注入：有身份时必须带上该段；空入参仍为空
+  const sys = buildAgentSystemPrompt({ identity: '你是助手' })
+  ok(sys.includes('## 搜索与核验') && sys.includes('信息茧房'), 'buildAgentSystemPrompt 注入搜索纪律段')
+  eq(buildAgentSystemPrompt(), '', '全空 → 空串（不注入）')
 })
 
 // ═══ 总结 ═══

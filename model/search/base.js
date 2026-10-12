@@ -10,18 +10,36 @@ function truncate(s, n) {
   return s.length > n ? `${s.slice(0, n)}...` : s
 }
 
-/** 统一格式化为 Agent 可消费的简洁文本 */
+/**
+ * 统一格式化为 Agent 可消费的简洁文本。
+ * 兼容两种形态：
+ *  - 单查询：{ answer, results:[{title,url,content,score?}], citations? }
+ *  - 多查询合并（searchMany）：{ answers:[{query,answer}], results:[{...,source,query,published?}], failures:[{query,error}], sources }
+ * 每条结果在可用时带「来源/时间」元信息，便于模型判断来源是否独立、信息是否过时（交叉验证的前提）。
+ */
 export function formatResults(result, { maxResults = 10, maxContent = 500 } = {}) {
   if (!result) return '(无搜索结果)'
   const parts = []
-  if (result.answer) parts.push(`💡 ${result.answer}`)
+  const answers = Array.isArray(result.answers) ? result.answers : (result.answer ? [{ query: result.query, answer: result.answer }] : [])
+  for (const a of answers) {
+    if (a?.answer) parts.push(`💡 ${Array.isArray(result.answers) && a.query ? `[${a.query}] ` : ''}${a.answer}`)
+  }
   if (result.results?.length) {
-    const items = result.results.slice(0, maxResults).map((r, i) =>
-      `[${i + 1}] ${r.title || '(无标题)'}${r.score != null ? ` (score: ${Number(r.score).toFixed(2)})` : ''}\n    ${r.url}\n    ${truncate(r.content, maxContent)}`,
-    )
+    const items = result.results.slice(0, maxResults).map((r, i) => {
+      const meta = [
+        r.source ? `来源: ${r.source}` : '',
+        (r.published || r.date) ? `时间: ${r.published || r.date}` : '',
+        r.score != null ? `score: ${Number(r.score).toFixed(2)}` : '',
+      ].filter(Boolean).join(' · ')
+      return `[${i + 1}] ${r.title || '(无标题)'}${meta ? ` (${meta})` : ''}\n    ${r.url}\n    ${truncate(r.content, maxContent)}`
+    })
     parts.push(items.join('\n\n'))
   }
   if (result.citations?.length) parts.push(`📎 引用：${result.citations.slice(0, 5).join(' ')}`)
+  // 多查询合并时：部分查询失败必须显式提示覆盖缺口（否则模型可能把"只查到一边"当成"只有一边"）
+  if (result.failures?.length) {
+    parts.push(`⚠️ 部分查询未成功，结论需考虑覆盖缺口：${result.failures.map((f) => `「${f.query}」${f.error}`).join('；')}`)
+  }
   if (parts.length) return parts.join('\n\n')
   // 所有源都返回空：给出可执行提示，避免模型直接断言"搜不到/没有相关信息"而放弃
   const sources = result.sources?.length ? result.sources.join('/') : result.provider
