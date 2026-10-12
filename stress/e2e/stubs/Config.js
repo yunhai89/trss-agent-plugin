@@ -30,6 +30,6 @@ export default {
   // path 契约与真实 Config 对齐（缺字段会让 import 期 path.join(undefined) 直接抛，如 model/sticker）
   path: {
     plugin: TMP, yunzai: TMP, defaultConfig: P('default_config'), userConfig: P('config.yaml'), legacyUserConfig: P('agents-plugin.yaml'),
-    data: TMP, temp: P('temp'), logs: P('logs'), humanizeLogs: P('humanize-logs'), memories: P('memories'), personas: P('personas'), evolution: P('evolution'),
+    data: TMP, temp: P('temp'), logs: P('logs'), humanizeLogs: P('humanize-logs'), memories: P('memories'), personas: P('personas'), evolution: P('evolution'), tts: P('tts'),
   },
 }

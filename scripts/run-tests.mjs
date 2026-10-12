@@ -59,6 +59,8 @@ const HOOKED_STRESS = new Set([
   'model/web/api.persona-lore.test.mjs',
   // 更新日志转发测试需要 Yunzai 桩（apps/update.js / lib 插件基类 + Bot）
   'apps/update.test.mjs',
+  // TTS 路由测试需要桩 Config（写配置不落盘真实 config.yaml）
+  'model/web/tts.test.mjs',
 ])
 for (const t of tests) {
   const rel = t.replace(root, '')

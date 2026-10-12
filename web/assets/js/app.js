@@ -30,7 +30,7 @@
         { id: 'evolution', name: '工具进化', icon: 'tool', badge: () => (window.MOCK?.tevoTools || []).filter((v) => v.status === 'verified').length },
       ],
     },
-    { group: '系统', items: [{ id: 'config', name: '配置中心', icon: 'config' }, { id: 'toolpacks', name: '外置工具', icon: 'tool' }, { id: 'humanize', name: '伪人模式', icon: 'group' }, { id: 'groupworld', name: '群聊小世界', icon: 'globe' }, { id: 'selfstate', name: '自我状态', icon: 'bot' }, { id: 'sticker', name: '表情包', icon: 'smile' }] },
+    { group: '系统', items: [{ id: 'config', name: '配置中心', icon: 'config' }, { id: 'toolpacks', name: '外置工具', icon: 'tool' }, { id: 'tts', name: '语音合成', icon: 'music' }, { id: 'humanize', name: '伪人模式', icon: 'group' }, { id: 'groupworld', name: '群聊小世界', icon: 'globe' }, { id: 'selfstate', name: '自我状态', icon: 'bot' }, { id: 'sticker', name: '表情包', icon: 'smile' }] },
   ]
   const TITLES = {
     dashboard: ['概览', '插件运行状态与核心指标'],
@@ -53,6 +53,7 @@
     groupworld: ['群聊小世界', '群聊社会记忆层 · 画像/关系/事件/圈子'],
     selfstate: ['自我状态', '自我认知与情绪 · 心境/情绪/期待/心事'],
     sticker: ['表情包', '配置 + 库概览 · 发送策略 / 自动发现'],
+    tts: ['语音合成', 'TTS 服务配置 + 参考音频库 · 情绪化支持（pro/max）'],
   }
   /* 移动端底部 Dock:四个常用 + 更多 */
   const DOCK = [

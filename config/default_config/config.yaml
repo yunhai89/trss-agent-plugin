@@ -332,6 +332,25 @@ agent:
     apiKey: ""              # STT API Key（OpenAI/Groq/Azure 等）
     model: "whisper-1"     # 模型名
     language: ""            # 语言提示（如 zh/en，留空自动检测）
+  tts:                     # 语音合成（tts_speak 工具）：当前内置 IndexTTS 2.5（Gradio HTTP），多服务商预留 provider
+    enable: true           # 关=tts_speak 工具不注册
+    provider: indextts     # 当前服务商（后续接入其它 TTS 服务时在此切换）
+    indextts:
+      endpoint: ""         # 接口地址（如 http://127.0.0.1:7860）
+      lang: ZH             # 合成语言：ZH/EN/JA/AR/ES
+      timeoutMs: 300000    # 单次合成超时（毫秒；情绪描述模式每段约 10~12 秒）
+      voice: ""            # 默认音色参考名（上传参考音频时命名；留空=最新上传的音色）
+      emotionMode: same    # same=沿用音色参考情绪 | audio=情绪参考音频 | vector=8 维情绪向量
+      emotionRef: ""       # audio 模式默认情绪参考名
+      emotionWeight: 0.65  # audio 模式情绪参考的影响强度 0~1
+      autoEmotion: true    # vector 模式由 LLM 结合文本+上下文自动调节（false=用下面 vector 默认值）
+      vector: []           # vector 模式默认向量（LLM 不可用时的回退；8 项：高兴/愤怒/悲伤/害怕/厌恶/忧郁/惊讶/平静）
+      tier: pro            # vector 模式档位：pro=整段一套情绪 | max=按需拆分逐段情绪 + ffmpeg 合并
+      segmentGapMs: 300    # max 档段间静音（毫秒）
+      maxSegmentChars: 140 # max 档单段字符上限（防拆得过碎）
+      model: ""            # 情绪判定用模型（模型条目 id/模型名；留空=utilityModel→主模型）
+      durationFactor: 1.0  # 语速/时长系数 0.5~2.0（越小越快）
+      maxTextTokensPerSegment: 100  # 服务端内部分段上限（建议 80~120）
   sandbox:                # E2B Firecracker 沙箱：terminal 工具的唯一执行面 + toolEvo 的隔离面
     # 命令在独立 microVM 内执行，宿主**不再有任何 shell 执行面**（旧 agent.terminal 已废弃，可直接删除）。
     # 仅 terminal 主人可用（验证码认领：#agents设置主人 → 控制台打印验证码 → 直接把码发到会话）；
