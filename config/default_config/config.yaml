@@ -336,9 +336,9 @@ agent:
     apiKey: ""              # STT API Key（OpenAI/Groq/Azure 等）
     model: "whisper-1"     # 模型名
     language: ""            # 语言提示（如 zh/en，留空自动检测）
-  tts:                     # 语音合成（tts_speak 工具）：当前内置 IndexTTS 2.5（Gradio HTTP），多服务商预留 provider
+  tts:                     # 语音合成（tts_speak 工具）：IndexTTS 2.5（本地）/ 豆包 / MiniMax / MiMo 四家
     enable: false          # 总开关（默认关，opt-in）：开=注册 tts_speak 并允许自动语音；关=完全静默（不注册、不合成）
-    provider: indextts     # 当前服务商（后续接入其它 TTS 服务时在此切换）
+    provider: indextts     # 当前服务商：indextts | doubao | minimax | mimo（云服务商仅在选中且配置齐全时才出网）
     autoReply: true        # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
     replyMaxChars: 300     # 自动语音的最大字符数（超长按句截断，防合成出几分钟语音；0=不限）
     hdVoice: true          # 发送前高清化：响度标准化 + 存在感补偿（需宿主 ffmpeg，失败自动回退原始音频）
@@ -356,10 +356,58 @@ agent:
       tier: pro            # vector 模式档位：pro=整段一套情绪 | max=按需拆分逐段情绪 + ffmpeg 合并
       segmentGapMs: 300    # max 档段间静音（毫秒）
       maxSegmentChars: 140 # max 档单段字符上限（防拆得过碎）
-      model: ""            # 情绪判定用模型（模型条目 id/模型名；留空=utilityModel→主模型）
+      model: ""            # 情绪判定用模型（模型条目 id/模型名；留空=tts.judgeModel→utilityModel→主模型）
       judgeTimeoutMs: 30000  # 情绪判定单次调用总预算（毫秒；超时中止请求并回退默认向量，不拖语音；快失败会在预算内重试一次）
       durationFactor: 1.0  # 语速/时长系数 0.5~2.0（越小越快）
       maxTextTokensPerSegment: 100  # 服务端内部分段上限（建议 80~120）
+    # ── 云服务商：仅在 provider 选中 + 本服务配置齐全时才会把讲稿发到对应平台 ──
+    # 情绪判定与 IndexTTS 同一条 LLM 链路（8 维向量），再由本地映射为各服务商参数
+    doubao:                # 豆包语音合成（火山引擎 Seed-TTS，HTTP Chunked）
+      endpoint: "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
+      apiKey: ""           # 火山引擎 API Key（新版控制台 → API Key 管理；按资源开通语音合成）
+      resourceId: seed-tts-2.0   # seed-tts-2.0 | seed-tts-1.0 | seed-tts-1.0-concurr（决定可用音色与计费）
+      speaker: ""          # 音色 ID（控制台音色库 voice_type，如 zh_female_vv_uranus_bigtts）
+      model: ""            # ""=默认 | seed-tts-2.0-standard | seed-tts-2.0-expressive（语音指令建议 expressive）
+      autoEmotion: true    # LLM 判定情绪：2.0 音色→context_texts 语音指令；1.0 音色→emotion 标签
+      instruct: ""         # 固定语音指令（如「用特别痛心的语气说」；留空=LLM 判定生成，仅 2.0 音色）
+      emotion: ""          # 固定情感标签（1.0 多情感音色；LLM 失败/关闭时回退）
+      emotionScale: 0      # 0=按判定强度自动（1~5）；手动=固定 emotion_scale
+      speechRate: 0        # 语速 -50~100（100=2 倍速）
+      loudnessRate: 0      # 音量 -50~100（100=2 倍音量）
+      sampleRate: 24000
+      format: wav          # wav | mp3（max 档分段拼接固定 wav）
+      useTagParser: false  # 声音复刻 2.0 表现力增强版 Cot 标签解析
+      tier: pro            # pro=整段一次 | max=LLM 分段逐段情绪后 ffmpeg 合并
+      timeoutMs: 120000
+    minimax:               # MiniMax 语音（T2A V2）
+      endpoint: "https://api.minimaxi.com/v1/t2a_v2"   # 国际站 https://api.minimax.io/v1/t2a_v2
+      apiKey: ""           # MiniMax API Key（平台 → 接口密钥）
+      groupId: ""          # 可选：旧版账号 URL 查询参数 GroupId
+      model: speech-2.8-hd # speech-2.8-hd / 2.8-turbo / 2.6-* / 02-* / 01-*（2.6/2.8 支持全部 9 种情绪）
+      voiceId: ""          # 音色 ID（系统音色或复刻音色，如 male-qn-qingse）
+      autoEmotion: true    # LLM 判定 8 维情绪 → MiniMax 标签（happy/sad/angry/fearful/disgusted/surprised/calm）
+      emotion: ""          # 固定情绪标签（LLM 失败/关闭时回退）
+      speed: 1.0           # 语速 0.5~2.0
+      vol: 1.0             # 音量 (0,10]
+      pitch: 0             # 音调 -12~12
+      sampleRate: 32000
+      format: wav          # wav | mp3 | flac（max 档固定 wav）
+      bitrate: 128000      # 仅 mp3 生效
+      languageBoost: ""    # 语种增强：留空=自动；Chinese/English/Japanese/Arabic/Spanish/auto
+      tier: pro
+      timeoutMs: 120000
+    mimo:                  # 小米 MiMo TTS（MiMo-V2.5-TTS，OpenAI 兼容 Chat Completions）
+      endpoint: "https://api.xiaomimimo.com/v1"
+      apiKey: ""           # MiMo 开放平台 API Key
+      model: mimo-v2.5-tts # mimo-v2.5-tts（预置音色）| mimo-v2.5-tts-voicedesign（文字设计音色，style 必填）
+      voice: mimo_default  # 预置音色：mimo_default/冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean
+      autoEmotion: true    # LLM 判定情绪 → 自然语言风格指令（user message）
+      style: ""            # 固定风格/音色描述指令（留空=LLM 生成；voicedesign 必填）
+      format: wav          # wav | mp3（max 档固定 wav）
+      tier: pro
+      timeoutMs: 120000
+    judgeModel: ""         # 情绪判定模型（对四家服务商统一生效；留空=indextts.model→utilityModel→主模型）
+    judgeTimeoutMs: 30000  # 情绪判定总预算（毫秒，统一生效）
   sandbox:                # E2B Firecracker 沙箱：terminal 工具的唯一执行面 + toolEvo 的隔离面
     # 命令在独立 microVM 内执行，宿主**不再有任何 shell 执行面**（旧 agent.terminal 已废弃，可直接删除）。
     # 仅 terminal 主人可用（验证码认领：#agents设置主人 → 控制台打印验证码 → 直接把码发到会话）；

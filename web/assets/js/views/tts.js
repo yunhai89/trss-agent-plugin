@@ -50,14 +50,21 @@
         document.getElementById('tts-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       }
 
-      /* IndexTTS 弹窗表单（detached；保存时 diff → indextts.* 点路径） */
+      /* 服务商弹窗表单（detached；保存时 diff → <provider>.* 点路径）。
+       * IndexTTS 走自定义表单；云服务商按后端下发的 fields schema 动态渲染。 */
       const modal = reactive({ show: false, service: null })
       const form = reactive({})
       let orig = {}
       const testState = reactive({ running: false, result: null })
 
-      const syncForm = (payload) => {
-        const src = { ...I_DEFAULTS, ...(payload?.indextts || {}) }
+      /** fields schema → 表单初值（select 默认第一项；number 空；switch false） */
+      const defaultsOf = (fields) => Object.fromEntries((fields || []).map((f) => [f.key,
+        f.type === 'number' ? null : f.type === 'switch' ? false : f.type === 'select' ? (f.options?.[0]?.[0] ?? '') : '']))
+
+      const syncForm = (payload, providerId = 'indextts') => {
+        const src = providerId === 'indextts'
+          ? { ...I_DEFAULTS, ...(payload?.indextts || {}) }
+          : { ...defaultsOf((payload?.providers || []).find((p) => p.id === providerId)?.fields), ...(payload?.[providerId] || {}) }
         for (const k of Object.keys(form)) delete form[k]
         Object.assign(form, JSON.parse(JSON.stringify(src)))
         orig = JSON.parse(JSON.stringify(form))
@@ -68,7 +75,7 @@
         try {
           const d = await window.api.get('/tts')
           data.value = d
-          syncForm(d)
+          syncForm(d, 'indextts')
         } catch (e) { error.value = e?.message || String(e) }
         finally { loading.value = false }
       }
@@ -86,12 +93,14 @@
       const toggleAutoReply = (v) => put({ autoReply: !!v }, v ? '已开启自动语音回复' : '已关闭自动语音回复')
       const saveReplyMaxChars = (v) => put({ replyMaxChars: Math.max(0, Math.min(5000, Number(v) || 0)) }, '已保存自动语音字数上限')
       const toggleHdVoice = (v) => put({ hdVoice: !!v }, v ? '已开启高清语音' : '已关闭高清语音')
+      const saveJudgeModel = (v) => put({ judgeModel: String(v || '').trim() }, '已保存情绪判定模型')
+      const saveJudgeTimeout = (v) => put({ judgeTimeoutMs: Math.max(1000, Math.min(600000, Number(v) || 30000)) }, '已保存情绪判定超时')
 
       /* ── 服务卡片 → 弹窗 ── */
       const openService = (p) => {
         if (!data.value) return
         modal.service = p
-        syncForm(data.value)
+        syncForm(data.value, p.id)
         testState.result = null
         modal.show = true
       }
@@ -105,7 +114,8 @@
         return out
       }
       const saveModal = async () => {
-        const changes = buildChanges(orig, JSON.parse(JSON.stringify(form)), 'indextts')
+        const providerId = modal.service?.id || 'indextts'
+        const changes = buildChanges(orig, JSON.parse(JSON.stringify(form)), providerId)
         if (!Object.keys(changes).length) { toast('无改动', 'warn'); return }
         try {
           await window.api.put('/tts/config', { changes })
@@ -117,9 +127,18 @@
 
       const testConn = async () => {
         testState.running = true; testState.result = null
+        const providerId = modal.service?.id || 'indextts'
         try {
-          const r = await window.api.post('/tts/test', { endpoint: form.endpoint, apiKey: form.apiKey })
-          testState.result = { ok: true, msg: `连接成功 · fn_index=${r.fnIndex} · ${r.tookMs}ms` }
+          const body = providerId === 'indextts'
+            ? { endpoint: form.endpoint, apiKey: form.apiKey }
+            : { provider: providerId, ...JSON.parse(JSON.stringify(form)) }
+          const r = await window.api.post('/tts/test', body)
+          testState.result = {
+            ok: true,
+            msg: providerId === 'indextts'
+              ? `连接成功 · fn_index=${r.fnIndex} · ${r.tookMs}ms`
+              : `连接成功 · 已真实合成 2 字 · ${r.tookMs}ms`,
+          }
         } catch (e) { testState.result = { ok: false, msg: e.message } }
         finally { testState.running = false }
       }
@@ -169,7 +188,7 @@
         loading, error, data, load, sections, open, jump,
         modal, form, saveModal, openService, testConn, testState,
         upload, onPick, doUpload, delRef, refUrl, refs, voiceRefs, emoRefs, kindZh, sizeKb, fileEl,
-        toggleEnable, setProvider, toggleAutoReply, saveReplyMaxChars, toggleHdVoice,
+        toggleEnable, setProvider, toggleAutoReply, saveReplyMaxChars, toggleHdVoice, saveJudgeModel, saveJudgeTimeout,
         EMOTIONS, vecOf, setVec, vecSum,
       }
     },
@@ -184,7 +203,7 @@
           <v-icon name="music"/>
           <div>
             <b>语音合成（TTS）</b>：总开关<strong>默认关闭（opt-in）</strong>——开启后 Agent 才注册 <code>tts_speak</code>，且<strong>每条最终回复都会自动追加语音</strong>（文字/图片照常发；合成内容为剥除 md/代码后的正文）。Agent 工具 <code>tts_speak</code> 用于指定音色/情绪的点播（本轮已点播则不再自动补发）。
-            <span class="mut2">情绪三种模式：沿用音色参考 / 情绪参考音频 / 8 维向量（默认由 LLM 结合文本与上下文自动调节）；pro=整段一套情绪，max=按需拆分逐段情绪后合成拼接。详细说明见技能 <code>tts</code>。</span>
+            <span class="mut2">四家服务商：<strong>IndexTTS 2.5</strong>（本地，音色/情绪参考 + 8 维向量）、<strong>豆包</strong>（Seed-TTS，语音指令/多情感标签）、<strong>MiniMax</strong>（9 种情绪标签）、<strong>MiMo</strong>（自然语言风格指令）。情绪判定四家共用一条 LLM 链路（8 维向量自动判定）；pro=整段一套情绪，max=按需拆分逐段情绪后合成拼接。云服务商仅在「总开关开 + 选中该服务商 + 密钥/音色配置齐全」时才会把讲稿发往对应平台。详细说明见技能 <code>tts</code>。</span>
           </div>
         </div>
 
@@ -210,10 +229,16 @@
             <cfg-row name="高清语音" desc="发送前响度标准化 + 清晰度补偿（修 TTS 输出偏轻偏闷；需宿主 ffmpeg，失败自动回退原始音频）">
               <v-switch :model-value="!!data?.hdVoice" @update:modelValue="toggleHdVoice"/>
             </cfg-row>
-            <cfg-row name="默认服务商" desc="后续接入其它 TTS 服务时在此切换">
+            <cfg-row name="默认服务商" desc="tts_speak 与自动语音使用该服务商；仅在录配置齐全时才会真正出网">
               <select class="sel" style="width:220px" :value="data?.provider || 'indextts'" @change="setProvider($event.target.value)" :disabled="(data?.providers || []).length < 2">
                 <option v-for="p in (data?.providers || [])" :key="p.id" :value="p.id">{{ p.name }}</option>
               </select>
+            </cfg-row>
+            <cfg-row name="情绪判定模型" desc="四家服务商共用的情绪判定小模型（模型条目 id/模型名）；留空=IndexTTS 情绪判定模型 → utilityModel → 主模型">
+              <input class="inp mono" style="width:200px" :value="data?.judgeModel || ''" placeholder="留空=utilityModel→主模型" @change="saveJudgeModel($event.target.value)">
+            </cfg-row>
+            <cfg-row name="情绪判定超时(ms)" desc="情绪判定单次调用总预算（默认 30000；超时中止请求并按配置回退，不影响出语音）">
+              <input type="number" class="inp" style="width:120px" min="1000" max="600000" step="1000" :value="data?.judgeTimeoutMs || 30000" @change="saveJudgeTimeout($event.target.value)">
             </cfg-row>
           </div></div>
         </div>
@@ -222,7 +247,7 @@
         <div id="tts-services" class="card cf-sec" :class="{open: open.services}">
           <div class="cf-sh" @click="open.services = !open.services">
             <span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="layers"/></span>
-            <div><div class="ct-t">TTS 服务</div><div class="ct-s">点击服务卡片打开对应配置（参考音频 / 接口地址 / 情绪化支持）</div></div>
+            <div><div class="ct-t">TTS 服务</div><div class="ct-s">点击服务卡片打开对应配置（本地 IndexTTS / 云服务商密钥与音色 / 情绪化支持）</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.services">
@@ -237,12 +262,10 @@
                   <span class="pill" :class="p.configured ? 'p-green' : 'p-rose'">{{ p.configured ? '已配置' : '未配置' }}</span>
                 </div>
                 <div class="row g6" style="margin-top:10px;align-items:center">
-                  <span class="mut2" style="font-size:11.5px"><v-icon name="user"/> 音色参考 {{ voiceRefs.length }} 条 · 情绪参考 {{ emoRefs.length }} 条</span>
+                  <span v-if="p.id === 'indextts'" class="mut2" style="font-size:11.5px"><v-icon name="user"/> 音色参考 {{ voiceRefs.length }} 条 · 情绪参考 {{ emoRefs.length }} 条</span>
+                  <span v-else class="mut2" style="font-size:11.5px">API Key / 音色 ID 在配置弹窗中设置{{ p.missing?.length ? '（缺少：' + p.missing.join('、') + '）' : '' }}</span>
                   <button class="btn b-soft b-sm" style="margin-left:auto">配置 <v-icon name="arrowr"/></button>
                 </div>
-              </div>
-              <div class="card" style="padding:14px 16px;border-style:dashed;display:flex;align-items:center;gap:10px;color:var(--mut,#8a93a6)">
-                <v-icon name="plus"/><span style="font-size:12.5px">更多 TTS 服务接入中（结构已按多服务商预留）</span>
               </div>
             </div>
             <div v-if="loading" class="mut2" style="font-size:12px;margin-top:10px">加载中…</div>
@@ -250,9 +273,9 @@
           </div>
         </div>
 
-        <!-- ===== IndexTTS 配置弹窗 ===== -->
+        <!-- ===== 服务商配置弹窗（IndexTTS 自定义表单 / 云服务商按 fields schema 渲染） ===== -->
         <v-modal v-if="modal.show" :title="(modal.service?.name || 'TTS 服务') + ' · 配置'" icon="music" width="min(780px,94vw)" @close="modal.show = false">
-          <div class="cf-grid">
+          <div v-if="modal.service?.id === 'indextts'" class="cf-grid">
             <div class="cf-sub full"><v-icon name="link"/> 接口</div>
             <cfg-row full name="接口地址" desc="IndexTTS 服务地址（如 http://127.0.0.1:7860；v1.2 起该端口由鉴权网关承接）">
               <div class="row g6">
@@ -371,6 +394,30 @@
             <cfg-row name="情绪判定超时(ms)" desc="judgeTimeoutMs：超时中止请求并回退默认向量（默认 30000；快失败会在预算内重试一次）">
               <input type="number" class="inp" style="width:130px" min="3000" step="1000" v-model.number="form.judgeTimeoutMs">
             </cfg-row>
+          </div>
+
+          <!-- 云服务商：按后端 fields schema 渲染（text/secret/select/number/switch） -->
+          <div v-else class="cf-grid">
+            <div class="cf-sub full"><v-icon name="link"/> 接口与密钥</div>
+            <cfg-row v-for="f in (modal.service?.fields || [])" :key="f.key" :full="f.type !== 'number' && f.type !== 'switch' && (f.desc || '').length > 26" :name="f.label" :desc="f.desc">
+              <input v-if="f.type === 'text' || f.type === 'secret'" class="inp" :class="{mono: f.type === 'secret'}" :type="f.type === 'secret' ? 'password' : 'text'" style="width:320px" v-model="form[f.key]" :placeholder="f.placeholder || ''" autocomplete="off">
+              <select v-else-if="f.type === 'select'" class="sel" style="width:300px" v-model="form[f.key]">
+                <option v-for="o in (f.options || [])" :key="String(o[0])" :value="o[0]">{{ o[1] }}</option>
+              </select>
+              <input v-else-if="f.type === 'number'" type="number" class="inp" style="width:130px" :min="f.min" :max="f.max" :step="f.step || 1" v-model.number="form[f.key]">
+              <v-switch v-else-if="f.type === 'switch'" :model-value="!!form[f.key]" @update:modelValue="form[f.key] = !!$event"/>
+              <span v-else class="mut2" style="font-size:12px">{{ f.desc }}</span>
+            </cfg-row>
+            <cfg-row full name="连接状态" desc="测试会真实合成 2 个字（消耗极少字符；这是官方唯一可探活方式），成功即代表密钥/音色/网络均可用">
+              <div class="row g6">
+                <button class="btn b-line b-sm" @click="testConn" :disabled="testState.running">{{ testState.running ? '测试中…' : '测试连接' }}</button>
+                <span v-if="testState.result" class="pill" :class="testState.result.ok ? 'p-green' : 'p-rose'">{{ testState.result.msg }}</span>
+                <span v-else class="mut2" style="font-size:12px">未测试</span>
+              </div>
+            </cfg-row>
+            <div v-if="modal.service?.docs" class="full mut2" style="font-size:11.5px;word-break:break-all">
+              官方文档：<a :href="modal.service.docs" target="_blank" rel="noopener noreferrer">{{ modal.service.docs }}</a>
+            </div>
           </div>
           <template #foot>
             <div class="row g10" style="margin-left:auto">

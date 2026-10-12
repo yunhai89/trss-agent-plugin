@@ -23,7 +23,11 @@ import { ok, fail, asyncHandler, CODE } from './response.js'
 import { listAllSuggestions, applySuggestion, removeSuggestion } from '../evolution/review.js'
 import { getStickerManager } from '../sticker/manager.js'
 import { RuntimeScope } from '../agent/runtime-scope.js'
-import { RefLibrary, IndexTtsClient, normalizeTtsConfig } from '../tts/index.js'
+import {
+  RefLibrary, IndexTtsClient, normalizeTtsConfig,
+  PROVIDERS, PROVIDER_IDS, providerConfigured,
+  DoubaoTtsClient, MinimaxTtsClient, MimoTtsClient,
+} from '../tts/index.js'
 
 const router = express.Router()
 
@@ -971,24 +975,25 @@ router.delete('/suggestions/:id', asyncHandler(async (req, res) => {
 // ── TTS 语音合成（参考音频库 + 服务配置；前端「语音合成」页）──
 const ttsRefs = () => new RefLibrary({ dir: Config.path.tts })
 
-/** 面板展示用 TTS 现状（不含密钥；provider 列表供前端渲染服务卡片，可扩展多服务商） */
+/** 面板展示用 TTS 现状（provider 列表/字段 schema 由 model/tts/providers.js 单一来源下发） */
 function ttsPayload() {
   const cfg = normalizeTtsConfig(Config.get().agent?.tts || {})
   return {
     enable: cfg.enable === true,
-    provider: cfg.provider || 'indextts',
+    provider: PROVIDER_IDS.includes(cfg.provider) ? cfg.provider : 'indextts',
     autoReply: cfg.autoReply !== false,
     replyMaxChars: Number(cfg.replyMaxChars ?? 300) || 0,
     hdVoice: cfg.hdVoice !== false,
-    providers: [
-      {
-        id: 'indextts',
-        name: 'IndexTTS 2.5',
-        desc: '本地/自托管服务（Gradio HTTP）· 音色参考 + 情绪参考/向量 + pro/max 档位',
-        configured: !!cfg.indextts.endpoint,
-      },
-    ],
+    judgeModel: cfg.judgeModel || '',
+    judgeTimeoutMs: Number(cfg.judgeTimeoutMs) || 30000,
+    providers: PROVIDERS.map((p) => {
+      const st = providerConfigured(p.id, cfg)
+      return { id: p.id, name: p.name, desc: p.desc, docs: p.docs, fields: p.fields, configured: st.configured, missing: st.missing }
+    }),
     indextts: cfg.indextts,
+    doubao: cfg.doubao,
+    minimax: cfg.minimax,
+    mimo: cfg.mimo,
     refs: ttsRefs().list(),
   }
 }
@@ -996,27 +1001,51 @@ function ttsPayload() {
 // GET /api/tts —— TTS 配置 + 服务商列表 + 参考音频库
 router.get('/tts', asyncHandler(async (req, res) => ok(res, ttsPayload())))
 
-// PUT /api/tts/config —— 点路径 changes（相对 agent.tts；仅允许 enable/provider/indextts.*，拒绝原型链键）
+// PUT /api/tts/config —— 点路径 changes（相对 agent.tts；白名单服务商前缀 + 原型链键拒绝）
 router.put('/tts/config', asyncHandler(async (req, res) => {
   const { changes } = req.body || {}
   if (!changes || typeof changes !== 'object') return fail(res, CODE.BAD, 'changes 必须是对象')
+  const TOP_KEYS = ['enable', 'provider', 'autoReply', 'replyMaxChars', 'hdVoice', 'judgeModel', 'judgeTimeoutMs']
   const SAFE_KEY = (key) => {
     const parts = String(key).split('.')
     if (parts.some((s) => ['__proto__', 'constructor', 'prototype'].includes(s))) return false
-    return ['enable', 'provider', 'autoReply', 'replyMaxChars', 'hdVoice'].includes(key) || /^indextts(\.[a-zA-Z0-9_]+)+$/.test(key)
+    return TOP_KEYS.includes(key) || /^(indextts|doubao|minimax|mimo)(\.[a-zA-Z0-9_]+)+$/.test(key)
   }
+  const BOOL_KEYS = new Set(['autoReply', 'hdVoice', 'doubao.autoEmotion', 'doubao.useTagParser', 'minimax.autoEmotion', 'mimo.autoEmotion', 'indextts.autoEmotion'])
+  const NUM_KEYS = new Set([
+    'judgeTimeoutMs', 'indextts.timeoutMs', 'indextts.judgeTimeoutMs',
+    'doubao.timeoutMs', 'doubao.speechRate', 'doubao.loudnessRate', 'doubao.emotionScale', 'doubao.sampleRate',
+    'minimax.timeoutMs', 'minimax.speed', 'minimax.vol', 'minimax.pitch', 'minimax.sampleRate', 'minimax.bitrate',
+    'mimo.timeoutMs',
+  ])
   const cfg = Config.get()
   let n = 0
   for (const [p, v] of Object.entries(changes)) {
     const key = String(p).replace(/^agent\.tts\./, '')
     if (!SAFE_KEY(key)) continue
     let val = v
-    if (key === 'autoReply' || key === 'hdVoice') val = !!v
-    if (key === 'replyMaxChars') val = Math.max(0, Math.min(5000, Number(v) || 0))
+    if (key === 'provider') {
+      if (!PROVIDER_IDS.includes(String(v))) continue
+      val = String(v)
+    } else if (BOOL_KEYS.has(key)) {
+      val = !!v
+    } else if (key === 'replyMaxChars') {
+      val = Math.max(0, Math.min(5000, Number(v) || 0))
+    } else if (NUM_KEYS.has(key)) {
+      const num = Number(v)
+      if (!Number.isFinite(num)) continue
+      val = num
+    } else if (/\.endpoint$/.test(key)) {
+      const s = String(v || '').trim()
+      if (s && !/^https?:\/\//i.test(s)) continue // 仅允许 http/https，防 javascript:/file: 等协议注入
+      val = s
+    } else if (typeof v === 'string') {
+      val = String(v).slice(0, 500)
+    }
     setPath(cfg, 'agent.tts.' + key, val)
     n++
   }
-  if (!n) return fail(res, CODE.BAD, '没有可应用的字段（仅支持 agent.tts.enable / provider / autoReply / replyMaxChars / hdVoice / indextts.*）')
+  if (!n) return fail(res, CODE.BAD, '没有可应用的字段（支持 enable/provider/autoReply/replyMaxChars/hdVoice/judgeModel/judgeTimeoutMs 与 indextts|doubao|minimax|mimo 前缀）')
   Config.save(cfg)
   Config.reload(true)
   return ok(res, { applied: n }, '已保存（已热加载）')
@@ -1060,17 +1089,33 @@ router.delete('/tts/refs/:id', asyncHandler(async (req, res) => {
   return ok(res, { removed: true }, '已删除')
 }))
 
-// POST /api/tts/test —— 连通性自检（探 /config 并解析 fn_index/情绪选项；可带 { endpoint, apiKey } 临时覆盖）
+// POST /api/tts/test —— 连通性自检（provider 感知；可带该服务商草稿字段临时覆盖保存配置）
 router.post('/tts/test', asyncHandler(async (req, res) => {
   const cfg = normalizeTtsConfig(Config.get().agent?.tts || {})
-  const endpoint = String(req.body?.endpoint || cfg.indextts.endpoint || '').trim()
-  // apiKey 显式传空字符串=按"无 key"测试（面板草稿未填时）；未传=用已保存配置
-  const apiKey = String(req.body?.apiKey != null ? req.body.apiKey : (cfg.indextts.apiKey || '')).trim()
-  if (!endpoint) return fail(res, CODE.BAD, '请先填写接口地址')
-  const client = new IndexTtsClient({ endpoint, apiKey, timeoutMs: 15000 })
+  const provider = PROVIDER_IDS.includes(req.body?.provider) ? req.body.provider : 'indextts'
+  if (provider === 'indextts') {
+    const endpoint = String(req.body?.endpoint || cfg.indextts.endpoint || '').trim()
+    // apiKey 显式传空字符串=按"无 key"测试（面板草稿未填时）；未传=用已保存配置
+    const apiKey = String(req.body?.apiKey != null ? req.body.apiKey : (cfg.indextts.apiKey || '')).trim()
+    if (!endpoint) return fail(res, CODE.BAD, '请先填写接口地址')
+    const client = new IndexTtsClient({ endpoint, apiKey, timeoutMs: 15000 })
+    const r = await client.check()
+    if (!r.ok) return fail(res, CODE.INTERNAL, r.error || '连接失败')
+    return ok(res, r, `连接成功（fn_index=${r.fnIndex}）`)
+  }
+  // 云端服务商：草稿字段（面板当前弹窗内容）优先，未传的用已保存配置；测试会真实合成 2 个字
+  const meta = PROVIDERS.find((p) => p.id === provider)
+  const merged = { ...(cfg[provider] || {}) }
+  for (const f of meta?.fields || []) {
+    if (req.body?.[f.key] !== undefined) merged[f.key] = req.body[f.key]
+  }
+  merged.timeoutMs = 15000
+  const client = provider === 'doubao' ? new DoubaoTtsClient(merged)
+    : provider === 'minimax' ? new MinimaxTtsClient(merged)
+      : new MimoTtsClient(merged)
   const r = await client.check()
   if (!r.ok) return fail(res, CODE.INTERNAL, r.error || '连接失败')
-  return ok(res, r, `连接成功（fn_index=${r.fnIndex}）`)
+  return ok(res, r, `连接成功（${provider}，${r.tookMs}ms）`)
 }))
 
 // 未知 /api 路径 → JSON 404（不走 SPA fallback）

@@ -9,6 +9,14 @@ export { stripForSpeech } from './speech-text.js'
 export { makeTtsSpeakTool } from './tools.js'
 export { RefLibrary, REF_KINDS, AUDIO_EXTS, normalizeRefName, extOf } from './refs.js'
 export {
+  PROVIDER_IDS, PROVIDERS, providerMeta, providerCaps, providerConfigured,
+  EMOTION_LABELS, VECTOR_LABEL_MAPS, MIMO_VOICES,
+  dominantEmotion, labelFor, doubaoScaleFor, styleInstructionFor, langFor,
+} from './providers.js'
+export { DoubaoTtsClient, parseDoubaoNdjson, doubaoHint, doubaoHttpHint, DOUBAO_ENDPOINT, DOUBAO_RESOURCE_IDS, DOUBAO_MODELS } from './doubao.js'
+export { MinimaxTtsClient, minimaxHint, minimaxHttpHint, MINIMAX_ENDPOINT, MINIMAX_MODELS } from './minimax.js'
+export { MimoTtsClient, mimoHttpHint, MIMO_ENDPOINT, MIMO_MODELS } from './mimo.js'
+export {
   IndexTtsClient, clampVector, vectorToObject, fileData, VECTOR_KEYS, VECTOR_ZH,
   VECTOR_ALIASES, normalizeVectorKeys, httpHint,
 } from './indextts.js'

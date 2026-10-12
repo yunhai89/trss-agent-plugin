@@ -31,10 +31,11 @@ export function runFfmpeg(args, { timeout = 120, maxOutput = 8000 } = {}) {
   })
 }
 
-/** 静音 wav 生成参数 */
-export function buildSilenceArgs(outPath, ms) {
+/** 静音 wav 生成参数（采样率需与被拼接音频一致：IndexTTS=22050，云端按各自配置） */
+export function buildSilenceArgs(outPath, ms, rate = 22050) {
   const sec = Math.max(0, Number(ms) || 0) / 1000
-  return ['-y', '-f', 'lavfi', '-i', 'anullsrc=r=22050:cl=mono', '-t', sec.toFixed(3), '-c:a', 'pcm_s16le', String(outPath)]
+  const r = Number(rate) || 22050
+  return ['-y', '-f', 'lavfi', '-i', `anullsrc=r=${r}:cl=mono`, '-t', sec.toFixed(3), '-c:a', 'pcm_s16le', String(outPath)]
 }
 
 /** concat demuxer 列表文件内容（单引号转义：内部 ' → '\''） */
@@ -54,7 +55,7 @@ export function buildConcatArgs(listPath, outPath) {
  * @param {object} opts { gapMs 段间静音毫秒(默认300,0=不加), tempDir, runner, timeout, logger }
  * @returns {Promise<{ok:boolean, outPath?:string, error?:string, stderr?:string}>}
  */
-export async function concatSegments(files, outPath, { gapMs = 300, tempDir, runner = runFfmpeg, timeout = 120, logger } = {}) {
+export async function concatSegments(files, outPath, { gapMs = 300, tempDir, runner = runFfmpeg, timeout = 120, logger, sampleRate = 22050 } = {}) {
   const list = (files || []).filter(Boolean)
   if (!list.length) return { ok: false, error: '没有可拼接的音频段' }
   if (list.length === 1) {
@@ -67,9 +68,9 @@ export async function concatSegments(files, outPath, { gapMs = 300, tempDir, run
   let seq = []
   try {
     if (Number(gapMs) > 0) {
-      const silence = path.join(tmp, `silence_${Number(gapMs)}ms.wav`)
+      const silence = path.join(tmp, `silence_${Number(gapMs)}ms_${Number(sampleRate) || 22050}.wav`)
       if (!fs.existsSync(silence)) {
-        const r = await runner(buildSilenceArgs(silence, gapMs), { timeout: 30 })
+        const r = await runner(buildSilenceArgs(silence, gapMs, sampleRate), { timeout: 30 })
         if (!r.ok) {
           logger?.('warn', '[tts] 静音生成失败，拼接时不插段间静音', (r.stderr || '').slice(-160))
         }
