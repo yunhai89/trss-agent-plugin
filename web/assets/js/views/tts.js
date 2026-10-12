@@ -183,7 +183,7 @@
         <div class="note">
           <v-icon name="music"/>
           <div>
-            <b>语音合成（TTS）</b>：开启后<strong>每条最终回复都会自动追加语音</strong>（文字/图片照常发；合成内容为剥除 md/代码后的正文）。Agent 工具 <code>tts_speak</code> 用于指定音色/情绪的点播（本轮已点播则不再自动补发）。
+            <b>语音合成（TTS）</b>：总开关<strong>默认关闭（opt-in）</strong>——开启后 Agent 才注册 <code>tts_speak</code>，且<strong>每条最终回复都会自动追加语音</strong>（文字/图片照常发；合成内容为剥除 md/代码后的正文）。Agent 工具 <code>tts_speak</code> 用于指定音色/情绪的点播（本轮已点播则不再自动补发）。
             <span class="mut2">情绪三种模式：沿用音色参考 / 情绪参考音频 / 8 维向量（默认由 LLM 结合文本与上下文自动调节）；pro=整段一套情绪，max=按需拆分逐段情绪后合成拼接。详细说明见技能 <code>tts</code>。</span>
           </div>
         </div>

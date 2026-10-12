@@ -50,7 +50,7 @@ const fakePort = await new Promise((resolve) => { fakeTts.listen(0, '127.0.0.1',
 await test('GET /api/tts：默认配置 + 服务商列表 + 空参考库', async () => {
   const r = await get('/api/tts')
   ok(r.status === 200 && r.body.code === 0, 'HTTP 200 / code 0')
-  ok(r.body.data.enable === true, 'enable 默认开')
+  ok(r.body.data.enable === false, 'enable 默认关（opt-in）')
   ok(r.body.data.autoReply === true, '自动语音回复默认开')
   ok(r.body.data.replyMaxChars === 300, '自动语音字数上限默认 300')
   ok(r.body.data.hdVoice === true, '高清语音默认开')

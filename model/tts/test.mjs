@@ -609,7 +609,7 @@ await test('TtsService：合成开始/完成 info 日志、失败 warn 日志（
 // ─────────────────────── 10. 配置归一 ───────────────────────
 await test('normalizeTtsConfig：缺省字段回落默认（旧配置安全）', () => {
   const c = normalizeTtsConfig({ indextts: { endpoint: 'http://a:1' } })
-  eq(c.enable, true, 'enable 默认开')
+  eq(c.enable, false, 'enable 默认关（opt-in）')
   eq(c.provider, 'indextts', 'provider 默认')
   eq(c.autoReply, true, '自动语音回复默认开')
   eq(c.replyMaxChars, 300, '自动语音字数上限默认 300')
