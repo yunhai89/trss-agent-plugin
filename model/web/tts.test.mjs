@@ -50,6 +50,8 @@ await test('GET /api/tts：默认配置 + 服务商列表 + 空参考库', async
   const r = await get('/api/tts')
   ok(r.status === 200 && r.body.code === 0, 'HTTP 200 / code 0')
   ok(r.body.data.enable === true, 'enable 默认开')
+  ok(r.body.data.autoReply === true, '自动语音回复默认开')
+  ok(r.body.data.replyMaxChars === 300, '自动语音字数上限默认 300')
   ok(r.body.data.provider === 'indextts', '默认服务商 indextts')
   ok(r.body.data.providers?.[0]?.id === 'indextts' && r.body.data.providers[0].configured === false, '服务商卡片数据（未配置）')
   ok(Array.isArray(r.body.data.refs) && r.body.data.refs.length === 0, '参考库空')
@@ -91,14 +93,22 @@ await test('PUT /api/tts/config：白名单点路径写入（enable/provider/ind
     'indextts.vector': [0.5, 0, 0, 0, 0, 0, 0, 0.3],
     enable: true,
     provider: 'indextts',
+    autoReply: false,
+    replyMaxChars: 123,
   } })
   ok(r.status === 200 && r.body.code === 0, `保存成功（${r.status}/${r.body.code}）`)
   const cfg = __state.config.agent.tts
   ok(cfg.indextts.endpoint === 'http://127.0.0.1:7860', 'endpoint 写入')
   ok(cfg.indextts.emotionMode === 'vector', '情绪模式写入')
   ok(Array.isArray(cfg.indextts.vector) && cfg.indextts.vector[7] === 0.3, '向量写入')
+  ok(cfg.autoReply === false, '自动语音开关写入')
+  ok(cfg.replyMaxChars === 123, '自动语音上限写入（数值化）')
   const payload = await get('/api/tts')
   ok(payload.body.data.providers[0].configured === true, 'configured 状态随配置刷新')
+  ok(payload.body.data.autoReply === false && payload.body.data.replyMaxChars === 123, 'payload 回读一致')
+
+  const over = await put('/api/tts/config', { changes: { replyMaxChars: 99999 } })
+  ok(over.status === 200 && __state.config.agent.tts.replyMaxChars === 5000, '超范围夹到 5000')
 
   const evil = await put('/api/tts/config', { changes: { 'indextts.__proto__.x': 1, 'agent.apiKey': 'hack' } })
   ok(evil.status === 400 && evil.body.code === 4001, '越权路径被拒（4001）')

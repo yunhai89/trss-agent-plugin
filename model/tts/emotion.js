@@ -54,11 +54,12 @@ export function buildEmotionSystemPrompt() {
     '- 文本没有明显情绪倾向时，用平静压底（calm 0.5~0.9）而不是全部为 0；',
     '- 反讽/玩笑/吐槽要结合上下文判断真实语气，不要只看字面。',
     '',
-    '【输出】只输出一个 JSON 对象，不要解释文字或代码块标记。字段：',
-    '- pro 模式：{"vector":{8 情绪键:数值},"reason":"一句话说明判定依据"}',
-    `- max 模式：{"vector":{整体基调},"segments":[{"text":"原文片段（必须保持原文用词，不得改写/增删）","vector":{该段情绪}}],"reason":"一句话"}`,
+    '【输出】只输出一个 JSON 对象，不要解释文字或代码块标记。键名必须用下列英文键（happy/angry/sad/afraid/disgusted/melancholic/surprised/calm），不要用中文名、不要自造键名；数值必须为 0~1.2。字段：',
+    '- pro 模式：{"vector":{"happy":0.8,"calm":0.3},"reason":"一句话说明判定依据"}',
+    `- max 模式：{"vector":{"calm":0.5},"segments":[{"text":"原文片段（必须保持原文用词，不得改写/增删）","vector":{"happy":0.9}}],"reason":"一句话"}`,
     `- max 模式分段规则：按语义与自然停顿拆分（一句一段或逗号短句合并），相邻同情绪可合段；每段不超过 ${MAX_SEGMENT_CHARS} 字、最多 ${MAX_SEGMENTS} 段；文本很短时不拆（1 段）；`,
     '- 每段 text 必须逐字来自原文（顺序拼接后应还原原文，可忽略空白差异）。',
+    '- 向量不能全为 0：没有明显情绪时也要给平静一个正数（如 calm 0.6）。',
   ].join('\n')
 }
 
@@ -139,12 +140,18 @@ export function splitByPunctuation(text, maxChars = MAX_SEGMENT_CHARS) {
 
 /**
  * 归一化 LLM 计划输出。
- * @returns {null | { vector: object, segments?: [{text, vector}], reason: string }} null=不可用
+ * @returns {null | { vector: object, segments?: [{text, vector}], reason: string }} null=不可用（调用方回退）
  */
 export function parsePlan(raw, { tier = 'pro', text = '', maxSegments = MAX_SEGMENTS, maxSegmentChars = MAX_SEGMENT_CHARS } = {}) {
   const obj = extractJson(raw)
   if (!obj || typeof obj !== 'object') return null
-  const vector = obj.vector && typeof obj.vector === 'object' ? vectorToObject(clampVector(obj.vector)) : null
+  // 全零/未知键（clamp 后无正数）视为无效：宁可回退默认，也不能"有 reason 但实际没情绪"地误导使用方
+  const safeVec = (x) => {
+    if (!x || typeof x !== 'object') return null
+    const arr = clampVector(x)
+    return arr.some((n) => n > 0) ? vectorToObject(arr) : null
+  }
+  const vector = safeVec(obj.vector)
   const reason = String(obj.reason || '').slice(0, 200)
   if (tier !== 'max') {
     if (!vector) return null
@@ -152,12 +159,12 @@ export function parsePlan(raw, { tier = 'pro', text = '', maxSegments = MAX_SEGM
   }
   const segs = Array.isArray(obj.segments) ? obj.segments : []
   const cleaned = segs
-    .map((s) => ({ text: String(s?.text || '').trim(), vector: s?.vector && typeof s.vector === 'object' ? vectorToObject(clampVector(s.vector)) : null }))
+    .map((s) => ({ text: String(s?.text || '').trim(), vector: safeVec(s?.vector) }))
     .filter((s) => s.text)
   if (!cleaned.length || cleaned.length > maxSegments) return null
   if (cleaned.some((s) => s.text.length > maxSegmentChars * 1.5)) return null
   if (!segmentsFaithful(cleaned, text)) return null
-  // 段缺失向量 → 用整体基调兜底（整体也没有则由调用方兜底）
+  // 段缺失/全零向量 → 用整体基调兜底（整体也没有则拒绝计划）
   for (const s of cleaned) if (!s.vector) s.vector = vector ? { ...vector } : null
   if (cleaned.some((s) => !s.vector)) return null
   return { vector: vector || { ...cleaned[0].vector }, segments: cleaned, reason }

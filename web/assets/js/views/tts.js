@@ -82,6 +82,8 @@
       }
       const toggleEnable = (v) => put({ enable: !!v }, v ? '已启用 TTS' : '已关闭 TTS')
       const setProvider = (v) => put({ provider: v }, '已切换默认服务商')
+      const toggleAutoReply = (v) => put({ autoReply: !!v }, v ? '已开启自动语音回复' : '已关闭自动语音回复')
+      const saveReplyMaxChars = (v) => put({ replyMaxChars: Math.max(0, Math.min(5000, Number(v) || 0)) }, '已保存自动语音字数上限')
 
       /* ── 服务卡片 → 弹窗 ── */
       const openService = (p) => {
@@ -165,7 +167,7 @@
         loading, error, data, load, sections, open, jump,
         modal, form, saveModal, openService, testConn, testState,
         upload, onPick, doUpload, delRef, refUrl, refs, voiceRefs, emoRefs, kindZh, sizeKb, fileEl,
-        toggleEnable, setProvider,
+        toggleEnable, setProvider, toggleAutoReply, saveReplyMaxChars,
         EMOTIONS, vecOf, setVec, vecSum,
       }
     },
@@ -179,8 +181,8 @@
         <div class="note">
           <v-icon name="music"/>
           <div>
-            <b>语音合成（TTS）</b>：Agent 工具 <code>tts_speak</code> 把文字合成为语音发到聊天；情绪支持三种模式（沿用音色参考 / 情绪参考音频 / 8 维向量）。
-            <span class="mut2">向量模式默认由 LLM 结合文本与近期对话上下文自动调节；pro=整段一套情绪，max=按需拆分逐段情绪后合成拼接。详细说明见技能 <code>tts</code>。</span>
+            <b>语音合成（TTS）</b>：开启后<strong>每条最终回复都会自动追加语音</strong>（文字/图片照常发；合成内容为剥除 md/代码后的正文）。Agent 工具 <code>tts_speak</code> 用于指定音色/情绪的点播（本轮已点播则不再自动补发）。
+            <span class="mut2">情绪三种模式：沿用音色参考 / 情绪参考音频 / 8 维向量（默认由 LLM 结合文本与上下文自动调节）；pro=整段一套情绪，max=按需拆分逐段情绪后合成拼接。详细说明见技能 <code>tts</code>。</span>
           </div>
         </div>
 
@@ -194,8 +196,14 @@
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.main"><div class="cf-grid">
-            <cfg-row name="启用语音合成" desc="关=Agent 不再注册 tts_speak（改完即热加载）">
+            <cfg-row name="启用语音合成" desc="关=Agent 不再注册 tts_speak、也不自动合成回复语音（改完即热加载）">
               <v-switch :model-value="!!data?.enable" @update:modelValue="toggleEnable"/>
+            </cfg-row>
+            <cfg-row name="自动语音回复" desc="开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音；内容为剥除 md/代码后的正文）">
+              <v-switch :model-value="!!data?.autoReply" @update:modelValue="toggleAutoReply"/>
+            </cfg-row>
+            <cfg-row name="自动语音字数上限" desc="超长按句子边界截断（防一条回复合成出几分钟语音）；0=不限">
+              <input type="number" class="inp" style="width:120px" min="0" max="5000" step="50" :value="data?.replyMaxChars != null ? data.replyMaxChars : 300" @change="saveReplyMaxChars($event.target.value)">
             </cfg-row>
             <cfg-row name="默认服务商" desc="后续接入其它 TTS 服务时在此切换">
               <select class="sel" style="width:220px" :value="data?.provider || 'indextts'" @change="setProvider($event.target.value)" :disabled="(data?.providers || []).length < 2">

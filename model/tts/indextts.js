@@ -26,6 +26,33 @@ const EMO_METHOD_FALLBACK = {
 export const VECTOR_KEYS = ['happy', 'angry', 'sad', 'afraid', 'disgusted', 'melancholic', 'surprised', 'calm']
 export const VECTOR_ZH = { happy: '高兴', angry: '愤怒', sad: '悲伤', afraid: '害怕', disgusted: '厌恶', melancholic: '忧郁', surprised: '惊讶', calm: '平静' }
 
+/** 键名别名 → 规范键（LLM 可能回中文名/近义词/大小写；全部归一，避免静默清零） */
+export const VECTOR_ALIASES = {
+  高兴: 'happy', 开心: 'happy', 喜悦: 'happy', joy: 'happy', glad: 'happy', excited: 'happy',
+  愤怒: 'angry', 生气: 'angry', anger: 'angry', annoyed: 'angry',
+  悲伤: 'sad', 难过: 'sad', sadness: 'sad', sorrow: 'sad',
+  害怕: 'afraid', 恐惧: 'afraid', fear: 'afraid', scared: 'afraid', frightened: 'afraid',
+  厌恶: 'disgusted', 反感: 'disgusted', disgust: 'disgusted', dislike: 'disgusted',
+  忧郁: 'melancholic', 低落: 'melancholic', melancholy: 'melancholic', blue: 'melancholic',
+  惊讶: 'surprised', surprise: 'surprised', amazed: 'surprised', shocked: 'surprised',
+  平静: 'calm', 中性: 'calm', neutral: 'calm', peaceful: 'calm',
+}
+
+/** 把 {任意键: 值} 归一到规范键（大小写不敏感；未知键忽略） */
+export function normalizeVectorKeys(v) {
+  if (!v || typeof v !== 'object') return v
+  if (Array.isArray(v)) return v
+  const out = {}
+  for (const [k, val] of Object.entries(v)) {
+    const raw = String(k).trim()
+    const key = VECTOR_KEYS.includes(raw) ? raw
+      : VECTOR_KEYS.includes(raw.toLowerCase()) ? raw.toLowerCase()
+        : VECTOR_ALIASES[raw] || VECTOR_ALIASES[raw.toLowerCase()] || null
+    if (key) out[key] = val
+  }
+  return out
+}
+
 /** 文件引用结构（Gradio 5.45 要求显式 meta） */
 export function fileData(remotePath) {
   return { path: String(remotePath), meta: { _type: 'gradio.FileData' } }
@@ -37,9 +64,10 @@ export function fileData(remotePath) {
  * @returns {number[]}
  */
 export function clampVector(v) {
-  const arr = Array.isArray(v)
-    ? VECTOR_KEYS.map((_, i) => Number(v[i]) || 0)
-    : VECTOR_KEYS.map((k) => Number(v?.[k]) || 0)
+  const src = normalizeVectorKeys(v)
+  const arr = Array.isArray(src)
+    ? VECTOR_KEYS.map((_, i) => Number(src[i]) || 0)
+    : VECTOR_KEYS.map((k) => Number(src?.[k]) || 0)
   const out = arr.map((n) => Math.min(1.2, Math.max(0, Number.isFinite(n) ? n : 0)))
   const sum = out.reduce((a, b) => a + b, 0)
   if (sum > 1.5) {

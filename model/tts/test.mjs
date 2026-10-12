@@ -10,6 +10,7 @@ import {
   IndexTtsClient, clampVector, vectorToObject, fileData, VECTOR_KEYS,
   RefLibrary, normalizeTtsConfig, parseVectorParam, TtsService, makeTtsSpeakTool,
   planEmotion, parsePlan, splitByPunctuation, buildConcatListContent, buildConcatArgs, concatSegments,
+  stripForSpeech,
 } from './index.js'
 
 let passed = 0
@@ -31,6 +32,13 @@ await test('clampVector：范围夹取 + 总和 ≤1.5 等比缩放', () => {
   eq(vectorToObject([1, 0, 0, 0, 0, 0, 0, 0]).happy, 1, 'vectorToObject 键序正确')
   eq(VECTOR_KEYS.length, 8, '8 维键')
   eq(fileData('/tmp/x.wav'), { path: '/tmp/x.wav', meta: { _type: 'gradio.FileData' } }, 'fileData 结构含 meta')
+})
+
+await test('clampVector：键名别名归一（中文/近义词/大小写），不静默清零', () => {
+  eq(clampVector({ 高兴: 0.8, 平静: 0.3 }), [0.8, 0, 0, 0, 0, 0, 0, 0.3], '中文键 → 规范键')
+  eq(clampVector({ fear: 0.5 }).filter(Boolean), [0.5], '英文近义词 fear → afraid')
+  eq(clampVector({ HAPPY: 0.6 })[0], 0.6, '大小写不敏感')
+  eq(clampVector({ 未知情绪: 0.9 }).every((n) => n === 0), true, '未知键忽略（不污染其它分量）')
 })
 
 await test('parseVectorParam：空/全 0 视为未指定；对象/数组归一', () => {
@@ -193,6 +201,21 @@ await test('planEmotion：pro 解析（容忍围栏）+ 非法输出回退 null'
 
   const thrown = await planEmotion({ run: async () => { throw new Error('boom') } }, { text: 'x', tier: 'pro' })
   eq(thrown, null, 'LLM 抛错 → null')
+
+  const zhPlan = await planEmotion({ run: async () => ({ content: '{"vector":{"高兴":0.9},"reason":"夸奖"}' }) }, { text: '你真棒', tier: 'pro' })
+  eq(zhPlan?.vector?.happy, 0.9, 'LLM 用中文键名也归一（曾静默清零成无情绪）')
+})
+
+await test('parsePlan：别名键归一 + 全零计划拒绝（不假装有情绪）', () => {
+  const zh = parsePlan('{"vector":{"高兴":0.8,"平静":0.2},"reason":"开心"}', { tier: 'pro' })
+  eq(zh?.vector?.happy, 0.8, '中文键归一为 happy')
+  eq(zh?.vector?.calm, 0.2, '中文键归一为 calm')
+  const zero = parsePlan('{"vector":{"happy":0,"calm":0},"reason":"看起来很开心"}', { tier: 'pro' })
+  eq(zero, null, '全零向量（即使带 reason）→ 拒绝，回退默认')
+  const segZh = parsePlan(JSON.stringify({ segments: [{ text: '你好。', vector: { 高兴: 0.7 } }] }), { tier: 'max', text: '你好。' })
+  eq(segZh?.segments?.[0]?.vector?.happy, 0.7, 'max 段向量同样归一')
+  const segZero = parsePlan(JSON.stringify({ segments: [{ text: '你好。', vector: { happy: 0 } }] }), { tier: 'max', text: '你好。' })
+  eq(segZero, null, 'max 全零且无整体基调 → 拒绝')
 })
 
 await test('planEmotion：max 分段忠实性校验（改写台词 → 拒绝）', () => {
@@ -381,11 +404,57 @@ await test('tts_speak 工具：服务报错 → 原样返回 error（不编造�
   delete globalThis.segment
 })
 
-// ─────────────────────── 8. 配置归一 ───────────────────────
+// ─────────────────────── 8. 回复文本清洗（自动语音用） ───────────────────────
+await test('stripForSpeech：代码围栏整体移除（含内容）', () => {
+  eq(stripForSpeech('看这个：\n```js\nconst a = 1\n```\n完成'), '看这个。完成', '围栏与代码内容都不朗读')
+  eq(stripForSpeech('```py\nprint(1)\n```'), '', '纯代码 → 空（跳过自动语音）')
+})
+
+await test('stripForSpeech：行内代码/强调去符号留文字', () => {
+  eq(stripForSpeech('这是 `代码`，还有**重点**和~~删除~~。'), '这是 代码，还有重点和删除。', '反引号/粗体/删除线')
+})
+
+await test('stripForSpeech：图片移除、链接留标题、URL 去掉；注音标注保留', () => {
+  eq(stripForSpeech('看图 ![图](https://a.com/x.png) 和 [官网](https://b.com)，或直接 https://c.com'), '看图 和 官网，或直接', '图片/链接/裸 URL')
+  eq(stripForSpeech('他去银<行|HANG2>取钱。'), '他去银<行|HANG2>取钱。', 'IndexTTS 注音标注不能被当 HTML 标签吃掉')
+  eq(stripForSpeech('换行<br>标签'), '换行标签', '普通 HTML 标签去掉')
+})
+
+await test('stripForSpeech：标题/列表/引用/表格/emoji 清理', () => {
+  eq(stripForSpeech('# 标题\n- 项目一\n- 项目二\n\n| a | b |\n|---|---|\n| 1 | 2 |\n> 引用'), '标题。项目一。项目二。引用', 'md 块级符号与表格')
+  eq(stripForSpeech('你好呀 🎉！今天很好👍'), '你好呀！今天很好', 'emoji 不朗读')
+  eq(stripForSpeech('好的[sticker:猫猫]没问题'), '好的没问题', '贴纸标记兜底剥离')
+})
+
+await test('stripForSpeech：按句截断（maxChars）与边界', () => {
+  eq(stripForSpeech('第一句话。第二句话。第三句话。', { maxChars: 8 }), '第一句话。', '截断落在句号处')
+  eq(stripForSpeech('一句话没有任何标点但是很长很长很长', { maxChars: 6 }), '一句话没有任。', '无标点则硬截并补句号')
+  eq(stripForSpeech('短句。'), '短句。', '不超限不动')
+  eq(stripForSpeech(''), '', '空输入')
+})
+
+// ─────────────────────── 9. 可观测性（合成生命周期日志） ───────────────────────
+await test('TtsService：合成开始/完成 info 日志、失败 warn 日志（用户可判断是否在合成）', async () => {
+  const logs = []
+  const dataDir = fs.mkdtempSync(path.join(tmp, 'svc-log-'))
+  const { fetchImpl } = fakeGradio()
+  const svc = new TtsService({ indextts: { endpoint: 'http://fake-indextts:7860' } }, { dataDir, logger: (l, ...a) => logs.push([l, a.join(' ')]), fetchImpl })
+  await svc.refs.add({ name: '甲', kind: 'voice', filename: 'v.wav', buffer: REF })
+  const r = await svc.synthesize({ text: '日志观测测试。', voice: '甲', emotionMode: 'same' })
+  ok(r.ok, '合成成功')
+  ok(logs.some(([l, m]) => l === 'info' && /合成开始/.test(m) && /音色=甲/.test(m)), 'info 合成开始（含音色/模式/档位）')
+  ok(logs.some(([l, m]) => l === 'info' && /合成完成/.test(m)), 'info 合成完成')
+  const bad = await svc.synthesize({ text: 'x', voice: '不存在' })
+  ok(!bad.ok && logs.some(([l, m]) => l === 'warn' && /合成未执行/.test(m)), '未执行原因 warn 可见')
+})
+
+// ─────────────────────── 10. 配置归一 ───────────────────────
 await test('normalizeTtsConfig：缺省字段回落默认（旧配置安全）', () => {
   const c = normalizeTtsConfig({ indextts: { endpoint: 'http://a:1' } })
   eq(c.enable, true, 'enable 默认开')
   eq(c.provider, 'indextts', 'provider 默认')
+  eq(c.autoReply, true, '自动语音回复默认开')
+  eq(c.replyMaxChars, 300, '自动语音字数上限默认 300')
   eq(c.indextts.endpoint, 'http://a:1', '覆盖端点保留')
   eq(c.indextts.emotionMode, 'same', '情绪模式默认 same')
   eq(c.indextts.tier, 'pro', '档位默认 pro')
