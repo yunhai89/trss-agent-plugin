@@ -10,7 +10,7 @@ export { makeTtsSpeakTool } from './tools.js'
 export { RefLibrary, REF_KINDS, AUDIO_EXTS, normalizeRefName, extOf } from './refs.js'
 export {
   IndexTtsClient, clampVector, vectorToObject, fileData, VECTOR_KEYS, VECTOR_ZH,
-  VECTOR_ALIASES, normalizeVectorKeys,
+  VECTOR_ALIASES, normalizeVectorKeys, httpHint,
 } from './indextts.js'
 export {
   planEmotion, buildPlanPrompt, buildEmotionSystemPrompt, normalizeContext,

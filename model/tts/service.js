@@ -32,6 +32,7 @@ export const TTS_DEFAULTS = {
   hdVoice: true,          // 发送前高清化：响度标准化 + 存在感补偿（失败自动回退原始音频）
   indextts: {
     endpoint: '',
+    apiKey: '',             // 网关 API Key（可选，itts_xxx；官方无鉴权时留空）
     lang: 'ZH',
     timeoutMs: 300000,
     voice: '',              // 默认音色参考名（留空=取最新上传的 voice）
@@ -86,7 +87,7 @@ export class TtsService {
     this.refs = new RefLibrary({ dir: this.dataDir, logger: this.logger })
     this.lock = createKeyedLock({ maxKeys: 4 })
     const ix = this.cfg.indextts
-    this.client = new IndexTtsClient({ endpoint: ix.endpoint, timeoutMs: ix.timeoutMs, fetchImpl, logger: this.logger })
+    this.client = new IndexTtsClient({ endpoint: ix.endpoint, apiKey: ix.apiKey, timeoutMs: ix.timeoutMs, fetchImpl, logger: this.logger })
     this.ffmpegRunner = ffmpegRunner || runFfmpeg
   }
 
