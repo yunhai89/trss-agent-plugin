@@ -93,7 +93,7 @@ import { readPdfTool } from '../model/document/pdf.js'
 import { createExcelTool, readExcelTool } from '../model/document/excel.js'
 import { fileToPdfTool } from '../model/document/topdf.js'
 import { transcribeMediaTool } from '../model/document/media_stt.js'
-import { TtsService, makeTtsSpeakTool } from '../model/tts/index.js'
+import { TtsService, makeTtsSpeakTool, stripForSpeech } from '../model/tts/index.js'
 import { DiagramService } from '../model/diagram/index.js'
 import { makeDiagramTool } from '../model/diagram/tool.js'
 import { makeDiagramDeliverer } from '../model/diagram/deliver.js'
@@ -119,6 +119,7 @@ const PROGRESS_LABELS = {
   perplexity: '🔍 联网搜索',
   skill: '📖 加载技能',
   reload_skills: '🔄 重载技能',
+  tts_speak: '🔊 语音合成',
   read_attachment: '📎 读取附件',
   get_group_file: '📎 获取文件',
   list_group_files: '📎 列出文件',
@@ -788,10 +789,12 @@ async function _buildRuntime(scope) {
   if (cfg.stt?.enable !== false) tools.register(transcribeMediaTool) // transcribe_media：音视频转文字(STT)
   // TTS 语音合成（tts_speak）：IndexTTS 2.5 等；vector 情绪默认由 LLM 结合文本+上下文自动调节
   // （情绪判定模型：agent.tts.indextts.model → utilityModel → 主模型，同 recall/thinkingAuto 的旁路通道）
+  // tts 服务实例暴露到运行时：自动回复语音（agent.tts.autoReply）在主回复管线里直接调用。
+  let tts = null
   if (cfg.tts?.enable !== false) {
     try {
       const ttsTarget = modelRouter.resolve(cfg.tts?.indextts?.model || cfg.utilityModel || cfg.model)
-      const tts = new TtsService(cfg.tts || {}, {
+      tts = new TtsService(cfg.tts || {}, {
         dataDir: Config.path.tts,
         logger: Log.tag('tts'),
         llm: {
@@ -1381,7 +1384,7 @@ async function _buildRuntime(scope) {
     ['面板', cfg.webApi?.enable !== false ? `:${cfg.webApi?.port || 6098}` : 'off'],
   ])
 
-  return { agentConfig, makeAgent, completePersona, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, personaLore, personaAdoptionQueue, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore, scope }
+  return { agentConfig, makeAgent, completePersona, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, personaLore, personaAdoptionQueue, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore, scope, tts }
 }
 
 const getRuntime = async () => {
@@ -2329,6 +2332,43 @@ export class Chat extends plugin {
         rt.kv.set(`perception:last_active:${ctx.groupId}`, { at: Date.now() }).catch(() => {})
       }
       devLog('reply', { mode: replyMode, delivered, replyLen: (body || '').length, body: body || '', turns, stopReason }, traceId, ctx.devScope)
+      // ── 自动 TTS（agent.tts.autoReply，默认开）：最终回复送达后追加语音 ——
+      // 内容 = LLM 最终回复剥除 md/代码（stripForSpeech）；文字/图片照常发送，语音是补充，用户选定的形式。
+      // fire-and-forget：合成 7~15s，不占用会话 single-flight 队列（否则下一条消息会排队等待）；
+      // 多个语音交给 TTS 服务内部串行队列按序生成。跳过：未送达 / 本轮已用 tts_speak 点播（防重复语音）/
+      // 剥除后无内容。任何失败只记日志（warn + devLog），不影响已完成的投递终态。
+      if (delivered && rt.tts && cfg.tts?.autoReply !== false && String(body || '').trim() && !agentInst?._ranTools?.has('tts_speak')) {
+        const speakText = stripForSpeech(body, { maxChars: Number(cfg.tts?.replyMaxChars ?? 300) })
+        if (speakText) {
+          const messages = Array.isArray(agentInst?.messages) ? agentInst.messages.slice(-8) : []
+          void (async () => {
+            const started = Date.now()
+            try {
+              const vr = await rt.tts.synthesize({ text: speakText, context: { messages } })
+              const ms = Date.now() - started
+              if (!vr.ok) {
+                Log.warn('[tts] 回复语音合成失败：', vr.error)
+                devLog('tts_reply', { ok: false, error: String(vr.error || '').slice(0, 200), chars: speakText.length, ms }, traceId, ctx.devScope)
+                return
+              }
+              if (typeof segment === 'undefined' || typeof segment.record !== 'function') {
+                Log.warn('[tts] 语音已生成但当前适配器不支持语音消息（segment.record 不可用）')
+                return
+              }
+              const vout = await safeReply(segment.record(vr.file))
+              devLog('tts_reply', {
+                ok: !!vout.ok, sent: !!vout.ok, voice: vr.voice, mode: vr.mode, tier: vr.tier,
+                chars: speakText.length, ms, error: vout.ok ? null : (vout.error || 'send rejected'),
+              }, traceId, ctx.devScope)
+              if (!vout.ok) Log.warn('[tts] 回复语音发送失败：', vout.error)
+            } catch (e) {
+              Log.warn('[tts] 自动语音异常（不影响回复）', e?.message || e)
+            }
+          })()
+        } else {
+          Log.debug('[tts] 回复剥除 md/代码后无可用语音内容，跳过自动语音')
+        }
+      }
       })
       // run 正常结束：标记本轮结束，未被 check_subagent 消费的子代理终态结果异步回推
       try { rt.multiagent?.endRun?.(ctx) } catch { /* noop */ }

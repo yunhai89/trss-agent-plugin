@@ -476,6 +476,8 @@ mcp:
 tts:
   enable: true
   provider: indextts
+  autoReply: true          # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
+  replyMaxChars: 300       # 自动语音最大字符数（超长按句截断；0=不限）
   indextts:
     endpoint: "http://127.0.0.1:7860"   # IndexTTS 服务地址（Web 面板「语音合成」可测试连接）
     lang: ZH
@@ -489,6 +491,7 @@ tts:
 ```
 
 - 配置入口：Web 管理面板 → **语音合成**（服务卡片 → 弹窗配置：接口地址 / 测试连接 / 参考音频上传+命名 / 情绪模式与 8 维滑块）。
+- **自动语音**（`autoReply`，默认开）：每条最终回复自动追加语音——文字/图片照常发送，语音内容是正文剥除 markdown/代码/链接/表格/emoji 后的文本（超长按句截断，`replyMaxChars`）；合成全过程有 `[tts] 合成开始/完成` 日志。`tts_speak` 工具保留给指定音色/情绪的点播（本轮已点播则不重复补发）。
 - 三种情绪模式：`same` 沿用音色参考的情绪；`audio` 另给一段情绪参考音频（`emotionWeight` 调影响强度）；`vector` 保留音色、用 8 维向量控制高兴/愤怒/悲伤/害怕/厌恶/忧郁/惊讶/平静，默认由 LLM 自动调节。
 - 档位：`pro` 一次合成（快）；`max` LLM 按需拆分、逐段情绪分别合成后用 **ffmpeg** 拼接（更细腻、更耗时，宿主要装 ffmpeg）。
 - 何时用语音、各模式怎么选：见技能 [`skills/tts.md`](skills/tts.md)（Agent 按需加载，不占常驻上下文）。

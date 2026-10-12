@@ -25,6 +25,8 @@ export const TTS_TEXT_MAX = 5000
 export const TTS_DEFAULTS = {
   enable: true,
   provider: 'indextts',
+  autoReply: true,        // 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
+  replyMaxChars: 300,     // 自动语音最大字符数（超长按句截断；0=不限）
   indextts: {
     endpoint: '',
     lang: 'ZH',
@@ -127,23 +129,23 @@ export class TtsService {
   async _synthesize(p) {
     const ix = this.cfg.indextts
     const notes = []
+    const fail = (msg) => { this.logger('warn', `[tts] 合成未执行：${msg}`); return { ok: false, error: msg } }
     const text = String(p.text || '').trim()
-    if (!text) return { ok: false, error: '合成文本为空' }
-    if (text.length > TTS_TEXT_MAX) return { ok: false, error: `文本过长（${text.length} 字，上限 ${TTS_TEXT_MAX}）；请分段调用或多轮发送` }
+    if (!text) return fail('合成文本为空')
+    if (text.length > TTS_TEXT_MAX) return fail(`文本过长（${text.length} 字，上限 ${TTS_TEXT_MAX}）；请分段调用或多轮发送`)
 
     const voice = this._resolveVoice(p.voice)
     if (!voice) {
       const want = String(p.voice || '').trim()
       const pool = this.voices('voice').map((r) => r.name)
-      return {
-        ok: false,
-        error: want
+      return fail(
+        want
           ? `音色参考「${want}」不存在；可用：${pool.join('、') || '（尚未上传，请到 Web 面板「语音合成」上传并命名）'}`
           : '没有可用的音色参考音频：请在 Web 面板「语音合成 → IndexTTS」上传参考音频并命名',
-      }
+      )
     }
     const voicePath = this.refs.filePath(voice)
-    if (!voicePath || !fs.existsSync(voicePath)) return { ok: false, error: `音色参考「${voice.name}」的文件不存在，请重新上传` }
+    if (!voicePath || !fs.existsSync(voicePath)) return fail(`音色参考「${voice.name}」的文件不存在，请重新上传`)
 
     const mode = ['same', 'audio', 'vector'].includes(p.emotionMode) ? p.emotionMode : (['same', 'audio', 'vector'].includes(ix.emotionMode) ? ix.emotionMode : 'same')
     const lang = TTS_LANGS.includes(String(p.lang || ix.lang).toUpperCase()) ? String(p.lang || ix.lang).toUpperCase() : 'ZH'
@@ -154,7 +156,7 @@ export class TtsService {
       emoRef = this._resolveEmotionRef(p.emotionRef)
       if (!emoRef) {
         const pool = this.voices('emotion').map((r) => r.name)
-        return { ok: false, error: pool.length ? `情绪参考音频未指定或不存在；可用：${pool.join('、')}` : '情绪参考模式需要先上传情绪参考音频（Web 面板「语音合成 → IndexTTS → 参考音频」）' }
+        return fail(pool.length ? `情绪参考音频未指定或不存在；可用：${pool.join('、')}` : '情绪参考模式需要先上传情绪参考音频（Web 面板「语音合成 → IndexTTS → 参考音频」）')
       }
     }
     const emoWeight = Number.isFinite(Number(p.emotionWeight)) ? Math.min(1, Math.max(0, Number(p.emotionWeight))) : ix.emotionWeight
@@ -162,6 +164,10 @@ export class TtsService {
     // 档位：仅 vector 模式有 pro/max 之分
     let tier = ['pro', 'max'].includes(p.tier) ? p.tier : (['pro', 'max'].includes(ix.tier) ? ix.tier : 'pro')
     if (mode !== 'vector') tier = 'pro'
+
+    // 可观测性：合成开始即可在控制台看到（此前只有 debug 级"合成完成"，用户无法判断是否在合成）
+    const autoPlan = mode === 'vector' && !parseVectorParam(p.vector) && ix.autoEmotion !== false && !!this.llm
+    this.logger('info', `[tts] 合成开始：音色=${voice.name} 模式=${mode}${autoPlan ? '(LLM自动调节)' : ''} 档位=${tier} 文本=${text.length}字${emoRef ? ` 情绪参考=${emoRef.name}` : ''}`)
 
     const t0 = this.now()
     const session = { voiceServerPath: null, emoServerPath: null }
@@ -215,7 +221,7 @@ export class TtsService {
           durationFactor: ix.durationFactor, maxTextTokensPerSegment: ix.maxTextTokensPerSegment,
         })
         const file = _writeOut(r.buffer, 'wav')
-        this.logger('debug', `[tts] 合成完成（${mode}/${tier}，${file}，${Date.now() - t0}ms）`)
+        this.logger('info', `[tts] 合成完成：${mode}/${tier} 音色=${voice.name} ${text.length}字 用时=${Date.now() - t0}ms`)
         return {
           ok: true, file, tier, mode, voice: voice.name, lang,
           ...(mode === 'vector' && vectorArr ? { vector: vectorToObject(vectorArr) } : {}),
@@ -282,7 +288,7 @@ export class TtsService {
           })
           if (!merged.ok) return { ok: false, error: `分段合成完成但合并失败：${merged.error}` }
         }
-        this.logger('debug', `[tts] max 档合成完成（${files.length} 段 → ${finalFile}，${Date.now() - t0}ms）`)
+        this.logger('info', `[tts] 合成完成：${mode}/max ${files.length}段 音色=${voice.name} ${text.length}字 用时=${Date.now() - t0}ms`)
         return {
           ok: true, file: finalFile, tier: 'max', mode, voice: voice.name, lang,
           segments: segments.map((s) => ({ text: s.text, vector: vectorToObject(s.vector) })),
@@ -294,6 +300,7 @@ export class TtsService {
         for (const f of files) { try { fs.unlinkSync(f) } catch { /* noop */ } }
       }
     } catch (e) {
+      this.logger('warn', '[tts] 合成失败：', e?.message || e)
       return { ok: false, error: e?.message || String(e) }
     }
   }

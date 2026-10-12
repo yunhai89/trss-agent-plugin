@@ -5,10 +5,12 @@
  * 情绪模式与 pro/max 档位见 service.js / emotion.js，面向 Agent 的说明见 skills/tts.md。
  */
 export { TtsService, normalizeTtsConfig, TTS_DEFAULTS, TTS_LANGS, TTS_TEXT_MAX, parseVectorParam } from './service.js'
+export { stripForSpeech } from './speech-text.js'
 export { makeTtsSpeakTool } from './tools.js'
 export { RefLibrary, REF_KINDS, AUDIO_EXTS, normalizeRefName, extOf } from './refs.js'
 export {
   IndexTtsClient, clampVector, vectorToObject, fileData, VECTOR_KEYS, VECTOR_ZH,
+  VECTOR_ALIASES, normalizeVectorKeys,
 } from './indextts.js'
 export {
   planEmotion, buildPlanPrompt, buildEmotionSystemPrompt, normalizeContext,
