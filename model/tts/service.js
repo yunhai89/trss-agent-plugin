@@ -439,6 +439,7 @@ export class TtsService {
     let planStyle = ''
     let planTag = ''
     let planTagged = ''
+    let judgeFailed = false
     if (explicitVec) {
       reason = '调用方显式指定向量'
     } else if (auto) {
@@ -460,10 +461,14 @@ export class TtsService {
           style: s.style || '', tag: s.tag || '', tagged: s.tagged || '',
         })) : null
       } else {
+        judgeFailed = true
         notes.push('情绪判定不可用，已按配置默认情绪回退')
       }
     }
-    const emoDesc = explicitVec ? '显式向量' : (planVector ? 'LLM自动判定' : '固定/关闭')
+    // 日志如实区分：自动判定失败回退 ≠ 主动关闭/固定（此前两者都显示"固定/关闭"，排查时误导）
+    const emoDesc = explicitVec ? '显式向量'
+      : (planVector ? 'LLM自动判定'
+        : (judgeFailed ? '自动判定失败→回退默认' : '固定/关闭'))
     this.logger('info', `[tts] 合成开始：服务商=${id} 音色=${voice} 情绪=${emoDesc} 档位=${tier} 文本=${text.length}字`)
 
     const t0 = this.now()

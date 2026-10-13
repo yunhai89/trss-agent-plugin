@@ -346,7 +346,7 @@ agent:
       segmentGapMs: 300    # max 档段间静音（毫秒）
       maxSegmentChars: 140 # max 档单段字符上限（防拆得过碎）
       model: ""            # 情绪判定用模型（模型条目 id/模型名；留空=tts.judgeModel→utilityModel→主模型）
-      judgeTimeoutMs: 30000  # 情绪判定单次调用总预算（毫秒；超时中止请求并回退默认向量，不拖语音；快失败会在预算内重试一次）
+      judgeTimeoutMs: 30000  # 情绪判定单次调用总预算（毫秒；超时中止请求并回退默认向量，不拖语音；快失败会在预算内重试一次，慢超时不重试）
       durationFactor: 1.0  # 语速/时长系数 0.5~2.0（越小越快）
       maxTextTokensPerSegment: 100  # 服务端内部分段上限（建议 80~120）
     # ── 云服务商：仅在 provider 选中 + 本服务配置齐全时才会把讲稿发到对应平台 ──
