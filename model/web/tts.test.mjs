@@ -67,6 +67,10 @@ await test('GET /api/tts：默认配置 + 服务商列表 + 空参考库', async
   ok(r.body.data.providers.find((p) => p.id === 'doubao')?.configured === false, '豆包默认未配置')
   ok(r.body.data.providers.find((p) => p.id === 'minimax')?.fields?.some((f) => f.key === 'voiceId'), 'MiniMax 字段 schema 下发')
   ok(r.body.data.providers.find((p) => p.id === 'mimo')?.fields?.some((f) => f.key === 'style'), 'MiMo 字段 schema 下发')
+  for (const id of ['doubao', 'minimax', 'mimo']) {
+    const tier = r.body.data.providers.find((p) => p.id === id)?.fields?.find((f) => f.key === 'tier')
+    ok(tier && tier.type === 'select' && tier.options.some((o) => o[0] === 'max'), `${id} 面板含 pro/max 档位字段`)
+  }
   ok(Array.isArray(r.body.data.refs) && r.body.data.refs.length === 0, '参考库空')
   ok(r.body.data.indextts?.emotionMode === 'same', 'indextts 默认情绪模式 same')
   ok(r.body.data.doubao?.resourceId === 'seed-tts-2.0' && r.body.data.minimax?.model === 'speech-2.8-hd', '云服务商默认配置下发')
