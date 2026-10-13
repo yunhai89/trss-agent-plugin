@@ -74,7 +74,7 @@ await test('GET /api/tts：默认配置 + 服务商列表 + 空参考库', async
   ok(Array.isArray(r.body.data.refs) && r.body.data.refs.length === 0, '参考库空')
   ok(r.body.data.indextts?.emotionMode === 'same', 'indextts 默认情绪模式 same')
   ok(r.body.data.doubao?.resourceId === 'seed-tts-2.0' && r.body.data.minimax?.model === 'speech-2.8-hd', '云服务商默认配置下发')
-  ok(r.body.data.judgeTimeoutMs === 30000, '情绪判定全局超时下发')
+  ok(r.body.data.judgeTimeoutMs === 300000, '情绪判定全局超时下发（默认 5 分钟）')
 })
 
 let voiceId = ''

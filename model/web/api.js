@@ -824,7 +824,7 @@ function ttsPayload() {
     replyMaxChars: Number(cfg.replyMaxChars ?? 300) || 0,
     hdVoice: cfg.hdVoice !== false,
     judgeModel: cfg.judgeModel || '',
-    judgeTimeoutMs: Number(cfg.judgeTimeoutMs) || 30000,
+    judgeTimeoutMs: Number(cfg.judgeTimeoutMs) || 300000,
     providers: PROVIDERS.map((p) => {
       const st = providerConfigured(p.id, cfg)
       return { id: p.id, name: p.name, desc: p.desc, docs: p.docs, fields: p.fields, configured: st.configured, missing: st.missing }

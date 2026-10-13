@@ -253,7 +253,7 @@ export function withTimeout(promise, ms, message = '超时', onTimeout = null) {
 
 /**
  * 调 LLM 规划情绪。
- * 预算语义（默认 30000ms，tts.indextts.judgeTimeoutMs 可配）：整个判定调用受总预算约束；
+ * 预算语义（默认 300000ms=5 分钟，tts.judgeTimeoutMs 可配）：整个判定调用受总预算约束；
  * 单次尝试最多用一半预算，快速失败（网络/限流等）且预算尚余时再试一次——首次请求偶发
  * 卡在连接/重试退避时，新连接往往几秒就能成功；两次都超预算则如实施加默认值回退，不拖语音。
  * 超时会 abort 底层请求（signal 透传到 provider.chat → fetch），不再让它在后台空跑。

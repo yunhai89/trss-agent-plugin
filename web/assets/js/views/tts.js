@@ -26,7 +26,7 @@
     emotionMode: 'same', emotionRef: '', emotionWeight: 0.65,
     autoEmotion: true, vector: [], tier: 'pro',
     segmentGapMs: 300, maxSegmentChars: 140, model: '',
-    judgeTimeoutMs: 30000,
+    judgeTimeoutMs: 300000,
     durationFactor: 1.0, maxTextTokensPerSegment: 100,
   }
 
@@ -94,7 +94,7 @@
       const saveReplyMaxChars = (v) => put({ replyMaxChars: Math.max(0, Math.min(5000, Number(v) || 0)) }, '已保存自动语音字数上限')
       const toggleHdVoice = (v) => put({ hdVoice: !!v }, v ? '已开启高清语音' : '已关闭高清语音')
       const saveJudgeModel = (v) => put({ judgeModel: String(v || '').trim() }, '已保存情绪判定模型')
-      const saveJudgeTimeout = (v) => put({ judgeTimeoutMs: Math.max(1000, Math.min(600000, Number(v) || 30000)) }, '已保存情绪判定超时')
+      const saveJudgeTimeout = (v) => put({ judgeTimeoutMs: Math.max(1000, Math.min(600000, Number(v) || 300000)) }, '已保存情绪判定超时')
 
       /* ── 服务卡片 → 弹窗 ── */
       const openService = (p) => {
@@ -238,7 +238,7 @@
               <input class="inp mono" style="width:200px" :value="data?.judgeModel || ''" placeholder="留空=utilityModel→主模型" @change="saveJudgeModel($event.target.value)">
             </cfg-row>
             <cfg-row name="情绪判定超时(ms)" desc="情绪判定单次调用总预算（默认 30000；超时中止请求并按配置回退，不影响出语音）">
-              <input type="number" class="inp" style="width:120px" min="1000" max="600000" step="1000" :value="data?.judgeTimeoutMs || 30000" @change="saveJudgeTimeout($event.target.value)">
+              <input type="number" class="inp" style="width:120px" min="1000" max="600000" step="1000" :value="data?.judgeTimeoutMs || 300000" @change="saveJudgeTimeout($event.target.value)">
             </cfg-row>
           </div></div>
         </div>
@@ -391,7 +391,7 @@
             <cfg-row full name="情绪判定模型" desc="vector 自动调节用的小模型（模型条目 id/模型名）；留空=utilityModel→主模型">
               <input class="inp mono" style="width:280px" v-model="form.model" placeholder="留空=utilityModel→主模型">
             </cfg-row>
-            <cfg-row name="情绪判定超时(ms)" desc="judgeTimeoutMs：超时中止请求并回退默认向量（默认 30000；快失败会在预算内重试一次）">
+            <cfg-row name="情绪判定超时(ms)" desc="judgeTimeoutMs：超时中止请求并回退默认向量（默认 300000=5 分钟；快失败会在预算内重试一次，慢超时不重试）">
               <input type="number" class="inp" style="width:130px" min="3000" step="1000" v-model.number="form.judgeTimeoutMs">
             </cfg-row>
           </div>

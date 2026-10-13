@@ -482,7 +482,7 @@ tts:
   replyMaxChars: 300       # 自动语音最大字符数（超长按句截断；0=不限）
   hdVoice: true            # 发送前高清化：响度标准化 + 存在感补偿（需宿主 ffmpeg，失败自动回退）
   judgeModel: ""           # 情绪判定模型（四家统一；留空=indextts.model→utilityModel→主模型）
-  judgeTimeoutMs: 30000    # 情绪判定总预算（毫秒，四家统一）
+  judgeTimeoutMs: 300000   # 情绪判定总预算（毫秒，默认 5 分钟，四家统一）
   indextts:
     endpoint: "http://127.0.0.1:7860"   # IndexTTS 服务地址（Web 面板「语音合成」可测试连接）
     apiKey: ""               # 鉴权网关 API Key（可选，itts_xxx；v1.2 起网关版必填，官方无鉴权留空）
@@ -495,7 +495,7 @@ tts:
     tier: pro                # pro=整段一套情绪 | max=按需拆分逐段情绪 + ffmpeg 合并
     segmentGapMs: 300        # max 档段间静音
     model: ""                # 情绪判定用模型（模型条目 id/模型名；留空=utilityModel→主模型）
-    judgeTimeoutMs: 30000    # 情绪判定单次调用总预算（毫秒；超时中止请求并回退；快失败在预算内重试一次，慢超时不重试）
+    judgeTimeoutMs: 300000   # 情绪判定单次调用总预算（毫秒，默认 5 分钟；超时中止请求并回退；快失败在预算内重试一次，慢超时不重试）
   doubao:                  # 豆包语音合成（火山引擎 Seed-TTS，HTTP Chunked 单向流式）
     apiKey: ""             # 火山引擎 API Key（新版控制台 → API Key 管理，按资源开通「语音合成」）
     resourceId: seed-tts-2.0  # seed-tts-2.0 | seed-tts-1.0 | seed-tts-1.0-concurr（决定可用音色与计费）
@@ -539,7 +539,7 @@ tts:
 - 配置入口：Web 管理面板 → **语音合成**（服务卡片 → 弹窗配置：接口地址 / API Key / 音色 ID / 测试连接 / 参考音频上传+命名 / 情绪模式与 8 维滑块）。云服务商的「测试连接」会真实合成 2 个字（官方唯一可探活方式，极少计费）。
 - **鉴权（可选）**：IndexTTS 服务若套了鉴权网关（v1.2+，官方本体无认证），填 `agent.tts.indextts.apiKey`（`itts_xxx`），请求统一带 `X-API-Key` 头；`401`＝Key 缺失/错误、`429`＝失败限流、`503`＝网关配置故障、`502/504`＝上游未就绪，错误信息会直接提示对应处理方式。本插件可直连 `127.0.0.1:7862` 本体（同机部署可绕过网关，key 留空）。
 - **自动语音**（`autoReply`，默认开）：每条最终回复自动追加语音——文字/图片照常发送，语音内容是正文剥除 markdown/代码/链接/表格/emoji 后的文本（超长按句截断，`replyMaxChars`）；合成全过程有 `[tts] 合成开始/完成` 日志。`tts_speak` 工具保留给指定音色/情绪的点播（本轮已点播则不重复补发）。**讲稿清洗在合成入口统一执行**（点播同样生效），破折号（——）会转成停顿而不是被读成"减减"。
-- **情绪判定（四家共用一条 LLM 链路）**：由一次旁路 LLM 调用结合文本与近期对话判定 8 维情绪（高兴/愤怒/悲伤/害怕/厌恶/忧郁/惊讶/平静），并可直接产出自然语言风格指令（`style`，支持复合情绪/语速/发声方式/导演式）与音频标签（`tag`/`tagged`）——IndexTTS 直接下发向量；豆包 1.0 → `emotion` 标签 + `emotion_scale`（由向量强度换算）；豆包 2.0 → 优先用 LLM `style` 作 `context_texts` 语音指令（无则回退向量模板）；MiniMax → 9 标签之一（忧郁→sad）；MiMo → LLM `style` 作 user 风格指令 + 按 `tagMode` 组合句首 `(风格)` 与行内 `[标签]`（保真校验）。`judgeModel` 可指定更快/更便宜的小模型，`judgeTimeoutMs` 控制单次判定总预算（默认 30s，单次尝试最多用一半）——快失败（网络/限流等秒级返回）会在剩余预算内自动重试一次；打满单次预算的**慢超时不再重试**（慢模型重试必然再超时，避免白等第二个半预算）；判定失败只影响情绪、不影响出语音，日志会给出预算/尝试次数/耗时与"自动判定失败→回退默认"标注便于排查。
+- **情绪判定（四家共用一条 LLM 链路）**：由一次旁路 LLM 调用结合文本与近期对话判定 8 维情绪（高兴/愤怒/悲伤/害怕/厌恶/忧郁/惊讶/平静），并可直接产出自然语言风格指令（`style`，支持复合情绪/语速/发声方式/导演式）与音频标签（`tag`/`tagged`）——IndexTTS 直接下发向量；豆包 1.0 → `emotion` 标签 + `emotion_scale`（由向量强度换算）；豆包 2.0 → 优先用 LLM `style` 作 `context_texts` 语音指令（无则回退向量模板）；MiniMax → 9 标签之一（忧郁→sad）；MiMo → LLM `style` 作 user 风格指令 + 按 `tagMode` 组合句首 `(风格)` 与行内 `[标签]`（保真校验）。`judgeModel` 可指定更快/更便宜的小模型，`judgeTimeoutMs` 控制单次判定总预算（默认 5 分钟，单次尝试最多用一半）——快失败（网络/限流等秒级返回）会在剩余预算内自动重试一次；打满单次预算的**慢超时不再重试**（慢模型重试必然再超时，避免白等第二个半预算）；判定失败只影响情绪、不影响出语音，日志会给出预算/尝试次数/耗时与"自动判定失败→回退默认"标注便于排查。
 - **云服务商接入要点**：
   - **豆包**（[文档](https://docs.volcengine.com/docs/DoubaoVoice/unidirectional-streaming-text-to-speech-http?lang=zh)）：HTTP Chunked 单向流式（NDJSON，base64 分片按序拼接，`code 20000000` 结束）；新版控制台只需 `X-Api-Key` + 资源版本；`resourceId` 决定可用音色（2.0 音色以 `_uranus_bigtts` 结尾）与计费；语音指令仅 2.0/复刻 2.0 支持（建议 `model: seed-tts-2.0-expressive`）。
   - **MiniMax**（[文档](https://platform.minimaxi.com/docs/api-reference/speech-t2a-http)）：`POST /v1/t2a_v2`（Bearer 鉴权；旧版账号可填 `groupId`），响应 `data.audio` 为 **hex** 编码；情绪仅 `speech-2.6/2.8` 全量支持（`fluent/whisper` 仅 2.6；2.8 不支持 whisper）。
