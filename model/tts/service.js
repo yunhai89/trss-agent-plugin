@@ -51,7 +51,7 @@ export const TTS_DEFAULTS = {
     segmentGapMs: 300,      // max 档段间静音毫秒
     maxSegmentChars: MAX_SEGMENT_CHARS,
     model: '',              // 情绪判定用模型（模型条目 id/模型名；留空=utilityModel→主模型）
-    judgeTimeoutMs: 30000,  // 情绪判定单次调用总预算（毫秒；超时中止请求并回退默认向量，不拖语音）
+    judgeTimeoutMs: 300000, // 情绪判定单次调用总预算（毫秒；超时中止请求并回退默认向量，不拖语音）
     durationFactor: 1.0,
     maxTextTokensPerSegment: 100,
   },
@@ -105,7 +105,7 @@ export const TTS_DEFAULTS = {
     timeoutMs: 120000,
   },
   judgeModel: '',                 // 情绪判定模型（留空=indextts.model → utilityModel → 主模型）
-  judgeTimeoutMs: 30000,          // 情绪判定总预算（毫秒；对全部服务商生效）
+  judgeTimeoutMs: 300000,         // 情绪判定总预算（毫秒；对全部服务商生效）
 }
 
 const _isObj = (v) => v && typeof v === 'object' && !Array.isArray(v)
@@ -417,7 +417,7 @@ export class TtsService {
     return voice || null
   }
 
-  /** 情绪判定预算（全局 judgeTimeoutMs → 历史 indextts.judgeTimeoutMs → 默认 30s） */
+  /** 情绪判定预算（全局 judgeTimeoutMs → 历史 indextts.judgeTimeoutMs → 默认 5 分钟） */
   _judgeTimeoutMs() {
     return Math.max(1000, Number(this.cfg.judgeTimeoutMs) || Number(this.cfg.indextts.judgeTimeoutMs) || TTS_DEFAULTS.judgeTimeoutMs)
   }
