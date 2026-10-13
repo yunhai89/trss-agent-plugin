@@ -401,8 +401,9 @@ agent:
       apiKey: ""           # MiMo 开放平台 API Key
       model: mimo-v2.5-tts # mimo-v2.5-tts（预置音色）| mimo-v2.5-tts-voicedesign（文字设计音色，style 必填）
       voice: mimo_default  # 预置音色：mimo_default/冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean
-      autoEmotion: true    # LLM 判定情绪 → 自然语言风格指令（user message）
-      style: ""            # 固定风格/音色描述指令（留空=LLM 生成；voicedesign 必填）
+      autoEmotion: true    # LLM 判定 → 自然语言风格指令（复合情绪/语速/发声方式/导演式）+ 音频标签
+      style: ""            # 固定风格/音色描述指令（留空=LLM 生成；voicedesign 必填；可写"用东北话说""用唱歌的方式"）
+      tagMode: auto        # 音频标签：auto=句首 (风格) + 行内 [标签]（原文保真校验，改写即丢弃）| style=只加句首 | off=不用
       format: wav          # wav | mp3（max 档固定 wav）
       tier: pro
       timeoutMs: 120000

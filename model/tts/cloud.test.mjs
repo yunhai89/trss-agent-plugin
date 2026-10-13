@@ -14,6 +14,7 @@ import {
   providerConfigured, dominantEmotion, labelFor, doubaoScaleFor, styleInstructionFor, langFor,
   parseDoubaoNdjson, DoubaoTtsClient, MinimaxTtsClient, MimoTtsClient,
   doubaoHint, minimaxHint, MIMO_VOICES,
+  parsePlan, stripAudioTags, isFaithfulTagged, buildEmotionSystemPrompt,
 } from './index.js'
 
 let passed = 0, failed = 0
@@ -276,6 +277,86 @@ await test('TtsService：MiMo = LLM 情绪 → 风格指令；固定 style 优�
   }, { dataDir, logger: () => {}, llm, fetchImpl, ffmpegRunner: fakeRunner })
   await fixed.synthesize({ text: 'x' })
   eq(calls[1].messages[0].content, '用极快的语速说', '固定 style 优先于 LLM 生成')
+})
+
+/* ─────────────────────── 5b. MiMo 情绪控制补全：LLM 风格指令 + 音频标签 ─────────────────────── */
+await test('parsePlan：style/tag/tagged 清洗与原文保真校验', () => {
+  const plan = parsePlan(JSON.stringify({
+    vector: { happy: 0.8 },
+    style: '用轻快上扬的语调说，语速稍快\n换行会被压平',
+    tag: '（开心）',
+    tagged: '(开心)太好了[笑]，终于成了！',
+  }), { tier: 'pro', text: '太好了，终于成了！' })
+  eq(plan.style, '用轻快上扬的语调说，语速稍快 换行会被压平', 'style 清洗换行')
+  eq(plan.tag, '开心', 'tag 去括号')
+  eq(plan.tagged, '(开心)太好了[笑]，终于成了！', '忠实 tagged 保留')
+  const bad = parsePlan(JSON.stringify({ vector: { happy: 0.8 }, tagged: '太棒了[笑]，终于成了！' }), { tier: 'pro', text: '太好了，终于成了！' })
+  eq(bad.tagged, undefined, '改写原文的 tagged 丢弃')
+  const noTag = parsePlan(JSON.stringify({ vector: { calm: 0.6 }, tagged: '太好了，终于成了！' }), { tier: 'pro', text: '太好了，终于成了！' })
+  eq(noTag.tagged, undefined, '没插标签的 tagged 丢弃')
+  const max = parsePlan(JSON.stringify({
+    vector: { calm: 0.5 },
+    segments: [
+      { text: '第一句。', vector: { happy: 0.9 }, style: '轻快上扬', tag: '开心', tagged: '第一句[笑]。' },
+      { text: '第二句。', vector: { sad: 0.8 }, tagged: '第二句。[叹气]' },
+      { text: '第三句。', vector: { sad: 0.7 }, tagged: '第三句。[叹气]吧' },
+    ],
+  }), { tier: 'max', text: '第一句。第二句。第三句。' })
+  eq(max.segments.length, 3, 'max 三段')
+  eq(max.segments[0].style, '轻快上扬', '段级 style 保留')
+  eq(max.segments[0].tagged, '第一句[笑]。', '段级 tagged 保留')
+  eq(max.segments[1].tagged, '第二句。[叹气]', '句尾标签也算忠实')
+  eq(max.segments[2].tagged, undefined, '段级不忠实 tagged 丢弃')
+  ok(stripAudioTags('(开心)太好了[笑]，终于成了！') === '太好了，终于成了！', 'stripAudioTags 去句首与行内标签')
+  ok(isFaithfulTagged('太好了[笑]，终于成了！', '太好了，终于成了！'), '保真判定通过')
+  ok(!isFaithfulTagged('太棒了[笑]，终于成了！', '太好了，终于成了！'), '改写判定失败')
+  const prompt = buildEmotionSystemPrompt()
+  ok(prompt.includes('风格指令 style') && prompt.includes('音频标签'), '判定提示词含 style/标签契约')
+  ok(prompt.includes('逐字保留原文'), '提示词明确保真约束')
+})
+
+await test('TtsService：MiMo LLM 风格指令 + 标签（保真）/tagMode 开关', async () => {
+  const calls = []
+  const fetchImpl = mkFetch({
+    'chat/completions': async (url, init) => {
+      calls.push(JSON.parse(init.body))
+      return jsonRes({ choices: [{ message: { audio: { data: Buffer.from('M').toString('base64') } } }] })
+    },
+  })
+  const llm = { run: async () => ({ content: JSON.stringify({ vector: { happy: 0.9 }, style: '用压抑的狂喜说，语速偏快', tag: '兴奋', tagged: '太好了[笑]，终于成了！' }) }) }
+  const mk = (mimo) => new TtsService({ enable: true, provider: 'mimo', mimo: { apiKey: 'k', voice: '冰糖', format: 'wav', ...mimo } },
+    { dataDir, logger: () => {}, llm, fetchImpl, ffmpegRunner: fakeRunner })
+  const r = await mk({}).synthesize({ text: '太好了，终于成了！' })
+  ok(r.ok, '合成成功')
+  eq(calls[0].messages[0].content, '用压抑的狂喜说，语速偏快', 'user = LLM 风格指令（复合情绪）')
+  eq(calls[0].messages[1].content, '(兴奋)太好了[笑]，终于成了！', 'assistant = 句首(风格) + 行内标签')
+
+  await mk({ tagMode: 'style' }).synthesize({ text: '太好了，终于成了！' })
+  eq(calls[1].messages[1].content, '(兴奋)太好了，终于成了！', 'tagMode=style 只加句首标签')
+  await mk({ tagMode: 'off' }).synthesize({ text: '太好了，终于成了！' })
+  eq(calls[2].messages[1].content, '太好了，终于成了！', 'tagMode=off 不加标签')
+  eq(calls[2].messages[0].content, '用压抑的狂喜说，语速偏快', 'off 仍使用 LLM 风格指令')
+
+  const llmBad = { run: async () => ({ content: JSON.stringify({ vector: { happy: 0.9 }, tag: '开心', tagged: '太棒了[笑]，成了！' }) }) }
+  const svcBad = new TtsService({ enable: true, provider: 'mimo', mimo: { apiKey: 'k', format: 'wav' } },
+    { dataDir, logger: () => {}, llm: llmBad, fetchImpl, ffmpegRunner: fakeRunner })
+  await svcBad.synthesize({ text: '太好了，终于成了！' })
+  eq(calls[3].messages[1].content, '(开心)太好了，终于成了！', '改写原文的 tagged 被丢弃（只保留句首标签）')
+})
+
+await test('TtsService：豆包 2.0 语音指令优先用 LLM style（无 style 时回退向量模板）', async () => {
+  const calls = []
+  const fetchImpl = mkFetch({ 'unidirectional': async (url, init) => { calls.push(JSON.parse(init.body)); return new Response(NDJSON_OK, { status: 200 }) } })
+  const llm = { run: async () => ({ content: JSON.stringify({ vector: { sad: 0.9 }, style: '用特别痛心的语气说' }) }) }
+  const svc = new TtsService({ enable: true, provider: 'doubao', doubao: { apiKey: 'k', speaker: 's20', resourceId: 'seed-tts-2.0', format: 'wav', sampleRate: 24000 } },
+    { dataDir, logger: () => {}, llm, fetchImpl, ffmpegRunner: fakeRunner })
+  await svc.synthesize({ text: '他走了。' })
+  eq(JSON.parse(calls[0].req_params.additions).context_texts[0], '用特别痛心的语气说', 'LLM style → context_texts')
+  const llmVecOnly = { run: async () => ({ content: JSON.stringify({ vector: { sad: 0.9 } }) }) }
+  const svc2 = new TtsService({ enable: true, provider: 'doubao', doubao: { apiKey: 'k', speaker: 's20', resourceId: 'seed-tts-2.0', format: 'wav', sampleRate: 24000 } },
+    { dataDir, logger: () => {}, llm: llmVecOnly, fetchImpl, ffmpegRunner: fakeRunner })
+  await svc2.synthesize({ text: '他走了。' })
+  ok(/难过低落/.test(JSON.parse(calls[1].req_params.additions).context_texts[0]), '无 style 回退向量模板')
 })
 
 await test('TtsService：云服务商未配置 → 可读错误，不发请求', async () => {

@@ -97,8 +97,9 @@ export const TTS_DEFAULTS = {
     apiKey: '',
     model: 'mimo-v2.5-tts',       // mimo-v2.5-tts | mimo-v2.5-tts-voicedesign
     voice: 'mimo_default',        // 预置音色（voicedesign 模型忽略）
-    autoEmotion: true,            // LLM 判定 → 自然语言风格指令
+    autoEmotion: true,            // LLM 判定 → 自然语言风格指令（复合情绪/语速/发声方式）+ 音频标签
     style: '',                    // 固定风格/音色描述指令（留空=LLM 判定生成；voicedesign 必填）
+    tagMode: 'auto',              // 音频标签：auto=句首 (风格) + 行内 [标签]（经原文保真校验）| style=只加句首 | off=不用
     format: 'wav',                // wav | mp3
     tier: 'pro',
     timeoutMs: 120000,
@@ -435,6 +436,9 @@ export class TtsService {
     let planVector = explicitVec
     let segments = null
     let reason = ''
+    let planStyle = ''
+    let planTag = ''
+    let planTagged = ''
     if (explicitVec) {
       reason = '调用方显式指定向量'
     } else if (auto) {
@@ -448,7 +452,13 @@ export class TtsService {
       if (plan?.vector) {
         planVector = clampVector(plan.vector)
         reason = plan.reason || ''
-        segments = plan.segments ? plan.segments.map((s) => ({ text: s.text, vector: clampVector(s.vector) })) : null
+        planStyle = plan.style || ''
+        planTag = plan.tag || ''
+        planTagged = plan.tagged || ''
+        segments = plan.segments ? plan.segments.map((s) => ({
+          text: s.text, vector: clampVector(s.vector),
+          style: s.style || '', tag: s.tag || '', tagged: s.tagged || '',
+        })) : null
       } else {
         notes.push('情绪判定不可用，已按配置默认情绪回退')
       }
@@ -480,7 +490,11 @@ export class TtsService {
           const files = []
           try {
             for (let i = 0; i < segs.length; i++) {
-              const r = await this._cloudCall(id, { text: segs[i].text, voice, vector: segs[i].vector || planVector, p, forceWav: true })
+              const r = await this._cloudCall(id, {
+                text: segs[i].text, voice, vector: segs[i].vector || planVector,
+                style: segs[i].style || planStyle, tag: segs[i].tag || planTag, tagged: segs[i].tagged || '',
+                p, forceWav: true,
+              })
               const f = path.join(tmpDir, `cloud_${this.now()}_${process.pid}_${i}.${r.ext}`)
               fs.writeFileSync(f, r.buffer)
               files.push(f)
@@ -508,7 +522,7 @@ export class TtsService {
         }
         // 单段等同 pro：继续走下方一次合成
       }
-      const r = await this._cloudCall(id, { text, voice, vector: planVector, p })
+      const r = await this._cloudCall(id, { text, voice, vector: planVector, style: planStyle, tag: planTag, tagged: planTagged, p })
       const file = writeOut(r.buffer, r.ext)
       const hd = await this._applyHd(file)
       this.logger('info', `[tts] 合成完成：${id}/${tier} 音色=${voice} ${text.length}字 用时=${Date.now() - t0}ms${hd.enhanced ? '（已高清增强）' : ''}`)
@@ -525,8 +539,8 @@ export class TtsService {
     }
   }
 
-  /** 构造目标服务商的合成参数并调用（text 为已清洗讲稿） */
-  async _cloudCall(id, { text, voice, vector, p, forceWav = false }) {
+  /** 构造目标服务商的合成参数并调用（text 为已清洗讲稿；style/tag/tagged 为 LLM 判定的风格字段） */
+  async _cloudCall(id, { text, voice, vector, style = '', tag = '', tagged = '', p, forceWav = false }) {
     const cfgProv = this.cfg[id] || {}
     const format = forceWav ? 'wav' : (['wav', 'mp3', 'flac'].includes(cfgProv.format) ? cfgProv.format : 'wav')
     const overrideEmotion = String(p.emotion || '').trim()
@@ -534,8 +548,9 @@ export class TtsService {
     const lang = langFor(id, p.lang)
     if (id === 'doubao') {
       const is20 = String(cfgProv.resourceId || '').startsWith('seed-tts-2.0')
+      // 2.0 语音指令优先用 LLM 判定的风格指令（比向量模板更细腻），回退模板
       const instruct = is20
-        ? (overrideStyle || overrideEmotion || String(cfgProv.instruct || '').trim() || (vector ? styleInstructionFor(vector) : ''))
+        ? (overrideStyle || overrideEmotion || String(cfgProv.instruct || '').trim() || style || (vector ? styleInstructionFor(vector) : ''))
         : ''
       const label = overrideEmotion || String(cfgProv.emotion || '').trim()
         || (!is20 && vector ? labelFor('doubao', vector) : '')
@@ -562,11 +577,18 @@ export class TtsService {
       })
       return { ...out, ext: format }
     }
-    // mimo
+    // mimo：自然语言风格指令（LLM 判定 > 固定 > 向量模板）+ 音频标签（tagMode）
     const isDesign = cfgProv.model === 'mimo-v2.5-tts-voicedesign'
-    const style = overrideStyle || overrideEmotion || String(cfgProv.style || '').trim()
-      || (!isDesign && vector ? styleInstructionFor(vector) : '')
-    const out = await this.clients.mimo.synthesize({ text, style, voice, format })
+    const mimoStyle = overrideStyle || overrideEmotion || String(cfgProv.style || '').trim()
+      || (!isDesign ? (style || (vector ? styleInstructionFor(vector) : '')) : '')
+    const tagMode = ['off', 'style', 'auto'].includes(cfgProv.tagMode) ? cfgProv.tagMode : 'auto'
+    let content = String(text || '')
+    if (!isDesign && tagMode !== 'off') {
+      const prefix = tag ? `(${tag})` : ''
+      const body = (tagMode === 'auto' && tagged) ? tagged : content
+      content = prefix + body
+    }
+    const out = await this.clients.mimo.synthesize({ text: content, style: mimoStyle, voice, format })
     return { ...out, ext: format }
   }
 
