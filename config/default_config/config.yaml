@@ -96,7 +96,7 @@ agent:
     enable: true            # 窗口内留结构化台账 + context_recall 工具按 ref/关键词恢复；false 关闭归档与恢复工具（回滚杠杆）
     archiveDir: "data/context-archive"  # 压缩原文归档目录（按会话分目录，独立于会话数据生命周期）
   maxToolResultChars: 8000  # 单条工具结果字符上限（内容获取类工具可经 meta.resultCap 单独放宽到 12000）
-  keepReasoning: false      # 是否把推理(reasoning_content)回灌历史（默认 false 省 context）
+  keepReasoning: false      # 是否把推理(reasoning_content)回灌历史（默认 false 省 context；thinking 模式带工具调用的轮次按协议必需始终回传，不受此开关影响）
   stream: false             # 逐字流式输出（依赖适配器、不稳，默认关）
   reflect: auto             # 自我反思/自纠：off=关 | auto=仅多轮/用工具时(默认) | always=每次最终回复都反思 | jev=由 Jev 判断是否需要反思
   finalizeMaxTokens: 2048   # 收尾（finalizer）输出 token 上限：异常停止后最后一次交付；太小会截断总结/子代理报告
