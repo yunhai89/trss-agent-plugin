@@ -335,6 +335,71 @@ await test('跨协议：OpenAI video_url 块发给 Gemini → 转 Content_2 vide
   assert.deepEqual(step.content[0], { type: 'video', data: 'QUJD', mime_type: 'video/mp4' })
 })
 
+// ── thinking 模式：工具轮必须回传 reasoning_content（上游 400 回归）────
+const REASONING = '内部推理-工具轮：先查一下再答'
+const toolTurnProvider = (reasoningField, extraMessage = {}) => {
+  const bodies = []
+  let turn = 0
+  const provider = new OpenAIProvider({
+    reasoningFields: [reasoningField],
+    client: { chat: { completions: { async create(body) {
+      bodies.push(structuredClone(body))
+      if (turn++ === 0) {
+        return { choices: [{ message: { content: '', [reasoningField]: REASONING, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'ping', arguments: '{}' } }] }, finish_reason: 'tool_calls' }] }
+      }
+      return { choices: [{ message: { content: 'done', ...extraMessage }, finish_reason: 'stop' }] }
+    } } } },
+  })
+  return { provider, bodies }
+}
+
+await test('thinking 工具轮：reasoning_content 原样回传（keepReasoning 默认关也回传）', async () => {
+  const { provider, bodies } = toolTurnProvider('reasoning_content')
+  const tools = new ToolRegistry().register({ name: 'ping', description: 'f', parameters: { type: 'object' }, execute: async () => ({ pong: true }) })
+  const result = await new Agent({ provider, model: 'fixture', tools, reflect: 'off', governor: false }).run('go')
+  assert.equal(result.content, 'done')
+  assert.equal(bodies.length, 2, '两轮请求')
+  const asst = bodies[1].messages.find((m) => m.role === 'assistant' && m.tool_calls)
+  assert.ok(asst, '续轮包含 assistant tool_call 消息')
+  assert.equal(asst.reasoning_content, REASONING, '工具轮 reasoning_content 原样回传（此前缺失 → 上游 400）')
+})
+
+await test('thinking 工具轮：按 provider 主字段回传（Gemini OpenAI 兼容口用 reasoning，不硬编码）', async () => {
+  const { provider, bodies } = toolTurnProvider('reasoning')
+  const tools = new ToolRegistry().register({ name: 'ping', description: 'f', parameters: { type: 'object' }, execute: async () => ({ pong: true }) })
+  await new Agent({ provider, model: 'fixture', tools, reflect: 'off', governor: false }).run('go')
+  const asst = bodies[1].messages.find((m) => m.role === 'assistant' && m.tool_calls)
+  assert.equal(asst.reasoning, REASONING, '回传字段与通道提取字段一致')
+  assert.equal(Object.hasOwn(asst, 'reasoning_content'), false, '不硬编码 reasoning_content')
+})
+
+await test('thinking 纯文本轮：keepReasoning=false 不回灌；工具轮仍保留（跨 run 复核）', async () => {
+  const { provider, bodies } = toolTurnProvider('reasoning_content', { reasoning_content: '最终轮推理-不应回灌' })
+  const tools = new ToolRegistry().register({ name: 'ping', description: 'f', parameters: { type: 'object' }, execute: async () => ({ pong: true }) })
+  const agent = new Agent({ provider, model: 'fixture', tools, reflect: 'off', governor: false })
+  await agent.run('go')
+  await agent.run('again')
+  const last = bodies[bodies.length - 1]
+  const toolAsst = last.messages.find((m) => m.role === 'assistant' && m.tool_calls)
+  assert.equal(toolAsst?.reasoning_content, REASONING, '历史里的工具轮 reasoning 仍在（协议必需）')
+  assert.ok(!last.messages.some((m) => m.reasoning_content === '最终轮推理-不应回灌'), '纯文本轮推理默认不回灌历史')
+})
+
+await test('thinking 纯文本轮：keepReasoning=true 时回灌', async () => {
+  const bodies = []
+  let turn = 0
+  const provider = new OpenAIProvider({ reasoningFields: ['reasoning_content'], client: { chat: { completions: { async create(body) {
+    bodies.push(structuredClone(body))
+    if (turn++ === 0) return { choices: [{ message: { content: 'a1', reasoning_content: 'R-可见' }, finish_reason: 'stop' }] }
+    return { choices: [{ message: { content: 'a2' }, finish_reason: 'stop' }] }
+  } } } } })
+  const agent = new Agent({ provider, model: 'fixture', keepReasoning: true, reflect: 'off', governor: false })
+  await agent.run('go')
+  await agent.run('again')
+  const last = bodies[bodies.length - 1]
+  assert.ok(last.messages.some((m) => m.reasoning_content === 'R-可见'), '开启后纯文本轮 reasoning 回灌')
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)

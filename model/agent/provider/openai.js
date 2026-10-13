@@ -157,7 +157,10 @@ export class OpenAIProvider extends Provider {
     }
     if (m.tool_call_id) out.tool_call_id = m.tool_call_id
     if (m.name) out.name = m.name
-    if (m.reasoning) out.reasoning_content = m.reasoning // deepseek 等多轮需回传 reasoning_content
+    // thinking 模式：带 tool_calls 的 assistant 消息必须把推理按该通道的主字段原样回传
+    // （DeepSeek/豆包/Kimi/MiMo 等用 reasoning_content；Gemini OpenAI 兼容口用 reasoning），
+    // 缺字段下一轮会 400（"reasoning_content ... must be passed back"）。
+    if (m.reasoning) out[this.reasoningFields?.[0] || 'reasoning_content'] = m.reasoning
     return out
   }
 

@@ -787,11 +787,15 @@ export class Agent {
         // deepseek 等模型偶尔返回空 content + 无 tool_calls（如纯 thinking 无正文），
         // 空消息被追加到历史后，下次 run 读历史时 API 拒绝。给占位避免。
         const __emptyAssistant = !result.content && !result.toolCalls?.length
+        // thinking 模式协议要求：带 tool_calls 的 assistant 消息必须把 reasoning_content 原样回传，
+        // 缺字段下一轮直接 400（"The reasoning_content in the thinking mode must be passed back"）。
+        // 因此工具轮的 reasoning 独立于 keepReasoning 必须保留；纯文本轮仍按 keepReasoning 策略
+        // （默认 false：不把隐藏思考回灌历史，省 context）。
+        const __replayReasoning = !!result.reasoning && (this.keepReasoning || !!result.toolCalls?.length)
         const assistantMsg = {
           role: 'assistant',
           content: result.content || (__emptyAssistant ? '(模型本轮未输出正文)' : null),
-          // 默认不回灌 reasoning（keepReasoning=false），避免隐藏 token 持续吃 context
-          ...((this.keepReasoning && result.reasoning) ? { reasoning: result.reasoning } : {}),
+          ...(__replayReasoning ? { reasoning: result.reasoning } : {}),
           // Provider 原生载荷（如 Anthropic thinking.signature/redacted_thinking）：协议必需，
           // 独立于 keepReasoning 保存并原样回发（工具续轮缺签名会 400），不参与正文/reasoning 策略。
           ...(result.providerNative ? { provider_native: result.providerNative } : {}),
@@ -1233,7 +1237,8 @@ export class Agent {
     for (const m of this.messages) {
       n += 4
       n += fn(this._contentText(m.content))
-      if (includeReasoning && m.reasoning) n += fn(m.reasoning)
+      // 工具轮的 reasoning 协议必需（会真实发给 provider），计入估算不受 keepReasoning 开关影响
+      if ((includeReasoning || m.tool_calls) && m.reasoning) n += fn(m.reasoning)
       if (m.provider_native) n += fn(JSON.stringify(m.provider_native))
       if (m.tool_calls) n += fn(JSON.stringify(m.tool_calls))
     }

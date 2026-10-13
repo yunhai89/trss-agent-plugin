@@ -102,7 +102,7 @@ agent:
   taskStore:                # 可恢复任务账本（P0-3）：任务事件/检查点落 sqlite 事务；重启把未结算任务标 interrupted
     enable: false           # 默认关闭（开发阶段开关；开启后写入任务库，写操作默认不自动重放）
     dir: "data/tasks"       # 任务库目录
-  keepReasoning: false      # 是否把推理(reasoning_content)回灌历史（默认 false 省 context）
+  keepReasoning: false      # 是否把推理(reasoning_content)回灌历史（默认 false 省 context；thinking 模式带工具调用的轮次按协议必需始终回传，不受此开关影响）
   stream: false             # 逐字流式输出（依赖适配器、不稳，默认关）
   reflect: auto             # 自我反思/自纠：off=关 | auto=仅多轮/用工具时(默认) | always=每次最终回复都反思 | jev=由 Jev 判断是否需要反思
   finalizeMaxTokens: 2048   # 收尾（finalizer）输出 token 上限：异常停止后最后一次交付；太小会截断总结/子代理报告

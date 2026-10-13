@@ -251,7 +251,7 @@ agent:
 | `maxTokens` | 空 | 单次回复最大 token（留空=厂商默认；Anthropic 默认 4096） |
 | `contextWindow` | 空 | 模型上下文窗口 token 数（如 `32000`）；超 80% 自动压缩历史、保留首条意图 |
 | `maxToolResultChars` | `4000` | 单条工具结果字符上限，超长截断防上下文膨胀 |
-| `keepReasoning` | `false` | 是否把推理(`reasoning_content`)回灌历史；默认 `false` 省 context |
+| `keepReasoning` | `false` | 是否把推理(`reasoning_content`)回灌历史；默认 `false` 省 context。thinking 模式下带工具调用的轮次按协议必需始终回传（不受此开关影响），否则上游会报 "reasoning_content must be passed back" |
 | `stream` | `false` | 逐字流式输出（依赖适配器、不稳，默认关） |
 | `progress` | `true` | 工具调用时推送节流进度消息（消除"干等"，默认开） |
 | `progressRecall` | `3` | 进度消息多少秒后自动撤回（适配器不支持则忽略） |
