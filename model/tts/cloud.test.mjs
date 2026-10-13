@@ -359,6 +359,25 @@ await test('TtsService：豆包 2.0 语音指令优先用 LLM style（无 style 
   ok(/难过低落/.test(JSON.parse(calls[1].req_params.additions).context_texts[0]), '无 style 回退向量模板')
 })
 
+await test('TtsService：情绪判定慢超时 → 一个 slice 内回退（不重试）+ 日志如实标注', async () => {
+  const logs = []
+  let judgeCalls = 0
+  const llm = { run: () => { judgeCalls++; return new Promise(() => {}) } } // 永不返回：只能被超时中止
+  const fetchImpl = mkFetch({
+    'chat/completions': async () => jsonRes({ choices: [{ message: { audio: { data: Buffer.from('M').toString('base64') } } }] }),
+  })
+  const svc = new TtsService({ enable: true, provider: 'mimo', judgeTimeoutMs: 1000, mimo: { apiKey: 'k', format: 'wav' } },
+    { dataDir, logger: (l, ...a) => logs.push([l, a.join(' ')]), llm, fetchImpl, ffmpegRunner: fakeRunner })
+  const t0 = Date.now()
+  const r = await svc.synthesize({ text: '你好呀' })
+  const ms = Date.now() - t0
+  ok(r.ok, '合成照常成功（回退默认情绪）')
+  ok(ms < 2000, `一个 slice 内回退（${ms}ms；此前会等满两个 slice 才回退）`)
+  eq(judgeCalls, 1, '慢超时不重试')
+  ok(logs.some(([l, m]) => l === 'info' && m.includes('自动判定失败→回退默认')), '日志如实标注"自动判定失败→回退默认"（不再误报固定/关闭）')
+  ok(r.notes?.some((n) => /回退/.test(n)), 'notes 告知回退')
+})
+
 await test('TtsService：云服务商未配置 → 可读错误，不发请求', async () => {
   let hit = 0
   const svc = new TtsService({ enable: true, provider: 'doubao', doubao: {} }, {

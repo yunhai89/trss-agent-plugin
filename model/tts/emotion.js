@@ -280,14 +280,18 @@ export async function planEmotion(llm, opts = {}) {
   const MAX_ATTEMPTS = 2
   let content = ''
   let lastErr = ''
+  let attempts = 0
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const remain = deadline - Date.now()
     if (remain < 1000) break
+    const slice = Math.min(remain, sliceMs)
+    const attemptStart = Date.now()
+    attempts++
     const ctrl = new AbortController()
     try {
       const res = await withTimeout(
         run(prompt, { signal: ctrl.signal }),
-        Math.min(remain, sliceMs),
+        slice,
         '情绪判定超时',
         () => ctrl.abort(),
       )
@@ -297,10 +301,14 @@ export async function planEmotion(llm, opts = {}) {
     } catch (e) {
       lastErr = e?.message || String(e)
       try { ctrl.abort() } catch { /* noop */ }
+      // 只有「快失败」才值得在剩余预算内重试一次（连接重置/限流等通常秒级返回）。
+      // 打满本片预算的慢超时（模型本身慢）再试一次同样会超时——直接回退，不再白等一个 slice。
+      const elapsed = Date.now() - attemptStart
+      if (/超时/.test(lastErr) || elapsed > slice * 0.6) break
     }
   }
   if (lastErr) {
-    logger?.('warn', '[tts] 情绪判定调用失败，按默认值回退', `${lastErr}（预算 ${budget}ms，耗时 ${Date.now() - t0}ms）`)
+    logger?.('warn', '[tts] 情绪判定调用失败，按默认值回退', `${lastErr}（预算 ${budget}ms，尝试 ${attempts} 次，耗时 ${Date.now() - t0}ms）`)
     return null
   }
   const plan = parsePlan(content, { tier, text, maxSegments: opts.maxSegments || MAX_SEGMENTS, maxSegmentChars: opts.maxSegmentChars || MAX_SEGMENT_CHARS })

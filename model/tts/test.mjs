@@ -208,14 +208,16 @@ await test('planEmotion：pro 解析（容忍围栏）+ 非法输出回退 null'
   eq(zhPlan?.vector?.happy, 0.9, 'LLM 用中文键名也归一（曾静默清零成无情绪）')
 })
 
-await test('planEmotion：预算语义——超时中止底层请求（不空转）；快失败在剩余预算内重试一次', async () => {
-  // ① 卡死的调用：到预算必须 abort 底层 signal 并回退 null
-  let aborted = false
+await test('planEmotion：预算语义——慢超时不重试（不白等第二个 slice）；快失败才重试一次', async () => {
+  // ① 卡死的调用：到单次预算必须 abort 底层 signal、直接回退（不再重试白等第二个 15s）
+  let aborted = 0
+  let attempts = 0
   let signalReceived = false
   const hang = {
     run: (prompt, { signal } = {}) => new Promise((_, rej) => {
+      attempts++
       signalReceived = !!signal
-      signal?.addEventListener('abort', () => { aborted = true; rej(Object.assign(new Error('Aborted'), { name: 'AbortError' })) })
+      signal?.addEventListener('abort', () => { aborted++; rej(Object.assign(new Error('Aborted'), { name: 'AbortError' })) })
     }),
   }
   const t0 = Date.now()
@@ -224,9 +226,10 @@ await test('planEmotion：预算语义——超时中止底层请求（不空转
   const ms = Date.now() - t0
   eq(r, null, '超时 → null（调用方回退默认向量）')
   ok(signalReceived, 'run 收到 abort signal（可中止底层 fetch）')
-  ok(aborted, '到预算时底层请求被 abort（不再后台跑到 60s/重试）')
-  ok(ms >= 800 && ms < 3000, `在预算内返回（${ms}ms）`)
-  ok(warned.some(([lvl, msg, detail]) => lvl === 'warn' && String(msg).includes('情绪判定') && String(detail).includes('预算 1200ms')), '告警带预算与耗时（可诊断）')
+  eq(aborted, 1, '到预算时底层请求被 abort 一次')
+  eq(attempts, 1, '打满单次预算的慢超时不再重试（此前会白等第二个 slice，30s 预算耗满才回退）')
+  ok(ms >= 400 && ms < 2000, `在一个 slice 内返回（${ms}ms）`)
+  ok(warned.some(([lvl, msg, detail]) => lvl === 'warn' && String(msg).includes('情绪判定') && String(detail).includes('预算 1200ms') && String(detail).includes('尝试 1 次')), '告警带预算/尝试次数/耗时（可诊断）')
 
   // ② 首次快速失败（非超时）→ 剩余预算内重试一次并成功
   let calls = 0
@@ -241,6 +244,19 @@ await test('planEmotion：预算语义——超时中止底层请求（不空转
   eq(calls, 2, '首次失败后重试一次')
   eq(r2?.vector?.happy, 0.8, '第二次成功解析出向量')
   eq(r2?.reason, '重试成功', 'reason 透传')
+
+  // ③ 慢失败（耗时超过单次预算 60%，但未触发超时）→ 同样不重试（重试大概率还是慢）
+  let slowCalls = 0
+  const slowFail = {
+    run: async () => {
+      slowCalls++
+      await new Promise((res) => setTimeout(res, 700))
+      throw new Error('socket hang up')
+    },
+  }
+  const r3 = await planEmotion(slowFail, { text: '测试', tier: 'pro', timeoutMs: 2000 })
+  eq(r3, null, '慢失败 → null 回退')
+  eq(slowCalls, 1, '慢失败不重试（预算内不空转）')
 })
 
 await test('parsePlan：别名键归一 + 全零计划拒绝（不假装有情绪）', () => {
