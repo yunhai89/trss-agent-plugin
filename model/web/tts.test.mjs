@@ -70,6 +70,8 @@ await test('GET /api/tts：默认配置 + 服务商列表 + 空参考库', async
   for (const id of ['doubao', 'minimax', 'mimo']) {
     const tier = r.body.data.providers.find((p) => p.id === id)?.fields?.find((f) => f.key === 'tier')
     ok(tier && tier.type === 'select' && tier.options.some((o) => o[0] === 'max'), `${id} 面板含 pro/max 档位字段`)
+    const keys = (r.body.data.providers.find((p) => p.id === id)?.fields || []).map((f) => f.key)
+    ok(keys.includes('segmentGapMs') && keys.includes('maxSegmentChars'), `${id} 面板含 max 档段间静音/单段字数`)
   }
   ok(Array.isArray(r.body.data.refs) && r.body.data.refs.length === 0, '参考库空')
   ok(r.body.data.indextts?.emotionMode === 'same', 'indextts 默认情绪模式 same')

@@ -118,6 +118,8 @@ export function providerConfigured(id, cfg = {}) {
 const F_APIKEY = { key: 'apiKey', label: 'API Key', type: 'secret', desc: '仅保存在插件本机配置；不随日志输出' }
 const F_ENDPOINT = { key: 'endpoint', label: '接口地址', type: 'text', desc: '默认官方地址；自建网关/代理时可覆盖（http/https）' }
 const F_TIER = { key: 'tier', label: '档位 tier', type: 'select', options: [['pro', 'pro · 整段一次合成（默认，快）'], ['max', 'max · 分段逐段情绪，合成后 ffmpeg 合并（更细腻，更慢更费额度）']], desc: 'max 会为每段单独调用一次合成接口（情绪判定失败时按标点分段）' }
+const F_GAP = { key: 'segmentGapMs', label: 'max 档段间静音(ms)', type: 'number', min: 0, max: 2000, step: 50, desc: '分段拼接时插入的静音（默认 300；0=不留空隙）' }
+const F_MAXSEG = { key: 'maxSegmentChars', label: 'max 档单段字数', type: 'number', min: 20, max: 500, step: 10, desc: 'LLM 分段/标点回退的每段字符上限（默认 140，防拆得过碎）' }
 
 export const PROVIDERS = [
   {
@@ -149,6 +151,8 @@ export const PROVIDERS = [
       { key: 'format', label: '音频格式', type: 'select', options: [['wav', 'wav'], ['mp3', 'mp3']], desc: 'max 档分段拼接固定使用 wav' },
       { key: 'useTagParser', label: '语音标签解析', type: 'switch', desc: '声音复刻 2.0 表现力增强版的 Cot 标签解析（use_tag_parser）' },
       F_TIER,
+      F_GAP,
+      F_MAXSEG,
       { key: 'timeoutMs', label: '超时(ms)', type: 'number', min: 10000, max: 600000, step: 5000, desc: '单次合成请求超时（毫秒）' },
       F_ENDPOINT,
     ],
@@ -173,6 +177,8 @@ export const PROVIDERS = [
       { key: 'languageBoost', label: '语种增强', type: 'select', options: [['', '（自动）'], ['Chinese', 'Chinese'], ['English', 'English'], ['Japanese', 'Japanese'], ['Arabic', 'Arabic'], ['Spanish', 'Spanish'], ['auto', 'auto']] },
       { key: 'groupId', label: 'GroupId', type: 'text', desc: '可选：旧版账号需要（拼在 URL 查询参数）' },
       F_TIER,
+      F_GAP,
+      F_MAXSEG,
       { key: 'timeoutMs', label: '超时(ms)', type: 'number', min: 10000, max: 600000, step: 5000, desc: '单次合成请求超时（毫秒）' },
       { ...F_ENDPOINT, desc: '默认 https://api.minimaxi.com/v1/t2a_v2（国际站 api.minimax.io，华北 api-bj.minimaxi.com）' },
     ],
@@ -191,6 +197,8 @@ export const PROVIDERS = [
       { key: 'style', label: '固定风格指令', type: 'text', desc: '如「用轻快上扬的语调报喜，语速稍快」「用东北话说」「用唱歌的方式唱出来」；留空且自动判定开=LLM 生成' },
       { key: 'tagMode', label: '音频标签', type: 'select', options: [['auto', 'auto · 句首风格 + 行内标签（推荐）'], ['style', 'style · 只加句首 (风格)'], ['off', 'off · 不使用标签']], desc: '行内标签（[笑]/[叹气]/[颤抖]/[语速加快] 等）由 LLM 按原文保真插入，改写原文的一律丢弃' },
       F_TIER,
+      F_GAP,
+      F_MAXSEG,
       { key: 'format', label: '音频格式', type: 'select', options: [['wav', 'wav'], ['mp3', 'mp3']], desc: 'max 档分段拼接固定使用 wav' },
       { key: 'timeoutMs', label: '超时(ms)', type: 'number', min: 10000, max: 600000, step: 5000, desc: '单次合成请求超时（毫秒）' },
       F_ENDPOINT,

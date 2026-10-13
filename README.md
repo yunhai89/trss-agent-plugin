@@ -511,6 +511,8 @@ tts:
     format: wav            # wav | mp3（max 档分段拼接固定 wav）
     useTagParser: false    # 声音复刻 2.0 表现力增强版 Cot 标签解析
     tier: pro              # pro=整段一次 | max=LLM 分段逐段情绪 + ffmpeg 合并
+    segmentGapMs: 300      # max 档段间静音（毫秒；0=不留空隙）
+    maxSegmentChars: 140   # max 档单段字符上限（LLM 分段/标点回退，防拆得过碎）
   minimax:                 # MiniMax 语音（T2A V2）
     endpoint: "https://api.minimaxi.com/v1/t2a_v2"   # 国际站 https://api.minimax.io/v1/t2a_v2
     apiKey: ""             # MiniMax API Key（平台 → 接口密钥）
@@ -524,6 +526,8 @@ tts:
     format: wav            # wav | mp3 | flac（max 档固定 wav）
     languageBoost: ""      # 语种增强：留空=自动；Chinese/English/Japanese/Arabic/Spanish/auto
     tier: pro
+    segmentGapMs: 300      # max 档段间静音（毫秒；0=不留空隙）
+    maxSegmentChars: 140   # max 档单段字符上限（LLM 分段/标点回退）
   mimo:                    # 小米 MiMo TTS（MiMo-V2.5-TTS，OpenAI 兼容）
     endpoint: "https://api.xiaomimimo.com/v1"
     apiKey: ""             # MiMo 开放平台 API Key
@@ -534,6 +538,8 @@ tts:
     tagMode: auto          # 音频标签：auto=句首 (风格) + 行内 [标签]（原文保真校验，改写即丢弃）| style=只加句首 | off=不用
     format: wav            # wav | mp3（max 档固定 wav）
     tier: pro
+    segmentGapMs: 300      # max 档段间静音（毫秒；0=不留空隙）
+    maxSegmentChars: 140   # max 档单段字符上限（LLM 分段/标点回退）
 ```
 
 - 配置入口：Web 管理面板 → **语音合成**（服务卡片 → 弹窗配置：接口地址 / API Key / 音色 ID / 测试连接 / 参考音频上传+命名 / 情绪模式与 8 维滑块）。云服务商的「测试连接」会真实合成 2 个字（官方唯一可探活方式，极少计费）。

@@ -1015,8 +1015,10 @@ router.put('/tts/config', asyncHandler(async (req, res) => {
   const NUM_KEYS = new Set([
     'judgeTimeoutMs', 'indextts.timeoutMs', 'indextts.judgeTimeoutMs',
     'doubao.timeoutMs', 'doubao.speechRate', 'doubao.loudnessRate', 'doubao.emotionScale', 'doubao.sampleRate',
+    'doubao.segmentGapMs', 'doubao.maxSegmentChars',
     'minimax.timeoutMs', 'minimax.speed', 'minimax.vol', 'minimax.pitch', 'minimax.sampleRate', 'minimax.bitrate',
-    'mimo.timeoutMs',
+    'minimax.segmentGapMs', 'minimax.maxSegmentChars',
+    'mimo.timeoutMs', 'mimo.segmentGapMs', 'mimo.maxSegmentChars',
   ])
   const cfg = Config.get()
   let n = 0

@@ -72,6 +72,8 @@ export const TTS_DEFAULTS = {
     format: 'wav',                // wav | mp3
     useTagParser: false,          // 声音复刻 2.0 表现力增强版 Cot 标签解析
     tier: 'pro',                  // pro=整段一次 | max=LLM 分段逐段情绪后 ffmpeg 合并
+    segmentGapMs: 300,            // max 档段间静音（毫秒）
+    maxSegmentChars: MAX_SEGMENT_CHARS, // max 档单段字符上限（LLM 分段/标点回退）
     timeoutMs: 120000,
   },
   minimax: {
@@ -90,6 +92,8 @@ export const TTS_DEFAULTS = {
     bitrate: 128000,              // 仅 mp3 生效
     languageBoost: '',            // ''=自动 | Chinese/English/... | auto
     tier: 'pro',
+    segmentGapMs: 300,            // max 档段间静音（毫秒）
+    maxSegmentChars: MAX_SEGMENT_CHARS, // max 档单段字符上限（LLM 分段/标点回退）
     timeoutMs: 120000,
   },
   mimo: {
@@ -102,6 +106,8 @@ export const TTS_DEFAULTS = {
     tagMode: 'auto',              // 音频标签：auto=句首 (风格) + 行内 [标签]（经原文保真校验）| style=只加句首 | off=不用
     format: 'wav',                // wav | mp3
     tier: 'pro',
+    segmentGapMs: 300,            // max 档段间静音（毫秒）
+    maxSegmentChars: MAX_SEGMENT_CHARS, // max 档单段字符上限（LLM 分段/标点回退）
     timeoutMs: 120000,
   },
   judgeModel: '',                 // 情绪判定模型（留空=indextts.model → utilityModel → 主模型）
@@ -432,6 +438,7 @@ export class TtsService {
     }
     const auto = cfgProv.autoEmotion !== false && !!this.llm
     const tier = ['pro', 'max'].includes(p.tier) ? p.tier : (['pro', 'max'].includes(cfgProv.tier) ? cfgProv.tier : 'pro')
+    const maxSegChars = Math.max(20, Number(cfgProv.maxSegmentChars) || MAX_SEGMENT_CHARS) // max 档单段字符上限（面板可调）
     const explicitVec = parseVectorParam(p.vector)
     let planVector = explicitVec
     let segments = null
@@ -448,7 +455,7 @@ export class TtsService {
         voiceName: voice, logger: this.logger,
         context: normalizeContext(p.context?.messages),
         timeoutMs: this._judgeTimeoutMs(),
-        maxSegments: MAX_SEGMENTS, maxSegmentChars: MAX_SEGMENT_CHARS,
+        maxSegments: MAX_SEGMENTS, maxSegmentChars: maxSegChars,
       })
       if (plan?.vector) {
         planVector = clampVector(plan.vector)
@@ -487,7 +494,7 @@ export class TtsService {
       if (tier === 'max') {
         const segs = (segments && segments.length)
           ? segments
-          : splitByPunctuation(text, MAX_SEGMENT_CHARS).slice(0, MAX_SEGMENTS).map((t) => ({ text: t, vector: planVector }))
+          : splitByPunctuation(text, maxSegChars).slice(0, MAX_SEGMENTS).map((t) => ({ text: t, vector: planVector }))
         if (segs.length > 1) {
           if (!segments) notes.push(`已按标点拆分为 ${segs.length} 段`)
           const tmpDir = path.join(this.dataDir, 'tmp')
