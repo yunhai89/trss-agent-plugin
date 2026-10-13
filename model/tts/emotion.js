@@ -37,6 +37,42 @@ export const EMOTION_GUIDE = [
 export const MAX_SEGMENTS = 12
 export const MAX_SEGMENT_CHARS = 140
 
+/**
+ * 去掉风格/音频标签，得到"裸文本"（用于保真校验，确保 LLM 只插标签不改原文）。
+ * 支持：行内 [标签]（半/全角方括号）与开头 (风格)（半/全角圆括号）。
+ */
+export function stripAudioTags(s) {
+  return String(s || '')
+    .replace(/^[（(][^（()）\n]{1,24}[)）]/, '')
+    .replace(/[\[［][^\[\]［］\n]{1,24}[\]］]/g, '')
+}
+
+/** 规整化文本（去空白，用于保真比较） */
+function normForCompare(s) {
+  return String(s || '').replace(/\s+/g, '')
+}
+
+/** 清理风格指令：去控制字符/换行、限长；空返回 '' */
+export function cleanStyleText(s, max = 80) {
+  const t = String(s || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim()
+  return t ? t.slice(0, max) : ''
+}
+
+/** 清理风格标签词：去掉会破坏 (风格) 语法的括号与标点，限长；空返回 '' */
+export function cleanStyleTag(s, max = 24) {
+  const t = cleanStyleText(s, max).replace(/[()（）\[\]［］,，、。;；:：]/g, ' ').replace(/\s+/g, ' ').trim()
+  return t ? t.slice(0, max) : ''
+}
+
+/** 校验带标签文本：去掉标签后必须与原文逐字一致，且确实插入了至少一个标签 */
+export function isFaithfulTagged(tagged, original) {
+  const a = String(tagged || '')
+  const b = String(original || '')
+  if (!a || !b) return false
+  if (!/[\[［]/.test(a.replace(/^[（(][^（()）\n]{1,24}[)）]/, ''))) return false
+  return normForCompare(stripAudioTags(a)) === normForCompare(b)
+}
+
 /** 情绪判定的系统提示词（含每个情绪模式的详细说明 + 8 情绪 + 输出契约） */
 export function buildEmotionSystemPrompt() {
   return [
@@ -54,9 +90,23 @@ export function buildEmotionSystemPrompt() {
     '- 文本没有明显情绪倾向时，用平静压底（calm 0.5~0.9）而不是全部为 0；',
     '- 反讽/玩笑/吐槽要结合上下文判断真实语气，不要只看字面。',
     '',
+    '【风格指令 style】（可选，≤60 字的一句话）',
+    '支持自然语言风格控制的 TTS（MiMo / 豆包 2.0）会直接使用它；写"怎么演"，比向量更细腻：',
+    '- 可用复合情绪："压抑的愤怒""带着哽咽的笑意""温柔但疲惫""狂躁中透着温柔"；',
+    '- 可指定语速/发声方式："语速偏慢，尾音带一点气声""声音明亮有活力，语速稍快"；',
+    '- 角色扮演/旁白场景可写导演式："像深夜电台DJ，压低嗓音，句间留一点空白"；',
+    '- 唱歌或方言直接点名："用唱歌的方式唱出来""用东北话说"。',
+    '风格必须贴合文本与上下文；平静日常用"自然平实地念"即可，不必强加情绪。',
+    '',
+    '【音频标签 tag / tagged】（可选，仅 MiMo 支持；不确定就不给）',
+    '- tag：1~2 个风格词，用于句首 (风格) 标签，从这些类别里选：基础情绪（开心/悲伤/愤怒/惊讶/兴奋/委屈/平静/冷漠）、复合情绪（怅然/欣慰/无奈/愧疚/释然/嫉妒/厌倦/忐忑）、语调（温柔/高冷/活泼/严肃/慵懒/俏皮/深沉/干练）、音色（磁性/清亮/稚嫩/甜美/沙哑）、人设腔调（夹子音/御姐音/正太音/大叔音/台湾腔）、方言（东北话/四川话/河南话/粤语）、唱歌。',
+    '- tagged：在原文中插入行内 [音频标签] 的版本，标签只能从：吸气/叹气/长叹一口气/喘息/屏息、紧张/激动/疲惫/委屈/撒娇/心虚/震惊/不耐烦、颤抖/变调/破音/鼻音/气声/沙哑、笑/轻笑/大笑/冷笑/抽泣/呜咽/哽咽、语速加快/放慢语速 里选；放在它作用的词句旁边，最多 3 处，宁缺毋滥。',
+    '- tagged 必须逐字保留原文：只允许插入 [标签]，不得改写、增删、调换任何字；做不到就省略 tagged 字段。',
+    '',
     '【输出】只输出一个 JSON 对象，不要解释文字或代码块标记。键名必须用下列英文键（happy/angry/sad/afraid/disgusted/melancholic/surprised/calm），不要用中文名、不要自造键名；数值必须为 0~1.2。字段：',
-    '- pro 模式：{"vector":{"happy":0.8,"calm":0.3},"reason":"一句话说明判定依据"}',
-    `- max 模式：{"vector":{"calm":0.5},"segments":[{"text":"原文片段（必须保持原文用词，不得改写/增删）","vector":{"happy":0.9}}],"reason":"一句话"}`,
+    '- pro 模式：{"vector":{"happy":0.8,"calm":0.3},"style":"用开心的语气说，语速稍快","tag":"开心","tagged":"太好了[笑]，终于成了！","reason":"一句话说明判定依据"}',
+    '- max 模式：{"vector":{"calm":0.5},"style":"整体自然平实","segments":[{"text":"原文片段（必须保持原文用词，不得改写/增删）","vector":{"happy":0.9},"style":"这一段轻快上扬","tag":"兴奋","tagged":"原文片段[笑]"}],"reason":"一句话"}',
+    '- style/tag/tagged 都是可选字段；没有把握时省略，不要为凑字段硬编。',
     `- max 模式分段规则：按语义与自然停顿拆分（一句一段或逗号短句合并），相邻同情绪可合段；每段不超过 ${MAX_SEGMENT_CHARS} 字、最多 ${MAX_SEGMENTS} 段；文本很短时不拆（1 段）；`,
     '- 每段 text 必须逐字来自原文（顺序拼接后应还原原文，可忽略空白差异）。',
     '- 向量不能全为 0：没有明显情绪时也要给平静一个正数（如 calm 0.6）。',
@@ -151,15 +201,23 @@ export function parsePlan(raw, { tier = 'pro', text = '', maxSegments = MAX_SEGM
     const arr = clampVector(x)
     return arr.some((n) => n > 0) ? vectorToObject(arr) : null
   }
+  /** 风格字段清理：style/tag 直接清洗；tagged 必须通过保真校验（只插标签不改原文），否则丢弃 */
+  const styleFields = (src, originalText) => {
+    const style = cleanStyleText(src?.style, 80)
+    const tag = cleanStyleTag(src?.tag, 24)
+    let tagged = String(src?.tagged || '').trim()
+    if (!tagged || !isFaithfulTagged(tagged, originalText)) tagged = ''
+    return { ...(style ? { style } : {}), ...(tag ? { tag } : {}), ...(tagged ? { tagged } : {}) }
+  }
   const vector = safeVec(obj.vector)
   const reason = String(obj.reason || '').slice(0, 200)
   if (tier !== 'max') {
     if (!vector) return null
-    return { vector, reason }
+    return { vector, ...styleFields(obj, text), reason }
   }
   const segs = Array.isArray(obj.segments) ? obj.segments : []
   const cleaned = segs
-    .map((s) => ({ text: String(s?.text || '').trim(), vector: safeVec(s?.vector) }))
+    .map((s) => ({ src: s, text: String(s?.text || '').trim(), vector: safeVec(s?.vector) }))
     .filter((s) => s.text)
   if (!cleaned.length || cleaned.length > maxSegments) return null
   if (cleaned.some((s) => s.text.length > maxSegmentChars * 1.5)) return null
@@ -167,7 +225,10 @@ export function parsePlan(raw, { tier = 'pro', text = '', maxSegments = MAX_SEGM
   // 段缺失/全零向量 → 用整体基调兜底（整体也没有则拒绝计划）
   for (const s of cleaned) if (!s.vector) s.vector = vector ? { ...vector } : null
   if (cleaned.some((s) => !s.vector)) return null
-  return { vector: vector || { ...cleaned[0].vector }, segments: cleaned, reason }
+  // 每段独立风格字段（tagged 按该段原文校验）；整体 style/tag 作为缺省
+  const overall = styleFields(obj, text)
+  const segments = cleaned.map((s) => ({ text: s.text, vector: s.vector, ...styleFields(s.src, s.text) }))
+  return { vector: vector || { ...cleaned[0].vector }, ...overall, segments, reason }
 }
 
 /**

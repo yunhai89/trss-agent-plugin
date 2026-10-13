@@ -75,13 +75,13 @@ function cloudTool(service, id) {
     props.emotion = { type: 'string', enum: EMOTION_LABELS.minimax, description: '固定情绪标签；省略=由 LLM 结合文本与上下文自动判定' }
     emotionHint = '情绪由 LLM 判定为 8 维情绪后自动映射为 MiniMax 标签，无需手填。'
   } else {
-    props.style = { type: 'string', description: '风格/音色指令（自然语言，如「用轻快上扬的语调说，语速稍快」）；省略=由 LLM 判定情绪后自动生成' }
+    props.style = { type: 'string', description: '风格/音色指令（自然语言，如「用轻快上扬的语调说，语速稍快」「用压抑的愤怒说，尾音带点哽咽」「用东北话说」「用唱歌的方式唱出来」）；省略=由 LLM 判定情绪后自动生成（含复合情绪/语速/发声方式）' }
     if (cfg.model === 'mimo-v2.5-tts-voicedesign') {
       props.voice = { type: 'string', description: `该模型用文字设计音色（会忽略 voice；请用 style 描述音色）；常见预置音色：${MIMO_VOICES.join('、')}` }
     } else {
       props.voice = { type: 'string', description: `预置音色（省略=默认「${cfg.voice || 'mimo_default'}」）：${MIMO_VOICES.join('、')}` }
     }
-    emotionHint = '情绪由 LLM 判定后自动生成自然语言风格指令（也可用 style 直接指定），无需手填。'
+    emotionHint = '情绪由 LLM 判定后自动生成自然语言风格指令（支持复合情绪/导演式），并按需插入音频标签（[笑]/[叹气]/[颤抖] 等，仅插标签不改原文）；也可用 style 直接指定。无需手填。'
   }
   return {
     description: [

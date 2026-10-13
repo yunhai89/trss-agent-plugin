@@ -24,6 +24,7 @@ export {
   planEmotion, buildPlanPrompt, buildEmotionSystemPrompt, normalizeContext,
   splitByPunctuation, parsePlan, extractJson, EMOTION_MODE_DOCS, EMOTION_GUIDE,
   MAX_SEGMENTS, MAX_SEGMENT_CHARS,
+  stripAudioTags, isFaithfulTagged, cleanStyleText, cleanStyleTag,
 } from './emotion.js'
 export { concatSegments, runFfmpeg, buildConcatArgs, buildSilenceArgs, buildConcatListContent } from './audio.js'
 export { enhanceVoice, buildEnhanceArgs, hdOutputPath, hdFilter, presenceGainFor, measurePresenceRatio, HD_LOUDNORM } from './enhance.js'

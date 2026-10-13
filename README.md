@@ -529,8 +529,9 @@ tts:
     apiKey: ""             # MiMo 开放平台 API Key
     model: mimo-v2.5-tts   # mimo-v2.5-tts（预置音色）| mimo-v2.5-tts-voicedesign（文字设计音色，style 必填）
     voice: mimo_default    # 预置音色：mimo_default/冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean
-    autoEmotion: true      # LLM 判定情绪 → 自然语言风格指令（user message）
-    style: ""              # 固定风格/音色描述指令（留空=LLM 生成；voicedesign 必填）
+    autoEmotion: true      # LLM 判定 → 自然语言风格指令（复合情绪/语速/发声方式/导演式）+ 音频标签
+    style: ""              # 固定风格/音色描述指令（留空=LLM 生成；voicedesign 必填；可写"用东北话说""用唱歌的方式"）
+    tagMode: auto          # 音频标签：auto=句首 (风格) + 行内 [标签]（原文保真校验，改写即丢弃）| style=只加句首 | off=不用
     format: wav            # wav | mp3（max 档固定 wav）
     tier: pro
 ```
@@ -538,11 +539,11 @@ tts:
 - 配置入口：Web 管理面板 → **语音合成**（服务卡片 → 弹窗配置：接口地址 / API Key / 音色 ID / 测试连接 / 参考音频上传+命名 / 情绪模式与 8 维滑块）。云服务商的「测试连接」会真实合成 2 个字（官方唯一可探活方式，极少计费）。
 - **鉴权（可选）**：IndexTTS 服务若套了鉴权网关（v1.2+，官方本体无认证），填 `agent.tts.indextts.apiKey`（`itts_xxx`），请求统一带 `X-API-Key` 头；`401`＝Key 缺失/错误、`429`＝失败限流、`503`＝网关配置故障、`502/504`＝上游未就绪，错误信息会直接提示对应处理方式。本插件可直连 `127.0.0.1:7862` 本体（同机部署可绕过网关，key 留空）。
 - **自动语音**（`autoReply`，默认开）：每条最终回复自动追加语音——文字/图片照常发送，语音内容是正文剥除 markdown/代码/链接/表格/emoji 后的文本（超长按句截断，`replyMaxChars`）；合成全过程有 `[tts] 合成开始/完成` 日志。`tts_speak` 工具保留给指定音色/情绪的点播（本轮已点播则不重复补发）。**讲稿清洗在合成入口统一执行**（点播同样生效），破折号（——）会转成停顿而不是被读成"减减"。
-- **情绪判定（四家共用一条 LLM 链路）**：由一次旁路 LLM 调用结合文本与近期对话判定 8 维情绪（高兴/愤怒/悲伤/害怕/厌恶/忧郁/惊讶/平静），再映射为目标服务商参数——IndexTTS 直接下发向量；豆包 1.0 → `emotion` 标签 + `emotion_scale`（由向量强度换算）；豆包 2.0 → `context_texts` 自然语言语音指令；MiniMax → 9 标签之一（忧郁→sad）；MiMo → 自然语言风格指令。`judgeModel` 可指定更快/更便宜的小模型，`judgeTimeoutMs` 控制单次判定总预算（默认 30s）——超时会中止请求并回退，快失败（网络/限流）会在剩余预算内自动重试一次；判定失败只影响情绪、不影响出语音，日志会给出预算与耗时便于排查。
+- **情绪判定（四家共用一条 LLM 链路）**：由一次旁路 LLM 调用结合文本与近期对话判定 8 维情绪（高兴/愤怒/悲伤/害怕/厌恶/忧郁/惊讶/平静），并可直接产出自然语言风格指令（`style`，支持复合情绪/语速/发声方式/导演式）与音频标签（`tag`/`tagged`）——IndexTTS 直接下发向量；豆包 1.0 → `emotion` 标签 + `emotion_scale`（由向量强度换算）；豆包 2.0 → 优先用 LLM `style` 作 `context_texts` 语音指令（无则回退向量模板）；MiniMax → 9 标签之一（忧郁→sad）；MiMo → LLM `style` 作 user 风格指令 + 按 `tagMode` 组合句首 `(风格)` 与行内 `[标签]`（保真校验）。`judgeModel` 可指定更快/更便宜的小模型，`judgeTimeoutMs` 控制单次判定总预算（默认 30s）——超时会中止请求并回退，快失败（网络/限流）会在剩余预算内自动重试一次；判定失败只影响情绪、不影响出语音，日志会给出预算与耗时便于排查。
 - **云服务商接入要点**：
   - **豆包**（[文档](https://docs.volcengine.com/docs/DoubaoVoice/unidirectional-streaming-text-to-speech-http?lang=zh)）：HTTP Chunked 单向流式（NDJSON，base64 分片按序拼接，`code 20000000` 结束）；新版控制台只需 `X-Api-Key` + 资源版本；`resourceId` 决定可用音色（2.0 音色以 `_uranus_bigtts` 结尾）与计费；语音指令仅 2.0/复刻 2.0 支持（建议 `model: seed-tts-2.0-expressive`）。
   - **MiniMax**（[文档](https://platform.minimaxi.com/docs/api-reference/speech-t2a-http)）：`POST /v1/t2a_v2`（Bearer 鉴权；旧版账号可填 `groupId`），响应 `data.audio` 为 **hex** 编码；情绪仅 `speech-2.6/2.8` 全量支持（`fluent/whisper` 仅 2.6；2.8 不支持 whisper）。
-  - **MiMo**（[文档](https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/speech-synthesis-v2.5)）：OpenAI 兼容 `chat/completions`，朗读文本必须放在 `assistant` 消息、风格指令放 `user` 消息，响应 `choices[0].message.audio.data`（base64）；`voicedesign` 模型用「固定风格指令」描述音色。
+  - **MiMo**（[文档](https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/speech-synthesis-v2.5)）：OpenAI 兼容 `chat/completions`，朗读文本必须放在 `assistant` 消息、风格指令放 `user` 消息，响应 `choices[0].message.audio.data`（base64）；情绪控制已按文档补全——LLM 判定后**直接生成自然语言风格指令**（支持复合情绪"压抑的愤怒/带着哽咽的笑意"、语速与发声方式、导演式角色/场景/指导、唱歌与方言点名），并按 `tagMode` 追加**音频标签**：句首 `(风格)` + 行内 `[笑]/[叹气]/[颤抖]/[语速加快]` 等（插入前后做原文保真校验，任何改写/增删一律丢弃该标签文本）；max 档逐段独立风格与标签；`voicedesign` 模型用「固定风格指令」描述音色（不走自动情绪与标签）。
   - 三家云服务的 API Key 保存在插件本机 `config/config.yaml`（与 LLM Key 同机制），面板/错误信息会回显配置本身但不会把密钥写入日志；讲稿仅在选中该服务商且配置齐全时才发送到对应平台。
 - **高清语音**（`hdVoice`，默认开）：发送前经 ffmpeg 做响度标准化（-15 LUFS / 真峰 -1.5dB）+ 存在感补偿（4kHz +5dB、6kHz 高架 +4dB）+ 24kHz 对齐——TTS 输出普遍偏轻偏闷，这一步显著提升清晰度；失败自动回退原始音频（需宿主 ffmpeg）。
 - 三种情绪模式：`same` 沿用音色参考的情绪；`audio` 另给一段情绪参考音频（`emotionWeight` 调影响强度）；`vector` 保留音色、用 8 维向量控制高兴/愤怒/悲伤/害怕/厌恶/忧郁/惊讶/平静，默认由 LLM 自动调节。
