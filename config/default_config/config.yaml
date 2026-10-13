@@ -367,6 +367,8 @@ agent:
       format: wav          # wav | mp3（max 档分段拼接固定 wav）
       useTagParser: false  # 声音复刻 2.0 表现力增强版 Cot 标签解析
       tier: pro            # pro=整段一次 | max=LLM 分段逐段情绪后 ffmpeg 合并
+      segmentGapMs: 300    # max 档段间静音（毫秒；0=不留空隙）
+      maxSegmentChars: 140 # max 档单段字符上限（LLM 分段/标点回退，防拆得过碎）
       timeoutMs: 120000
     minimax:               # MiniMax 语音（T2A V2）
       endpoint: "https://api.minimaxi.com/v1/t2a_v2"   # 国际站 https://api.minimax.io/v1/t2a_v2
@@ -384,6 +386,8 @@ agent:
       bitrate: 128000      # 仅 mp3 生效
       languageBoost: ""    # 语种增强：留空=自动；Chinese/English/Japanese/Arabic/Spanish/auto
       tier: pro
+      segmentGapMs: 300    # max 档段间静音（毫秒；0=不留空隙）
+      maxSegmentChars: 140 # max 档单段字符上限（LLM 分段/标点回退）
       timeoutMs: 120000
     mimo:                  # 小米 MiMo TTS（MiMo-V2.5-TTS，OpenAI 兼容 Chat Completions）
       endpoint: "https://api.xiaomimimo.com/v1"
@@ -395,6 +399,8 @@ agent:
       tagMode: auto        # 音频标签：auto=句首 (风格) + 行内 [标签]（原文保真校验，改写即丢弃）| style=只加句首 | off=不用
       format: wav          # wav | mp3（max 档固定 wav）
       tier: pro
+      segmentGapMs: 300    # max 档段间静音（毫秒；0=不留空隙）
+      maxSegmentChars: 140 # max 档单段字符上限（LLM 分段/标点回退）
       timeoutMs: 120000
     judgeModel: ""         # 情绪判定模型（对四家服务商统一生效；留空=indextts.model→utilityModel→主模型）
     judgeTimeoutMs: 300000 # 情绪判定总预算（毫秒，默认 5 分钟，统一生效）

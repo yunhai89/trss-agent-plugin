@@ -378,6 +378,34 @@ await test('TtsService：情绪判定慢超时 → 一个 slice 内回退（不�
   ok(r.notes?.some((n) => /回退/.test(n)), 'notes 告知回退')
 })
 
+await test('TtsService：max 档单段字数/段间静音按配置生效（与 IndexTTS 同口径）', async () => {
+  const calls = []
+  const runnerArgs = []
+  const fetchImpl = mkFetch({
+    'chat/completions': async (url, init) => {
+      calls.push(JSON.parse(init.body))
+      return jsonRes({ choices: [{ message: { audio: { data: Buffer.from('S').toString('base64') } } }] })
+    },
+  })
+  const runner = (args) => {
+    runnerArgs.push(args)
+    const out = args[args.length - 1]
+    if (out && out !== '-') { try { fs.writeFileSync(out, Buffer.from('X')) } catch { /* noop */ } }
+    return Promise.resolve({ ok: true, exitCode: 0, stdout: '', stderr: '' })
+  }
+  const svc = new TtsService({
+    enable: true, provider: 'mimo',
+    mimo: { apiKey: 'k', autoEmotion: false, tier: 'max', maxSegmentChars: 20, segmentGapMs: 500, format: 'wav' },
+  }, { dataDir, logger: () => {}, llm: null, fetchImpl, ffmpegRunner: runner })
+  const text = '甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥。' // 23 字 → 20 + 3 两段
+  const r = await svc.synthesize({ text })
+  ok(r.ok, `合成成功：${r.error || ''}`)
+  ok(calls.length >= 2, `按 maxSegmentChars=20 拆分（实际 ${calls.length} 段）`)
+  ok(calls.every((c) => c.messages[c.messages.length - 1].content.length <= 20), '每段不超单段字数上限')
+  ok(runnerArgs.some((a) => a.some((x) => String(x).includes('anullsrc')) && a.includes('0.500')), '段间静音 500ms 生效')
+  ok(r.tier === 'max' && r.segments?.length >= 2, '返回档位/分段信息')
+})
+
 await test('TtsService：云服务商未配置 → 可读错误，不发请求', async () => {
   let hit = 0
   const svc = new TtsService({ enable: true, provider: 'doubao', doubao: {} }, {
