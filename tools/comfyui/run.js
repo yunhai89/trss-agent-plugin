@@ -30,6 +30,7 @@ export function availableModels(objectInfo) {
     loras: optsOf('LoraLoader', 'lora_name'),
     // Impact 检测器权重（bbox/face/hand yolo）——选项来自 UltralyticsDetectorProvider，与 upscale 不同源
     detectors: optsOf('UltralyticsDetectorProvider', 'model_name'),
+    controlnet: optsOf('ControlNetLoader', 'control_net_name'),
   }
 }
 
@@ -47,6 +48,7 @@ export function missingModels(analysis, avail) {
   check('upscale', analysis.models.upscale)
   check('loras', analysis.models.loras)
   check('detectors', analysis.models.detectors)
+  check('controlnet', analysis.models.controlnet)
   return out
 }
 

@@ -325,6 +325,7 @@ const statusTool = defineTool({
         models: models ? {
           checkpoints: cap(models.checkpoints), unet: cap(models.unet), vae: cap(models.vae),
           upscale: cap(models.upscale), loras: cap(models.loras), detectors: cap(models.detectors),
+          controlnet: cap(models.controlnet),
         } : null,
       })
     } catch (e) {

@@ -19,7 +19,7 @@ import { analyzeGraph } from './analyze.js'
 import { applyParams } from './params.js'
 import { listWorkflowFiles, loadWorkflow, resolveWorkflowRef, clearDiscoveryCache } from './discover.js'
 import { parseDraw, formatWorkflowList, pickWorkflow, kindText } from './command.js'
-import { listWorkflowsSummary, finalOutputNodeId, nodeDepths } from './run.js'
+import { listWorkflowsSummary, finalOutputNodeId, nodeDepths, missingModels } from './run.js'
 import { newClient } from './api.js'
 
 const PLUGIN = fileURLToPath(new URL('../../', import.meta.url))
@@ -80,6 +80,14 @@ const OBJECT_INFO = {
   UltralyticsDetectorProvider: { input: { required: { model_name: [['bbox/face.pt', 'bbox/hand.pt'], {}] } }, output: ['BBOX_DETECTOR', 'SEGM_DETECTOR'] },
   'WD14Tagger|pysssss': { input: { required: { image: ['IMAGE', {}], model: [['wd-swinv2-tagger-v3'], {}], threshold: ['FLOAT', {}], character_threshold: ['FLOAT', {}], replace_underscore: ['BOOLEAN', {}], trailing_comma: ['BOOLEAN', {}], exclude_tags: ['STRING', {}] } }, output: ['STRING'], output_node: true },
   PreviewAny: { input: { required: { source: ['*', {}] } }, output: ['STRING'], output_node: true },
+  VAEDecodeTiled: { input: { required: { samples: ['LATENT', {}], vae: ['VAE', {}], tile_size: ['INT', {}], overlap: ['INT', {}] } }, output: ['IMAGE'] },
+  BboxDetectorSEGS: { input: { required: { bbox_detector: ['BBOX_DETECTOR', {}], image: ['IMAGE', {}], threshold: ['FLOAT', {}], dilation: ['INT', {}] } }, output: ['SEGS'] },
+  HandRepairCrop2080: { input: { required: { image: ['IMAGE', {}], selection_mode: [['detect', 'manual_box'], {}], hand_index: ['INT', {}], context_factor: ['FLOAT', {}], min_crop: ['INT', {}], target_size: [[512, 640, 768], {}], mask_expand: ['FLOAT', {}] } }, output: ['IMAGE', 'HAND_REPAIR_CONTEXT_2080', 'MASK'] },
+  HandPoseGuide2080: { input: { required: { context: ['HAND_REPAIR_CONTEXT_2080', {}], preset: [['waist_rest', 'palm_up'], {}], rotation: ['FLOAT', {}], mirror: ['BOOLEAN', {}], scale: ['FLOAT', {}] } }, output: ['IMAGE'] },
+  HandRepairStitch2080: { input: { required: { original: ['IMAGE', {}], repaired: ['IMAGE', {}], context: ['HAND_REPAIR_CONTEXT_2080', {}], feather: ['INT', {}] } }, output: ['IMAGE'] },
+  ControlNetLoader: { input: { required: { control_net_name: [['xinsir-openpose-sdxl-1.0.safetensors'], {}] } }, output: ['CONTROL_NET'] },
+  ControlNetApplyAdvanced: { input: { required: { positive: ['CONDITIONING', {}], negative: ['CONDITIONING', {}], control_net: ['CONTROL_NET', {}], image: ['IMAGE', {}], strength: ['FLOAT', {}] } }, output: ['CONDITIONING', 'CONDITIONING'] },
+  VAEEncodeForInpaint: { input: { required: { pixels: ['IMAGE', {}], vae: ['VAE', {}], mask: ['MASK', {}], grow_mask_by: ['INT', {}] } }, output: ['LATENT'] },
   LoraLoader: { input: { required: { model: ['MODEL', {}], clip: ['CLIP', {}], lora_name: [['lora-a.safetensors'], {}] } }, output: ['MODEL', 'CLIP'] },
 }
 
@@ -198,6 +206,28 @@ const FILE_MISSING_DETECTOR = JSON.stringify({
   7: { class_type: 'CLIPTextEncode', inputs: { clip: ['4', 1], text: 'worst quality' } },
 })
 
+/** 新版 02 同构：底图 + 手部修复链（ControlNet），内部有 VAEEncodeForInpaint 但无需输入图 */
+const FILE_REPAIR_CHAIN = JSON.stringify({
+  1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'model-a.safetensors' } },
+  3: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: 'base girl' } },
+  4: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: 'worst quality' } },
+  5: { class_type: 'EmptyLatentImage', inputs: { width: 768, height: 1152, batch_size: 1 } },
+  6: { class_type: 'KSampler', inputs: { model: ['1', 0], seed: 1, steps: 28, cfg: 5, sampler_name: 'euler_ancestral', scheduler: 'normal', positive: ['3', 0], negative: ['4', 0], latent_image: ['5', 0], denoise: 1 } },
+  7: { class_type: 'VAEDecodeTiled', inputs: { samples: ['6', 0], vae: ['1', 2], tile_size: 512, overlap: 64 } },
+  8: { class_type: 'SaveImage', inputs: { images: ['7', 0], filename_prefix: 'r/01_base' } },
+  9: { class_type: 'UltralyticsDetectorProvider', inputs: { model_name: 'bbox/hand.pt' } },
+  10: { class_type: 'BboxDetectorSEGS', inputs: { bbox_detector: ['9', 0], image: ['7', 0], threshold: 0.3, dilation: 8 } },
+  11: { class_type: 'HandRepairCrop2080', inputs: { image: ['7', 0], selection_mode: 'detect', hand_index: 0, context_factor: 3.0, min_crop: 256, target_size: 640, mask_expand: 0.15 } },
+  12: { class_type: 'HandPoseGuide2080', inputs: { context: ['11', 1], preset: 'waist_rest', rotation: 0, mirror: false, scale: 0.9 } },
+  13: { class_type: 'ControlNetLoader', inputs: { control_net_name: 'xinsir-openpose-sdxl-1.0.safetensors' } },
+  14: { class_type: 'ControlNetApplyAdvanced', inputs: { positive: ['3', 0], negative: ['4', 0], control_net: ['13', 0], image: ['12', 0], strength: 0.85 } },
+  15: { class_type: 'VAEEncodeForInpaint', inputs: { pixels: ['11', 0], vae: ['1', 2], mask: ['11', 2], grow_mask_by: 8 } },
+  16: { class_type: 'KSampler', inputs: { model: ['1', 0], seed: 9, steps: 30, cfg: 5, sampler_name: 'dpmpp_2m', scheduler: 'karras', positive: ['14', 0], negative: ['14', 1], latent_image: ['15', 0], denoise: 0.95 } },
+  17: { class_type: 'VAEDecodeTiled', inputs: { samples: ['16', 0], vae: ['1', 2], tile_size: 512, overlap: 64 } },
+  18: { class_type: 'HandRepairStitch2080', inputs: { original: ['7', 0], repaired: ['17', 0], context: ['11', 1], feather: 8 } },
+  19: { class_type: 'SaveImage', inputs: { images: ['18', 0], filename_prefix: 'r/02_repaired' } },
+})
+
 /** 多段式工作流（底图→中段→最终）：3 个 SaveImage 串联，验证「默认只发最终成品」 */
 const FILE_MULTISTAGE = JSON.stringify({
   1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'model-a.safetensors' } },
@@ -245,6 +275,7 @@ const server = http.createServer((req, res) => {
       { path: '06_missing_detector.json', size: FILE_MISSING_DETECTOR.length, modified: 446 },
       { path: '07_tagger.json', size: FILE_TAGGER.length, modified: 447 },
       { path: '08_multistage.json', size: FILE_MULTISTAGE.length, modified: 448 },
+      { path: '09_repair_chain.json', size: FILE_REPAIR_CHAIN.length, modified: 449 },
       { path: 'note.txt', size: 3, modified: 555 },
     ])
   }
@@ -258,6 +289,7 @@ const server = http.createServer((req, res) => {
     if (p === 'workflows/06_missing_detector.json') return res.end(FILE_MISSING_DETECTOR)
     if (p === 'workflows/07_tagger.json') return res.end(FILE_TAGGER)
     if (p === 'workflows/08_multistage.json') return res.end(FILE_MULTISTAGE)
+    if (p === 'workflows/09_repair_chain.json') return res.end(FILE_REPAIR_CHAIN)
     res.statusCode = 404; return res.end('nope')
   }
   if (u.pathname === '/prompt' && req.method === 'POST') {
@@ -411,7 +443,7 @@ await test('discover：userdata 列表 / 文件读取（路径 %2F 编码）/ �
   clearDiscoveryCache()
   const api = client()
   const entries = await listWorkflowFiles(api, { dir: 'workflows', ttl: 300 })
-  ok(entries.length === 8 && !entries.some((e) => e.name === 'note.txt'), '递归列出 8 个 .json（忽略非 json）')
+  ok(entries.length === 9 && !entries.some((e) => e.name === 'note.txt'), '递归列出 9 个 .json（忽略非 json）')
   const e1 = entries.find((e) => e.path === 'sub/01_txt2img.json')
   ok(e1?.udPath === 'workflows/sub/01_txt2img.json', 'udPath 带 dir 前缀（GET /userdata/{file} 用）')
   ok(e1?.folder === 'sub', 'folder 归一')
@@ -445,7 +477,7 @@ await test('list_workflows：清单（用途提示/参数/缺模型/说明）与
   clearDiscoveryCache()
   const { ctx } = makeCtx()
   const r = await tools['comfyui__list_workflows'].execute({ refresh: true }, ctx)
-  ok(r.ok && r.count === 8, `列出 8 个工作流（count=${r.count}）`)
+  ok(r.ok && r.count === 9, `列出 9 个工作流（count=${r.count}）`)
   const t = r.workflows.find((w) => w.name === '01_txt2img.json')
   ok(t && t.kinds.includes('txt2img') && t.params.includes('prompt') && t.params.includes('seed'), 'txt2img 摘要（kinds/params）')
   ok(t?.note && /用法说明/.test(t.note), 'Note 说明随清单下发')
@@ -472,7 +504,7 @@ await test('inspect_workflow：参数映射 / 模型缺失 / 名称解析', asyn
   ok(r.params.prompt?.node === '3' && r.params.seed?.node === '6', '参数映射下发')
   ok(r.missing_models.length === 0, '模型齐全（model-a 已安装）')
   const bad = await tools['comfyui__inspect_workflow'].execute({ workflow: 'zzz' }, ctx)
-  ok(!bad.ok && bad.candidates?.length === 8, '未找到 → 候选列表')
+  ok(!bad.ok && bad.candidates?.length === 9, '未找到 → 候选列表')
 })
 
 await test('generate：提交图正确（参数注入/seed）+ 产物回发 + 结果字段', async () => {
@@ -560,7 +592,7 @@ await test('run：listWorkflowsSummary（清单数据源，供工具与指令共
   clearDiscoveryCache()
   const api = client()
   const r = await listWorkflowsSummary({ api, dir: 'workflows', ttl: 300 })
-  ok(r.ok && r.items.length === 8, `清单 8 项（${r.items.length}）`)
+  ok(r.ok && r.items.length === 9, `清单 9 项（${r.items.length}）`)
   const t = r.items.find((i) => i.name === '01_txt2img.json')
   ok(t?.kinds?.includes('txt2img') && t?.params?.includes('prompt'), '摘要含 kinds/params')
   ok(t?.path === 'sub/01_txt2img.json' && typeof t?.size === 'number', '摘要含路径与体积')
@@ -584,6 +616,34 @@ await test('run：最终成品判定（依赖链最深输出节点）', async ()
   ok(finalOutputNodeId(single) === '2', '单输出 → 该节点')
   const depths = nodeDepths(g)
   ok(depths.get('8') === 4 && depths.get('12') === 6, '依赖链深度计算（base=4, final=6）')
+})
+
+await test('适配新版 02：底图+手部修复链（内部 inpaint 编码不得误标 img2img；ControlNet 模型纳入检查）', async () => {
+  clearDiscoveryCache()
+  const { ctx } = makeCtx()
+  const listed = await tools['comfyui__list_workflows'].execute({ refresh: true }, ctx)
+  const w = listed.workflows.find((x) => x.name === '09_repair_chain.json')
+  ok(w?.kinds?.includes('txt2img'), `含内部 inpaint 编码但无需输入图 → 仍为 txt2img：${JSON.stringify(w?.kinds)}`)
+  ok(!w?.kinds?.includes('img2img'), '不得误标 img2img（回归：旧判定只看 encode 节点）')
+  ok(w?.kinds?.includes('detailer'), '手部修复链 → detailer（修脸/修手）')
+  ok(w?.needs_input_image === false, '无需输入图')
+  ok(!w?.missing_models, `ControlNet 模型已装 → 不报缺失：${JSON.stringify(w?.missing_models)}`)
+
+  const insp = await tools['comfyui__inspect_workflow'].execute({ workflow: '09_repair_chain' }, ctx)
+  ok(insp.models.controlnet?.[0] === 'xinsir-openpose-sdxl-1.0.safetensors', 'ControlNet 模型归入 models.controlnet')
+  const conv = toApiGraph(JSON.parse(FILE_REPAIR_CHAIN), OBJECT_INFO)
+  ok(conv.ok && finalOutputNodeId(conv.prompt) === '19', `修复链最终成品 = 缝合后重绘（节点 19）：${conv.ok ? finalOutputNodeId(conv.prompt) : conv.error}`)
+  const depths = nodeDepths(conv.prompt)
+  ok(depths.get('8') === 4 && depths.get('19') > depths.get('8'), '底图（8）浅于成品（19）→ 默认只发成品')
+})
+
+await test('适配新版 02：缺失的 ControlNet 模型会被点名', async () => {
+  const g = JSON.parse(FILE_REPAIR_CHAIN)
+  g['13'].inputs.control_net_name = 'nope-openpose.safetensors'
+  const a = analyzeGraph(g, {})
+  const miss = missingModels(a, { controlnet: ['xinsir-openpose-sdxl-1.0.safetensors'] })
+  ok(miss.includes('controlnet:nope-openpose.safetensors'), `缺 ControlNet 上报：${JSON.stringify(miss)}`)
+  ok(missingModels(a, { controlnet: ['nope-openpose.safetensors'] }).length === 0, '已装时不报')
 })
 
 await test('generate：多段式工作流默认只发最终成品；all_steps=true 才全发', async () => {
@@ -617,7 +677,7 @@ await test('generate：主人审批可由配置关闭（agent.comfyui.confirm，
 await test('status：连通性/版本/工作流与模型计数', async () => {
   const { ctx } = makeCtx()
   const r = await tools['comfyui__status'].execute({}, ctx)
-  ok(r.ok && r.version === '9.9-test' && r.workflow_count === 8, `状态聚合（version=${r.version}, workflows=${r.workflow_count}）`)
+  ok(r.ok && r.version === '9.9-test' && r.workflow_count === 9, `状态聚合（version=${r.version}, workflows=${r.workflow_count}）`)
   ok(r.models?.checkpoints?.[0] === 'model-a.safetensors' && r.models?.upscale?.[0] === '4x-test.pth', '已安装模型清单（含 COMBO options 口径）')
 })
 

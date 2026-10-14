@@ -17,7 +17,7 @@ const SAMPLER_RE = /^(KSampler|KSamplerAdvanced|SamplerCustom|SamplerCustomAdvan
 /** 带 width/height 的潜空间/缩放节点（尺寸目标候选） */
 const LATENT_CLASSES = /^(EmptyLatentImage|EmptySD3LatentImage|EmptyHunyuanLatentVideo|EmptyLatentVideo|EmptyMochiLatentVideo|EmptyLTXVLatentVideo|ImageScale|ImageScaleBy|ResizeImageMaskNode|ImageResize)$/
 const VIDEO_OUT_RE = /^(VHS_VideoCombine|SaveVideo|SaveWEBM|SaveAnimatedWEBP|SaveAnimatedPNG)$/
-const DETAILER_RE = /(FaceDetailer|MaskDetailer|SegmDetailer|DetailerPipe)/
+const DETAILER_RE = /(FaceDetailer|MaskDetailer|SegmDetailer|DetailerPipe|HandRepair|HandPose)/
 /** 提示词反推/打标类节点（WD14 Tagger、CLIP Interrogator、Florence、BLIP 等） */
 const INTERROGATE_RE = /(WD14Tagger|Tagger|Interrogator|Florence|BLIP|JoyTag|ImageCaption|Captioner)/i
 const MAX_TRACE_DEPTH = 12
@@ -37,7 +37,7 @@ export function analyzeGraph(graph, opts = {}) {
   const params = {}
   const warnings = []
   const kinds = new Set()
-  const models = { checkpoints: [], unet: [], vae: [], upscale: [], loras: [], detectors: [] }
+  const models = { checkpoints: [], unet: [], vae: [], upscale: [], loras: [], detectors: [], controlnet: [] }
 
   const setIf = (key, node, field) => { if (!params[key] && node && field in node.inputs) params[key] = { node: node.id, field } }
 
@@ -126,6 +126,7 @@ export function analyzeGraph(graph, opts = {}) {
       else if (/Detector/i.test(n.class_type)) push(models.detectors, n.inputs.model_name)
     }
     if ('lora_name' in n.inputs) push(models.loras, n.inputs.lora_name)
+    if ('control_net_name' in n.inputs) push(models.controlnet, n.inputs.control_net_name)
   }
 
   // ── 输入图 / 蒙版 ──
@@ -152,9 +153,13 @@ export function analyzeGraph(graph, opts = {}) {
   if (plainImages.length > 1) warnings.push(`工作流含 ${plainImages.length} 个输入图节点，仅第一个映射为 input_image（其余可用 set 覆盖）`)
 
   // ── 类型提示 ──
+  // img2img 判定要求「真有输入图」：局部重绘/手部修复链内部也含 VAEEncode（但那是把原图编码进重绘流程），
+  // 只看 encode 节点会把「底图+修手」这类 txt2img 工作流误标成 img2img（如 02 新版）。
   const hasEncode = nodes.some((n) => /VAEEncode|EncodeTiled|VAEEncodeForInpaint/.test(n.class_type)) || (loadImages.length && primary && srcOf(primary.inputs, 'latent_image'))
-  if (primary && !hasEncode) kinds.add('txt2img')
-  if (primary && hasEncode) kinds.add('img2img')
+  if (primary) {
+    if (params.input_image && hasEncode) kinds.add('img2img')
+    else kinds.add('txt2img')
+  }
   if (nodes.some((n) => DETAILER_RE.test(n.class_type))) kinds.add('detailer')
   if (nodes.some((n) => /UltimateSDUpscale|UpscaleModelLoader|ImageUpscaleWithModel/.test(n.class_type))) kinds.add('upscale')
   if (nodes.some((n) => VIDEO_OUT_RE.test(n.class_type))) kinds.add('video')
