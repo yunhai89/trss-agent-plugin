@@ -22,10 +22,9 @@
 
 > ## 🌿 分支说明（先看）
 >
-> - **`master` 为稳定版**：核心对话（多模型聊天 / 工具调用 / 记忆 / 人设 / 图片渲染 / MCP / 群管）稳定可用，**只接收 bug 修复**。
-> - **`beta` 为 beta 测试分支**：新功能上线、或 Agents 底层改动（可能影响插件稳定性的改动）**优先推送到 `beta`**，验证稳定后会逐步合并进 `master`。
-> - 🧪 **想尝鲜且有一点自行解决问题能力的用户，可以部署 `beta` 分支**体验最新能力；生产/追求稳定请用 `master`。
-> - 维护约定：**bug 修复同时推送到 `master` 与 `beta`**，保持两个分支修复进度一致；新功能/底层改动只进 `beta`、不进 `master`。
+> - **`master` 为唯一主分支**：新功能、底层改动与 bug 修复都直接提交到 `master`。
+> - 历史上的 `beta` 测试分支已于 **v1.21.0** 全量合并进 `master` 并停用（`git pull` 用 `master` 即可，无需再切分支）。
+> - 更新插件：#更新（或 `git pull origin master`），随后 `#agents重载`。
 
 ---
 
@@ -151,33 +150,31 @@ cd ./plugins/agents-plugin && npm install      # 安装 markdown 渲染依赖（
 > 除 markdown 渲染（marked / marked-highlight / highlight.js，需在插件目录 `npm install`）外，其余依赖随 Yunzai 提供。`#agents更新`（git pull）后若 package.json 有变动，需重跑一次 `npm install`。
 > 重启 Yunzai 后，首次启动自动在**插件自己的** `plugins/agents-plugin/config/config.yaml` 生成配置，填入 API Key 即可使用。
 
-### 🌿 安装稳定版 / beta 测试版
+### 🌿 安装与更新（单一主分支 master）
 
-- **稳定版（推荐）**：直接使用上面的克隆命令（默认 `master` 分支）。
-- **beta 测试版（尝鲜）**：新功能与 Agents 底层改动会**先进入 `beta`**，验证稳定后再逐步合并进 `master`。安装时加 `-b beta`：
+- **`master` 为唯一主分支**：新功能、底层改动与 bug 修复都直接进 `master`。
+- 历史上的 `beta` 测试分支已于 **v1.21.0 全量合并进 `master` 并停用**（两个分支内容一致，无需再切换）。
 
 ```bash
 # Gitee（国内推荐）：
-git clone -b beta https://gitee.com/YunXi-67/trss-agent-plugin.git ./plugins/agents-plugin
+git clone https://gitee.com/YunXi-67/trss-agent-plugin.git ./plugins/agents-plugin
 # 或 GitHub：
-git clone -b beta https://github.com/yunhai89/trss-agent-plugin.git ./plugins/agents-plugin
+git clone https://github.com/yunhai89/trss-agent-plugin.git ./plugins/agents-plugin
 cd ./plugins/agents-plugin && npm install
 ```
 
-#### 已有安装切换分支
+#### 更新
 
 ```bash
 cd ./plugins/agents-plugin
-git fetch origin
-git checkout beta              # 切到 beta 测试分支
-git pull origin beta           # 拉取最新代码；若本地有冲突可改用：git reset --hard origin/beta
+git pull origin master         # 或主人发 #agents更新
 npm install                    # package.json 有变动时需重跑
 ```
 
-切回稳定版：`git checkout master && git pull origin master`。
+曾部署过 beta 分支的：`git checkout master && git pull origin master`（内容与 beta 一致，配置与 `tools/` 自研工具不受影响）。
 
 > ⚠️ 切换 / 更新后建议**重启 Yunzai**（或主人发 `#agents重载`）以重建运行时。你的配置（`config/config.yaml`）与 `tools/` 自研工具包**不在版本控制内**，切换分支不会覆盖。
-> 维护约定：**bug 修复同时更新 `master` 与 `beta`**；新功能 / 底层改动只进 `beta`（详见页首「🌿 分支说明」）。
+> 维护约定：**单一主分支 `master`**（新功能/底层改动/bug 修复都进 `master`；`beta` 已于 v1.21.0 合并停用，详见页首「🌿 分支说明」）。
 
 ### 🖼️ 图片回复（默认开启）
 
