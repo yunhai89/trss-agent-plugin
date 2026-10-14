@@ -2,7 +2,7 @@
  * 图片识别离线自检 —— mock provider 驱动 VisionService + describeImages。
  * 运行：node model/vision/test.mjs
  */
-import { VisionService, describeImages, DEFAULT_DESCRIBE } from './index.js'
+import { VisionService, describeImages, DEFAULT_DESCRIBE, DEFAULT_VIDEO_DESCRIBE } from './index.js'
 
 let passed = 0
 let failed = 0
@@ -238,6 +238,27 @@ await test('recognizeVideo：openai 发 video_url；anthropic 跳过（不调用
   eq(await vAnthropic.recognizeVideo({ buffer: PNG, mime: 'video/mp4', name: 'a.mp4' }), '', 'anthropic 跳过返回空串')
   eq(called, 0, 'anthropic 不调用 provider')
   ok(logs.some(([lvl, msg]) => lvl === 'warn' && /video_url/.test(msg)), '有明确 warn')
+})
+
+// ---------- 12b. recognizeVideo：自定义 prompt / maxTokens / 默认视频指令 ----------
+await test('recognizeVideo：自定义指令与 token 上限；默认为视频报告指令（非识图指令）', async () => {
+  const m = mockProvider('报告文本')
+  const v = new VisionService({ provider: m.provider, model: 'mimo-omni', protocol: 'openai' })
+  const desc = await v.recognizeVideo({ buffer: PNG, mime: 'video/mp4' }, { prompt: '只看要点', question: '讲了什么', maxTokens: 4096 })
+  eq(desc, '报告文本', '返回文本')
+  const recv = m.received()
+  eq(recv.max_tokens, 4096, 'maxTokens 覆盖服务默认')
+  const block = recv.messages[0].content.find((b) => b.type === 'text')
+  ok(block.text.startsWith('只看要点'), '自定义指令整体覆盖默认')
+  ok(block.text.includes('讲了什么'), '用户问题追加在自定义指令后')
+
+  const m2 = mockProvider('x')
+  const v2 = new VisionService({ provider: m2.provider, model: 'mimo-omni', protocol: 'openai', maxTokens: 111 })
+  await v2.recognizeVideo({ buffer: PNG, mime: 'video/mp4' })
+  const block2 = m2.received().messages[0].content.find((b) => b.type === 'text')
+  eq(block2.text, DEFAULT_VIDEO_DESCRIBE, '默认用视频报告指令')
+  ok(block2.text.includes('时间顺序') && !block2.text.includes('这张图片'), '含时间线要求、不再误用识图指令')
+  eq(m2.received().max_tokens, 111, '未显式覆盖时用服务默认 maxTokens')
 })
 
 // ---------- 总结 ----------

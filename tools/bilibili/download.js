@@ -47,6 +47,18 @@ function runFfmpeg(args, timeoutMs = MERGE_TIMEOUT_MS) {
   })
 }
 
+/**
+ * 媒体文件下载用的 opts：把「媒体整段下载超时」与「API 请求超时」分开。
+ * - timeoutMs：元数据/播放地址类 API 请求超时（配置 agent.tools.bilibili.timeout，通常 15s）；
+ * - downloadTimeoutMs：媒体文件整段下载超时（缺省沿用 timeoutMs，调用方可显式放宽）。
+ * 此前两者共用 timeoutMs：大文件下载会在 15s 被 abort（表现为"下载超时"），
+ * 观看/下载链路分别传 downloadTimeoutMs 规避。
+ */
+export function fileOpts(opts = {}) {
+  const t = Number(opts.downloadTimeoutMs) > 0 ? Number(opts.downloadTimeoutMs) : opts.timeoutMs
+  return { ...opts, timeoutMs: t }
+}
+
 /** 流式下载 URL 到本地文件（带 Referer/Cookie，防 CDN 403） */
 export async function downloadToFile(url, destPath, { fetcher, cookie, timeoutMs = DOWNLOAD_TIMEOUT_MS } = {}) {
   const f = fetcher || globalThis.fetch
@@ -66,8 +78,7 @@ export async function downloadToFile(url, destPath, { fetcher, cookie, timeoutMs
 }
 
 /** 从 dash.video 选轨：优先请求分辨率（取不到则最高可用），同分辨率按 codec 兼容度 + 码率排序 */
-export function pickVideoTrack(tracks, qn = 0, codec = 'auto') {
-  const arr = (Array.isArray(tracks) ? tracks : []).filter((t) => t?.baseUrl)
+export function pickVideoTrack(tracks, qn = 0, codec = 'auto') {  const arr = (Array.isArray(tracks) ? tracks : []).filter((t) => t?.baseUrl)
   if (!arr.length) return null
   const sel = pickClosestQuality(arr.map((t) => Number(t.id)), qn)
   const cand = arr.filter((t) => Number(t.id) === sel)
@@ -108,8 +119,8 @@ export async function downloadVideo({ bvid, cid, title }, opts = {}) {
       const vtmp = `${dest}.v.m4s`
       const atmp = `${dest}.a.m4s`
       try {
-        await downloadToFile(track.baseUrl, vtmp, opts)
-        await downloadToFile(audio.baseUrl, atmp, opts)
+        await downloadToFile(track.baseUrl, vtmp, fileOpts(opts))
+        await downloadToFile(audio.baseUrl, atmp, fileOpts(opts))
         await runFfmpeg(['-y', '-i', vtmp, '-i', atmp, '-c', 'copy', dest])
         const size = fs.statSync(dest).size
         const got = Number(track.id)
@@ -128,7 +139,7 @@ export async function downloadVideo({ bvid, cid, title }, opts = {}) {
   const d = pickBestDurl(info.durl)
   if (!d?.url) throw new BiliError('未取到可下载的视频流（durl 为空，可能需登录或该视频受限）', { kind: 'need_login' })
   const dest = path.join(outDir(opts.cfg), `${safeName(title)}_${bvid}.mp4`)
-  const r = await downloadToFile(d.url, dest, opts)
+  const r = await downloadToFile(d.url, dest, fileOpts(opts))
   const got = Number(info.quality) || 0
   return {
     ...r, kind: 'video', ext: 'mp4', via: 'durl',
@@ -142,6 +153,6 @@ export async function downloadAudio({ bvid, cid, title }, opts = {}) {
   const a = pickBestAudio(info.dash)
   if (!a?.baseUrl) throw new BiliError('未取到可下载的音频流（dash.audio 为空）', { kind: 'need_login' })
   const dest = path.join(outDir(opts.cfg), `${safeName(title)}_${bvid}.m4a`)
-  const r = await downloadToFile(a.baseUrl, dest, opts)
+  const r = await downloadToFile(a.baseUrl, dest, fileOpts(opts))
   return { ...r, audioId: a.id, kind: 'audio', ext: 'm4a', via: 'dash' }
 }

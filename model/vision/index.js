@@ -9,7 +9,7 @@
  *   media.replaceActive(described)   // 再走 buildContent → 主模型拿到的是描述文本
  */
 
-import { VisionService, DEFAULT_DESCRIBE } from './client.js'
+import { VisionService, DEFAULT_DESCRIBE, DEFAULT_VIDEO_DESCRIBE } from './client.js'
 import { isImage } from '../media/resolve.js'
 
 /**
@@ -107,4 +107,4 @@ function toTextMedia(mf, text) {
   }
 }
 
-export { VisionService, DEFAULT_DESCRIBE }
+export { VisionService, DEFAULT_DESCRIBE, DEFAULT_VIDEO_DESCRIBE }

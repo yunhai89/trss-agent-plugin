@@ -9,7 +9,7 @@ import {
   buildBiliCardJson, resolveQuality, pickClosestQuality, qualityLabel,
 } from './util.js'
 import { transcribeAudio } from './api.js'
-import { pickVideoTrack, ffmpegAvailable } from './download.js'
+import { pickVideoTrack, ffmpegAvailable, fileOpts } from './download.js'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -151,6 +151,139 @@ await test('dash 选轨：分辨率优先 + 编码偏好', () => {
   eq(pickVideoTrack(tracks, 112).id, 80, '会员档不可得回退 80')
   eq(pickVideoTrack([], 80), null, '空轨 null')
   okf(typeof ffmpegAvailable() === 'boolean', 'ffmpegAvailable 返回布尔')
+})
+
+// ── 看视频（多模态视觉模型）──
+const { watchVideo, watchIneligibility, buildWatchPrompt, WATCH_LIMITS } = await import('./watch.js')
+const { DEFAULT_VIDEO_DESCRIBE } = await import('../../model/vision/index.js')
+
+/** 观看用假视频详情（normalizeVideo 形态） */
+const mkVideo = (over = {}) => ({ bvid: 'BV1x', cid: 123, title: '视频', duration: 120, ...over })
+/** 假多模态视觉模型：记录收到的字节与参数 */
+function fakeVision({ reply = '报告：视频讲了 A、B、C', protocol = 'openai', videoCapable = true, model = 'mimo-omni' } = {}) {
+  const calls = []
+  return {
+    calls,
+    model, protocol, videoCapable,
+    async recognizeVideo(media, opts) { calls.push({ media, opts }); return reply },
+  }
+}
+/** 假下载器：写一个临时文件，返回与 downloadVideo 同形结果 */
+function fakeDownloader({ bytes = 'fake-video-bytes', quality = 16, via = 'durl' } = {}) {
+  const calls = []
+  return {
+    calls,
+    async download({ bvid, cid, title }, opts = {}) {
+      const p = path.join(os.tmpdir(), `bili_watch_${Date.now()}_${calls.length}.mp4`)
+      fs.writeFileSync(p, bytes)
+      calls.push({ bvid, cid, title, opts, path: p })
+      return { path: p, size: fs.statSync(p).size, kind: 'video', ext: 'mp4', via, quality, requestedQuality: opts.quality, downgraded: false }
+    },
+  }
+}
+
+await test('看视频：不可用判定（无视觉/协议/视频能力）', () => {
+  okf(!!watchIneligibility(null)?.reason.includes('视觉子模型'), '无视觉子模型 → 可读原因')
+  okf(!!watchIneligibility({ protocol: 'anthropic', videoCapable: true })?.reason.includes('video_url'), '非 openai 协议 → 可读原因')
+  okf(!!watchIneligibility({ protocol: 'openai', videoCapable: false, model: 'qwen-vl' })?.reason.includes('视频能力'), '未声明视频能力 → 可读原因')
+  eq(watchIneligibility({ protocol: 'openai', videoCapable: true, model: 'mimo-omni' }), null, 'OpenAI 兼容 + 视频能力 → 可看')
+})
+
+await test('看视频：下载 → 交视觉模型观看 → 报告 → 删除临时文件', async () => {
+  const dl = fakeDownloader({ bytes: 'video-bytes-123' })
+  const vision = fakeVision()
+  const r = await watchVideo({
+    video: mkVideo({ duration: 90 }),
+    vision,
+    cfg: { watchPrompt: '只看要点', watchMaxTokens: 4096 },
+    question: '它在讲什么？',
+    downloadOpts: { timeoutMs: 15000 }, // API 请求超时保持配置值（不随媒体下载放宽）
+    deps: { downloadVideo: dl.download },
+  })
+  okf(r.ok, '观看成功')
+  eq(r.description, '报告：视频讲了 A、B、C', '报告透传')
+  eq(r.quality, '360P', '回报实际清晰度（qn 32 → 360P）')
+  eq(dl.calls.length, 1, '只下载一次')
+  eq(dl.calls[0].opts.quality, resolveQuality('360'), '观看用 360P（低码率）')
+  eq(dl.calls[0].opts.format, 'mp4', '固定 mp4（多数多模态端可解）')
+  eq(dl.calls[0].opts.timeoutMs, 15000, 'API 请求超时保持配置值（15s）')
+  okf(dl.calls[0].opts.downloadTimeoutMs >= 60000, '媒体整段下载超时放宽（downloadTimeoutMs）')
+  eq(vision.calls.length, 1, '视觉模型被调用一次')
+  eq(vision.calls[0].media.buffer.toString(), 'video-bytes-123', '把视频字节交给视觉模型')
+  eq(vision.calls[0].media.mime, 'video/mp4', 'mime=video/mp4')
+  okf(vision.calls[0].opts.prompt.includes('只看要点'), '自定义观看指令生效')
+  okf(vision.calls[0].opts.prompt.includes('它在讲什么'), '用户问题追加进指令')
+  eq(vision.calls[0].opts.maxTokens, 4096, '报告 token 上限透传')
+  okf(!fs.existsSync(dl.calls[0].path), '观看结束后删除临时视频（不留盘）')
+})
+
+await test('看视频：时长超上限 → 不下载直接给原因', async () => {
+  const dl = fakeDownloader()
+  const r = await watchVideo({
+    video: mkVideo({ duration: 3600 }),
+    vision: fakeVision(),
+    cfg: { watchMaxDurationSec: 600 },
+    deps: { downloadVideo: dl.download },
+  })
+  okf(!r.ok && /时长/.test(r.reason), `超时长被拒绝（${r.reason}）`)
+  eq(dl.calls.length, 0, '不下载')
+  okf(/watchMaxDurationSec/.test(r.hint || ''), '建议可操作（调大上限/用字幕）')
+})
+
+await test('看视频：文件超上限 → 不送模型且删除临时文件', async () => {
+  const big = 'x'.repeat(2 * 1024 * 1024) // 2MB；上限设 1MB
+  const dl = fakeDownloader({ bytes: big })
+  const vision = fakeVision()
+  const r = await watchVideo({
+    video: mkVideo(),
+    vision,
+    cfg: { watchMaxMB: 1 },
+    deps: { downloadVideo: dl.download },
+  })
+  okf(!r.ok && /超过看视频上限/.test(r.reason), `超大小被拒绝（${r.reason}）`)
+  eq(vision.calls.length, 0, '不调用视觉模型')
+  okf(!fs.existsSync(dl.calls[0].path), '超限临时文件已删除（不占盘）')
+  okf(/watchMaxMB|watchQuality/.test(r.hint || ''), '建议可操作（调大上限/降分辨率）')
+  eq(fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('bili_watch_')).length, 0, '临时目录无残留')
+})
+
+await test('看视频：下载失败 / 模型空返回 → 结构化失败且不留文件', async () => {
+  const r1 = await watchVideo({
+    video: mkVideo(),
+    vision: fakeVision(),
+    deps: { downloadVideo: async () => { throw new Error('HTTP 403') } },
+  })
+  okf(!r1.ok && /下载视频失败/.test(r1.reason), `下载失败可读（${r1.reason}）`)
+
+  const dl = fakeDownloader()
+  const r2 = await watchVideo({
+    video: mkVideo(),
+    vision: fakeVision({ reply: '' }),
+    deps: { downloadVideo: dl.download },
+  })
+  okf(!r2.ok && /未产出观看报告/.test(r2.reason), `空报告可读（${r2.reason}）`)
+  eq(fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('bili_watch_')).length, 0, '临时文件已删除')
+})
+
+await test('看视频：默认指令与配置合并规则', () => {
+  okf(buildWatchPrompt({}, '').includes('时间顺序'), '默认指令要求时间线')
+  eq(buildWatchPrompt({}, ''), DEFAULT_VIDEO_DESCRIBE, '默认指令来自视觉模块的单一真源')
+  okf(buildWatchPrompt({ watchPrompt: '自定义' }, '问X').startsWith('自定义') && buildWatchPrompt({ watchPrompt: '自定义' }, '问X').includes('问X'), '自定义指令 + 用户问题')
+  eq(WATCH_LIMITS.maxTokens, 2048, '报告 token 默认上限')
+})
+
+await test('媒体下载超时分离：API 超时 vs 整段下载超时', () => {
+  eq(fileOpts({ timeoutMs: 15000 }).timeoutMs, 15000, '未配 downloadTimeoutMs → 沿用 API 超时')
+  eq(fileOpts({ timeoutMs: 15000, downloadTimeoutMs: 180000 }).timeoutMs, 180000, 'media 下载用 downloadTimeoutMs')
+  eq(fileOpts({ timeoutMs: 15000, downloadTimeoutMs: 180000 }).downloadTimeoutMs, 180000, '原字段保留（供上层读取）')
+  eq(fileOpts({}).timeoutMs, undefined, '两者都缺省 → 交给 downloadToFile 默认值')
+})
+
+await test('看视频：多模态模型不可用时不静默（analyze 回退依据）', async () => {
+  const dl = fakeDownloader()
+  const r = await watchVideo({ video: mkVideo(), vision: null, deps: { downloadVideo: dl.download } })
+  okf(!r.ok && /视觉子模型/.test(r.reason), '返回原因供 analyze 标注并回退')
+  eq(dl.calls.length, 0, '无视觉模型时不浪费下载')
 })
 
 console.log(`\n通过 ${passed}，失败 ${failed}`)

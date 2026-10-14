@@ -72,9 +72,9 @@ export function scopeKeyOf(ctx) {
 /**
  * 传给子代理的身份上下文子集：让 memory_search 等 query 工具可用，
  * 同时不带事件句柄/权限对象（e/bot/API Key/AbortController 一律不进 worker）。
- * sandbox 例外放行：calculate/转写等 shell 类 query 工具据此走沙箱（或 fail-closed），
- * 若缺这份上下文，子代理会绕过沙箱选择回落宿主执行。terminal 本身仍被
- * WORKER_CTX_UNSUPPORTED 剔除（不下发给子代理）。
+ * sandbox/vision 例外放行：calculate/转写等 shell 类 query 工具据此走沙箱（或 fail-closed），
+ * bilibili__analyze 等媒体类 query 工具据此看视频；若缺这两份上下文，子代理会绕过沙箱选择
+ * 回落宿主执行、或看不了视频。terminal 本身仍被 WORKER_CTX_UNSUPPORTED 剔除（不下发给子代理）。
  * @param {object} ctx 主代理工具上下文
  * @param {{ signal?: AbortSignal }} [extra] 需要显式透传的取消信号（与身份字段分开，语义清晰）
  */
@@ -87,6 +87,7 @@ export function workerCtxOf(ctx, extra = {}) {
         groupId: ctx.groupId,
         conversationId: ctx.conversationId,
         ...(ctx.sandbox ? { sandbox: ctx.sandbox } : {}),
+        ...(ctx.vision ? { vision: ctx.vision } : {}),
       }
     : {}
   if (extra.signal) base.signal = extra.signal

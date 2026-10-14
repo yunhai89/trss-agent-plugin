@@ -1168,9 +1168,9 @@ async function _buildRuntime(scope) {
       miyoushe: b.miyoushe || { cookie: cfg.miyoushe?.cookie || '', defaultGid: cfg.miyoushe?.defaultGid || 2 },
       replyMode: 'text',
     }
-    // 沙箱执行面同样装配：补齐任务里若有 shell 类工具（calculate/网页抓取等），
-    // 必须与交互路径同口径（不能因"没有交互事件"而绕过沙箱选择回落宿主）
-    completionCtx.sandbox = b.sandbox || makeSandboxCtx(completionCtx, { sandbox }, cfg)
+    // 工具运行时能力同源装配：补齐任务里若有 shell 类工具（calculate/网页抓取等）或多模态工具
+    // （B站看视频等），必须与交互路径同口径（不能因"没有交互事件"而绕过沙箱选择/缺少视觉子模型）
+    attachToolRuntime(completionCtx, { sandbox, vision }, cfg)
     let out
     const taskId = randomUUID()
     try {
@@ -1606,6 +1606,17 @@ export function makeSandboxCtx(ctx, rt, cfg = Config.get().agent || {}) {
 }
 
 /**
+ * 给工具 ctx 挂上运行时能力（沙箱执行面 + 视觉子模型）。所有 Agent 运行入口（交互/定时任务/
+ * 人设补齐/任务续跑/子代理）统一走这里，否则会出现「同一工具一处有、一处没有」的能力漂移
+ * （如 analyze 一处能看视频、一处只能看字幕）。rt 允许传 { sandbox, vision } 子集。
+ */
+export function attachToolRuntime(ctx, rt, cfg = Config.get().agent || {}) {
+  ctx.sandbox = makeSandboxCtx(ctx, rt, cfg)
+  ctx.vision = rt?.vision || null
+  return ctx
+}
+
+/**
  * 解析当前用户激活的人设接地（身份层 systemPrompt + 长尾检索 context），
  * 供交互对话与 #继续任务 续跑等入口统一复用（避免两处接地语义漂移）。
  * @returns {Promise<{ personaId: string|null, systemPrompt: string|undefined, context: string|undefined }>}
@@ -1638,9 +1649,9 @@ export const makeFireDispatch = (rt) => {
     if (info.type === 'task' && info.prompt) {
       const cfg = Config.get().agent || {}
       const ctx = ctxFromInfo(info)
-      // 定时任务同样装配沙箱上下文：显式选择 e2b 时，沙箱化工具（calculate/下载/转写等）
-      // 在任务链里也必须走沙箱，不能因"无交互事件"而回落宿主执行
-      ctx.sandbox = makeSandboxCtx(ctx, rt)
+      // 定时任务同样装配工具运行时能力：显式选择 e2b 时，沙箱化工具（calculate/下载/转写等）
+      // 在任务链里也必须走沙箱；多模态工具（B站看视频）同样需要视觉子模型
+      attachToolRuntime(ctx, rt)
       const taskId = randomUUID() // 与交互路径同源：定时任务也落 dev trace / 用量 / 采迹
       try {
         const r = await rt.makeAgent().run(info.prompt, {
@@ -1936,8 +1947,9 @@ export class Chat extends plugin {
       },
       cancel: (id) => rt.schedule.cancel(id),
     }
-    // terminal 工具运行时配置（沙箱执行；全员可用，无审批无黑名单，只有成本闸）
-    ctx.sandbox = makeSandboxCtx(ctx, rt, cfg)
+    // 工具运行时能力（沙箱执行面 + 视觉子模型）：沙箱给 terminal/沙箱化工具（全员可用，无审批无黑名单，只有成本闸）；
+    // 视觉给媒体类工具（bilibili__analyze 看视频等）
+    attachToolRuntime(ctx, rt, cfg)
     // web_download 工具运行时配置（yt-dlp 下载；目录/大小/超时上限，单位 MB→字节）
     ctx.download = {
       dir: cfg.download?.dir || undefined,
@@ -3230,8 +3242,8 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     const ctx = ctxOf(this.e)
     try { ctx.conversationId = await rt.session.getActiveConversation(ctx.scopeUserId, ctx.groupId) } catch { /* 无活动会话按默认 */ }
-    // 任务续跑/恢复会重新跑 Agent 工具链：沙箱执行面与交互路径同口径（防绕过沙箱回落宿主）
-    ctx.sandbox = makeSandboxCtx(ctx, rt)
+    // 任务续跑/恢复会重新跑 Agent 工具链：运行时能力（沙箱/视觉）与交互路径同口径
+    attachToolRuntime(ctx, rt)
     return { rt, ctx, scopeKey: scopeKeyOfCtx(ctx) }
   }
 

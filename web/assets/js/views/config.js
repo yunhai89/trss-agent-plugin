@@ -494,7 +494,7 @@
       const FEATURES = [
         { key: 'main', label: '主模型', mainOnly: false, hint: '对话主力：推理/工具调用/复杂任务，建议用强模型', get: () => mainModel.value?.model || '', set: (v) => { if (!v) form.modelId = '' } },
         { key: 'utility', label: '旁路小模型', mainOnly: false, hint: '高频小任务（意图识别/摘要），推荐便宜快速的小模型', get: () => form.utilityModel, set: (v) => { form.utilityModel = v } },
-        { key: 'vision', label: '视觉模型', mainOnly: false, hint: '看图/多模态理解，必须选支持图片输入的模型', get: () => form.vision?.model || '', set: (v) => { if (!form.vision) form.vision = {}; form.vision.model = v } },
+        { key: 'vision', label: '视觉模型', mainOnly: false, hint: '看图/看视频（多模态理解）：识图需图片输入，看视频（B站分析/用户发视频）需 OpenAI 兼容且声明视频能力的模型（如 mimo omni）', get: () => form.vision?.model || '', set: (v) => { if (!form.vision) form.vision = {}; form.vision.model = v } },
         { key: 'recall', label: '记忆抽取模型', mainOnly: false, hint: '短文本结构化抽取，小模型即可，量大省钱', get: () => form.recall?.model || '', set: (v) => { if (!form.recall) form.recall = {}; form.recall.model = v } },
         { key: 'embed', label: 'Embedding 模型', mainOnly: false, hint: '语义检索/近邻检测用，需厂商有 /embeddings 端点（DeepSeek 无，留空则全部回落词面匹配）', get: () => form.recall?.embedProvider || '', set: (v) => { if (!form.recall) form.recall = {}; form.recall.embedProvider = v } },
         { key: 'review', label: '自进化评审模型', mainOnly: false, hint: '代码/方案评审，输出结构化结论，中等模型够用', get: () => form.selfReview?.model || '', set: (v) => { if (!form.selfReview) form.selfReview = {}; form.selfReview.model = v } },
@@ -1498,7 +1498,7 @@
             <cfg-row name="单次最多图片" desc="media.maxImages">
               <input type="number" class="inp" style="width:110px" min="1" max="20" v-model.number="form.media.maxImages">
             </cfg-row>
-            <cfg-row name="视觉子模型" desc="主模型无视觉时图转文；各字段留空=复用主配置">
+            <cfg-row name="视觉子模型" desc="主模型无视觉时图转文；视频（用户视频/B站看视频）也走这里；各字段留空=复用主配置">
               <v-switch v-model="form.vision.enable"/>
             </cfg-row>
             <cfg-row full name="视觉模型" desc="已移至 模型配置（功能分配）（模型 ID / 接口 / Key）">
@@ -1729,8 +1729,8 @@
                 <cfg-row name="被动读取附件" desc="media.passive"><v-switch v-model="form.media.passive"/></cfg-row>
                 <cfg-row name="单文件上限(字节)"><input type="number" class="inp" style="width:130px" min="0" step="1048576" v-model.number="form.media.maxFileBytes"></cfg-row>
                 <cfg-row name="降级策略" desc="media.degrade"><input class="inp mono" style="width:120px" v-model="form.media.degrade"></cfg-row>
-                <cfg-row name="视觉描述 maxTokens"><input type="number" class="inp" style="width:110px" min="64" step="64" v-model.number="form.vision.maxTokens"></cfg-row>
-                <cfg-row class="full" name="视觉描述提示词"><input class="inp" style="width:100%" v-model="form.vision.describePrompt" placeholder="留空=内置"></cfg-row>
+                <cfg-row name="视觉描述 maxTokens" desc="识图/看视频报告输出上限（视频报告建议 2048+）"><input type="number" class="inp" style="width:110px" min="64" step="64" v-model.number="form.vision.maxTokens"></cfg-row>
+                <cfg-row class="full" name="视觉描述提示词" desc="识图指令（视频用内置“看视频”报告指令或 bilibili 的 watchPrompt）"><input class="inp" style="width:100%" v-model="form.vision.describePrompt" placeholder="留空=内置"></cfg-row>
                 <cfg-row class="full" name="能力覆盖" desc="media.caps（JSON，如 {&quot;vision&quot;:false,&quot;file&quot;:true}；留空=自动探测）">
                   <textarea class="inp mono" style="width:100%;min-height:54px" :value="JSON.stringify(form.media.caps || {})" @change="updateJson('media.caps', $event.target.value)"></textarea>
                 </cfg-row>

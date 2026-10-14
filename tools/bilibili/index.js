@@ -2,12 +2,13 @@
  * 哔哩哔哩工具包（目录型：index 入口 + sign.js 签名 + api.js 请求 + download.js 下载 + util.js 辅助）。
  *
  * 逆向接口来源：哔哩哔哩野生 API 文档（realysy/bili-apis ≈ SocialSisterYi/bilibili-API-collect）。
- * 匿名可用：搜索 / 详情 / 播放地址 / 评论 / 弹幕 / 榜单 / 热门；需登录 Cookie（SESSDATA）：AI 总结 / 字幕 / 用户空间 / 高清晰度。
+ * 匿名可用：搜索 / 详情 / 播放地址 / 评论 / 弹幕 / 榜单 / 热门；需登录 Cookie（SESSDATA）：字幕 / 用户空间 / 高清晰度。
  *
  * 工具：
  *  - bilibili__search    视频搜索
  *  - bilibili__video     视频详情
- *  - bilibili__analyze   视频分析包（元数据+AI总结+字幕/STT转录+热评+弹幕，交主 agent 总结）
+ *  - bilibili__analyze   视频内容分析（默认下载视频交多模态视觉模型「看视频」→ 带时间线的内容报告；
+ *                        看视频不可用时回退字幕/STT 转录；可附热评/弹幕，交主 agent 总结）
  *  - bilibili__download  分享卡片(默认)/下载视频(dash合并或durl,可选分辨率)/音频(m4a)
  *  - bilibili__subtitle  字幕文本
  *  - bilibili__comments  热门评论
@@ -22,10 +23,11 @@ import fs from 'node:fs'
 import { defineToolPack, defineTool, param, ok, fail, sendApi, sendText, getToolConfig } from '../../model/toolkit/index.js'
 import Config from '../../utils/Config.js'
 import {
-  search, getVideo, getConclusion, getSubtitles, getComments, getDanmaku,
+  search, getVideo, getSubtitles, getComments, getDanmaku,
   getRanking, getPopular, getUserInfo, getUserVideos, transcribeAudio, BiliError,
 } from './api.js'
 import { downloadVideo, downloadAudio } from './download.js'
+import { watchVideo } from './watch.js'
 import { fmtCount, fmtDate, parseMid, buildBiliCardJson, resolveQuality, qualityLabel } from './util.js'
 
 const cfg = () => getToolConfig('bilibili')
@@ -109,15 +111,16 @@ const videoTool = defineTool({
 // ─── analyze ───
 const analyzeTool = defineTool({
   name: 'analyze',
-  description: '哔哩哔哩视频内容分析包：拉取 元数据 + B站AI总结(需Cookie) + 字幕/无字幕时音频STT转录 + 热门评论 + 弹幕取样，返回结构化内容供你（主模型）总结/回答。用户说“分析/总结/讲讲这个B站视频”时用它。',
+  description: '哔哩哔哩视频内容分析：默认下载视频交多模态视觉模型「看视频」（画面+台词/讲解 → 带时间线的内容报告），并结合元数据返回；看视频不可用时自动回退字幕/转录（会在 notes 说明原因）。用户说“分析/总结/讲讲这个B站视频”时用它。',
   category: 'query',
-  meta: { summary: 'B站视频内容分析', resultCap: 8000 },
+  meta: { summary: 'B站视频内容分析（看视频）', resultCap: 8000 },
   parameters: param.object({
     video: VIDEO_PARAM,
-    question: param.str('用户想了解的重点（可选，用于引导分析）'),
+    question: param.str('用户想了解的重点（可选，引导观看/分析）'),
+    watch: param.bool('是否下载视频交多模态视觉模型观看（默认 true；false=只看字幕/转录）'),
     comments: param.bool('是否包含热门评论（默认 true）'),
     danmaku: param.bool('是否包含弹幕取样（默认 false）'),
-    maxChars: param.int('字幕/转录最大字符数（默认 6000）', { min: 500 }),
+    maxChars: param.int('观看报告/转录最大字符数（默认 6000）', { min: 500 }),
   }, ['video']),
   async execute(p, ctx) {
     const opts = optsOf(ctx)
@@ -131,37 +134,60 @@ const analyzeTool = defineTool({
       }
       const notes = []
 
-      // 1) B站 AI 总结（需登录 Cookie）
-      try {
-        const cc = await getConclusion({ bvid: v.bvid, cid: v.cid, upMid: v.owner.mid }, opts)
-        if (cc.summary || cc.outline.length) {
-          bundle.aiSummary = { summary: cc.summary, outline: cc.outline.map((o) => ({ title: o.title, points: o.points.map((pt) => pt.content).filter(Boolean) })) }
-        } else notes.push('B站 AI 总结为空')
-      } catch (e) { notes.push(`AI 总结不可用${errNote(e)}`) }
-
-      // 2) 字幕（需 Cookie）；无字幕且有 STT 时下载音频转录
-      let transcript = ''
-      try {
-        const s = await getSubtitles({ bvid: v.bvid, cid: v.cid }, opts)
-        if (s.text) { transcript = s.text; bundle.transcriptSource = `字幕(${s.lan})` }
-        else notes.push(`无字幕（可用字幕：${s.available.map((a) => a.lan).join('/') || '无'}）`)
-      } catch (e) { notes.push(`字幕不可用${errNote(e)}`) }
-
-      if (!transcript && c.enableStt !== false) {
-        const stt = Config.get()?.agent?.stt || {}
-        if (stt.enable === false) {
-          notes.push('无字幕；STT 已禁用（agent.stt.enable=false），无法转录')
-        } else if (!stt.apiKey) {
-          notes.push('无字幕且未配置 STT：请在配置中心「多模态 / 工具 / 扩展 → 语音转写 STT」填 Whisper 兼容的 apiKey（OpenAI/Groq/SiliconFlow 等；非 OpenAI 端点需同时填 apiBase），之后即可自动转录音频')
+      // 1) 看视频（主路径）：下载低码率视频 → 交多模态视觉模型观看（画面+声音）
+      //    不再依赖 B站 AI 总结（二手转述）与字幕（常缺失/机翻错漏）；看不了时才回退字幕/转录
+      const wantWatch = p.watch !== false && c.enableWatch !== false
+      let watched = null
+      if (wantWatch) {
+        const r = await watchVideo({
+          video: v,
+          vision: ctx?.vision,
+          cfg: c,
+          question: p.question || '',
+          downloadOpts: { fetcher: opts.fetcher, cookie: opts.cookie, cfg: c, timeoutMs: opts.timeoutMs },
+        })
+        if (r.ok) {
+          watched = r
+          const truncated = r.description.length > cap
+          bundle.watched = {
+            by: `视觉模型 ${r.model || '?'}`,
+            quality: `${r.quality || '?'}${r.downgraded ? `（请求 ${r.requestedQuality}，已回退）` : ''}`,
+            sizeMB: r.sizeMB,
+            text: truncated ? `${r.description.slice(0, cap)}\n…(观看报告已截断)` : r.description,
+          }
+          notes.push(`已观看视频（视觉模型 ${r.model || '?'} · ${r.quality || '?'} · ${r.sizeMB}MB）`)
         } else {
-          let audioPath = ''
-          try {
-            const a = await downloadAudio({ bvid: v.bvid, cid: v.cid, title: v.title }, opts)
-            audioPath = a.path
-            transcript = await transcribeAudio(audioPath, stt, { fetchImpl: ctx?.fetcher })
-            bundle.transcriptSource = 'STT 语音转录'
-          } catch (e) { notes.push(`STT 转录失败：${e?.message || e}${/401|403|Invalid|apiKey/i.test(e?.message || '') ? '（检查 agent.stt.apiKey/apiBase）' : ''}`) }
-          finally { if (audioPath) { try { fs.unlinkSync(audioPath) } catch { /* noop */ } } }
+          notes.push(`看视频不可用：${r.reason}${r.hint ? `（${r.hint}）` : ''}`)
+        }
+      } else {
+        notes.push(p.watch === false ? '未观看视频（watch=false）' : '看视频已关闭（agent.tools.bilibili.enableWatch=false）')
+      }
+
+      // 2) 回退：字幕（需 Cookie）；无字幕且有 STT 时下载音频转录。仅在未看到视频时执行
+      let transcript = ''
+      if (!watched) {
+        try {
+          const s = await getSubtitles({ bvid: v.bvid, cid: v.cid }, opts)
+          if (s.text) { transcript = s.text; bundle.transcriptSource = `字幕(${s.lan})` }
+          else notes.push(`无字幕（可用字幕：${s.available.map((a) => a.lan).join('/') || '无'}）`)
+        } catch (e) { notes.push(`字幕不可用${errNote(e)}`) }
+
+        if (!transcript && c.enableStt !== false) {
+          const stt = Config.get()?.agent?.stt || {}
+          if (stt.enable === false) {
+            notes.push('无字幕；STT 已禁用（agent.stt.enable=false），无法转录')
+          } else if (!stt.apiKey) {
+            notes.push('无字幕且未配置 STT：请在配置中心「多模态 / 工具 / 扩展 → 语音转写 STT」填 Whisper 兼容的 apiKey（OpenAI/Groq/SiliconFlow 等；非 OpenAI 端点需同时填 apiBase），之后即可自动转录音频')
+          } else {
+            let audioPath = ''
+            try {
+              const a = await downloadAudio({ bvid: v.bvid, cid: v.cid, title: v.title }, opts)
+              audioPath = a.path
+              transcript = await transcribeAudio(audioPath, stt, { fetchImpl: ctx?.fetcher })
+              bundle.transcriptSource = 'STT 语音转录（看视频不可用的回退）'
+            } catch (e) { notes.push(`STT 转录失败：${e?.message || e}${/401|403|Invalid|apiKey/i.test(e?.message || '') ? '（检查 agent.stt.apiKey/apiBase）' : ''}`) }
+            finally { if (audioPath) { try { fs.unlinkSync(audioPath) } catch { /* noop */ } } }
+          }
         }
       }
 

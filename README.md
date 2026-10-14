@@ -299,10 +299,12 @@ policy:
 
 主模型不支持视觉时，由视觉子模型识图 → 文本描述 → 主模型回答。主模型支持视觉则直发原图、不走此路径。默认复用主模型 `protocol/baseURL/apiKey`，只换 `model`。
 
+**视频也走视觉子模型**（主模型没有视频原生块路径）：用户发送的视频、以及 `bilibili__analyze` 的「看视频」都会把视频字节交给它输出文本报告。看视频要求 **OpenAI 兼容协议 + 模型声明视频能力**（`media.caps.video`，`mimo` 系 omni 已内置；纯图像 VL 模型会明确跳过并回退字幕/转录），视频报告输出上限建议 ≥2048 tokens、思考型模型建议关思考。
+
 ```yaml
 vision:
   enable: true
-  model: "mimo-2.5"     # 视觉模型 ID（必填才启用）
+  model: "mimo-2.5"     # 视觉模型 ID（必填才启用；看视频需支持 video_url）
   # 以下可选：覆盖为独立厂商
   protocol:             # 如 anthropic
   preset:

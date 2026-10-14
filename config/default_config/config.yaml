@@ -208,13 +208,13 @@ agent:
                                 # 原生音频块(OpenAI input_audio/Gemini audio)需 audio:true；视频识别需 video:true（mimo v2.5/v2.6 已内置）
   vision:
     enable: true
-    model: ""
+    model: ""               # 视觉子模型（识图 + 看视频）：留空=主模型支持视觉时复用主模型；主模型纯文本时必须显式指定
     protocol:
     preset:
     baseURL: ""
     apiKey: ""
-    maxTokens: 1024
-    describePrompt: ""
+    maxTokens: 1024        # 识图/观看报告输出上限（视频报告建议 2048+；思考型模型建议关思考）
+    describePrompt: ""      # 识图自定义指令（留空=内置；不影响视频——视频用内置“看视频”报告指令或工具自带 watchPrompt）
   tools:
     builtin: true
     dir: "tools"

@@ -3,7 +3,8 @@
  *
  * 接口来源：哔哩哔哩野生 API 文档（realysy/bili-apis ≈ SocialSisterYi/bilibili-API-collect）。
  * 匿名可用：搜索/详情/播放地址/评论/弹幕/榜单/热门。
- * 需登录 Cookie（SESSDATA）：AI 总结、字幕、用户空间、高清晰度。
+ * 需登录 Cookie（SESSDATA）：字幕、用户空间、高清晰度。
+ * 注：不再调用 B站 AI 总结接口——内容分析改为把视频交多模态视觉模型观看（见 watch.js）。
  */
 import { encWbi, keyFromWbiUrl } from './sign.js'
 import {
@@ -155,21 +156,6 @@ export async function getVideo(input, opts = {}) {
   const v = normalizeVideo(data)
   if (!v) throw new BiliError('视频数据为空', { kind: 'parse' })
   return v
-}
-
-/** AI 视频总结（需登录 Cookie） */
-export async function getConclusion({ bvid, cid, upMid }, opts = {}) {
-  const params = await wbiParams({ bvid, cid, up_mid: upMid }, opts)
-  const json = await getJson(`${HOSTS.api}/x/web-interface/view/conclusion/get?${new URLSearchParams(params)}`, opts)
-  const d = unwrap(json)
-  const mr = d?.model_result || {}
-  const outline = Array.isArray(mr.outline)
-    ? mr.outline.map((o) => ({
-      title: o.title || '',
-      points: Array.isArray(o.part_outline) ? o.part_outline.map((p) => ({ time: p.timestamp, content: p.content })) : [],
-    }))
-    : []
-  return { resultType: d?.code ?? 0, summary: mr.summary || '', outline }
 }
 
 /** 字幕（需登录 Cookie）：返回可用字幕列表与首选字幕正文 */

@@ -20,6 +20,20 @@ export const DEFAULT_DESCRIBE = [
   '5) 控制在 300 字以内，信息密度高、可直接被引用。',
 ].join('\n')
 
+/**
+ * 默认"看视频"指令（识图指令不适用于视频——视频要看时间线/过程，而不是"这张图片"的构图）。
+ * 供 recognizeVideo 与 bilibili__analyze 的观看报告复用；调用方可整体覆盖（prompt 参数）。
+ */
+export const DEFAULT_VIDEO_DESCRIBE = [
+  '请完整观看这个视频，为看不到视频的文本 AI 输出一份内容报告。要求：',
+  '1) 一句话概括主题与结论；',
+  '2) 按时间顺序梳理关键节点（用 0:00 / 1:23 这类时间点标注）；',
+  '3) 视频中的台词/讲解/字幕要点，尽量逐字转写；',
+  '4) 画面里出现的演示、图表、数据、步骤等可视信息；',
+  '5) 只写视频里真实出现的内容；看不清/听不清处标注"不确定"，不要臆测；',
+  '6) 控制在 500 字以内，信息密度高、可被直接引用。',
+].join('\n')
+
 export class VisionService {
   constructor({ provider, model, protocol = 'openai', describePrompt, maxTokens = 1024, thinking = null, temperature = null, videoCapable, logger = () => {} } = {}) {
     if (!provider) throw new Error('VisionService 需要 provider')
@@ -75,12 +89,12 @@ export class VisionService {
 
   /**
    * 识别视频 → 文本描述（MiMo-V2.5 等支持 video_url 的模型）。
-   * 用 OpenAI 兼容的 video_url 块（base64 data URI）+ 描述指令。
+   * 用 OpenAI 兼容的 video_url 块（base64 data URI）+ 观看指令。
    * @param {object} video { buffer:Buffer, mime:string, name?:string }
-   * @param {object} opts { question?:string }
+   * @param {object} opts  { question?:string 用户想了解的重点, prompt?:string 整体覆盖观看指令（如 B站观看报告）, maxTokens?:number 覆盖本服务默认上限 }
    * @returns {Promise<string>} 描述文本；失败返回空串
    */
-  async recognizeVideo({ buffer, mime, name } = {}, { question } = {}) {
+  async recognizeVideo({ buffer, mime, name } = {}, { question = '', prompt = null, maxTokens = null } = {}) {
     if (!buffer || !mime) return ''
     // video_url 仅 OpenAI 兼容多模态端（MiMo-V2.5 等）支持；Anthropic 无视频原生块。
     // 非 openai 协议若强发 video_url，会被端点拒收（或被归一为占位文本 → 对着空视频编描述），
@@ -95,9 +109,8 @@ export class VisionService {
       return ''
     }
     const videoUrl = `data:${mime};base64,${buffer.toString('base64')}`
-    const userText = question
-      ? `${DEFAULT_DESCRIBE}\n\n用户想了解：${question}`
-      : DEFAULT_DESCRIBE
+    const base = prompt || DEFAULT_VIDEO_DESCRIBE
+    const userText = question ? `${base}\n\n用户想了解：${question}` : base
     const content = [
       { type: 'video_url', video_url: { url: videoUrl }, fps: 2 },
       { type: 'text', text: userText },
@@ -108,7 +121,7 @@ export class VisionService {
       res = await this.provider.chat({
         model: this.model,
         messages: [{ role: 'user', content }],
-        max_tokens: this.maxTokens,
+        max_tokens: Number(maxTokens) > 0 ? Number(maxTokens) : this.maxTokens,
         stream: false,
         ...this._genOpts(),
       })
