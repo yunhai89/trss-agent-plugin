@@ -61,6 +61,8 @@ const HOOKED_STRESS = new Set([
   'apps/update.test.mjs',
   // TTS 路由测试需要桩 Config（写配置不落盘真实 config.yaml）
   'model/web/tts.test.mjs',
+  // 指令画图插件测试需要桩插件基类 + 桩 Config
+  'apps/comfyui-draw.test.mjs',
 ])
 for (const t of tests) {
   const rel = t.replace(root, '')

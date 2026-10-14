@@ -10,6 +10,8 @@
  *   POST /upload/image      multipart → {name, subfolder, type}
  *   POST /upload/mask       multipart + original_ref
  *   GET  /system_stats  /object_info  /models/{folder}  /queue
+ *   GET  /userdata?dir=&recurse=&full_info=   用户数据文件列表（工作流发现）
+ *   GET  /userdata/{file}                     用户数据文件内容（工作流文件）
  *   POST /interrupt         取消运行中
  *
  * Cloud 路由（移植自 Hermes _common.py 的 resolve_url/cloud_endpoint）：
@@ -66,7 +68,11 @@ export function classifyKind(filename) {
   return 'file'
 }
 
-/** 把 history.outputs（按节点聚合）拍平成产物列表 */
+/**
+ * 把 history.outputs（按节点聚合）拍平成产物列表。
+ * 文件类：images/gifs/videos/audio（Cloud 为 video）；文本类：text（PreviewAny/ShowText）/ tags（WD14 Tagger）。
+ * 同一段文本可能同时出现在标签节点与预览节点 → 调用方按内容去重（见 run.js）。
+ */
 function flattenOutputs(outputs) {
   const out = []
   for (const [nid, node] of Object.entries(outputs || {})) {
@@ -83,6 +89,13 @@ function flattenOutputs(outputs) {
           nodeId: nid,
         })
       }
+    }
+    // 文本类产物（不落盘、无文件名）
+    for (const bk of ['text', 'tags']) {
+      const v = node[bk]
+      const arr = Array.isArray(v) ? v : (typeof v === 'string' ? [v] : [])
+      const text = arr.filter((x) => typeof x === 'string' && x.trim()).join('\n').trim()
+      if (text) out.push({ kind: 'text', text, nodeId: nid })
     }
   }
   return out
@@ -153,6 +166,35 @@ export function newClient({ host, apiKey, cloud, fetcher, timeoutMs = 30000 } = 
       const r = await req(`/models/${encodeURIComponent(folder)}`)
       if (!r.ok) throw new Error(`/models/${folder} HTTP ${r.status}`)
       return r.data
+    },
+
+    /** 节点定义表（转换前端格式工作流用；约数 MB，调用方自行缓存） */
+    async objectInfo({ timeout = 60000 } = {}) {
+      const r = await req('/object_info', { timeout })
+      if (!r.ok) throw new Error(`/object_info HTTP ${r.status}`)
+      return r.data
+    },
+
+    /**
+     * 用户数据文件列表（工作流发现）。
+     * @returns {Promise<Array<{path:string,size?:number,modified?:number}>>}
+     */
+    async listUserdata(dir, { recurse = true, fullInfo = true } = {}) {
+      const q = new URLSearchParams({ dir: String(dir || ''), recurse: recurse ? 'true' : 'false', full_info: fullInfo ? 'true' : 'false' })
+      const r = await req(`/userdata?${q}`)
+      if (!r.ok) {
+        const hint = r.status === 404 ? '（目录不存在）' : r.status === 403 ? '（路径不允许）' : ''
+        throw new Error(`/userdata 列表失败 HTTP ${r.status}${hint}；该接口需 ComfyUI 较新版本（前端 1.16+）`)
+      }
+      return r.data
+    },
+
+    /** 用户数据文件内容（返回原始文本；工作流 JSON 由调用方解析） */
+    async getUserdata(file, { timeout = 30000 } = {}) {
+      // 整个相对路径编码为单个路径段（aiohttp 路由 /userdata/{file} 不匹配裸斜杠，必须 %2F）
+      const res = await req(`/userdata/${encodeURIComponent(String(file))}`, { raw: true, timeout })
+      if (!res.ok) throw new Error(`/userdata/${file} HTTP ${res.status}`)
+      return res.text()
     },
 
     async interrupt() {
