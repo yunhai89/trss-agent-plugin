@@ -36,7 +36,7 @@ agent:
   fallbackProtocol: "openai"  # openai | anthropic
   proxy: ""  # HTTP/SOCKS 代理（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）；国内服务器访问 GPT/Gemini 等海外 LLM 用，留空=直连
   reasoningFields: []
-  maxTurns: 25  # 单次对话工具调用轮次预算上限（默认 25；配合下方 loop.* 智能终止，实际很少触顶）
+  maxTurns: 200  # 单次对话工具调用轮次预算上限（默认 200；配合下方 loop.* 智能终止，实际很少触顶）
   loop:                       # 循环智能终止（审计 §2.1）：独立于 maxTurns 硬上限，额外检测死循环/停滞/预算耗尽
     maxSameAction: 2          # 同工具+相同参数连续允许次数（超出 → duplicate_action 终止，防 ping 死循环）
     maxConsecutiveFailures: 3 # 连续工具失败次数上限（超出 → consecutive_failures 终止）
@@ -96,10 +96,17 @@ agent:
     enable: true            # 窗口内留结构化台账 + context_recall 工具按 ref/关键词恢复；false 关闭归档与恢复工具（回滚杠杆）
     archiveDir: "data/context-archive"  # 压缩原文归档目录（按会话分目录，独立于会话数据生命周期）
   maxToolResultChars: 8000  # 单条工具结果字符上限（内容获取类工具可经 meta.resultCap 单独放宽到 12000）
+  toolConcurrency:          # 单批工具调用的受控并发（审计 §F03）：未声明并发语义的工具默认独占，内置只读工具显式并发
+    maxParallel: 3          # 全局滚动并发池上限（同一批只读工具最多同时执行多少个；独占/资源类工具另行串行）
+  toolSchemaValidate: true  # 工具参数 schema 预校验（缺参/类型错误/多余参数在副作用前结构化回报；关=回滚杠杆）
+  taskStore:                # 可恢复任务账本（P0-3）：任务事件/检查点落 sqlite 事务；重启把未结算任务标 interrupted
+    enable: false           # 默认关闭（开发阶段开关；开启后写入任务库，写操作默认不自动重放）
+    dir: "data/tasks"       # 任务库目录
   keepReasoning: false      # 是否把推理(reasoning_content)回灌历史（默认 false 省 context；thinking 模式带工具调用的轮次按协议必需始终回传，不受此开关影响）
   stream: false             # 逐字流式输出（依赖适配器、不稳，默认关）
   reflect: auto             # 自我反思/自纠：off=关 | auto=仅多轮/用工具时(默认) | always=每次最终回复都反思 | jev=由 Jev 判断是否需要反思
   finalizeMaxTokens: 2048   # 收尾（finalizer）输出 token 上限：异常停止后最后一次交付；太小会截断总结/子代理报告
+  rootTokenBudget: 0        # F13 根任务 token 预算上限（0=不限）：主/编排/子代理/反思合计；嵌套工作开始前预留
   render:                   # 卡片图渲染（帮助/列表/回复图）
     card: true              # 帮助等卡片图开关；弱服务器可置 false 直接回文本，避免渲染卡死
     timeoutMs: 15000        # 单张卡片图渲染总超时（毫秒）：超时/失败降级文本，不让指令永久卡住
@@ -146,6 +153,10 @@ agent:
     crawl:
       engine: crawl4ai      # 网页抓取引擎：crawl4ai（默认。真浏览器渲染，SPA/JS 动态页可抓；
                             # 需先跑 scripts/install-crawl4ai.sh，未安装自动降级 fetch）| fetch（纯 HTTP+cheerio，零依赖）
+      stealth: true         # 浏览器路径反检测（playwright-stealth + 模拟用户行为）；显式传 stealth:false 可单次关闭
+      retryBlocked: true    # 被反爬拦截（403/CF 挑战等）时自动用 undetected+stealth 强化再试一轮（最坏耗时翻倍）
+      allowPrivateHosts: false  # 允许抓取本机/内网/元数据地址（防 SSRF，默认禁）；确需抓内网页面再开
+      # proxy 复用 agent.proxy（浏览器路径与 fetch 一致；逐次生效）
     crawlTimeout: 60        # 单页抓取超时秒（慢站可调大；crawl4ai 含浏览器启停另加 30s 余量）
     chunkSize: 500          # 文档分块字符数
     chunkOverlap: 50        # 分块重叠（保上下文连贯）
@@ -153,7 +164,7 @@ agent:
     minScore: 0.3           # 最低相似度（cosine；低于不返回）；embedding 复用上面的 recall.embedProvider
   schedule:
     taskEnabled: true       # 定时任务链总开关（#定时任务 cron 重复 task；false 则拒绝创建）
-    taskMaxTurns: 15        # 任务链工具调用轮次上限（防失控烧 token）
+    taskMaxTurns: 200        # 任务链工具调用轮次上限（防失控烧 token；200=给足步数，靠 loop.* 智能终止兜底）
   selfReview:
     enable: true            # 在线自进化：每 N 轮对话后台异步自我评审，产出改进 suggestion（不阻塞回复）
     every: 20               # 每 N 轮对话触发一次后台自评审（per-scope 计数）
@@ -234,7 +245,14 @@ agent:
     host: "http://127.0.0.1:8188"   # ComfyUI 服务地址（本地/远程/Cloud）；本地默认 8188
     cloud: false              # true=走 Comfy Cloud 路由（host 填 https://cloud.comfy.org，端点加 /api 前缀、/history→/history_v2、/view 跟 302）
     apiKey: ""                # Cloud 的 X-API-Key（cloud:true 时必填；本地通常留空，反向代理加鉴权时填）
-    timeout: 300              # 单次生成最长等待秒（视频模板自动放宽到 900）
+    workflowDir: "workflows"  # 自动发现工作流的目录（ComfyUI user 目录下；默认 user/default/workflows，递归含子目录）
+    workflowCacheTtl: 300     # 工作流发现/转换缓存秒数（刚在 ComfyUI 里保存新工作流可让工具带 refresh 刷新）
+    confirm: true             # 生成需主人审批（#确认/#拒绝）；false=免审批直接生成（每次生成消耗 GPU，谨慎关闭）
+    command:                  # 指令画图（#画图列表 / #画图1 关键字；免 LLM 的快捷入口）
+      enable: true            # 关=不响应 #画图 指令（交给其它插件/LLM）
+      masterOnly: false       # true=仅主人可用
+      cooldown: 30            # 同用户两次画图最小间隔（秒；0=不限，防连点刷 GPU）
+    timeout: 300              # 单次生成最长等待秒（视频工作流自动放宽到 900）
     pollInterval: 1.5         # 轮询初始间隔（秒，指数退避到 pollMaxInterval）
     pollMaxInterval: 8        # 轮询最大间隔（秒）
     maxImages: 4              # 单次最多发图数（防爆刷）
@@ -484,7 +502,9 @@ agent:
     topology: spawn             # spawn=异步三件套 spawn/check/extend_subagent（默认）| orchestrator=同步编排工具 orchestrate
     maxConcurrent: 3            # 同时运行的子代理数上限
     maxSpawnsPerConversation: 5 # 单次对话最多创建几个子代理（topology=spawn 时生效）
-    workerMaxTurns: 10          # 子代理工具循环上限（防失控烧 token）
+    workerMaxTurns: 200          # 子代理工具循环上限（防失控烧 token；200=给足步数，靠 loop.* 智能终止兜底）
+    workerMaxTokens: 4096        # 子代理单轮最大输出 tokens（防报告被截断/空产出）
+    reserveTokens: 8000         # F13：编排（orchestrate）开始前向根任务预留的 token 额度；不足则拒绝启动
     workerModel: ""             # 子代理模型（空=复用主模型；可跨厂商，填便宜模型可降本）
     defaultTools:               # 子代理默认可用工具（模型未指定时）
       - web_search

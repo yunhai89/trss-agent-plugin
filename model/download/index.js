@@ -101,7 +101,7 @@ export function makeDownloadTool({ ytDlpBin } = {}) {
     name: 'web_download',
     description: '从网站下载视频/音频/媒体文件（基于 yt-dlp，支持 YouTube/B站/抖音/西瓜/微博 等 1000+ 站点）。需要下载视频时优先用本工具，不要用 terminal 跑 curl/wget/yt-dlp。下完会自动把文件发到当前会话并清理临时文件。仅主人可用。',
     category: 'system',
-    meta: { interactive: true, resultCap: 6000 },
+    meta: { interactive: true, resultCap: 6000, effect: 'external', replay: 'never' },
     parameters: {
       type: 'object',
       required: ['url'],

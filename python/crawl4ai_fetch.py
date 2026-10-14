@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
 """crawl4ai 一次性抓取子进程（Node 端 model/crawl/crawl4ai.js 监管）。
 
-对齐官方能力面（docs.crawl4ai.com Page Interaction / Simple Crawl / Extraction）：
+对齐官方能力面（docs.crawl4ai.com，v0.9.x 核对；老版本按参数过滤优雅降级）：
   - 同态渲染（CSR/SPA）：wait_for（css:/js: 等渲染完成）+ js_code（滚动/点击触发懒加载）
     + js_code_before_wait（先触发再等待）+ delay_ms（hydration 余量，默认 800ms）
     —— 官方执行顺序：goto → js_before_wait → wait_for → delay → js_code → capture
   - 结构化抽取：extract（JsonCssExtractionStrategy：baseSelector + fields schema）
   - 虚拟滚动：virtual_scroll（VirtualScrollConfig：容器选择器/次数/间隔——懒加载长列表）
+  - 整页滚动：scan_full_page + max_scroll_steps（无限加载、内容追加型站点）
   - 页面链接清单：links（内部/外部分开）
-  - 反检测：stealth（simulate_user + override_navigator + magic）
+  - 反检测：stealth（浏览器级 playwright-stealth enable_stealth + 行为级 simulate_user/
+    override_navigator/magic）、undetected（UndetectedAdapter 深度补丁，可与 stealth 叠加）、
+    proxy（走 agent.proxy；浏览器与 fetch 一致地处理受限网络）
   - Shadow DOM 组件页：flat_shadow_dom（flatten_shadow_dom）
 
 协议（python-subprocess-supervision 契约）：
   - stdin  ：单行 JSON 请求；stdout：单行 JSON 结果；stderr：日志（父进程留尾部）
   - 退出码 ：0=成功 | 2=抓取失败（stdout 仍有 ok:false 结果体）| 3=请求非法
              | 4=内部异常 | 124=总看门狗超时
+  - 结果码 ：blocked/challenge（反爬拦截或挑战页）| empty（无有效正文）| crawl_failed
+             | request_timeout | crashed | invalid_request
 
 运行前提：本脚本由 crawl4ai 专用 venv 的 python 启动（scripts/install-crawl4ai.sh 创建）。
 失败时 Node 端自动降级 fetch+cheerio（静态抓取兜底；本脚本的高级参数在降级时不可用）。
 """
 import asyncio
+import inspect
 import json
+import re
 import signal
 import sys
 
@@ -29,6 +36,18 @@ MIN_FIT_CHARS = 200        # fit_markdown 低于此长度视为修剪过度，�
 DEFAULT_DELAY_MS = 800     # hydration 余量：同态渲染组件挂载后 DOM 仍在变化（官方建议 1~3s，取保守值）
 JS_MAX_CHARS = 10_000      # 单段 JS 上限（防超长注入目标页）
 JS_MAX_ITEMS = 10          # js_code 数组段数上限
+PROXY_MAX_CHARS = 500      # 代理 URL 上限
+WAIT_UNTIL_ALLOWED = ("domcontentloaded", "load", "networkidle", "commit")
+
+# 反爬拦截 / 挑战页识别（保守：只在标题或 Cloudflare 挑战运行时变量命中，
+# 避免正常页面正文含 "captcha/challenge" 等词被误判——nowsecure.nl 这类页
+# 会带 challenge-platform 脚本但确实已通过验证，不能只看脚本标记）
+_CHALLENGE_TITLE_RE = re.compile(r"just a moment|attention required|正在验证|请稍候.*验证|人机验证", re.I)
+_CHALLENGE_BODY_RE = re.compile(
+    r"enable javascript and cookies to continue|cf_chl_opt|__cf_chl|checking if the site connection is secure",
+    re.I,
+)
+_BLOCK_TITLE_RE = re.compile(r"access denied|you have been blocked|request blocked|errors\.edgesuite\.net", re.I)
 
 
 def emit(obj):
@@ -106,6 +125,20 @@ def parse_request():
         emit({"ok": False, "code": "invalid_request", "error": "virtual_scroll 需为对象"})
         sys.exit(3)
 
+    # wait_until：Playwright 导航完成条件白名单（domcontentloaded/load/networkidle/commit）
+    wait_until = _s(req.get("wait_until"), 32, "wait_until") or None
+    if wait_until and wait_until not in WAIT_UNTIL_ALLOWED:
+        emit({"ok": False, "code": "invalid_request", "error": f"wait_until 需为 {'/'.join(WAIT_UNTIL_ALLOWED)} 之一"})
+        sys.exit(3)
+
+    # extra_args：浏览器启动附加 flag（仅内部策略注入，不做 LLM 参数；形状仍校验）
+    extra_args = req.get("extra_args")
+    if extra_args is not None:
+        if not isinstance(extra_args, list) or len(extra_args) > 20 \
+                or not all(isinstance(a, str) and 0 < len(a) <= 200 for a in extra_args):
+            emit({"ok": False, "code": "invalid_request", "error": "extra_args 需为 ≤20 个非空字符串（每个 ≤200 字符）"})
+            sys.exit(3)
+
     return {
         "url": url,
         "timeout_s": _bounded(req.get("timeout_s"), 5, 300, 60),
@@ -118,9 +151,111 @@ def parse_request():
         "extract": extract,
         "links": req.get("links") is True,
         "stealth": req.get("stealth") is True,
+        "undetected": req.get("undetected") is True,
+        "headless": req.get("headless") is not False,   # 默认无头（服务器环境）
+        "proxy": _s(req.get("proxy"), PROXY_MAX_CHARS, "proxy") or None,
+        "wait_until": wait_until,
+        "scan_full_page": req.get("scan_full_page") is True,
+        "max_scroll_steps": req.get("max_scroll_steps"),
         "flat_shadow_dom": req.get("flat_shadow_dom") is True,
         "virtual_scroll": vs,
+        "extra_args": extra_args,
     }
+
+
+def _init_params(cls):
+    """取类的 __init__ 参数名集合；失败返回 None（调用方视为「不过滤」）。"""
+    try:
+        return set(inspect.signature(cls.__init__).parameters.keys())
+    except (TypeError, ValueError):
+        return None
+
+
+def filter_kwargs(cls, kwargs, label):
+    """按已安装版本过滤构造参数：老版本 crawl4ai 缺新字段时跳过并在 stderr 说明，
+    不因版本差异整单失败（升级由 install-crawl4ai.sh 负责）。"""
+    params = _init_params(cls)
+    if params is None:
+        return dict(kwargs)
+    accepted = {k: v for k, v in kwargs.items() if k in params and k != "self"}
+    dropped = sorted(k for k in kwargs if k not in accepted)
+    if dropped:
+        sys.stderr.write(f"crawl4ai 版本不支持 {label} 参数，已跳过: {', '.join(dropped)}\n")
+    return accepted
+
+
+def build_browser_config(BrowserConfig, p):
+    kwargs = {"headless": p["headless"], "verbose": False}
+    if p["stealth"]:
+        kwargs["enable_stealth"] = True  # playwright-stealth（v0.7+ 字段，老版本经 filter_kwargs 跳过）
+    if p["proxy"]:
+        params = _init_params(BrowserConfig) or set()
+        if "proxy_config" in params:
+            kwargs["proxy_config"] = p["proxy"]  # v0.8+ 推荐字段
+        elif "proxy" in params:
+            kwargs["proxy"] = p["proxy"]         # 老字段（deprecated 但可用）
+        else:
+            sys.stderr.write("crawl4ai 版本不支持浏览器代理配置，已忽略 proxy\n")
+    if p["extra_args"]:
+        kwargs["extra_args"] = list(p["extra_args"])
+    return BrowserConfig(**filter_kwargs(BrowserConfig, kwargs, "BrowserConfig"))
+
+
+def build_run_config(deps, p):
+    run_kwargs = dict(
+        cache_mode=deps.CacheMode.BYPASS,       # 每次实抓（知识库刷新依赖真实最新内容）
+        page_timeout=int(p["timeout_s"] * 1000),
+        word_count_threshold=5,
+        excluded_tags=["nav", "footer", "header", "aside", "form"],
+        remove_overlay_elements=True,
+        # 正文去外链（markdown 已 ignore_links，这里防 cleaned_html 混入外站导航）；
+        # links 清单请求时让位——用户要的就是完整内外链列表（曾把 external 清单也剥空）
+        exclude_external_links=not p["links"],
+        # 同态渲染：导航后等 hydration 余量再取 HTML（组件挂载后 DOM 仍在变）
+        delay_before_return_html=p["delay_ms"] / 1000.0,
+    )
+    if p["wait_until"]:
+        run_kwargs["wait_until"] = p["wait_until"]
+    if p["wait_for"]:
+        run_kwargs["wait_for"] = p["wait_for"]
+    if p["js_before_wait"]:
+        # 官方顺序：goto → js_code_before_wait（触发）→ wait_for（等内容出现）
+        run_kwargs["js_code_before_wait"] = p["js_before_wait"]
+    if p["js_code"]:
+        run_kwargs["js_code"] = p["js_code"]
+    if p["css_selector"]:
+        run_kwargs["css_selector"] = p["css_selector"]
+    if p["stealth"]:
+        # 行为级反检测（浏览器级 enable_stealth 见 build_browser_config）
+        run_kwargs.update(simulate_user=True, override_navigator=True, magic=True)
+    if p["scan_full_page"]:
+        run_kwargs["scan_full_page"] = True
+        if p["max_scroll_steps"] is not None:
+            run_kwargs["max_scroll_steps"] = int(_bounded(p["max_scroll_steps"], 1, 200, 30))
+    if p["flat_shadow_dom"]:
+        run_kwargs["flatten_shadow_dom"] = True
+    if p["virtual_scroll"]:
+        try:
+            from crawl4ai import VirtualScrollConfig
+            v = p["virtual_scroll"]
+            run_kwargs["virtual_scroll_config"] = VirtualScrollConfig(
+                container_selector=str(v.get("container_selector") or "body")[:500],
+                scroll_count=int(_bounded(v.get("scroll_count"), 1, 50, 10)),
+                scroll_by=str(v.get("scroll_by") or "container_height"),
+                wait_after_scroll=_bounded(v.get("wait_after_scroll"), 0.1, 5.0, 1.0),
+            )
+        except ImportError:
+            sys.stderr.write("此版本 crawl4ai 不支持 VirtualScrollConfig，忽略 virtual_scroll\n")
+    if p["extract"]:
+        from crawl4ai import JsonCssExtractionStrategy
+        schema = {"name": str(p["extract"].get("name") or "Items"), **{k: v for k, v in p["extract"].items() if k != "name"}}
+        run_kwargs["extraction_strategy"] = JsonCssExtractionStrategy(schema)
+    else:
+        run_kwargs["markdown_generator"] = deps.DefaultMarkdownGenerator(
+            content_filter=deps.PruningContentFilter(threshold=0.45),
+            options={"ignore_links": True, "body_width": 0},
+        )
+    return deps.CrawlerRunConfig(**filter_kwargs(deps.CrawlerRunConfig, run_kwargs, "CrawlerRunConfig"))
 
 
 def extract_markdown(result):
@@ -158,74 +293,103 @@ def links_payload(result, cap=200):
     return out
 
 
+def blocked_kind(title, status, html):
+    """成功抓取但内容实为反爬挑战/拦截页的识别（返回 'challenge' / 'blocked' / None）。
+
+    保守策略：只认标题特征与 Cloudflare 挑战运行时变量/兜底文案——它们不会出现在
+    正常正文里；不能只看 challenge-platform 脚本（多数通过验证的 CF 站点也会加载它）。"""
+    t = str(title or "")
+    body = str(html or "")[:300000]
+    if _CHALLENGE_TITLE_RE.search(t) or _CHALLENGE_BODY_RE.search(body):
+        return "challenge"
+    if _BLOCK_TITLE_RE.search(t):
+        return "blocked"
+    try:
+        sc = int(status or 0)
+    except (TypeError, ValueError):
+        sc = 0
+    if sc in (401, 403, 429) and re.search(r"captcha|人机验证|安全验证|滑动验证", body, re.I):
+        return "challenge"
+    return None
+
+
+def crawl_stats_payload(result):
+    """crawl_stats（v0.9+ anti-bot 重试登记）：attempts/retries/resolved_by 等，跨版本缺失为 None。"""
+    stats = getattr(result, "crawl_stats", None)
+    if not isinstance(stats, dict):
+        return None
+    keep = {}
+    for k in ("attempts", "retries", "resolved_by", "fallback_fetch_used"):
+        v = stats.get(k)
+        if v is not None and isinstance(v, (int, float, str, bool)):
+            keep[k] = v
+    return keep or None
+
+
+class _Deps:
+    """crawl4ai 运行期依赖集合（显式注入 build_* 助手，避免隐式全局引用漏导入）。"""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
 async def crawl(p):
     from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
     from crawl4ai.content_filter_strategy import PruningContentFilter
     from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
-    run_kwargs = dict(
-        cache_mode=CacheMode.BYPASS,            # 每次实抓（知识库刷新依赖真实最新内容）
-        page_timeout=int(p["timeout_s"] * 1000),
-        word_count_threshold=5,
-        excluded_tags=["nav", "footer", "header", "aside", "form"],
-        remove_overlay_elements=True,
-        # 正文去外链（markdown 已 ignore_links，这里防 cleaned_html 混入外站导航）；
-        # links 清单请求时让位——用户要的就是完整内外链列表（曾把 external 清单也剥空）
-        exclude_external_links=not p["links"],
-        # 同态渲染：导航后等 hydration 余量再取 HTML（组件挂载后 DOM 仍在变）
-        delay_before_return_html=p["delay_ms"] / 1000.0,
+    deps = _Deps(
+        CrawlerRunConfig=CrawlerRunConfig, CacheMode=CacheMode,
+        PruningContentFilter=PruningContentFilter, DefaultMarkdownGenerator=DefaultMarkdownGenerator,
     )
-    if p["wait_for"]:
-        run_kwargs["wait_for"] = p["wait_for"]
-    if p["js_before_wait"]:
-        # 官方顺序：goto → js_code_before_wait（触发）→ wait_for（等内容出现）
-        run_kwargs["js_code_before_wait"] = p["js_before_wait"]
-    if p["js_code"]:
-        run_kwargs["js_code"] = p["js_code"]
-    if p["css_selector"]:
-        run_kwargs["css_selector"] = p["css_selector"]
-    if p["stealth"]:
-        run_kwargs.update(simulate_user=True, override_navigator=True, magic=True)
-    if p["flat_shadow_dom"]:
-        run_kwargs["flatten_shadow_dom"] = True
-    if p["virtual_scroll"]:
+    browser_config = build_browser_config(BrowserConfig, p)
+    run_config = build_run_config(deps, p)
+
+    crawler = None
+    if p["undetected"]:
         try:
-            from crawl4ai import VirtualScrollConfig
-            v = p["virtual_scroll"]
-            run_kwargs["virtual_scroll_config"] = VirtualScrollConfig(
-                container_selector=str(v.get("container_selector") or "body")[:500],
-                scroll_count=int(_bounded(v.get("scroll_count"), 1, 50, 10)),
-                scroll_by=str(v.get("scroll_by") or "container_height"),
-                wait_after_scroll=_bounded(v.get("wait_after_scroll"), 0.1, 5.0, 1.0),
+            from crawl4ai import UndetectedAdapter
+            from crawl4ai.async_crawler_strategy import AsyncPlaywrightCrawlerStrategy
+            strategy_kwargs = filter_kwargs(
+                AsyncPlaywrightCrawlerStrategy,
+                {"browser_config": browser_config, "browser_adapter": UndetectedAdapter()},
+                "AsyncPlaywrightCrawlerStrategy",
             )
-        except ImportError:
-            sys.stderr.write("此版本 crawl4ai 不支持 VirtualScrollConfig，忽略 virtual_scroll\n")
-    if p["extract"]:
-        from crawl4ai import JsonCssExtractionStrategy
-        schema = {"name": str(p["extract"].get("name") or "Items"), **{k: v for k, v in p["extract"].items() if k != "name"}}
-        run_kwargs["extraction_strategy"] = JsonCssExtractionStrategy(schema)
-    else:
-        run_kwargs["markdown_generator"] = DefaultMarkdownGenerator(
-            content_filter=PruningContentFilter(threshold=0.45),
-            options={"ignore_links": True, "body_width": 0},
-        )
+            crawler = AsyncWebCrawler(crawler_strategy=AsyncPlaywrightCrawlerStrategy(**strategy_kwargs), config=browser_config)
+        except (ImportError, TypeError) as e:
+            sys.stderr.write(f"undetected 模式不可用（{type(e).__name__}: {e}），回退常规浏览器\n")
+            crawler = None
+    if crawler is None:
+        crawler = AsyncWebCrawler(config=browser_config)
 
-    run_config = CrawlerRunConfig(**run_kwargs)
-    browser_config = BrowserConfig(headless=True, verbose=False)
-    async with AsyncWebCrawler(config=browser_config) as crawler:
+    async with crawler:
         result = await crawler.arun(url=p["url"], config=run_config)
-        if not result.success:
-            err = getattr(result, "error_message", None) or f"HTTP {getattr(result, 'status_code', '?')}"
-            emit({"ok": False, "url": p["url"], "code": "crawl_failed", "error": str(err)})
-            return 2
-
         status = getattr(result, "status_code", None) or getattr(result, "status", None)
         meta = getattr(result, "metadata", None) or {}
         title = str(meta.get("title") or "") if isinstance(meta, dict) else ""
         if not title:
             title = str(getattr(result, "title", "") or "")
 
+        if not result.success:
+            err = getattr(result, "error_message", None) or f"HTTP {status or '?'}"
+            err = str(err)
+            # crawl4ai v0.9+ 自带反爬检测（"Blocked by anti-bot protection: ..."）→ 结构化 blocked
+            code = "blocked" if re.search(r"anti-bot|blocked", err, re.I) else "crawl_failed"
+            emit({"ok": False, "url": p["url"], "status_code": status, "code": code, "error": err})
+            return 2
+
+        kind = blocked_kind(title, status, getattr(result, "html", ""))
+        if kind:
+            emit({
+                "ok": False, "url": p["url"], "status_code": status, "code": kind,
+                "error": f"内容为反爬{'挑战页' if kind == 'challenge' else '拦截页'}（title={title[:80]}）",
+            })
+            return 2
+
         out = {"ok": True, "url": str(getattr(result, "url", None) or p["url"]), "status_code": status, "title": title}
+        stats = crawl_stats_payload(result)
+        if stats:
+            out["crawl_stats"] = stats
 
         # 结构化抽取模式：新版字段 extracted_content（旧版/文档写作 extracted_data），可能已是
         # list、{schemaName: [items]} 或 JSON 字符串——三者都归一到 items 列表
@@ -255,12 +419,13 @@ async def crawl(p):
         else:
             markdown, fit_used = extract_markdown(result)
             if not markdown or len(markdown.strip()) < 20:
-                emit({"ok": False, "url": p["url"], "status_code": status, "error": "页面无有效正文"})
+                emit({"ok": False, "url": p["url"], "status_code": status, "code": "empty", "error": "页面无有效正文"})
                 return 2
-            truncated = len(markdown) > p["max_chars"]
+            full_len = len(markdown)
+            truncated = full_len > p["max_chars"]
             if truncated:
                 markdown = markdown[: p["max_chars"]]
-            out.update(markdown=markdown, fit_used=fit_used, raw_len=len(markdown), truncated=truncated)
+            out.update(markdown=markdown, fit_used=fit_used, raw_len=full_len, truncated=truncated)
 
         if p["links"]:
             lp = links_payload(result)

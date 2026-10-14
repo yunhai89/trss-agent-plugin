@@ -31,6 +31,12 @@ import { jsonSchemaToZod } from './schema.js'
 
 export { jsonSchemaToZod }
 
+/** 浏览器代理回退：与搜索/抓取一致，读环境变量代理（agent.proxy 优先，由调用方传入）。 */
+function browserProxyEnv() {
+  const env = process.env || {}
+  return env.HTTPS_PROXY || env.https_proxy || env.ALL_PROXY || env.all_proxy || env.HTTP_PROXY || env.http_proxy || ''
+}
+
 export function makeStagehand(opt = {}) {
   const cfg = opt.cfg || {}
   const agent = opt.agent || {}
@@ -72,7 +78,7 @@ export function makeStagehand(opt = {}) {
     return undefined
   }
 
-  const sessionMgr = opt.sessionMgr || new SessionManager({ cfg, buildModel, opTimeoutMs, launcher: opt.launcher || null, installPolicy: opt.installPolicy || null })
+  const sessionMgr = opt.sessionMgr || new SessionManager({ cfg: { ...cfg, proxy: agent.proxy || browserProxyEnv() }, buildModel, opTimeoutMs, launcher: opt.launcher || null, installPolicy: opt.installPolicy || null })
 
   /** 由 ctx 解析身份：{key(sessionKey), operator(限流键)}；缺少机器人/用户标识返回 null。 */
   function identityOf(ctx) {

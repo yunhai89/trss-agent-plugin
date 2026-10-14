@@ -14,8 +14,9 @@
  *   const { content, trace } = await orch.run('深度研究 AI Agent 行业')
  */
 
-export { SubagentSpec, makeDelegationTool } from './subagent.js'
+export { SubagentSpec, makeDelegationTool, normalizeSubagentResult } from './subagent.js'
 export { makeSpawnSubagentTool, makeSpawnSubagentTools } from './spawn-tool.js'
 export { Orchestrator, DEFAULT_ORCHESTRATOR_PROMPT } from './orchestrator.js'
 export { pipeline, parallel, router, evaluatorOptimizer, runStep } from './patterns.js'
 export { Semaphore, Trace, SharedState } from './support.js'
+export { buildWorkerTools, workerCtxOf, scopeKeyOf, WORKER_CTX_KEYS, WORKER_CTX_UNSUPPORTED } from './worker-context.js'

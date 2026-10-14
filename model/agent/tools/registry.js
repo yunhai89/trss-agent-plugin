@@ -79,6 +79,24 @@ export class ToolRegistry {
   }
 
   /**
+   * 作用域内注册（P0-4）：注册后把「仅移除本次注册」的清理函数登记到 scope。
+   * 旧注册的 disposer 按注册时的工具对象引用比对，不会误删同名新版本。
+   * register(...) 仍返回 this（不破坏链式调用），本方法额外返回 dispose 句柄。
+   */
+  registerScoped(scope, ...tools) {
+    const added = tools.flat(Infinity).filter(Boolean)
+    this.register(...added)
+    const captured = added.map((t) => ({ name: t.name, ref: this.tools.get(t.name) }))
+    const dispose = () => {
+      for (const { name, ref } of captured) {
+        if (this.tools.get(name) === ref) { this.tools.delete(name); this._indexDirty = true }
+      }
+    }
+    if (scope && typeof scope.register === 'function') scope.register(dispose, { name: 'tool-registry' })
+    return dispose
+  }
+
+  /**
    * 绑定工具的 toolEvo 版本身份（内置 seed / 进化 stable 共用）。
    * 使调用埋点能关联到具体版本（审计 P1-8）；不改变 execute 与权限等原始行为。
    */
@@ -108,7 +126,8 @@ export class ToolRegistry {
         const t0 = Date.now()
         if (isMcp) lg('info', `调用 ${name}`, '参数=', brief(params))
         else self.logger('debug', 'tool call', name, 'args=', brief(params))
-        // 观测埋点隔离（F21）：sink 同步抛错或异步 reject 都不得污染工具真实执行结果。
+        // 观测埋点隔离（F21）：sink 同步抛错或异步 reject 都不得污染工具真实执行结果，
+        // 更不能让成功工具被记成失败/触发重试。
         const sink = (extra) => {
           if (!self._invSink) return
           try {

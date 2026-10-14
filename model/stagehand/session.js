@@ -215,6 +215,9 @@ export class SessionManager {
       if (this._closed || signal?.aborted) throw new Error('会话在初始化期间已关闭/取消')
       const page = await resolveFirstPage(context)
       if (!page) throw new Error('Stagehand 启动后无可用页面')
+      // 会话级默认超时：让慢站（fandom/wiki 等）有足够时间加载，而不是被 SDK/RPC 默认短超时中断
+      const navMs = Math.max(1000, Number(this._cfg.navTimeoutMs || this._cfg.opTimeoutMs) || DEFAULT_OP_TIMEOUT_MS)
+      try { page.setDefaultNavigationTimeout?.(navMs); page.setDefaultTimeout?.(navMs) } catch { /* page 代理不支持则忽略 */ }
       const entry = { key, stagehand, browser, context, page, close, timer: null, active: 0, tail: Promise.resolve(), lastUsed: Date.now(), closed: false }
       this._sessions.set(key, entry)
       this._touch(key)

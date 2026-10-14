@@ -17,7 +17,7 @@
  */
 import { SubagentSpec } from './subagent.js'
 import { Semaphore, Trace } from './support.js'
-import { ToolRegistry } from '../agent/tools/registry.js'
+import { buildWorkerTools, scopeKeyOf, workerCtxOf } from './worker-context.js'
 import Log from '../../utils/Log.js'
 
 const FOCUS_PROMPTS = {
@@ -28,77 +28,10 @@ const FOCUS_PROMPTS = {
   default: '你是一个独立子代理。只做被委派的任务，直接给出结果。不要解释过程，不要做超出任务范围的事。任务自包含——你看不到主对话的上下文。',
 }
 
-const ALLOWED_TOOL_CATEGORIES = new Set(['query'])
-
-/** 子代理 run 时只注入身份字段（见 workerCtxOf）；这些是「可用 ctx 键」集合 */
-const WORKER_CTX_KEYS = new Set(['userId', 'scopeUserId', 'scopeId', 'groupId', 'conversationId'])
-
-/**
- * 依赖运行时句柄（e/bot/sandbox/media/fetcher/miyoushe…）的 query 类工具。
- * 子代理拿不到这些句柄，调用必然失败——下发给子代理只会空转/浪费轮次，故排除。
- * 新增此类工具时请同步登记（或在工具 meta.requires 里声明所需 ctx 键）。
- */
-const WORKER_CTX_UNSUPPORTED = new Set([
-  'terminal',                 // ctx.sandbox
-  'read_attachment',          // ctx.media
-  'list_group_folder', 'get_group_file_url', // ctx.e/bot
-  'get_chat_history', 'get_forward_msg', 'analyze_chat_record', 'get_group_notice', // ctx.e/bot/quoted
-  'group_info', 'group_member', 'user_info', // ctx.bot
-  'get_ai_characters', 'ai_tts', // ctx.e/bot（AI 语音通道）
-  'read_pdf', 'create_excel', 'send_file', 'file_to_pdf', // ctx.e / ctx.media
-  'miyoushe_search', 'miyoushe_post', 'miyoushe_replies', // ctx.miyoushe/fetcher/e
-  'pixiv__search', 'pixiv__illust', 'pixiv__ranking', 'pixiv__user', 'pixiv__tags', // ctx.e（外置工具包）
-])
-
 const MIN_BUDGET_MS = 10000
 const MAX_BUDGET_MS = 600000
 const HARD_GRACE_MS = 30000 // 预算到点（协作取消）后，最多再等这么久；仍不结算就强制判超时并释放并发槽
 const STALE_MS = 10 * 60 * 1000 // 终态任务保留时长 / 会话配额记录过期时长
-
-/**
- * 按白名单 + 可达性构建子代理工具集。
- * @returns {{ registry: ToolRegistry|null, granted: string[], dropped: string[] }}
- *   granted=实际下发的工具名；dropped=请求了但不可用的工具名（供主代理据此改派/自己完成）。
- */
-function buildWorkerTools(sourceRegistry, names, defaultNames) {
-  if (!sourceRegistry) return { registry: null, granted: [], dropped: [] }
-  const wanted = (Array.isArray(names) && names.length ? names : defaultNames).map(String)
-  const workerReg = new ToolRegistry()
-  const granted = []
-  const dropped = []
-  for (const name of wanted) {
-    if (name === 'spawn_subagent' || name === 'check_subagent' || name === 'extend_subagent') { dropped.push(name); continue }
-    if (WORKER_CTX_UNSUPPORTED.has(name)) { dropped.push(name); continue } // 依赖子代理没有的运行时句柄 → 剔除
-    const tool = sourceRegistry.get(name)
-    if (!tool) { dropped.push(name); continue }
-    if (!ALLOWED_TOOL_CATEGORIES.has(tool.category || 'query')) { dropped.push(name); continue }
-    // 声明式能力校验：meta.requires 里有子代理 ctx 不提供的键 → 不下发
-    if (Array.isArray(tool.meta?.requires) && tool.meta.requires.some((k) => !WORKER_CTX_KEYS.has(k))) { dropped.push(name); continue }
-    if (!workerReg.has(name)) { workerReg.register(tool); granted.push(name) }
-  }
-  return { registry: workerReg, granted, dropped }
-}
-
-/** 会话作用域键：配额与任务归属都按它隔离（与 Agent/session 的群:用户:会话同源） */
-function scopeKeyOf(ctx) {
-  if (!ctx) return 'global'
-  const gid = ctx.groupId ? String(ctx.groupId) : 'private'
-  const uid = String(ctx.scopeUserId || ctx.userId || 'unknown')
-  const conv = ctx.conversationId != null ? String(ctx.conversationId) : 'default'
-  return `${gid}:${uid}:${conv}`
-}
-
-/** 传给子代理的身份上下文子集：让 memory_search 等 query 工具可用，同时不带事件句柄/权限对象 */
-function workerCtxOf(ctx) {
-  if (!ctx) return undefined
-  return {
-    userId: ctx.userId,
-    scopeUserId: ctx.scopeUserId,
-    scopeId: ctx.scopeId,
-    groupId: ctx.groupId,
-    conversationId: ctx.conversationId,
-  }
-}
 
 /**
  * 构造子代理三件套工具（spawn + check + extend）。
@@ -110,13 +43,15 @@ export function makeSpawnSubagentTools({
   model = null,
   sourceRegistry = null,
   semaphore = null,
-  maxTurns = 10,
+  maxTurns = 200,
+  maxTokens = 4096,
   defaultTools = ['web_search', 'memory_search'],
   maxSpawns = 5,
   defaultBudgetMs = 600000, // 默认 10 分钟（长任务如大文件处理需要）
   hardGraceMs = HARD_GRACE_MS, // 测试可调小
   minBudgetMs = MIN_BUDGET_MS,
   onSettle = null, // 任务终态且主循环本轮已结束、结果未被 check 消费时回调（异步回推给会话）
+  detach = false, // F12：默认附属（随父任务取消）；true=脱离（跨主轮次后台继续，不受父取消影响）
 } = {}) {
   if (!provider) throw new Error('makeSpawnSubagentTools: provider 必填')
 
@@ -142,10 +77,12 @@ export function makeSpawnSubagentTools({
     clearTimeout(t._budgetTimer); clearTimeout(t._hardTimer)
     const remaining = t.startedAt ? Math.max(1, t.budgetMs - (Date.now() - t.startedAt)) : t.budgetMs
     t._budgetTimer = setTimeout(() => {
+      t._budgetAborted = true
       try { t.abort.abort(new Error('子代理时间预算耗尽')) } catch { /* noop */ }
     }, remaining)
     t._budgetTimer.unref?.()
     t._hardTimer = setTimeout(() => {
+      t._hardAborted = true
       try { t.abort.abort(new Error('子代理未响应取消（硬超时）')) } catch { /* noop */ }
       try { t._hardReject?.(new Error('子代理未响应取消（硬超时）')) } catch { /* noop */ }
     }, remaining + _hardGrace())
@@ -303,17 +240,29 @@ export function makeSpawnSubagentTools({
       const deliverCtx = ctx ? { e: ctx.e, bot: ctx.bot, groupId: ctx.groupId, userId: ctx.userId, conversationId: ctx.conversationId } : null
       const spec = new SubagentSpec({
         name: specName, description: `子代理 #${_seq}（${focus}）`,
-        systemPrompt: FOCUS_PROMPTS[focus], tools: (workerTools && workerTools.list().length) ? workerTools : null, model, provider, maxTurns,
+        systemPrompt: FOCUS_PROMPTS[focus], tools: (workerTools && workerTools.list().length) ? workerTools : null, model, provider, maxTurns, maxTokens,
       })
 
       const abort = new AbortController()
       const taskInfo = {
         id: taskId, task: task.slice(0, 80), scope, createdAt: Date.now(), startedAt: null, finishedAt: null,
+        status: 'queued', // 入场状态显式化（此前隐式 undefined，导致排队可取消的入场检查误判）
         budgetMs, abort, _budgetTimer: null, _hardTimer: null, _hardReject: null,
         _waiters: new Set(), result: null, error: null, specName,
+        stopReason: null, completion: null, usage: null, turns: 0,
+        _budgetAborted: false, _hardAborted: false, _parentCancelled: false, _unlinkParent: null,
         consumed: false, runEnded: false, _settled: false, deliverCtx,
       }
       _tasks.set(taskId, taskInfo)
+
+      // F12：默认附属任务随父任务取消（detach=true 时不联动，后台跨主轮次继续）。
+      if (!detach && ctx?.signal) {
+        const parentSignal = ctx.signal
+        const onParentAbort = () => { taskInfo._parentCancelled = true; try { abort.abort(parentSignal.reason) } catch { /* noop */ } }
+        if (parentSignal.aborted) onParentAbort()
+        else parentSignal.addEventListener('abort', onParentAbort, { once: true })
+        taskInfo._unlinkParent = () => { try { parentSignal.removeEventListener('abort', onParentAbort) } catch { /* noop */ } }
+      }
 
       Log.mark('[spawn_subagent]', `异步创建子代理 ${taskId} scope=${scope} focus=${focus} budget=${Math.round(budgetMs / 1000)}s task="${task.slice(0, 120)}${task.length > 120 ? '…' : ''}"（完整任务见 devLog）`)
       trace.emit('delegate:start', { subagent: specName, task: task.slice(0, 120), budgetMs })
@@ -322,34 +271,54 @@ export function makeSpawnSubagentTools({
       ;(async () => {
         let slotHeld = false
         try {
-          await sem.acquire()
+          // 排队可取消（P0-1）+ F18：Semaphore 队列满返回 false（不再忽略，直接失败）；取消时 acquire 抛错由外层 catch 处理
+          const admitted = await sem.acquire({ signal: abort.signal })
+          if (admitted === false) {
+            taskInfo.status = 'failed'
+            taskInfo.error = '子代理并发已满（队列拒绝）'
+            return
+          }
           slotHeld = true
+          if (taskInfo.status !== 'queued') return // 排队期间已被 shutdown 等置为终态 → 不再启动
           taskInfo.status = 'running'
           taskInfo.startedAt = Date.now() // 预算从真正开始运行起算（排队时间不计）
           _armTimers(taskId, taskInfo)
-          const runPromise = spec.runTask(task, { signal: abort.signal, ...(workerCtx ? { ctx: workerCtx } : {}) })
+          // F11：用结构化结果（保留 status/completion/stopReason/usage/turns），不再只取文本包装
+          const runPromise = spec.runTaskResult(task, { signal: abort.signal, ...(workerCtx ? { ctx: workerCtx } : {}) })
           runPromise.catch(() => { /* 硬超时后迟到的 rejection 不外溢 */ })
-          const result = await new Promise((resolve, reject) => {
+          const r = await new Promise((resolve, reject) => {
             taskInfo._hardReject = reject
             runPromise.then(resolve, reject)
           })
           taskInfo._hardReject = null
-          taskInfo.status = 'done'
-          taskInfo.result = result
-          trace.emit('delegate:end', { subagent: specName, resultLength: (result || '').length })
-          Log.mark('[spawn_subagent]', `${taskId} 完成 len=${(result || '').length}`)
+          if (taskInfo.status !== 'running') return // 已被取消（cancelled）→ 不覆盖终态、不交付过期结果
+          taskInfo.stopReason = r?.stopReason || null
+          taskInfo.completion = r?.completion || null
+          taskInfo.usage = r?.usage || null
+          taskInfo.turns = r?.turns || 0
+          taskInfo.result = r?.content || ''
+          const st = r?.status || 'completed'
+          if (st === 'cancelled') taskInfo.status = taskInfo._parentCancelled ? 'cancelled' : (taskInfo._budgetAborted || taskInfo._hardAborted ? 'timeout' : 'cancelled')
+          else taskInfo.status = st === 'completed' ? 'done' : st // partial / waiting_input / failed
+          if (st === 'failed') taskInfo.error = r?.error || '子代理执行失败'
+          trace.emit('delegate:end', { subagent: specName, status: taskInfo.status, stopReason: taskInfo.stopReason, resultLength: (taskInfo.result || '').length })
+          Log.mark('[spawn_subagent]', `${taskId} ${taskInfo.status} len=${(taskInfo.result || '').length} stop=${taskInfo.stopReason || '-'}`)
         } catch (e) {
           taskInfo._hardReject = null
-          // 停止原因按 AbortController 状态判定，不再靠错误文本正则（避免把含 abort/budget/signal 的普通失败误判为超时）
-          const timedOut = abort.signal.aborted
-          taskInfo.status = timedOut ? 'timeout' : 'failed'
-          taskInfo.error = e?.message || String(e)
-          trace.emit('delegate:error', { subagent: specName, error: taskInfo.error, timedOut })
-          Log.warn('[spawn_subagent]', `${taskId} ${taskInfo.status}:`, String(taskInfo.error || '').slice(0, 80))
+          // 已由 shutdown 等置为终态（cancelled）时不覆盖；否则按取消/超时/失败分类
+          if (taskInfo.status === 'queued' || taskInfo.status === 'running') {
+            const cancelled = taskInfo._parentCancelled
+            const timedOut = !cancelled && (taskInfo._budgetAborted || taskInfo._hardAborted || abort.signal.aborted)
+            taskInfo.status = cancelled ? 'cancelled' : (timedOut ? 'timeout' : 'failed')
+            taskInfo.error = e?.message || String(e)
+            trace.emit('delegate:error', { subagent: specName, error: taskInfo.error, timedOut, cancelled })
+            Log.warn('[spawn_subagent]', `${taskId} ${taskInfo.status}:`, String(taskInfo.error || '').slice(0, 80))
+          }
         } finally {
           taskInfo.finishedAt = Date.now()
           clearTimeout(taskInfo._budgetTimer)
           clearTimeout(taskInfo._hardTimer)
+          if (taskInfo._unlinkParent) { try { taskInfo._unlinkParent() } catch { /* noop */ } }
           if (slotHeld) sem.release()
           _notifyWaiters(taskInfo) // 唤醒 check_subagent 的长轮询等待者
           // 延后一个微任务：让被唤醒的 check_subagent 先拿到终态并标记 consumed，再判断是否需要异步回推（防重复）
@@ -368,7 +337,7 @@ export function makeSpawnSubagentTools({
   // ── check_subagent（查看子代理状态 + 结果）──
   const checkTool = {
     name: 'check_subagent',
-    description: '查看子代理任务状态。默认会等待子代理完成（最多 30 秒，可传 waitMs 调整），完成即返回 done + 结果——因此只需调用一两次，不要高频轮询。返回 status（queued=排队中/running=运行中/done=完成/failed=失败/timeout=超时）。快到预算时会提示用 extend_subagent 续期。',
+    description: '查看子代理任务状态。默认会等待子代理完成（最多 30 秒，可传 waitMs 调整），完成即返回 done + 结果——因此只需调用一两次，不要高频轮询。返回 status（queued=排队中/running=运行中/done=完成/partial=部分完成/waiting_input=等待输入/failed=失败/timeout=超时/cancelled=已取消）。partial/waiting_input 表示未完整完成，勿当完成。快到预算时会提示用 extend_subagent 续期。',
     category: 'query',
     meta: { polling: true, resultCap: 16000 }, // polling：轮询豁免 duplicate_action；resultCap 避免研究结果被 4000 全局默认截断
     parameters: {
@@ -394,10 +363,20 @@ export function makeSpawnSubagentTools({
         elapsedMs: now - t.createdAt, waitingMs, budgetMs: t.budgetMs, remainingMs: remaining,
       }
       // 主循环已取走终态结果 → 标记已消费，避免主循环结束后再异步回推造成重复
-      if (t.status === 'done' || t.status === 'failed' || t.status === 'timeout' || t.status === 'cancelled') t.consumed = true
+      const TERMINAL = new Set(['done', 'partial', 'waiting_input', 'failed', 'timeout', 'cancelled'])
+      if (TERMINAL.has(t.status)) t.consumed = true
+      if (TERMINAL.has(t.status)) {
+        res.stopReason = t.stopReason || null
+        res.completion = t.completion || null
+        if (t.usage) res.usage = t.usage
+        if (t.turns) res.turns = t.turns
+      }
       if (t.status === 'done') {
         res.result = t.result
         res.message = '子代理已完成，结果在 result 字段。可直接用于回复用户。'
+      } else if (t.status === 'partial' || t.status === 'waiting_input') {
+        res.result = t.result
+        res.message = `子代理未完整完成（status=${t.status}，stopReason=${t.stopReason || '-'}）：result 为部分内容，请勿当完整完成；必要时由主代理补全或再派子代理。`
       } else if (t.status === 'failed' || t.status === 'timeout' || t.status === 'cancelled') {
         res.error = t.error
         res.message = `子代理${t.status === 'timeout' ? '超时' : t.status === 'cancelled' ? '已取消' : '失败'}：${t.error}`

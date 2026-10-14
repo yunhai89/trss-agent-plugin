@@ -6,14 +6,16 @@
  */
 import { Agent } from '../agent/Agent.js'
 
-/** 通用 step 执行器 */
+/** 通用 step 执行器。取消信号随 ctx.signal 透传（P0-1 相邻路径：此前只传 ctx，step 收不到取消）。 */
 export async function runStep(step, input, ctx = {}) {
+  const signal = ctx?.signal || null
+  const opts = signal ? { ctx, signal } : { ctx }
   if (step instanceof Agent) {
-    const result = await step.run(input, { ctx })
+    const result = await step.run(input, opts)
     return result.content
   }
   if (step && typeof step.runTask === 'function') {
-    return step.runTask(input, { ctx })
+    return step.runTask(input, opts)
   }
   if (step && typeof step.run === 'function') {
     return step.run(input, ctx)

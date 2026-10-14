@@ -15,11 +15,26 @@
 import { PersonaStore, slugify, normalizePersona } from './store.js'
 import { PersonaService } from './service.js'
 import { BUILTIN_PERSONAS } from './defaults.js'
+import { PersonaLore, normalizeLore, normalizeCanonical, normalizeSources, groundingText, assertSafeLore } from './lore.js'
+import { PersonaAdoptionQueue } from './adoptions.js'
+import { PERSONA_COMPLETION_SYSTEM, buildCompletionInput, parseCompletionOutput, buildLoreDraft, formatDraftSummary } from './completion.js'
 
 export {
   PersonaStore,
   PersonaService,
+  PersonaLore,
+  PersonaAdoptionQueue,
   slugify,
   normalizePersona,
+  normalizeLore,
+  normalizeCanonical,
+  normalizeSources,
+  groundingText,
+  assertSafeLore,
   BUILTIN_PERSONAS,
+  PERSONA_COMPLETION_SYSTEM,
+  buildCompletionInput,
+  parseCompletionOutput,
+  buildLoreDraft,
+  formatDraftSummary,
 }

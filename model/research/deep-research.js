@@ -41,7 +41,7 @@ export class DeepResearch {
     workerModel,
     workerProvider,
     maxRounds = 3, // 外层 Supervisor 最大轮次（§3.2 每轮可派多子代理）
-    maxToolCallsPerWorker = 10,
+    maxToolCallsPerWorker = 200,
     maxConcurrent = 3,
     logger = () => {},
     enableEvaluation = true,

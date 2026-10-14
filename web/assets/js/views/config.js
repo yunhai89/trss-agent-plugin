@@ -176,6 +176,9 @@
         if (!form.kb) form.kb = {}
         if (!form.kb.crawl) form.kb.crawl = {}
         if (form.kb.crawl.engine == null) form.kb.crawl.engine = 'crawl4ai'
+        if (form.kb.crawl.stealth == null) form.kb.crawl.stealth = true
+        if (form.kb.crawl.retryBlocked == null) form.kb.crawl.retryBlocked = true
+        if (form.kb.crawl.allowPrivateHosts == null) form.kb.crawl.allowPrivateHosts = false
         // diagram 示意图兜底（旧配置无此块防 v-model 报错）
         if (!form.diagram) form.diagram = {}
         if (!form.diagram.kroki) form.diagram.kroki = {}
@@ -211,7 +214,6 @@
         if (!form.selfState.replyer) form.selfState.replyer = {}
         if (!form.loop) form.loop = {}
         if (!form.multiagent) form.multiagent = {}
-        if (!form.render) form.render = {}
         if (!form.toolDiscovery) form.toolDiscovery = {}
         if (!Array.isArray(form.reasoningFields)) form.reasoningFields = []
         if (!form.kb) form.kb = {}
@@ -221,9 +223,15 @@
         if (!form.calc) form.calc = {}
         if (!form.document) form.document = {}
         if (!form.comfyui) form.comfyui = {}
+        if (!form.comfyui.command) form.comfyui.command = {}
         if (!form.miyoushe) form.miyoushe = {}
         if (!form.vision) form.vision = {}
         if (!form.tools) form.tools = {}
+        if (!form.toolConcurrency) form.toolConcurrency = {}
+        if (!form.render) form.render = {}
+        if (form.toolConcurrency.maxParallel == null) form.toolConcurrency.maxParallel = 3
+        if (form.toolSchemaValidate == null) form.toolSchemaValidate = true
+        if (!form.taskStore) form.taskStore = {}
         if (!form.skill) form.skill = {}
         if (!form.compaction) form.compaction = {}
         // 思考自动决策兜底（UI 绑定需完整对象树）
@@ -554,6 +562,7 @@
         { id: 'features', name: '功能分配', icon: 'zap', grad: 'var(--grad-honey)' },
         { id: 'selfstate', name: '自我状态', icon: 'bot', grad: 'var(--grad-rose)' },
         { id: 'reason', name: '推理参数', icon: 'zap', grad: 'var(--grad-sky)' },
+        { id: 'task', name: '任务账本', icon: 'schedule', grad: 'var(--grad-vio)' },
         { id: 'reply', name: '进度 / 回复渲染', icon: 'send', grad: 'var(--grad-mint)' },
         { id: 'memory', name: '记忆系统', icon: 'memory', grad: 'var(--grad-honey)' },
         { id: 'evolution', name: '自进化', icon: 'evolution', grad: 'var(--grad-rose)' },
@@ -1205,6 +1214,12 @@
             <cfg-row name="工具结果字符上限" desc="超出截断,防爆 context">
               <input type="number" class="inp" style="width:130px" min="100" v-model.number="form.maxToolResultChars">
             </cfg-row>
+            <cfg-row name="工具并发上限" desc="单批只读工具滚动池上限;未声明并发语义的工具默认独占">
+              <input type="number" class="inp" style="width:110px" min="1" max="16" v-model.number="form.toolConcurrency.maxParallel">
+            </cfg-row>
+            <cfg-row name="工具参数校验" desc="副作用前校验 schema(缺参/类型/多余参数结构化回报)">
+              <v-switch v-model="form.toolSchemaValidate"/>
+            </cfg-row>
             <cfg-row name="反思模式" desc="回复前自检回环；jev=由 Jev 判断是否需要反思（需开启 Jev）">
               <select class="sel" style="width:150px" v-model="form.reflect"><option v-for="o in reflectOptions" :value="o[0]">{{ o[1] }}</option></select>
             </cfg-row>
@@ -1236,6 +1251,23 @@
                 </select>
               </cfg-row>
             </div></div>
+          </div></div>
+        </div>
+
+        <!-- ===== §1.2b 任务账本 ===== -->
+        <div :id="'cfg-task'" class="card cf-sec" :class="{open: open.task}">
+          <div class="cf-sh" @click="open.task = !open.task">
+            <span class="ct-ico" style="background:var(--grad-vio)"><v-icon name="schedule"/></span>
+            <div><div class="ct-t">任务账本</div><div class="ct-s">可恢复任务记录（P0-3）：关键边界落盘，重启标记未结算任务、不自动重放副作用</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
+          </div>
+          <div class="cf-body" v-show="open.task"><div class="cf-grid">
+            <cfg-row name="任务账本" desc="可恢复任务记录(P0-3)：关键边界落盘;重启标记未结算任务,不自动重放">
+              <v-switch v-model="form.taskStore.enable"/>
+            </cfg-row>
+            <cfg-row name="任务库目录" desc="taskStore.dir（留空=默认 data/tasks）">
+              <input class="inp mono" style="width:200px" v-model="form.taskStore.dir" placeholder="data/tasks">
+            </cfg-row>
           </div></div>
         </div>
 
@@ -1676,6 +1708,9 @@
               <div class="cf-grid">
                 <cfg-row name="启用知识库" desc="kb.enable"><v-switch v-model="form.kb.enable"/></cfg-row>
                 <cfg-row name="启用网页抓取" desc="kb.crawlEnable"><v-switch v-model="form.kb.crawlEnable"/></cfg-row>
+                <cfg-row name="抓取反检测" desc="crawl4ai stealth（默认开）"><v-switch v-model="form.kb.crawl.stealth"/></cfg-row>
+                <cfg-row name="被拦截自动升级" desc="undetected 强化重试一轮"><v-switch v-model="form.kb.crawl.retryBlocked"/></cfg-row>
+                <cfg-row name="允许抓内网地址" desc="防 SSRF，默认关"><v-switch v-model="form.kb.crawl.allowPrivateHosts"/></cfg-row>
                 <cfg-row name="抓取超时(秒)"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.kb.crawlTimeout"></cfg-row>
                 <cfg-row name="分块大小"><input type="number" class="inp" style="width:110px" min="50" v-model.number="form.kb.chunkSize"></cfg-row>
                 <cfg-row name="分块重叠"><input type="number" class="inp" style="width:100px" min="0" v-model.number="form.kb.chunkOverlap"></cfg-row>
@@ -1718,6 +1753,12 @@
                 <cfg-row name="服务地址"><input class="inp mono" style="width:220px" v-model="form.comfyui.host"></cfg-row>
                 <cfg-row name="Cloud 模式"><v-switch v-model="form.comfyui.cloud"/></cfg-row>
                 <cfg-row name="Cloud API Key"><input class="inp mono" style="width:200px" v-model="form.comfyui.apiKey"></cfg-row>
+                <cfg-row name="工作流目录" desc="自动发现工作流的目录（ComfyUI user 目录下；默认 workflows，递归含子目录）"><input class="inp mono" style="width:220px" v-model="form.comfyui.workflowDir" placeholder="workflows"></cfg-row>
+                <cfg-row name="工作流缓存(秒)" desc="发现/转换结果缓存时长（刚在 ComfyUI 里保存新工作流可让工具带 refresh 立即刷新）"><input type="number" class="inp" style="width:110px" min="0" v-model.number="form.comfyui.workflowCacheTtl"></cfg-row>
+                <cfg-row name="生成需主人审批" desc="开=每次生成走 #确认/#拒绝（默认）；关=免审批直接生成（每次生成消耗 GPU，谨慎关闭）"><v-switch v-model="form.comfyui.confirm"/></cfg-row>
+                <cfg-row name="指令画图" desc="开=响应 #画图列表 / #画图1 关键字（免 LLM 快捷入口）；关=不拦截这类消息"><v-switch v-model="form.comfyui.command.enable"/></cfg-row>
+                <cfg-row name="指令仅主人" desc="开=只有主人能用 #画图 指令"><v-switch v-model="form.comfyui.command.masterOnly"/></cfg-row>
+                <cfg-row name="指令冷却(秒)" desc="同用户两次画图最小间隔（0=不限）"><input type="number" class="inp" style="width:110px" min="0" v-model.number="form.comfyui.command.cooldown"></cfg-row>
                 <cfg-row name="生成超时(秒)"><input type="number" class="inp" style="width:110px" min="10" v-model.number="form.comfyui.timeout"></cfg-row>
                 <cfg-row name="轮询初始间隔(秒)"><input type="number" class="inp" style="width:110px" min="0.5" step="0.5" v-model.number="form.comfyui.pollInterval"></cfg-row>
                 <cfg-row name="轮询最大间隔(秒)"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.comfyui.pollMaxInterval"></cfg-row>

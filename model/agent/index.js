@@ -15,7 +15,7 @@
  */
 
 import { Agent } from './Agent.js'
-export { Agent, STOP_REASON_CN, GOVERNOR_STOP } from './Agent.js'
+export { Agent, STOP_REASON_CN, GOVERNOR_STOP, abortActiveRun, isAgentRunActive, abortAllActiveRuns } from './Agent.js'
 
 export { createProvider, Provider, mapToolChoice, toolsToList } from './provider/index.js'
 export { createModelRouter } from './model-router.js'
@@ -35,6 +35,13 @@ export { ScheduleStore, nodeScheduleAdapter, reminderSetTool, reminderListTool, 
 export { checkInput, analyze, isolate, tagUntrusted, screenUntrusted, systemHardening, normalizeForScan, assessPersonaPrompt, PERSONA_FORBIDDEN_CATS, PATTERNS, SENSITIVITY } from './guard.js'
 export { decide, roleRank, categoryMinRole, visibleCategories, roleLabel, createPolicy, RANK, CATEGORY_MIN } from './policy.js'
 export { ConfirmStore } from './confirm.js'
+export { ToolScheduler, resolveToolConcurrency, READ_PARALLEL_TOOLS } from './tool-scheduler.js'
+export { RuntimeScope } from './runtime-scope.js'
+export { resolveExecutionMeta } from './tool-effects.js'
+export { validateToolArgs } from './tool-schema.js'
+export { buildResumeMessages, classifySteps } from './continuation.js'
+export { planRecovery } from './recovery.js'
+export { TaskStore, TASK_SCHEMA_VERSION, TASK_PHASES, TERMINAL_PHASES, scopeKeyOfCtx } from './task-store.js'
 export { buildHelpHtml, buildChatListHtml, buildPersonaListHtml } from './render.js'
 
 export {

@@ -37,6 +37,14 @@ import {
   createPolicy,
   buildChatListHtml,
   buildPersonaListHtml,
+  TaskStore,
+  scopeKeyOfCtx,
+  resolveExecutionMeta,
+  validateToolArgs,
+  RuntimeScope,
+  abortActiveRun,
+  abortAllActiveRuns,
+  ToolScheduler,
 } from '../model/agent/index.js'
 import { presets as openaiPresets } from '../model/openai/index.js'
 import { stripInlineToolCalls } from '../model/openai/helpers.js'
@@ -48,14 +56,18 @@ import { primeModelCaps } from '../model/llm/caps-source.js'
 import { buildEmbed } from '../model/llm/embed-wiring.js'
 import { thinkingLogFields as fmtThinkingLogFields } from '../model/llm/thinking.js'
 import { KnowledgeStore, makeKbSearchTool } from '../model/agent/knowledge.js'
-import { webCrawlTool } from '../model/crawl/index.js' // web_crawl：抓取网页正文（常驻）
+import { webCrawlTool, resetCrawl4aiProbe } from '../model/crawl/index.js' // web_crawl：抓取网页正文（常驻）
 import { CompactionArchive } from '../model/agent/compact/archive.js' // 无损压缩：原文内容寻址归档
 import { makeContextRecallTool } from '../model/agent/compact/recall.js' // context_recall：取回归档原文
 import { groupInfoTools, groupManageTools, groupHistoryTools, groupNoticeTools, groupFileTools, aiVoiceTools, forwardTools } from '../model/group/index.js'
 import { miyousheTools } from '../model/miyoushe/index.js'
 import { loadToolPacks } from '../model/toolkit/index.js'
 import { createSearchManager, makeSearchTools } from '../model/search/index.js'
-import { PersonaStore, PersonaService } from '../model/persona/index.js'
+import {
+  PersonaStore, PersonaService, PersonaLore, PersonaAdoptionQueue,
+  groundingText, PERSONA_COMPLETION_SYSTEM, buildCompletionInput,
+  parseCompletionOutput, buildLoreDraft, formatDraftSummary,
+} from '../model/persona/index.js'
 import { VisionService, describeImages } from '../model/vision/index.js'
 import { getStickerManager } from '../model/sticker/manager.js'
 import { isStickerOnly, stripMarkers } from '../model/sticker/parser.js'
@@ -74,7 +86,7 @@ import { createJevClient, makeJevTool, JEV_MODEL_DEFAULT, resolveThresholds } fr
 import { createSandboxRuntime, sessionKeyOf } from '../model/sandbox/index.js'
 import { makeStagehand } from '../model/stagehand/index.js'
 import { makeDownloadTool } from '../model/download/index.js'
-import { makeSpawnSubagentTools, Semaphore, Orchestrator, SubagentSpec } from '../model/multiagent/index.js'
+import { makeSpawnSubagentTools, Semaphore, Orchestrator, SubagentSpec, buildWorkerTools, normalizeSubagentResult } from '../model/multiagent/index.js'
 import { calcTool } from '../model/calc/index.js'
 import { sendFileTool } from '../model/document/sendfile.js'
 import { readPdfTool } from '../model/document/pdf.js'
@@ -376,6 +388,7 @@ let _runtime = null
 let _runtimePromise = null // in-flight buildRuntime()，并发安全：多调用方共享同一次构建
 let _runtimeFailed = null  // buildRuntime 失败原因缓存；非 null 则 getRuntime 直接抛、不再重试，避免每条消息刷屏重建
 let _runtimeGen = 0        // 运行时代际：invalidateRuntime 递增；在途构建据此丢弃旧配置结果，防止热重载后复活旧运行时
+let _closingPromise = null // 旧运行时 scope.close() 的在途 Promise：getRuntime 在重建前 await，避免旧资源与新运行时并存
 let _initErrLogged = false // 初始化失败日志限首（防每条消息重复打 ERRO）
 const _initFailNotified = new Set() // 已提示过"初始化失败"的用户(每用户仅提示一次，防刷屏)；runtime 重建时清
 const _clearPending = new Map() // userId → 确认清空的时间戳（2 步确认）
@@ -458,7 +471,25 @@ async function makeSearchFetch(proxyFetch) {
 }
 
 async function buildRuntime() {
+  // P0-4：为本次构建创建资源作用域；构建失败按逆序回滚已获取资源，避免半成品残留。
+  const scope = new RuntimeScope({ name: 'runtime' })
+  try {
+    return await _buildRuntime(scope)
+  } catch (e) {
+    try { await scope.close('build_failed') } catch { /* noop */ }
+    throw e
+  }
+}
+
+async function _buildRuntime(scope) {
   const cfg = Config.get().agent || {}
+  // 每次运行时重建（含 #agents重载）清空 crawl4ai 可用性探测缓存：
+  // 用户跑完 scripts/install-crawl4ai.sh 后发 #agents重载 即可立即启用真浏览器抓取
+  try { resetCrawl4aiProbe() } catch { /* noop */ }
+  // 显式打印本轮生效的步数上限：便于确认配置是否已随运行时重建生效（出现过"改了配置仍是旧值"的困惑）
+  Log.mark('[limits]', `maxTurns=${cfg.maxTurns ?? 50} · schedule.taskMaxTurns=${cfg.schedule?.taskMaxTurns ?? 200} · multiagent.workerMaxTurns=${cfg.multiagent?.workerMaxTurns ?? 200}`)
+  // F14：最先登记——关闭时取消并等待在途 Agent run 退出，再关依赖资源/账本（关库晚于最后写账本者）
+  scope.register(async () => { try { const n = await abortAllActiveRuns(); if (n) Log.info(`[runtime] 关闭：已取消并等待 ${n} 个在途任务退出`) } catch { /* noop */ } }, { name: 'active-runs', order: -1 })
   const startupInfo = {} // 运行时构建期采集的摘要信息（供末尾统一面板输出）
   // cfg.protocol/preset/baseURL/apiKey/model 是「基础模型引用」的解析镜像（由 Config 按 agent.providerId/modelId 回填）
   if (!cfg.apiKey) throw new Error(`未选定可用的基础模型：请在 Web 配置中心「厂商配置」维护厂商（填 baseURL + API Key）、「模型列表」挂模型，再到「基础 / 模型」选中厂商与模型（等价于 config.yaml 的 agent.providerId / agent.modelId）。当前 agent.apiKey 为空——它是上面引用的解析结果，直接改它会在下次加载被覆盖。`)
@@ -556,7 +587,29 @@ async function buildRuntime() {
   const K = getKv()
   // 用量统计采集器：对话/工具用量按本地日聚合写 KV（Web 端 overview 趋势主数据源，替代读日志的不稳定路径）
   const usageStats = createUsageStats({ kv: K, logger: Log })
+  // F16：获取即登记清理（带 order），构建中途失败时也可回滚
+  scope.register(async () => { try { await usageStats?.flushNow?.() } catch { /* noop */ } ; try { usageStats?.stop?.() } catch { /* noop */ } }, { name: 'usageStats', order: 70 })
   const session = new SessionStore({ kv: K })
+
+  // 可恢复任务账本（P0-3，opt-in）：任务事件/检查点落 sqlite 事务；重启把未结算任务标 interrupted
+  // （默认不自动重放副作用）。与 SessionStore（对话历史投影）职责分离。
+  let taskStore = null
+  if (cfg.taskStore?.enable === true) {
+    try {
+      taskStore = new TaskStore({ dir: path.resolve(PLUGIN_ROOT, cfg.taskStore?.dir || 'data/tasks'), logger: Log.tag('task') })
+      await taskStore.open()
+      const n = await taskStore.markInterrupted({ runtimeGeneration: _runtimeGen })
+      if (n) Log.info(`[task] 重启：${n} 个未结算任务已标记 interrupted（默认不自动重放）`)
+      // F02：取消落账后联动中止在途 Agent run（QQ/Web 取消真正停止执行）
+      taskStore.setCancelHook((id) => { try { abortActiveRun(id) } catch { /* noop */ } })
+      scope.register(async () => { try { await taskStore?.close?.() } catch { /* noop */ } }, { name: 'taskStore', order: 90 })
+      Log.debug('[task] 任务账本已启用')
+    } catch (e) {
+      Log.warn('[task] 任务账本初始化失败，降级为不可恢复模式', e?.message || e)
+      try { await taskStore?.close?.() } catch { /* noop */ } // F16：初始化失败关闭已打开连接
+      taskStore = null
+    }
+  }
   // 召回记忆威胁扫描：复用同一 threatScanFn，按 0.6 更严阈值判定（召回内容会进上下文）
   const recallScanFn = threatScanFn ? (text) => {
     try {
@@ -589,12 +642,28 @@ async function buildRuntime() {
     chunkSize: cfg.kb?.chunkSize, chunkOverlap: cfg.kb?.chunkOverlap,
     topK: cfg.kb?.topK, minScore: cfg.kb?.minScore,
   })
+  scope.register(() => { try { knowledge?.shutdown?.() } catch { /* noop */ } }, { name: 'knowledge', order: 20 })
   // confirmTimeout 配置单位是「秒」，ConfirmStore 用「毫秒」，这里换算（默认 300 秒）
   const confirm = new ConfirmStore({ timeout: (cfg.confirmTimeout || 300) * 1000 })
   const scheduler = await nodeScheduleAdapter()
   const schedule = new ScheduleStore({ kv: K, scheduler })
+  scope.register(() => { try { schedule?.shutdown?.() } catch { /* noop */ } }, { name: 'schedule', order: 10 })
   knowledge.attachScheduler(scheduler) // KB URL 定时刷新复用同一 scheduler（注册/恢复 refresh job）
   const persona = new PersonaService({ store: personaStore, kv: K })
+  // 人设资料库（按 id 独立，内置人设也可叠加补丁）：核心事实静态接地 + 长尾知识检索
+  const personaLore = new PersonaLore({
+    dir: path.resolve(PLUGIN_ROOT, cfg.personaLore?.dir || 'data/persona-lore'),
+    kv: K, embedFn,
+  })
+  personaLore.attachScheduler(scheduler) // 长尾/资料定时刷新复用 KB 同一 scheduler
+  scope.register(() => { try { personaLore?.shutdown?.() } catch { /* noop */ } }, { name: 'personaLore', order: 25 })
+  // 人设资料「采纳」审批队列（持久化）：#采纳补齐 / Web 采纳按钮不再直接生效，
+  // 改为投递待审项，须在 Web 审批门批准后才 draft→active（人工复核自动补齐草稿）
+  const personaAdoptionQueue = new PersonaAdoptionQueue({
+    dir: path.resolve(PLUGIN_ROOT, cfg.personaLore?.adoptionsDir || 'data/persona-adoptions'),
+    personaLore,
+    logger: Log,
+  })
 
   // Skill（说明书 / 指令包）：从 skills/ 目录加载 .md/.js，按用户输入匹配后注入 prompt
   const skills = new SkillRegistry()
@@ -628,6 +697,7 @@ async function buildRuntime() {
   // ── E2B 沙箱运行时（terminal 的唯一执行面 + toolEvo 的隔离面）──
   // 装配失败不抛穿：mode=off 或初始化失败都返回 manager:null，由工具层给 fail-closed 结果
   const sandbox = await createSandboxRuntime(cfg.sandbox, { logger: Log.tag('sandbox') })
+  scope.register(async () => { try { await sandbox?.shutdown?.() } catch { /* noop */ } }, { name: 'sandbox', order: 100 })
   if (cfg.terminal?.enable === true && !sandbox.enabled) {
     Log.warn('[migrate] agent.terminal 已废弃：终端执行改为 E2B 沙箱。请改用 agent.sandbox.mode=e2b + apiKey（当前 terminal 工具不会注册），并删除 config.yaml 里残留的 terminal 段')
   }
@@ -708,6 +778,7 @@ async function buildRuntime() {
       Log.debug(`[stagehand] 已启用浏览器自动化工具（${cfg.stagehand.mode || 'local'} 模式；4 个工具 stagehand__goto/observe/extract/act）`)
     } catch (e) { Log.warn('[stagehand] 初始化失败（@browserbasehq/stagehand 未装或浏览器不可用？）', e?.message || e) }
   }
+  scope.register(async () => { try { await stagehand?.sessionMgr?.closeAll?.() } catch { /* noop */ } }, { name: 'stagehand', order: 50 })
 
   // Python 精确计算工具（数学/统计等；沙箱内执行，默认开）
   if (cfg.calc?.enable !== false) tools.register(calcTool)
@@ -760,6 +831,7 @@ async function buildRuntime() {
       Log.debug(`[diagram] 已启用示意图工具 diagram_render（引擎 ${eng}；endpoint=${diagram.kroki?.endpointId || '-'}）`)
     } catch (e) { Log.warn('[diagram] 初始化失败，工具不注册', e?.message || e) }
   }
+  scope.register(() => { try { diagram?.stop?.() } catch { /* noop */ } }, { name: 'diagram', order: 60 })
 
   // skill 工具：模型主动调用 skill 的通道（按 name 加载说明书正文）—— 渐进式披露的载入入口
   tools.register(makeSkillTool(skills))
@@ -792,6 +864,7 @@ async function buildRuntime() {
   tools.register(makeInstallSkillTool({ skillsDir, registry: skills, logger: Log.tag('skill') }))
 
   const mcp = new McpManager({ registry: tools, logger: Log.tag('mcp'), requestTimeout: cfg.mcp?.requestTimeout })
+  scope.register(async () => { try { await mcp?.stop?.() } catch { /* noop */ } }, { name: 'mcp', order: 30 })
   mcp.start(cfg.mcp?.servers || {}).catch((e) => Log.error('[mcp] 启动失败', e?.message || e))
 
   // 工具按需发现：检索 embedding（可选，复用上面的 embedFn）；未填则 registry 用纯关键词 jaccard
@@ -831,7 +904,8 @@ async function buildRuntime() {
   const promptDir = path.resolve(PLUGIN_ROOT, cfg.evolution?.promptDir || 'data/evolution/prompts')
   const traceDir = path.resolve(PLUGIN_ROOT, cfg.evolution?.traceDir || 'data/evolution/traces')
   const suggestionDir = path.resolve(PLUGIN_ROOT, cfg.evolution?.suggestionDir || 'data/evolution/suggestions')
-  // 进化产出目录先建好：prompt 采纳/回滚直接 writeFileSync 到 promptDir，目录缺省时旧代码报 ENOENT。
+  // 进化产出目录先建好：prompt 采纳/回滚直接 writeFileSync 到 promptDir，
+  // 目录缺省时旧代码报 ENOENT（首次采纳必崩）。trace/suggestion 也一并确保存在。
   for (const d of [promptDir, traceDir, suggestionDir]) { try { fs.mkdirSync(d, { recursive: true }) } catch { /* noop */ } }
   const promptRegistry = new PromptRegistry()
   promptRegistry.registerAll(TEMPLATES)
@@ -929,6 +1003,10 @@ async function buildRuntime() {
       Log.debug(`[toolEvo] 已初始化（内置 ${builtins.length} 个 · 本次 seed ${seeded}（已入库则跳过）· stable 进化 ${stableCount} 经隔离执行面 ${startupInfo.toolEvo.backend}）`)
     } catch (e) { Log.warn('[toolEvo] 初始化失败（sqlite3 未装？）', e?.message || e) }
   }
+  scope.register(async () => {
+    try { await toolEvo?.runner?.stop?.() } catch { /* noop */ }
+    try { await toolEvo?.closeDb?.() } catch { /* noop */ }
+  }, { name: 'toolEvo', order: 40 })
 
   // 模型注册表参数覆盖：当前主模型在 agent.llmModels 有登记且显式指定 thinking/温度/maxTokens 时覆盖全局
   // （web「模型列表 → 编辑」弹窗设置的参数在此生效；仅对主对话链路，各旁路功能仍用自己的配置）
@@ -1023,6 +1101,11 @@ async function buildRuntime() {
     contextWindow: cfg.contextWindow || null,
     compactArchive, // 无损压缩归档（null=无归档压缩；见上方装配说明）
     maxToolResultChars: cfg.maxToolResultChars ?? 4000,
+    // 工具受控并发（P0-2/F10）：全局滚动池上限；未声明并发语义的工具默认独占；跨 Agent 共享同一调度器
+    toolConcurrency: { maxParallel: Math.max(1, Number(cfg.toolConcurrency?.maxParallel) || 3) },
+    toolScheduler: new ToolScheduler({ maxParallel: Math.max(1, Number(cfg.toolConcurrency?.maxParallel) || 3) }),
+    toolSchemaValidate: cfg.toolSchemaValidate !== false, // 工具参数 schema 预校验（默认开；关=回滚杠杆）
+    taskStore, // 可恢复任务账本（P0-3；null=关闭）
     keepReasoning: cfg.keepReasoning === true,
     // 工具按需发现：LLM 只常驻少数核心工具，其余经 tool_search 检索后动态注入（默认开；关则回退全量常驻）
     toolDiscovery: {
@@ -1038,13 +1121,76 @@ async function buildRuntime() {
     promptCacheKey: cfg.promptCacheKey === true, // OpenAI 官方 prompt_cache_key 稳定会话路由（仅官方 preset 下发）
     reflectMaxIterations: cfg.reflectMaxIterations ?? 1,
     finalizeMaxTokens: cfg.finalizeMaxTokens ?? 2048, // 收尾输出上限（异常停止后交付；防子代理报告被截断）
+    rootTokenBudget: Number(cfg.rootTokenBudget) > 0 ? Number(cfg.rootTokenBudget) : null, // F13：根任务 token 预算（含嵌套预留）
     stickers: getStickerManager({ logger: Log.tag('sticker') }), // 表情包清单注入（_assembleSystem 用 catalog()）
     devLog: (event, data, traceId, scope) => devLog(event, data, traceId, scope), // 详细 trace（框架无关，pino 文件）；库零依赖，由 apps 注入
     logger: Log.tag('agent'),
   }
   // 多例：每请求 new Agent（共享 provider/tools/session 等引用，但 this.messages 各自独立）
   // → 并发 run 不再互相覆盖 this.messages，根治串会话/艾特错人，且不同用户真并发（不排队）
-  const makeAgent = () => new Agent(agentConfig)
+  const makeAgent = (overrides) => new Agent(overrides ? { ...agentConfig, ...overrides } : agentConfig)
+
+  /**
+   * 人设补齐：跑一次"资料员"任务（只读取材）→ 解析结构化产出 → 存草稿（不自动生效）。
+   * 供 #人设补齐 命令、Web 面板、定时刷新共用。
+   * 复用主 Agent 任务系统：传入调用方真实 ctx 时，任务按同一 scopeKey 记入任务账本
+   * （#任务列表/#任务状态/#取消任务/#继续任务 可见可管），并保留真实身份使浏览器等工具可用；
+   * run 以 ephemeral 模式执行——不读写会话历史、不注入/抽取召回记忆与画像，避免污染用户长期上下文。
+   * @param {string} idOrName
+   * @param {{ by?: string|null, ctx?: object|null }} opts
+   * @returns {Promise<{ persona?, lore?, error?, code? }>}
+   */
+  const completePersona = async (idOrName, { by = null, ctx: baseCtx = null } = {}) => {
+    const p = personaStore.get(idOrName)
+    if (!p) return { error: `未找到人设「${idOrName}」` }
+    let botUin = ''
+    try { botUin = String((typeof Bot !== 'undefined' && (Bot.uin || Bot.uins?.[0])) || '') } catch { /* noop */ }
+    const b = (baseCtx && typeof baseCtx === 'object') ? baseCtx : {}
+    const completionCtx = {
+      ...b,
+      // 剥离事件 e：防只读取材工具（miyoushe_post 发图）把内容误发到群/好友；
+      // 浏览器/工具身份改由下面显式 userId/selfId 提供，不依赖 e。
+      e: undefined,
+      userId: String(b.userId || `__persona_complete__:${p.id}`),
+      selfId: String(b.selfId || botUin || ''),
+      isMaster: b.isMaster === true,
+      role: b.role || (b.isMaster === true ? 'owner' : 'member'),
+      // 安全：补齐是"读外部资料"的自动化任务，即便发起者是主人也不给"免确认直执行"——
+      // 状态类工具(terminal/浏览器/群管等)一律走审批门，防外部网页经注入驱动副作用。
+      masterSelfSkip: false,
+      groupId: b.groupId != null ? b.groupId : null,
+      scopeUserId: String(b.scopeUserId || b.userId || `__persona_complete__:${p.id}`),
+      scopeId: String(b.scopeId || `persona_complete_${p.id}`),
+      // 传入真实会话时复用其 scopeKey → 任务落进该会话的主任务账本
+      conversationId: b.conversationId != null ? b.conversationId : `persona-complete:${p.id}`,
+      notify: typeof b.notify === 'function' ? b.notify : (() => {}),
+      fetcher: b.fetcher || ((typeof fetch !== 'undefined' && fetch) || null),
+      miyoushe: b.miyoushe || { cookie: cfg.miyoushe?.cookie || '', defaultGid: cfg.miyoushe?.defaultGid || 2 },
+      replyMode: 'text',
+    }
+    let out
+    const taskId = randomUUID()
+    try {
+      out = await makeAgent({ maxTurns: cfg.schedule?.taskMaxTurns || 200, masterSkipConfirm: false }).run(buildCompletionInput(p), {
+        ctx: completionCtx,
+        systemPrompt: PERSONA_COMPLETION_SYSTEM, // 身份层替换为资料员；工具/防护仍照常追加
+        ephemeral: true, // 借用真实身份/任务账本，但不污染会话历史/记忆
+        // 有界运行：即便被外部资料诱导触发审批类工具，也最多等 signal 超时，不会卡满审批超时(默认 300s)
+        signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(180000) : null,
+        taskId,
+      })
+    } catch (e) { return { error: `补齐任务失败：${e?.message || e}`, taskId } }
+    const parsed = parseCompletionOutput(out?.content || '')
+    if (!parsed.ok) return { error: `补齐失败：${parsed.error}`, taskId }
+    try {
+      const lore = personaLore.saveDraft(p.id, buildLoreDraft({ data: parsed.data, by, model: cfg.model }))
+      // 该人设已有待审采纳项时刷新快照：审批门看到的始终是当前草稿
+      try { personaAdoptionQueue.refreshPending(p.id, { personaName: p.name }) } catch { /* noop */ }
+      return { persona: p, lore, taskId }
+    } catch (e) { return { error: `补齐产出未通过安全校验：${e?.message || e}`, code: e?.code, taskId } }
+  }
+  // 定时刷新回调：周期重跑补齐 → 出新草稿（仍需 #采纳补齐 / 面板采纳提交审批，批准后才生效）
+  personaLore.setRefreshHandler((id) => completePersona(id, { by: 'schedule' }))
 
   // 视觉子模型（A 方案）：主模型不支持视觉时，由它把图片转成文本描述喂给主模型。
   // 注意：vision.model 留空时"复用主模型"只对本身支持视觉的主模型成立。主模型若是纯文本模型，
@@ -1112,24 +1258,25 @@ async function buildRuntime() {
   if (cfg.multiagent?.enable !== false && cfg.multiagent?.topology === 'orchestrator') {
     try {
       // Orchestrator 编排模式：注册一个同步 `orchestrate` 工具（flagship 分解 → 通用 worker 委派 → 综合）
-      const workerReg = new ToolRegistry()
-      for (const t of tools.list()) {
-        if (t.name === 'tool_search') continue
-        if ((t.category || 'query') === 'query') workerReg.register(t)
-      }
+      // worker 工具集复用 spawn 的同一能力判定（见 worker-context.js），而不是只按 category=query 粗筛
+      const queryNames = tools.list()
+        .filter((t) => t.name !== 'tool_search' && (t.category || 'query') === 'query')
+        .map((t) => t.name)
+      const { registry: workerReg, granted: workerGranted, dropped: workerDropped } = buildWorkerTools(tools, queryNames, queryNames)
       const worker = new SubagentSpec({
         name: 'worker',
         description: '通用子代理：只做被委派的独立子任务，返回精炼结果',
         systemPrompt: '你是独立子任务子代理。只完成被委派的任务，直接给出结果，不解释过程；任务自包含（你看不到主对话）。',
-        tools: workerReg.list().length ? workerReg : null,
+        tools: workerGranted.length ? workerReg : null,
         model: workerTarget.model || null,
-        provider: workerTarget.provider, maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
+        provider: workerTarget.provider, maxTurns: cfg.multiagent?.workerMaxTurns ?? 200,
+        maxTokens: cfg.multiagent?.workerMaxTokens ?? 4096,
       })
       const orch = new Orchestrator({
         provider, model: cfg.model,
         subagents: [worker],
         tools: null,
-        maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
+        maxTurns: cfg.multiagent?.workerMaxTurns ?? 200,
         maxConcurrent: cfg.multiagent?.maxConcurrent ?? 3,
         logger: Log.tag('multiagent'),
       })
@@ -1142,12 +1289,37 @@ async function buildRuntime() {
         async execute(params = {}, ctx) {
           const task = String(params.task || '').trim()
           if (!task) return { error: 'task 不能为空' }
-          const r = await orch.run(task, { ctx })
-          return { result: r?.content || '', turns: r?.turns, stopReason: r?.stopReason }
+          const agent = ctx?.executionContext?.agent
+          // F13：嵌套工作开始前先预留根任务预算；不足则不启动（避免执行阶段超预算）
+          const reserve = Math.max(0, Number(cfg.multiagent?.reserveTokens) || 8000)
+          if (agent && typeof agent.reserveBudget === 'function' && !agent.reserveBudget(reserve)) {
+            return { error: 'budget_exhausted', reason: `根任务 token 预算不足（需预留 ${reserve}），未启动编排。请缩小任务或提高 agent.rootTokenBudget。` }
+          }
+          // P0-1：把父任务取消信号与关联 ID 传入编排链（否则父任务取消后编排器仍继续跑）
+          let r
+          try {
+            r = await orch.run(task, { ctx, signal: ctx?.signal || null, taskId: ctx?.taskId || null })
+          } finally {
+            agent?.releaseBudget?.(reserve) // 释放预留（实际用量经 noteExternalUsage 计入 consumed）
+          }
+          // 复用同一归一：预算/异常停止只标 partial，绝不把部分完成当完整完成
+          const norm = normalizeSubagentResult({ content: r?.content, stopReason: r?.stopReason, usage: r?.usage, turns: r?.turns })
+          // F13：把编排/子代理实际用量归集到根任务（否则只进工具正文，根 usage/预算漏计）
+          try { agent?.noteExternalUsage?.(r?.usage) } catch { /* 归集失败不影响结果 */ }
+          return {
+            result: norm.content,
+            status: norm.status,
+            completion: norm.completion,
+            stopReason: r?.stopReason, turns: r?.turns, usage: r?.usage || null,
+            ...(r?.subagents?.length ? { subagents: r.subagents } : {}),
+          }
         },
       })
       startupInfo.multiagent = 'orchestrator'
-      Log.debug('[multiagent] 编排模式（topology=orchestrator）：orchestrate 工具已注册')
+      Log.debug(
+        `[multiagent] 编排模式（topology=orchestrator）：orchestrate 工具已注册（worker 工具 ${workerGranted.length} 个`
+        + `${workerDropped.length ? `，剔除 ${workerDropped.length} 个不可达` : ''}）`,
+      )
     } catch (e) { Log.warn('[multiagent] 编排模式装配失败', e?.message || e) }
   } else if (cfg.multiagent?.enable !== false) {
     try {
@@ -1155,7 +1327,8 @@ async function buildRuntime() {
         provider: workerTarget.provider, model: workerTarget.model || null,
         sourceRegistry: tools,
         semaphore: new Semaphore(cfg.multiagent?.maxConcurrent ?? 3),
-        maxTurns: cfg.multiagent?.workerMaxTurns ?? 10,
+        maxTurns: cfg.multiagent?.workerMaxTurns ?? 200,
+        maxTokens: cfg.multiagent?.workerMaxTokens ?? 4096,
         defaultTools: cfg.multiagent?.defaultTools || ['web_search', 'memory_search'],
         maxSpawns: cfg.multiagent?.maxSpawnsPerConversation ?? 5,
         // 主循环结束后，未被 check_subagent 取走的子代理结果/失败异步回推给会话（防"后续无反应"）
@@ -1164,8 +1337,10 @@ async function buildRuntime() {
             const label = info.task ? `「${String(info.task).slice(0, 40)}」` : ''
             const head = info.status === 'done'
               ? `🤖 后台子代理任务完成${label}：`
-              : `⚠️ 后台子代理任务${info.status === 'timeout' ? '超时' : info.status === 'cancelled' ? '已中止' : '失败'}${label}：${String(info.error || '未知原因').slice(0, 200)}`
-            const body = stripMarkers(redactSecrets(info.status === 'done' ? `${head}\n${String(info.result || '').slice(0, 1800)}` : head)).trim()
+              : (info.status === 'partial' || info.status === 'waiting_input')
+                ? `⚠️ 后台子代理任务未完整完成（${info.status}）${label}：`
+                : `⚠️ 后台子代理任务${info.status === 'timeout' ? '超时' : info.status === 'cancelled' ? '已中止' : '失败'}${label}：${String(info.error || '未知原因').slice(0, 200)}`
+            const body = stripMarkers(redactSecrets((info.status === 'done' || info.status === 'partial' || info.status === 'waiting_input') ? `${head}\n${String(info.result || '').slice(0, 1800)}` : head)).trim()
             if (!body) return
             const send = (m) => (sctx?.e?.reply ? sctx.e.reply(m)
               : (sctx?.bot?.pickGroup && sctx.groupId) ? sctx.bot.pickGroup(sctx.groupId).sendMsg(m)
@@ -1181,6 +1356,9 @@ async function buildRuntime() {
       Log.debug('[multiagent] spawn_subagent + check_subagent + extend_subagent 已注册（异步委派 + 预算控制）')
     } catch (e) { Log.warn('[multiagent] 子代理工具注册失败', e?.message || e) }
   }
+  scope.register(() => {
+    try { const n = multiagent?.shutdown?.(); if (n) Log.info(`[multiagent] 运行时失效：已终止 ${n} 个在跑子代理`) } catch { /* noop */ }
+  }, { name: 'multiagent', order: 80 })
 
   // ── 启动摘要面板：把散落的模块初始化结果汇总成一份对齐清单（各模块细节日志已降为 debug 级，
   // 需要排查时把日志级别调到 debug 即可查看）。仅在运行时构建成功时输出一次。
@@ -1209,11 +1387,13 @@ async function buildRuntime() {
     ['面板', cfg.webApi?.enable !== false ? `:${cfg.webApi?.port || 6098}` : 'off'],
   ])
 
-  return { agentConfig, makeAgent, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, tts }
+  return { agentConfig, makeAgent, completePersona, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, personaLore, personaAdoptionQueue, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore, scope, tts }
 }
 
 const getRuntime = async () => {
   if (_runtime) return _runtime
+  // 旧运行时 scope 正在清理：等待其完成再重建，避免旧资源（Worker/浏览器/沙箱）与新运行时并存
+  if (_closingPromise) { try { await _closingPromise } catch { /* noop */ } }
   // 失败缓存：apiKey 等配置类错误一旦发生，直接抛缓存原因，不再每条消息重新 buildRuntime
   // （否则每条群消息都重建+抛错+回复，刷屏 + 日志爆炸）。配置热加载后 invalidateRuntime 清缓存重试。
   if (_runtimeFailed) {
@@ -1226,9 +1406,12 @@ const getRuntime = async () => {
   if (!_runtimePromise) {
     const gen = _runtimeGen
     _runtimePromise = buildRuntime()
-      .then((rt) => {
+      .then(async (rt) => {
         // 构建期间配置被热重载（invalidateRuntime 递增 gen）→ 丢弃旧配置结果，改用新配置重建
-        if (gen !== _runtimeGen) return getRuntime()
+        if (gen !== _runtimeGen) {
+          try { await rt?.scope?.close?.('stale_build') } catch { /* noop */ } // F16：过期构建关闭资源，不遗留
+          return getRuntime()
+        }
         _runtime = rt
         _runtimeFailed = null
         // 运行时（重）建后恢复定时调度：提醒 / 定时任务链 + KB 定时刷新。
@@ -1237,6 +1420,8 @@ const getRuntime = async () => {
         // restore 已幂等：重复调用不会叠加 job（见 ScheduleStore.restore）。
         try { rt.schedule?.restore?.(makeFireDispatch(rt)).catch(() => {}) } catch { /* noop */ }
         try { rt.knowledge?.restoreRefreshJobs?.((id) => rt.knowledge.refreshDoc(id).catch((e) => Log.warn('[kb] 定时刷新失败', id, e?.message || e))).catch(() => {}) } catch { /* noop */ }
+        // 人设资料定时刷新：重启/热重载后重排 job（周期重跑补齐 → 出新草稿）
+        try { rt.personaLore?.restoreRefreshJobs?.((id) => Promise.resolve(rt.completePersona?.(id, { by: 'schedule' })).catch((e) => Log.warn('[persona] 定时刷新失败', id, e?.message || e))).catch(() => {}) } catch { /* noop */ }
         return rt
       })
       .catch((e) => {
@@ -1251,42 +1436,40 @@ const getRuntime = async () => {
   return _runtimePromise
 }
 
-/** 失效运行时单例（下一次 getRuntime 用新配置重建） */
+/** 失效运行时单例（下一次 getRuntime 用新配置重建）。返回旧 scope 清理的 Promise（可等待）。 */
 function invalidateRuntime() {
-  // 取消旧运行时的定时调度 job（提醒/定时任务链 + KB 刷新）：node-schedule 的 job 不会随对象失效自动停，
-  // 不取消会在热重载后继续触发（生产事故：同一任务被重复注册 → 到点并发触发 N 次）。
-  if (_runtime?.schedule?.shutdown) { try { _runtime.schedule.shutdown() } catch { /* noop */ } }
-  if (_runtime?.knowledge?.shutdown) { try { _runtime.knowledge.shutdown() } catch { /* noop */ } }
-  if (_runtime?.toolEvo) {
-    try { _runtime.toolEvo.runner?.stop?.() } catch { /* noop */ } // 关闭隔离 worker（审计 §4.2）
-    // closeDb 内部会先停落盘定时器并 flush 队列再关库（审计 P1-8），不会丢 2s 窗口内的埋点
-    try { Promise.resolve(_runtime.toolEvo.closeDb?.()).catch(() => {}) } catch { /* noop */ }
-  }
-  if (_runtime?.stagehand?.sessionMgr) {
-    try { _runtime.stagehand.sessionMgr.closeAll() } catch { /* noop */ } // 关闭所有浏览器会话
-  }
-  if (_runtime?.diagram) {
-    try { _runtime.diagram.stop() } catch { /* noop */ } // 停 diagram 临时目录 TTL 清理定时器（unref 过，防御性显式停）
-  }
-  if (_runtime?.usageStats) {
-    // 统计缓冲落 KV 后停采集器（2s 窗口内未 flush 的数据不丢）
-    try { _runtime.usageStats.flushNow().catch(() => {}) } catch { /* noop */ }
-    try { _runtime.usageStats.stop() } catch { /* noop */ }
-  }
-  // 在跑子代理：热重载/退出时终止，避免后台继续烧 token/占用并发
-  if (_runtime?.multiagent?.shutdown) {
-    try { const n = _runtime.multiagent.shutdown(); if (n) Log.info(`[multiagent] 运行时失效：已终止 ${n} 个在跑子代理`) } catch { /* noop */ }
-  }
-  // 沙箱必须最后关：toolEvo.runner 依赖 sandbox.transport，先关 transport 会让 runner 停止时操作已失效沙箱
-  if (_runtime?.sandbox?.manager) {
-    try { _runtime.sandbox.shutdown().catch(() => {}) } catch { /* noop */ }
-  }
+  const rt = _runtime
   _runtime = null
   _runtimePromise = null
   _runtimeFailed = null  // 配置已变更：清失败缓存，下次 getRuntime 用新配置重试
   _runtimeGen++          // 在途 buildRuntime 据此丢弃旧配置结果，防止旧运行时被复活
   _initErrLogged = false // 允许再次记录初始化失败（若仍失败）
   _initFailNotified.clear() // runtime 重建：重置"已提示"标记，下次失败可再提示用户
+
+  const prev = _closingPromise // F17：串接未完成的关闭屏障，重复 invalidate 不得绕过旧代清理
+  const p = (async () => {
+    if (prev) { try { await prev } catch { /* noop */ } }
+    if (rt?.scope?.close) {
+      // P0-4：统一走 scope（幂等、await 资源退出、按依赖顺序）
+      try { const s = await rt.scope.close('invalidate'); return s } catch (e) { Log.warn('[runtime] 作用域清理异常', e?.message || e) }
+    } else if (rt) {
+      // 兼容：无 scope 的旧运行时退回内联清理（尽力而为）
+      try { rt.schedule?.shutdown?.() } catch { /* noop */ }
+      try { rt.knowledge?.shutdown?.() } catch { /* noop */ }
+      try { rt.toolEvo?.runner?.stop?.() } catch { /* noop */ }
+      try { await rt.toolEvo?.closeDb?.() } catch { /* noop */ }
+      try { rt.stagehand?.sessionMgr?.closeAll?.() } catch { /* noop */ }
+      try { rt.diagram?.stop?.() } catch { /* noop */ }
+      try { await rt.usageStats?.flushNow?.() } catch { /* noop */ }
+      try { rt.usageStats?.stop?.() } catch { /* noop */ }
+      try { const n = rt.multiagent?.shutdown?.(); if (n) Log.info(`[multiagent] 运行时失效：已终止 ${n} 个在跑子代理`) } catch { /* noop */ }
+      try { await rt.taskStore?.close?.() } catch { /* noop */ }
+      try { await rt.sandbox?.shutdown?.() } catch { /* noop */ }
+    }
+  })()
+  _closingPromise = p
+  p.finally(() => { if (_closingPromise === p) _closingPromise = null })
+  return p
 }
 
 // 热加载：配置文件变更 → 失效运行时单例，下次对话用新配置重建（无需重启框架）
@@ -1400,7 +1583,34 @@ function ctxFromInfo(info) {
   }
 }
 
-// 统一 fire 分发：type='task' → 跑 Agent 任务链（makeAgent().run(prompt)）+ 发结果；否则 fireReminder 静态
+/**
+ * 解析当前用户激活的人设接地（身份层 systemPrompt + 长尾检索 context），
+ * 供交互对话与 #继续任务 续跑等入口统一复用（避免两处接地语义漂移）。
+ * @returns {Promise<{ personaId: string|null, systemPrompt: string|undefined, context: string|undefined }>}
+ */
+async function resolvePersonaGrounding(rt, ctx, queryText) {
+  const none = { personaId: null, systemPrompt: undefined, context: undefined }
+  try {
+    const { persona } = await rt.persona.resolve(ctx.userId)
+    if (!persona) return none
+    const lore = rt.personaLore?.get?.(persona.id)
+    const active = lore && lore.status === 'active' ? lore : null
+    const systemPrompt = [persona.systemPrompt, active ? groundingText(active) : ''].filter(Boolean).join('\n\n') || undefined
+    let context
+    if (active) {
+      const hits = await rt.personaLore.retrieve(active.id, queryText, 3).catch(() => [])
+      if (hits.length) {
+        context = '【角色设定·长尾资料（检索，仅供参考；与已核实事实冲突时以已核实事实为准）】\n'
+          + hits.map((h) => `- ${h.text}`).join('\n')
+      }
+    }
+    return { personaId: persona.id, systemPrompt, context }
+  } catch (e) {
+    Log.warn('[persona] 接地解析失败', e?.message || e)
+    return none
+  }
+}
+
 export const makeFireDispatch = (rt) => {
   return async (info) => {
     if (info.type === 'task' && info.prompt) {
@@ -1409,7 +1619,7 @@ export const makeFireDispatch = (rt) => {
       const taskId = randomUUID() // 与交互路径同源：定时任务也落 dev trace / 用量 / 采迹
       try {
         const r = await rt.makeAgent().run(info.prompt, {
-          ctx, maxTurns: cfg.schedule?.taskMaxTurns || 15, taskId,
+          ctx, maxTurns: cfg.schedule?.taskMaxTurns || 200, taskId,
           onToolEnd: (tc, content) => { try { rt.usageStats?.recordToolResult?.(tc?.name, content) } catch { /* 统计不阻塞 */ } },
         })
         // 与交互路径一致的可观测性：用量统计 + 进化采迹 + 自评审（此前定时任务全部旁路）
@@ -1491,12 +1701,25 @@ export class Chat extends plugin {
         { reg: '^#忘记画像\\s+(.+)', fnc: 'forgetProfile' },
         { reg: '^#我的提醒$', fnc: 'myReminders' },
         { reg: '^#取消提醒\\s*(\\d+)', fnc: 'cancelReminder' },
+        { reg: '^#任务列表$', fnc: 'listTasks' },
+        { reg: '^#任务状态\\s+(\\S+)', fnc: 'taskStatus' },
+        { reg: '^#继续任务\\s+(\\S+)', fnc: 'resumeTask' },
+        { reg: '^#恢复任务\\s+(\\S+)', fnc: 'recoverTask' },
+        { reg: '^#取消任务\\s+(\\S+)', fnc: 'cancelTask' },
         { reg: '^#清空所有记录$', fnc: 'clearMyData' },
         // —— 人设 ——（更具体的规则在前，避免被 #人设+id 吞掉）
         { reg: '^#人设列表$', fnc: 'personaList' },
         { reg: '^#人设详情\\s+(.+)', fnc: 'personaDetail' },
         { reg: '^#新建人设\\s+(.+)', fnc: 'personaCreate' },
         { reg: '^#删除人设\\s+(.+)', fnc: 'personaDelete' },
+        { reg: '^#人设补齐\\s+(.+)', fnc: 'personaComplete', permission: 'master' },
+        { reg: '^#查看补齐\\s+(.+)', fnc: 'personaDraftView', permission: 'master' },
+        { reg: '^#采纳补齐\\s+(.+)', fnc: 'personaDraftAdopt', permission: 'master' },
+        { reg: '^#丢弃补齐\\s+(.+)', fnc: 'personaDraftDiscard', permission: 'master' },
+        { reg: '^#刷新人设资料\\s+(.+)', fnc: 'personaDraftRefresh', permission: 'master' },
+        { reg: '^#人设资料定时列表$', fnc: 'personaDraftScheduleList', permission: 'master' },
+        { reg: '^#人设资料取消定时\\s+(.+)', fnc: 'personaDraftCancelSchedule', permission: 'master' },
+        { reg: '^#人设资料定时\\s+(.+)', fnc: 'personaDraftSchedule', permission: 'master' },
         { reg: '^#重置人设$', fnc: 'personaReset' },
         { reg: '^#人设$', fnc: 'personaList' },
         { reg: '^#人设\\s+(.+)', fnc: 'personaSwitch' },
@@ -1800,13 +2023,15 @@ export class Chat extends plugin {
       return true
     }
 
-    // —— 人设：解析当前用户激活的人设，覆盖身份层 systemPrompt ——
+    // —— 人设：解析当前用户激活的人设 + 已采纳资料接地（静态核心事实 + 长尾检索）——
     let systemPrompt
     let personaId = null
+    let personaGroundingContext = null
     try {
-      const { persona } = await rt.persona.resolve(ctx.userId)
-      systemPrompt = persona?.systemPrompt || undefined
-      personaId = persona?.id || null
+      const pg = await resolvePersonaGrounding(rt, ctx, text)
+      personaId = pg.personaId
+      systemPrompt = pg.systemPrompt || undefined
+      personaGroundingContext = pg.context || null
     } catch (e) {
       Log.warn('[persona] 解析失败，用默认', e?.message || e)
     }
@@ -1843,6 +2068,10 @@ export class Chat extends plugin {
       }
     } catch (e) {
       Log.warn('[perception/skill] 注入失败', e?.message || e)
+    }
+    // —— 人设长尾资料：按本轮问题检索 per-persona 知识库，动态注入本轮上下文（核心事实已在身份层静态接地）——
+    if (personaGroundingContext) {
+      context = context ? `${context}\n\n${personaGroundingContext}` : personaGroundingContext
     }
     // 盲媒体防臆测（问题1）：模型看不到图/视频时，明确告知"无法识别"，杜绝从历史/上下文臆测内容
     if (blindMedia) {
@@ -2094,6 +2323,13 @@ export class Chat extends plugin {
         terminal('reply_failed', { mode: replyMode, stopReason, turns, replyLen: (body || '').length, error: finalOutcome?.error || 'send rejected' })
         await safeReply('⚠️ 回复已生成但发送失败，请稍后重发消息触发重试。') // best-effort 降级提示（不改变 reply_failed 终态）
       }
+      // F07：投递结果入账（execution 完成 ≠ 已送达）；QQ 超时等未知状态记 unknown
+      try {
+        if (rt.taskStore && traceId) {
+          const status = delivered ? 'sent' : (finalOutcome?.unknown ? 'unknown' : 'failed')
+          await rt.taskStore.recordDelivery(traceId, { status, mode: replyMode, detail: delivered ? null : (finalOutcome?.error || 'send rejected') })
+        }
+      } catch { /* 投递记录失败不影响回复 */ }
       // 记录群内最近活跃时间，供 perception 判断"久未发言补课"
       if (ctx.isGroup && ctx.groupId && rt.kv) {
         rt.kv.set(`perception:last_active:${ctx.groupId}`, { at: Date.now() }).catch(() => {})
@@ -2972,6 +3208,139 @@ export class Chat extends plugin {
     return true
   }
 
+  // —— 任务账本（P0-3）：列表 / 状态 / 取消 / 继续 ——
+  async _taskScope() {
+    const rt = await getRuntime()
+    const ctx = ctxOf(this.e)
+    try { ctx.conversationId = await rt.session.getActiveConversation(ctx.scopeUserId, ctx.groupId) } catch { /* 无活动会话按默认 */ }
+    return { rt, ctx, scopeKey: scopeKeyOfCtx(ctx) }
+  }
+
+  async _resolveTaskId(rt, scopeKey, input) {
+    if (!input) return null
+    if (await rt.taskStore.get(input, { scopeKey })) return input
+    const list = await rt.taskStore.list({ scopeKey, limit: 200 })
+    const hits = list.filter((t) => String(t.taskId).startsWith(input))
+    return hits.length === 1 ? hits[0].taskId : null
+  }
+
+  async listTasks() {
+    const { rt, scopeKey } = await this._taskScope()
+    if (!rt.taskStore) return this.e.reply('任务账本未启用（config agent.taskStore.enable=true）'), true
+    const tasks = await rt.taskStore.list({ scopeKey, limit: 20 })
+    if (!tasks.length) return this.e.reply('当前会话暂无任务记录'), true
+    const icon = (p) => ({ completed: '✅', paused: '⏸️', interrupted: '⚠️', failed: '❌', cancelled: '🚫', running: '▶️', waiting_input: '💬', queued: '🕒' }[p] || '·')
+    const lines = tasks.map((t) => `${icon(t.phase)} ${t.taskId} [${t.phase}]${t.stopReason ? ` ${t.stopReason}` : ''}`)
+    await this.e.reply(`任务记录（${tasks.length}，最近在前）：\n${lines.join('\n')}\n\n#任务状态 <id> · #取消任务 <id> · #继续任务 <id>`)
+    return true
+  }
+
+  async taskStatus() {
+    const { rt, scopeKey } = await this._taskScope()
+    if (!rt.taskStore) return this.e.reply('任务账本未启用（config agent.taskStore.enable=true）'), true
+    const input = (this.e.msg.match(/^#任务状态\s+(\S+)/) || [])[1]
+    const id = await this._resolveTaskId(rt, scopeKey, input)
+    if (!id) return this.e.reply('未找到任务（可能不属于当前会话或不存在）'), true
+    const t = await rt.taskStore.get(id, { scopeKey })
+    const events = await rt.taskStore.listEvents(id)
+    const recent = events.slice(-8).map((e) => `  · ${e.kind}${e.callId ? `(${e.callId})` : ''}${e.phase ? ` →${e.phase}` : ''}`)
+    await this.e.reply([
+      `任务 ${t.taskId}`,
+      `状态：${t.phase}${t.stopReason ? `（${t.stopReason}）` : ''} · completion=${t.completion || '-'}`,
+      `事件 ${events.length} 条（最近 ${recent.length}）：`, ...recent,
+    ].join('\n'))
+    return true
+  }
+
+  async cancelTask() {
+    const { rt, scopeKey } = await this._taskScope()
+    if (!rt.taskStore) return this.e.reply('任务账本未启用'), true
+    const input = (this.e.msg.match(/^#取消任务\s+(\S+)/) || [])[1]
+    const id = await this._resolveTaskId(rt, scopeKey, input)
+    if (!id) return this.e.reply('未找到任务'), true
+    const r = await rt.taskStore.cancel(id, { scopeKey })
+    await this.e.reply(r.ok ? `已取消任务 ${id}` : `无法取消：${r.code || '未知'}`)
+    return true
+  }
+
+  async resumeTask() {
+    const { rt, ctx, scopeKey } = await this._taskScope()
+    if (!rt.taskStore) return this.e.reply('任务账本未启用'), true
+    const input = (this.e.msg.match(/^#继续任务\s+(\S+)/) || [])[1]
+    const id = await this._resolveTaskId(rt, scopeKey, input)
+    if (!id) return this.e.reply('未找到任务'), true
+    const r = await rt.taskStore.resume(id, { scopeKey })
+    if (!r.ok) return this.e.reply(`无法继续：${r.code}${r.phase ? `（${r.phase}）` : ''}`), true
+    const p = r.plan
+    const planLine = p ? `恢复计划：复用 ${p.counts.reuse} · 可重试 ${p.counts.retry} · 需核实 ${p.counts.reconcile} · 阻断 ${p.counts.block}` : ''
+    // 存在未知写副作用 → 不自动续跑，先人工核实（与恢复门一致）
+    if (p?.hasBlocking) {
+      const lines = p.steps.map((s) => `· ${s.name || s.callId} → ${s.action}（${s.reason}）`)
+      await this.e.reply([`任务 ${id} 存在未知写副作用，禁止自动续跑：`, planLine, ...lines, '⚠️ 请先人工核实外部实际状态。'].join('\n'))
+      return true
+    }
+    // F06：从检查点重建已提交步骤并续跑同一任务（新 run 关联 parentTaskId）
+    const cp = await rt.taskStore.getCheckpoint(id, { scopeKey })
+    if (!cp.ok) return this.e.reply(`无法读取检查点：${cp.code}`), true
+    await this.e.reply(`任务 ${id} 续跑中（${planLine || '无已完成步骤'}）…`)
+    try {
+      const agent = rt.makeAgent()
+      // 与人设接地统一：续跑也应用当前用户激活人设（静态核心事实 + 按原任务输入的长尾检索）
+      const pg = await resolvePersonaGrounding(rt, ctx, String(cp?.input || ''))
+      const out = await agent.continueFrom(cp, {
+        ctx, parentTaskId: id, runtimeGeneration: _runtimeGen,
+        systemPrompt: pg.systemPrompt, context: pg.context,
+      })
+      const body = stripMarkers(redactSecrets(out?.content || '')).trim()
+      await this.e.reply(body || '续跑未产出内容（可查看任务状态或重新发起）。')
+    } catch (e) {
+      await this.e.reply(`续跑失败：${e?.message || e}`)
+    }
+    return true
+  }
+
+  async recoverTask() {
+    const { rt, ctx, scopeKey } = await this._taskScope()
+    if (!rt.taskStore) return this.e.reply('任务账本未启用'), true
+    const input = (this.e.msg.match(/^#恢复任务\s+(\S+)/) || [])[1]
+    const id = await this._resolveTaskId(rt, scopeKey, input)
+    if (!id) return this.e.reply('未找到任务'), true
+    const planned = await rt.taskStore.recoveryPlan(id, { scopeKey })
+    if (!planned.ok) return this.e.reply(`无法读取：${planned.code}`), true
+    const p = planned.plan
+    const lines = p.steps.map((s) => `· ${s.name || s.callId} → ${s.action}（${s.reason}）`)
+    if (p.hasBlocking) {
+      await this.e.reply([
+        `任务 ${id} 恢复计划（存在未知写副作用，禁止自动重放）：`,
+        ...lines,
+        '⚠️ 请先人工核实外部实际状态后再决定是否重发任务。',
+      ].join('\n'))
+      return true
+    }
+    if (!p.autoResumable) return this.e.reply(`任务 ${id} 无可自动恢复的只读步骤（复用 ${p.counts.reuse}）`), true
+    // 有限自动恢复：仅重跑「仍为只读」且可安全重放的步骤；执行前用实时工具重新校验 effect，
+    // 并走与普通执行相同的门（schema 校验 + 权限策略），不得绕过（F08）。
+    const exec = async (step) => {
+      const tool = rt.tools.get(step.name)
+      if (!tool) throw new Error(`工具 ${step.name} 已不存在`)
+      const meta = resolveExecutionMeta(tool, step.args || {}, ctx)
+      if (meta.effect !== 'read' || meta.replay !== 'safe') throw new Error(`工具 ${step.name} 当前不再是只读可重放，已中止`)
+      const v = validateToolArgs(tool, step.args || {})
+      if (!v.ok) throw new Error(`参数校验失败：${(v.fields || []).map((f) => f.message).join('；') || v.code || 'invalid'}`)
+      if (rt.agentConfig?.policy) {
+        const dec = rt.agentConfig.policy.decide(ctx, tool)
+        if (dec?.decision === 'deny') throw new Error(`权限拒绝：${dec.reason || 'policy'}`)
+      }
+      const toolCtx = Object.assign({}, ctx, { signal: null, taskId: id })
+      return await tool.execute(step.args || {}, toolCtx)
+    }
+    const out = await rt.taskStore.recoverReadOnly(id, { scopeKey, execute: exec })
+    if (!out.ok) return this.e.reply(`自动恢复未执行：${out.code}`), true
+    const done = out.applied.filter((a) => a.applied).length
+    await this.e.reply(`任务 ${id} 只读步骤恢复：成功 ${done}/${out.applied.length}${out.applied.filter((a) => a.error).length ? `（${out.applied.filter((a) => a.error).map((a) => a.error).join('；')}）` : ''}`)
+    return true
+  }
+
   // —— 清空自己的所有记录（不含配置文件；2 步确认）——
   async clearMyData() {
     const rt = await getRuntime()
@@ -3033,6 +3402,17 @@ export class Chat extends plugin {
       const rems = await rt.schedule.listByUser(uid)
       for (const r of rems) await rt.schedule.cancel(r.id)
       if (rems.length) cleared.push(`提醒(${rems.length})`)
+      // 任务账本（P0-3）：清理归属当前用户的任务记录（群共享任务不清，避免一人清全群）
+      if (rt.taskStore) {
+        let nTask = 0
+        for (const t of await rt.taskStore.list({ limit: 500 })) {
+          const au = t.scope?.userId != null ? String(t.scope.userId) : ''
+          const su = t.scope?.scopeUserId != null ? String(t.scope.scopeUserId) : ''
+          if (su === '__group__') continue
+          if (au === uid || su === uid) { const r = await rt.taskStore.remove(t.taskId, { scopeKey: t.scopeKey }); if (r.ok) nTask++ }
+        }
+        if (nTask) cleared.push(`任务记录(${nTask})`)
+      }
       // 人设绑定
       await rt.persona.resetActive(uid); cleared.push('人设绑定')
       await this.e.reply('✅ 已清空你的所有记录：' + cleared.join('、') + '\n（配置文件未动）')
@@ -3056,6 +3436,19 @@ export class Chat extends plugin {
     const lines = personas.map((p, i) => `${p.id === activeId ? '★' : '·'} ${i + 1}. ${p.name}${p.builtin ? '（内置）' : ''} — ${p.description}`)
     await this.e.reply(['人设列表（#人设 + 序号切换，如 #人设 1）', ...lines].join('\n'))
     return true
+  }
+
+  /** 解析人设引用：数字 → #人设列表序号(1-based)，否则按 id/名称。找不到返回 null。 */
+  _resolvePersonaRef(rt, input) {
+    return rt.persona.resolveRef(input)
+  }
+
+  /** 补齐任务的真实 ctx（含活动会话 + 机器人身份）：使任务并入主任务账本、浏览器等工具可用。 */
+  async _personaCompletionCtx(rt) {
+    const base = ctxOf(this.e)
+    try { base.conversationId = await rt.session.getActiveConversation(base.scopeUserId, base.groupId) } catch { /* 用默认 */ }
+    base.selfId = String(this.e.self_id || this.e.selfId || '')
+    return base
   }
 
   async personaSwitch() {
@@ -3125,8 +3518,8 @@ export class Chat extends plugin {
     const idOrName = this.e.msg.replace(/^#删除人设\s+/, '').trim()
     const rt = await getRuntime()
     const ctx = ctxOf(this.e)
-    const p = rt.personaStore.get(idOrName)
-    if (!p) return this.e.reply(`未找到人设「${idOrName}」`), true
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
     if (p.builtin) return this.e.reply(`内置人设「${p.name}」不可删除`), true
     // 仅创建者或 master 可删
     if (p.creator && p.creator !== ctx.userId && !ctx.isMaster) {
@@ -3143,6 +3536,122 @@ export class Chat extends plugin {
     const ctx = ctxOf(this.e)
     await rt.persona.resetActive(ctx.userId)
     await this.e.reply('已恢复默认人设')
+    return true
+  }
+
+  // —— 人设补齐 / 资料草稿管理（主人；AI 只产出草稿，须采纳才生效）——
+  async personaComplete() {
+    const rt = await getRuntime()
+    if (!rt.personaLore || !rt.completePersona) return this.e.reply('人设资料库未启用'), true
+    const idOrName = this.e.msg.replace(/^#人设补齐\s+/, '').trim()
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
+    await this.e.reply(`🔎 已启动人设补齐任务（${p.name}），正在检索角色资料，请稍候…`)
+    const r = await rt.completePersona(p.id, { by: String(this.e.user_id || ''), ctx: await this._personaCompletionCtx(rt) })
+    if (r.error) return this.e.reply(`${r.error}（可重试 #人设补齐 ${p.id}）`), true
+    await this.e.reply(formatDraftSummary(r.lore) + (r.taskId ? `\n任务：${r.taskId}（#任务状态 ${r.taskId}）` : ''))
+    return true
+  }
+
+  async personaDraftRefresh() {
+    const rt = await getRuntime()
+    if (!rt.personaLore || !rt.completePersona) return this.e.reply('人设资料库未启用'), true
+    const idOrName = this.e.msg.replace(/^#刷新人设资料\s+/, '').trim()
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
+    await this.e.reply(`🔁 正在为人设「${p.name}」重新检索资料…`)
+    const r = await rt.completePersona(p.id, { by: String(this.e.user_id || ''), ctx: await this._personaCompletionCtx(rt) })
+    if (r.error) return this.e.reply(`${r.error}`), true
+    await this.e.reply(formatDraftSummary(r.lore) + (r.taskId ? `\n任务：${r.taskId}` : ''))
+    return true
+  }
+
+  async personaDraftSchedule() {
+    const rt = await getRuntime()
+    if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    const input = this.e.msg.replace(/^#人设资料定时\s+/, '').trim()
+    const m = input.match(/^(\S+)\s+([\s\S]+)$/)
+    if (!m) return this.e.reply('用法：#人设资料定时 <人设id> <时间>（如 每天8点 / 每周一8点30 / 每12小时）'), true
+    const p = this._resolvePersonaRef(rt, m[1])
+    if (!p) return this.e.reply(`未找到人设「${m[1]}」（可用 #人设列表 的序号或 id）`), true
+    const cron = parseCron(m[2].trim())
+    if (!cron) return this.e.reply(`无法识别时间「${m[2]}」，支持：每天8点/每2小时/工作日9点/每周一8点30/每30分钟`), true
+    const r = await rt.personaLore.setRefresh(p.id, cron)
+    if (r.error) return this.e.reply(r.error), true
+    await this.e.reply(`✓ 已为「${p.name}」（#${p.id}）设定人设资料定时刷新：${m[2].trim()}\n到点会重新检索并产出新草稿（需 #采纳补齐 提交审批、经审批门批准后生效）`)
+    return true
+  }
+
+  async personaDraftCancelSchedule() {
+    const rt = await getRuntime()
+    if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    const idOrName = this.e.msg.replace(/^#人设资料取消定时\s+/, '').trim()
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
+    await rt.personaLore.cancelRefresh(p.id)
+    await this.e.reply(`已取消人设「${p.name}」的资料定时刷新`)
+    return true
+  }
+
+  async personaDraftScheduleList() {
+    const rt = await getRuntime()
+    if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    const list = rt.personaLore.listRefresh()
+    if (!list.length) return this.e.reply('暂无人设资料定时刷新任务'), true
+    const lines = list.map((l) => `· ${l.id} · ${l.cron} · ${l.status === 'active' ? '已生效' : '草稿'}`)
+    await this.e.reply(['人设资料定时刷新：', ...lines].join('\n'))
+    return true
+  }
+
+  async personaDraftView() {
+    const rt = await getRuntime()
+    if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    const idOrName = this.e.msg.replace(/^#查看补齐\s+/, '').trim()
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
+    const draft = rt.personaLore.getDraft(p.id)
+    const main = rt.personaLore.get(p.id)
+    const lore = draft || main
+    if (!lore) return this.e.reply(`人设「${p.name}」暂无补齐资料`), true
+    const status = draft ? '待采纳草稿' : (lore.status === 'active' ? '已生效' : '草稿')
+    const src = lore.sources.map((s, i) => `[${i + 1}] ${s.title || s.ref}（${s.ref}）`).join('\n')
+    const lines = [
+      `🧩 人设资料 · ${p.name}（#${p.id}）· ${status}${draft && main?.status === 'active' ? '（另有一份已生效版本）' : ''}`,
+      lore.summary ? `概述：${lore.summary}` : '',
+      lore.systemPromptPatch ? `风格补充：${lore.systemPromptPatch}` : '',
+      '—— 事实 ——', lore.facts || '（无）',
+      src ? '—— 出处 ——' : '', src,
+      lore.rawNotes ? `—— 长尾资料（${lore.rawNotes.length} 字，采纳后入库供检索） ——` : '',
+    ].filter(Boolean)
+    await this.e.reply(lines.join('\n'))
+    return true
+  }
+
+  async personaDraftAdopt() {
+    const rt = await getRuntime()
+    if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    if (!rt.personaAdoptionQueue) return this.e.reply('人设采纳审批未启用'), true
+    const idOrName = this.e.msg.replace(/^#采纳补齐\s+/, '').trim()
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
+    // 采纳改为「进审批门」：不再直接生效，投递待审项，主人批准后才 draft→active
+    const res = rt.personaAdoptionQueue.request({ personaId: p.id, personaName: p.name, by: String(this.e.user_id || ''), via: 'qq' })
+    if (res.error) return this.e.reply(`提交采纳审批失败：${res.error}`), true
+    await this.e.reply(`📥 已将「${p.name}」（#${p.id}）的资料采纳提交审批（单号 ${res.item.id}）${res.duplicated ? '（已有待审项，已刷新为最新草稿）' : ''}。\n请在 Web 面板「审批门」批准后生效。`)
+    return true
+  }
+
+  async personaDraftDiscard() {
+    const rt = await getRuntime()
+    if (!rt.personaLore) return this.e.reply('人设资料库未启用'), true
+    const idOrName = this.e.msg.replace(/^#丢弃补齐\s+/, '').trim()
+    const p = this._resolvePersonaRef(rt, idOrName)
+    if (!p) return this.e.reply(`未找到人设「${idOrName}」（可用 #人设列表 的序号或 id）`), true
+    const isDraft = !!rt.personaLore.getDraft(p.id)
+    const ok = rt.personaLore.discard(p.id)
+    // 草稿丢弃同步撤销其待审采纳项，避免审批门残留已无法采纳的条目
+    if (ok) { try { rt.personaAdoptionQueue?.cancelByPersona?.(p.id) } catch { /* noop */ } }
+    await this.e.reply(ok ? `已丢弃人设资料${isDraft ? '（草稿）' : ''}：#${p.id}` : `人设「${p.name}」暂无补齐资料`)
     return true
   }
 }

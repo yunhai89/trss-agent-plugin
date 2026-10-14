@@ -25,8 +25,8 @@
             sub: '群聊/私聊会话总数', count: true,
           },
           {
-            icon: 'confirm', grad: 'var(--grad-honey)', label: '待审批 / 待审建议', value: (M.confirms || []).length + (M.suggestions || []).filter((s) => s.status === 'pending').length,
-            sub: '审批为纯内存,重启清空', count: true,
+            icon: 'confirm', grad: 'var(--grad-honey)', label: '待审批 / 待审建议', value: (M.confirms || []).length + (M.personaAdoptions || []).filter((p) => p.status === 'pending').length + (M.suggestions || []).filter((s) => s.status === 'pending').length,
+            sub: '工具确认(内存) + 人设采纳审批(持久)', count: true,
           },
           {
             icon: 'zap', grad: 'var(--grad-rose)', label: '近 7 日请求', value: M.totalRequests || 0,
@@ -141,6 +141,8 @@
       onMounted(async () => {
         try { await window.store.loadOverview() } catch { /* 未就绪,忽略 */ }
         try { await window.store.loadConfig() } catch { /* 忽略 */ }
+        try { await window.store.loadConfirm() } catch { /* 忽略 */ }
+        try { await window.store.loadPersonaAdoptions() } catch { /* 忽略 */ }
       })
 
       return { stats, chart, reqChart, toolTop, toolMax, switches, perceptions, totalTokens, cacheStats, win, setWin, fmt, M }

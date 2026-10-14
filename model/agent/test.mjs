@@ -9,6 +9,7 @@ import path from 'node:path'
 import {
   Agent,
   ToolRegistry,
+  ToolScheduler,
   MemoryStore,
   MemoryLimitError,
   createMemoryTool,
@@ -146,6 +147,7 @@ await test('并行工具：并发执行 + 按原序回插', async () => {
     name: 'slow',
     description: '慢工具',
     parameters: { type: 'object', properties: { city: { type: 'string' } } },
+    meta: { concurrency: 'parallel' },
     async execute(p) {
       active++
       maxActive = Math.max(maxActive, active)
@@ -1955,6 +1957,129 @@ await test('provider：x-opencode-session / UA 头部下发（OpenCode Go）', a
   ok(!('sessionId' in cap.body), 'sessionId 不泄漏进请求体')
 })
 
+// ---------- 受控并发（P0-2 / F03）----------
+await test('受控并发：未声明工具默认独占（串行）', async () => {
+  let active = 0, maxActive = 0
+  const tools = new ToolRegistry().register({
+    name: 'unknown_write', description: 'd', parameters: { type: 'object' },
+    async execute() { active++; maxActive = Math.max(maxActive, active); await delay(15); active--; return { ok: true } },
+  })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'unknown_write', arguments: {} }, { id: 'c2', name: 'unknown_write', arguments: {} }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const res = await new Agent({ provider, tools, maxTurns: 5 }).run('写两次')
+  eq(maxActive, 1, '未声明并发语义 → 串行（防同资源竞态）')
+  eq(res.messages[2].tool_call_id, 'c1', '结果仍按原序 c1')
+  eq(res.messages[3].tool_call_id, 'c2', '结果仍按原序 c2')
+})
+
+await test('受控并发：只读白名单工具并行（保留性能）', async () => {
+  let active = 0, maxActive = 0
+  const tools = new ToolRegistry().register({
+    name: 'web_search', description: 'd', parameters: { type: 'object' },
+    async execute() { active++; maxActive = Math.max(maxActive, active); await delay(15); active--; return { ok: true } },
+  })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'web_search', arguments: {} }, { id: 'c2', name: 'web_search', arguments: {} }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  await new Agent({ provider, tools, maxTurns: 5 }).run('搜两次')
+  eq(maxActive, 2, '白名单只读工具并发')
+})
+
+await test('受控并发：resource 键同页串行、异页并发', async () => {
+  const perKey = new Map()
+  let overlapSameKey = false, maxActive = 0, active = 0
+  const tools = new ToolRegistry().register({
+    name: 'browser_op', description: 'd', parameters: { type: 'object', properties: { page: { type: 'string' } } },
+    meta: { concurrency: 'resource', resourceKeys: (a) => ['browser:' + a.page] },
+    async execute(p) {
+      const c = (perKey.get(p.page) || 0) + 1
+      perKey.set(p.page, c)
+      if (c > 1) overlapSameKey = true
+      active++; maxActive = Math.max(maxActive, active)
+      await delay(20)
+      active--; perKey.set(p.page, perKey.get(p.page) - 1)
+      return { page: p.page }
+    },
+  })
+  const provider = mockProvider([
+    { toolCalls: [
+      { id: 'c1', name: 'browser_op', arguments: { page: 'A' } },
+      { id: 'c2', name: 'browser_op', arguments: { page: 'A' } },
+      { id: 'c3', name: 'browser_op', arguments: { page: 'B' } },
+    ], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const res = await new Agent({ provider, tools, maxTurns: 5 }).run('三页操作')
+  ok(!overlapSameKey, '同一页面（资源键）无重叠')
+  eq(maxActive, 2, '不同页面可并发')
+  eq(res.messages.slice(2, 5).map((m) => m.tool_call_id), ['c1', 'c2', 'c3'], '结果按原序')
+})
+
+await test('受控并发：全局并发池上限', async () => {
+  let active = 0, maxActive = 0
+  const tools = new ToolRegistry().register({
+    name: 'web_search', description: 'd', parameters: { type: 'object' },
+    async execute() { active++; maxActive = Math.max(maxActive, active); await delay(20); active--; return { ok: true } },
+  })
+  const provider = mockProvider([
+    { toolCalls: [1, 2, 3, 4, 5].map((i) => ({ id: 'c' + i, name: 'web_search', arguments: {} })), finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  await new Agent({ provider, tools, maxTurns: 5, toolConcurrency: { maxParallel: 2 } }).run('搜五次')
+  eq(maxActive, 2, '并发不超过配置上限 2')
+})
+
+// ---------- 参数校验（P0-2 / 统一执行门）----------
+await test('参数校验：schema 非法在副作用前结构化拒绝', async () => {
+  let calls = 0
+  const tools = new ToolRegistry().register({
+    name: 'needs_city', description: 'd',
+    parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false },
+    async execute() { calls++; return { ok: true } },
+  })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'needs_city', arguments: { city: 123 } }], finishReason: 'tool_calls' },
+    { toolCalls: [{ id: 'c2', name: 'needs_city', arguments: { city: '北京', extra: 1 } }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const res = await new Agent({ provider, tools, maxTurns: 6 }).run('非法参数')
+  eq(calls, 0, '非法参数不产生副作用')
+  eq(JSON.parse(res.messages[2].content).error, 'invalid_arguments', '类型错误结构化拒绝')
+  eq(JSON.parse(res.messages[4].content).error, 'invalid_arguments', '多余参数结构化拒绝')
+  ok(Array.isArray(JSON.parse(res.messages[2].content).fields), '返回字段级错误供模型修正')
+})
+
+await test('参数校验：合法参数正常执行；关闭开关可回滚', async () => {
+  let calls = 0
+  const tools = new ToolRegistry().register({
+    name: 'needs_city', description: 'd',
+    parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false },
+    async execute(p) { calls++; return { city: p.city } },
+  })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'needs_city', arguments: { city: '北京' } }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  await new Agent({ provider, tools, maxTurns: 4 }).run('北京')
+  eq(calls, 1, '合法参数执行一次')
+
+  let calls2 = 0
+  const tools2 = new ToolRegistry().register({
+    name: 'needs_city', description: 'd',
+    parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'], additionalProperties: false },
+    async execute() { calls2++; return {} },
+  })
+  const provider2 = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'needs_city', arguments: { city: 123 } }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  await new Agent({ provider: provider2, tools: tools2, maxTurns: 4, toolSchemaValidate: false }).run('关闭校验')
+  eq(calls2, 1, '关闭校验时按其自身逻辑执行（回滚杠杆）')
+})
+
 // ---------- 收尾输出上限（修复：子代理报告被 1024 token 截断）----------
 await test('收尾 token 上限可配：finalizeMaxTokens', async () => {
   let finOpts = null
@@ -1992,6 +2117,72 @@ await test('收尾 token 上限默认 2048', async () => {
   }
   await new Agent({ provider, tools, maxTurns: 1 }).run('x')
   eq(finOpts.max_tokens, 2048, '默认 2048')
+})
+
+// ---------- F13：嵌套用量并入根 usage ----------
+await test('F13：工具上报的嵌套用量并入根 usage', async () => {
+  const tools = new ToolRegistry().register({
+    name: 'orch', description: 'd', parameters: { type: 'object' },
+    async execute(_p, ctx) { (ctx.executionContext || ctx).agent?.noteExternalUsage({ input: 100, output: 20 }); return 'ok' },
+  })
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'orch', arguments: {} }], finishReason: 'tool_calls', usage: { prompt_tokens: 5, completion_tokens: 1 } },
+    { content: 'done', finishReason: 'stop', usage: { prompt_tokens: 5, completion_tokens: 1 } },
+  ])
+  const r = await new Agent({ provider, tools, maxTurns: 4 }).run('x')
+  ok(r.usage && r.usage.input >= 100, '根 usage 含嵌套（编排/子代理）用量')
+})
+
+// ---------- F10：跨 Agent 共享调度器 ----------
+await test('F10：跨 Agent 共享调度器同资源互斥', async () => {
+  const scheduler = new ToolScheduler({ maxParallel: 1 })
+  let active = 0, peak = 0
+  const mkAgent = () => {
+    const tools = new ToolRegistry().register({
+      name: 'browser_op', description: 'd', parameters: { type: 'object' },
+      meta: { concurrency: 'resource', resourceKeys: () => ['browser:same'] },
+      async execute() { active++; peak = Math.max(peak, active); await delay(20); active--; return 'ok' },
+    })
+    const provider = mockProvider([
+      { toolCalls: [{ id: 'c', name: 'browser_op', arguments: {} }], finishReason: 'tool_calls' },
+      { content: 'done', finishReason: 'stop' },
+    ])
+    return new Agent({ provider, tools, maxTurns: 4, toolScheduler: scheduler })
+  }
+  await Promise.all([mkAgent().run('a'), mkAgent().run('b')])
+  eq(peak, 1, '跨 Agent 同资源无重叠')
+})
+
+// ---------- F13：根任务预算预留 ----------
+await test('F13：reserveBudget/releaseBudget + noteExternalUsage 计入 consumed', async () => {
+  const agent = new Agent({ provider: mockProvider([{ content: 'x' }]), rootTokenBudget: 100 })
+  eq(agent.reserveBudget(60), true, '预留 60 成功')
+  eq(agent.reserveBudget(60), false, '60+60>100 拒绝')
+  agent.releaseBudget(60)
+  eq(agent.reserveBudget(90), true, '释放后再预留 90 成功')
+  agent.noteExternalUsage({ input: 20, output: 5 })
+  eq(agent._budget.consumed, 25, '嵌套用量计入 consumed')
+  eq(agent.reserveBudget(10), false, '25(consumed)+90(reserved)+10>100 拒绝')
+  agent.releaseBudget(90)
+  eq(agent.reserveBudget(70), true, '释放预留后可再预留')
+})
+
+await test('F13：未配置预算时 reserveBudget 恒 true', async () => {
+  const agent = new Agent({ provider: mockProvider([{ content: 'x' }]) })
+  eq(agent.reserveBudget(999999), true, '无上限恒放行')
+})
+
+// ---------- F06：从检查点续跑 ----------
+await test('F06：continueFrom 用检查点重建历史并续跑', async () => {
+  let seen = null
+  const provider = { async chat(o) { seen = o.messages; return { role: 'assistant', content: '续跑完成', toolCalls: [], finishReason: 'stop', usage: null, rawMessage: {} } } }
+  const agent = new Agent({ provider, maxTurns: 2 })
+  const cp = { input: '原任务描述', steps: [{ callId: 'c1', name: 'web_search', args: { q: 'x' }, ok: true, resultPreview: '{"found":1}' }] }
+  const r = await agent.continueFrom(cp)
+  eq(r.content, '续跑完成', '续跑返回')
+  ok(Array.isArray(seen), 'provider 收到消息')
+  ok(seen.some((m) => m.role === 'tool' && String(m.content).includes('found')), '历史含已提交只读结果')
+  ok(seen.some((m) => m.role === 'user' && String(m.content).includes('原任务描述')), '历史含原始输入')
 })
 
 // ---------- 总结 ----------

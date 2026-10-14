@@ -14,13 +14,16 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
-import { runCrawl4ai, isCrawl4aiAvailable, CRAWL4AI_TIMEOUTS } from './crawl4ai.js'
-import { crawlUrl } from './index.js'
+import { runCrawl4ai, isCrawl4aiAvailable, resetCrawl4aiProbe, CRAWL4AI_TIMEOUTS } from './crawl4ai.js'
+import { crawlUrl, resolveCrawlPolicy, checkTargetAllowed, isBlockSignal } from './index.js'
 
 let passed = 0
 let failed = 0
 function ok(c, m) { if (c) { passed++; console.log('  ✓', m) } else { failed++; console.error('  ✗ FAIL', m) } }
 async function test(name, fn) { console.log(`\n[${name}]`); try { await fn() } catch (e) { failed++; console.error('  ✗ THROW', e?.message || e); console.error(e?.stack?.split('\n').slice(0, 3).join('\n')) } }
+
+// 离线环境无 DNS：注入公网解析结果（SSRF 门禁测试另用私有解析结果）
+const pubLookup = async () => [{ address: '93.184.216.34', family: 4 }]
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'crawl4ai-test-'))
 const PYTHON = process.execPath // 用 node 桩脚本模拟 python 协议行为（跨平台、无需真 python）
@@ -178,6 +181,18 @@ process.stdout.write('0.9.2\\n')
   process.env.PROBE_MODE = 'garbage'
   const a3 = await isCrawl4aiAvailable({ python: probeStub, probeArg: [], ttl: 0 })
   ok(a3.ok, '垃圾版本串仍算可用（版本仅诊断用，判活看退出码）')
+  // 负结果短 TTL + reset：模拟「先未安装 → 安装 → #agents重载 后立即可用」
+  ok(CRAWL4AI_TIMEOUTS.probeNegativeTtlMs <= CRAWL4AI_TIMEOUTS.probeTtlMs, '负结果 TTL 不长于正结果 TTL')
+  process.env.PROBE_MODE = 'fail'
+  resetCrawl4aiProbe()
+  const neg = await isCrawl4aiAvailable({ python: probeStub, probeArg: [], ttl: 60000 })
+  ok(!neg.ok, '未安装 → 判定不可用')
+  process.env.PROBE_MODE = 'ok'
+  const stillNeg = await isCrawl4aiAvailable({ python: probeStub, probeArg: [], ttl: 60000 })
+  ok(!stillNeg.ok, 'TTL 内仍命中负缓存（不回退成可用，避免抖动）')
+  resetCrawl4aiProbe() // 等价 #agents重载 / 进程重启
+  const pos = await isCrawl4aiAvailable({ python: probeStub, probeArg: [], ttl: 60000 })
+  ok(pos.ok, 'reset（#agents重载）后立即探测到可用')
   delete process.env.PROBE_MODE
 })
 
@@ -187,20 +202,20 @@ await test('路由：crawl4ai 成功 → 不走 fetch；失败/不可用 → 降
   const c4aiBad = async () => { calls.c4ai++; return { success: false, code: 'crawl_failed', error: 'x' } }
   const fetchStub = async () => { calls.fetch++; return { success: true, markdown: 'FETCH 正文', title: 'FETCH', via: 'fetch' } }
   // 1) crawl4ai 成功
-  let r = await crawlUrl('https://a.com', { engine: 'crawl4ai', _avail: async () => ({ ok: true }), _c4ai: c4aiOk, _fetch: fetchStub })
+  let r = await crawlUrl('https://a.com', { engine: 'crawl4ai', _lookup: pubLookup, _avail: async () => ({ ok: true }), _c4ai: c4aiOk, _fetch: fetchStub })
   ok(r.success && r.via === 'crawl4ai', 'crawl4ai 命中')
   eq2(calls.fetch, 0, '成功时不走 fetch')
   // 2) crawl4ai 失败 → 降级
-  r = await crawlUrl('https://a.com', { engine: 'crawl4ai', _avail: async () => ({ ok: true }), _c4ai: c4aiBad, _fetch: fetchStub })
+  r = await crawlUrl('https://a.com', { engine: 'crawl4ai', _lookup: pubLookup, _avail: async () => ({ ok: true }), _c4ai: c4aiBad, _fetch: fetchStub })
   ok(r.success && r.via === 'fetch', `失败自动降级 fetch（via=${r.via}）`)
   eq2(calls.c4ai, 2, 'crawl4ai 被尝试过')
   // 3) 不可用 → 直接 fetch
   calls.c4ai = 0
-  r = await crawlUrl('https://a.com', { engine: 'crawl4ai', _avail: async () => ({ ok: false }), _c4ai: c4aiOk, _fetch: fetchStub })
+  r = await crawlUrl('https://a.com', { engine: 'crawl4ai', _lookup: pubLookup, _avail: async () => ({ ok: false }), _c4ai: c4aiOk, _fetch: fetchStub })
   ok(r.via === 'fetch', '不可用直接 fetch')
   eq2(calls.c4ai, 0, '不可用时不启子进程')
   // 4) engine=fetch 强制
-  r = await crawlUrl('https://a.com', { engine: 'fetch', _avail: async () => ({ ok: true }), _c4ai: c4aiOk, _fetch: fetchStub })
+  r = await crawlUrl('https://a.com', { engine: 'fetch', _lookup: pubLookup, _avail: async () => ({ ok: true }), _c4ai: c4aiOk, _fetch: fetchStub })
   ok(r.via === 'fetch', 'engine=fetch 强制纯 HTTP')
   eq2(calls.c4ai, 0, 'engine=fetch 不启子进程')
 })
@@ -209,7 +224,7 @@ await test('超时常量：外部可覆盖（安装/慢站场景）', async () =
   ok(CRAWL4AI_TIMEOUTS && Number.isFinite(CRAWL4AI_TIMEOUTS.defaultMs), 'CRAWL4AI_TIMEOUTS.defaultMs 存在')
 })
 
-await test('高级参数透传：wait_for/js_code 数组/extract/links/stealth/virtual_scroll 完整到达子进程请求', async () => {
+await test('高级参数透传：wait_for/js_code 数组/extract/links/stealth/virtual_scroll/代理/undetected 完整到达子进程请求', async () => {
   const echoFile = path.join(TMP, 'echo-req.json')
   process.env.STUB_ECHO_FILE = echoFile
   try {
@@ -220,6 +235,8 @@ await test('高级参数透传：wait_for/js_code 数组/extract/links/stealth/v
       extract: { baseSelector: '.quote', fields: [{ name: 'text', selector: '.text', type: 'text' }] },
       links: true, stealth: true, flatShadowDom: true,
       virtualScroll: { container_selector: '.feed', scroll_count: 8, wait_after_scroll: 1.5 },
+      proxy: 'http://user:pass@127.0.0.1:7890', undetected: true, waitUntil: 'load',
+      headless: false, scanFullPage: true, maxScrollSteps: 12, extraArgs: ['--disable-dev-shm-usage'],
     })
     ok(r.success, '抓取成功')
     const req = JSON.parse(fs.readFileSync(echoFile, 'utf8'))
@@ -232,6 +249,13 @@ await test('高级参数透传：wait_for/js_code 数组/extract/links/stealth/v
     eq2(req.stealth, true, 'stealth 透传')
     eq2(req.flat_shadow_dom, true, 'flat_shadow_dom 透传')
     ok(req.virtual_scroll && req.virtual_scroll.container_selector === '.feed' && req.virtual_scroll.scroll_count === 8, 'virtual_scroll 透传')
+    eq2(req.proxy, 'http://user:pass@127.0.0.1:7890', 'proxy 透传')
+    eq2(req.undetected, true, 'undetected 透传')
+    eq2(req.wait_until, 'load', 'wait_until 透传')
+    eq2(req.headless, false, 'headless 透传')
+    eq2(req.scan_full_page, true, 'scan_full_page 透传')
+    eq2(req.max_scroll_steps, 12, 'max_scroll_steps 透传')
+    ok(Array.isArray(req.extra_args) && req.extra_args[0] === '--disable-dev-shm-usage', 'extra_args 透传')
   } finally { delete process.env.STUB_ECHO_FILE }
 })
 
@@ -249,14 +273,14 @@ await test('降级标注：crawl4ai 失败 + 高级参数 → 降级 fetch 结�
   const c4aiBad = async () => ({ success: false, code: 'crawl_failed', error: 'x' })
   const fetchStub = async () => ({ success: true, markdown: 'F 正文', title: 'F', via: 'fetch' })
   const r = await crawlUrl('https://a.com', {
-    engine: 'crawl4ai', _avail: async () => ({ ok: true }), _c4ai: c4aiBad, _fetch: fetchStub,
+    engine: 'crawl4ai', _lookup: pubLookup, _avail: async () => ({ ok: true }), _c4ai: c4aiBad, _fetch: fetchStub,
     waitFor: 'css:.x', extract: { baseSelector: '.q', fields: [{ name: 'a', selector: '.a', type: 'text' }] },
   })
   ok(r.success && r.via === 'fetch', '降级 fetch 成功')
   eq2(r.degraded, true, 'degraded=true')
   ok(r.skipped.includes('waitFor') && r.skipped.includes('extract'), `skipped 列出未生效能力（${r.skipped.join(',')}）`)
   // 无高级参数的普通降级不带 skipped（向后兼容 KnowledgeStore 路径）
-  const r2 = await crawlUrl('https://a.com', { engine: 'crawl4ai', _avail: async () => ({ ok: true }), _c4ai: c4aiBad, _fetch: fetchStub })
+  const r2 = await crawlUrl('https://a.com', { engine: 'crawl4ai', _lookup: pubLookup, _avail: async () => ({ ok: true }), _c4ai: c4aiBad, _fetch: fetchStub })
   ok(r2.degraded !== true, '普通降级不带 degraded 标注')
 })
 
@@ -314,12 +338,136 @@ await test('B8 解释器不可执行（EACCES）：结构化 spawn_failed，不�
 await test('B8 spawn 失败可降级 fetch（真实 runCrawl4ai 解释器缺失）', async () => {
   let fetched = 0
   const r = await crawlUrl('https://a.com', {
-    engine: 'crawl4ai',
+    engine: 'crawl4ai', _lookup: pubLookup,
     _avail: async () => ({ ok: true }),
     _c4ai: () => runCrawl4ai('https://a.com', { python: '/missing-audit-python', script: STUB, timeoutMs: 200 }),
     _fetch: async () => { fetched++; return { success: true, markdown: 'F', title: 'F', via: 'fetch' } },
   })
   ok(r.via === 'fetch' && fetched === 1, 'spawn_failed 自动降级 fetch（上层可达）')
+})
+
+await test('策略解析：stealth/retryBlocked 默认开，allowPrivateHosts 默认关，显式值优先', async () => {
+  const p1 = resolveCrawlPolicy({ crawl: {} })
+  eq2(p1.engine, 'crawl4ai', '默认引擎 crawl4ai')
+  eq2(p1.stealth, true, 'stealth 默认开')
+  eq2(p1.retryBlocked, true, 'retryBlocked 默认开')
+  eq2(p1.allowPrivateHosts, false, 'allowPrivateHosts 默认关')
+  const p2 = resolveCrawlPolicy({ crawl: { engine: 'fetch', stealth: false, retryBlocked: false, allowPrivateHosts: true } })
+  eq2(p2.engine, 'fetch', '配置引擎覆盖')
+  eq2(p2.stealth, false, '配置 stealth 关')
+  eq2(p2.retryBlocked, false, '配置 retryBlocked 关')
+  eq2(p2.allowPrivateHosts, true, '配置 allowPrivateHosts 开')
+  const p3 = resolveCrawlPolicy({ crawl: { stealth: true } }, { stealth: false, engine: 'fetch' })
+  eq2(p3.stealth, false, 'opts 显式值优先于配置')
+  eq2(p3.engine, 'fetch', 'opts engine 优先')
+})
+
+await test('拦截升级：命中反爬 → undetected+stealth 强化重试一轮，成功带 escalated 标记', async () => {
+  const seen = []
+  const c4ai = async (url, o) => {
+    seen.push({ stealth: o.stealth, undetected: o.undetected, waitUntil: o.waitUntil, delayMs: o.delayMs })
+    return seen.length === 1
+      ? { success: false, code: 'blocked', error: 'Blocked by anti-bot protection: Cloudflare JS challenge' }
+      : { success: true, markdown: '解锁正文'.repeat(5), title: 'OK', via: 'crawl4ai' }
+  }
+  const r = await crawlUrl('https://a.com', {
+    engine: 'crawl4ai', _lookup: pubLookup,
+    _avail: async () => ({ ok: true }), _c4ai: c4ai, _fetch: async () => { throw new Error('不应走 fetch') },
+  })
+  eq2(seen.length, 2, '升级重试恰好 2 次')
+  eq2(seen[0].undetected, undefined, '首次常规（非 undetected）')
+  eq2(seen[1].undetected, true, '重试走 undetected')
+  eq2(seen[1].stealth, true, '重试 stealth 强制开')
+  eq2(seen[1].waitUntil, 'load', '重试 wait_until=load（反爬站建议）')
+  ok(seen[1].delayMs >= 1500, `重试 hydration 余量加大（${seen[1].delayMs}ms）`)
+  ok(r.success && r.escalated === true, '升级命中：success + escalated=true')
+})
+
+await test('拦截升级：retryBlocked=false 不升级；非拦截类失败（协议错误）不升级', async () => {
+  let calls = 0
+  const blocked = async () => { calls++; return { success: false, code: 'blocked', error: 'Blocked by anti-bot protection' } }
+  const fetchStub = async () => ({ success: true, markdown: 'F', title: 'F', via: 'fetch' })
+  let r = await crawlUrl('https://a.com', { engine: 'crawl4ai', _lookup: pubLookup, retryBlocked: false, _avail: async () => ({ ok: true }), _c4ai: blocked, _fetch: fetchStub })
+  eq2(calls, 1, 'retryBlocked=false 只尝试 1 次')
+  ok(r.via === 'fetch', '直接降级 fetch')
+  calls = 0
+  const proto = async () => { calls++; return { success: false, code: 'protocol_error', error: 'stdout 无可解析 JSON' } }
+  r = await crawlUrl('https://a.com', { engine: 'crawl4ai', _lookup: pubLookup, _avail: async () => ({ ok: true }), _c4ai: proto, _fetch: fetchStub })
+  eq2(calls, 1, 'protocol_error 不触发升级（升级只针对拦截/挑战）')
+  ok(r.via === 'fetch', '降级 fetch')
+})
+
+await test('isBlockSignal：拦截/挑战码与 403 文案触发，超时/崩溃不触发', async () => {
+  ok(isBlockSignal({ success: false, code: 'blocked', error: 'HTTP 403' }), 'blocked 触发')
+  ok(isBlockSignal({ success: false, code: 'challenge', error: '' }), 'challenge 触发')
+  ok(isBlockSignal({ success: false, code: 'crawl_failed', error: 'Blocked by anti-bot protection: HTTP 403 with HTML content' }), 'anti-bot 文案触发')
+  ok(!isBlockSignal({ success: false, code: 'request_timeout', error: '总超时（>105s）' }), '超时不触发')
+  ok(!isBlockSignal({ success: false, code: 'crashed', error: 'Traceback: boom' }), '崩溃不触发')
+  ok(!isBlockSignal({ success: true, code: 'blocked' }), '成功不触发')
+})
+
+await test('SSRF 门禁：内网解析/字面 IP/元数据主机拒绝；allowPrivateHosts 与代理路径放行', async () => {
+  const privLookup = async () => [{ address: '192.168.1.10', family: 4 }]
+  let v = await checkTargetAllowed('http://intranet.example.com/', { lookup: privLookup })
+  ok(!v.ok && v.code === 'ssrf_blocked', `域名解析到内网 → 拒绝（${v.code}）`)
+  v = await checkTargetAllowed('http://127.0.0.1:8080/admin', {})
+  ok(!v.ok && v.code === 'ssrf_blocked', '环回 IP → 拒绝（无需 DNS）')
+  v = await checkTargetAllowed('http://169.254.169.254/latest/meta-data/', {})
+  ok(!v.ok && v.code === 'ssrf_blocked', '云元数据 IP → 拒绝')
+  v = await checkTargetAllowed('http://2130706433/', {})
+  ok(!v.ok && v.code === 'ssrf_blocked', '混淆 IPv4（十进制 2130706433）→ 拒绝')
+  v = await checkTargetAllowed('http://[::1]/', {})
+  ok(!v.ok && v.code === 'ssrf_blocked', 'IPv6 环回 → 拒绝')
+  v = await checkTargetAllowed('http://localhost:3000/', {})
+  ok(!v.ok && v.code === 'ssrf_blocked', 'localhost → 拒绝')
+  v = await checkTargetAllowed('file:///etc/passwd', {})
+  ok(!v.ok && v.code === 'invalid_url', '非 http(s) 协议 → 拒绝')
+  v = await checkTargetAllowed('http://127.0.0.1/', { allowPrivateHosts: true })
+  ok(v.ok, 'allowPrivateHosts=true 放行内网')
+  // 代理路径：不做本地 DNS（目标域名由代理解析），但字面 IP/黑名单仍拦
+  v = await checkTargetAllowed('https://blocked-but-dns-unresolvable.example/', { viaProxy: true })
+  ok(v.ok, 'viaProxy 跳过本地 DNS（代理可用场景不误拦）')
+  v = await checkTargetAllowed('http://169.254.169.254/', { viaProxy: true })
+  ok(!v.ok && v.code === 'ssrf_blocked', 'viaProxy 仍拦字面内网 IP')
+})
+
+await test('crawlUrl SSRF 门禁：默认拒绝内网目标（不启浏览器/不走 fetch）', async () => {
+  let c4ai = 0
+  let fetchN = 0
+  const r = await crawlUrl('http://127.0.0.1:8080/private', {
+    engine: 'crawl4ai',
+    _avail: async () => ({ ok: true }),
+    _c4ai: async () => { c4ai++; return { success: true } },
+    _fetch: async () => { fetchN++; return { success: true } },
+  })
+  ok(!r.success && r.code === 'ssrf_blocked', `拒绝并给出 ssrf_blocked（实际 ${r.code}）`)
+  eq2(c4ai, 0, '未启动 crawl4ai')
+  eq2(fetchN, 0, '未发起 fetch')
+  ok(/allowPrivateHosts/.test(r.hint || ''), 'hint 指向 allowPrivateHosts 开关')
+})
+
+await test('挑战页识别：crawl4ai 成功结果实为挑战页 → 结构化 challenge 并触发升级', async () => {
+  const challengeStub = path.join(TMP, 'challenge.cjs')
+  fs.writeFileSync(challengeStub, `#!/usr/bin/env node
+let s = ''
+process.stdin.on('data', (d) => {
+  s += d
+  if (!s.includes('\\n')) return
+  process.stdout.write(JSON.stringify({ ok: false, url: 'challenge://', code: 'challenge', error: '内容为反爬挑战页（title=Just a moment...）' }) + '\\n')
+  process.exit(2)
+})
+`)
+  const r = await runCrawl4ai('challenge://x', { python: PYTHON, script: challengeStub, timeoutMs: 4000 })
+  ok(!r.success && r.code === 'challenge', `code=${r.code}`)
+  // 升级链：挑战 → 强化重试
+  let calls = 0
+  const r2 = await crawlUrl('https://a.com', {
+    engine: 'crawl4ai', _lookup: pubLookup,
+    _avail: async () => ({ ok: true }),
+    _c4ai: async (u, o) => { calls++; return o.undetected === true ? { success: true, markdown: 'X'.repeat(30), via: 'crawl4ai' } : { success: false, code: 'challenge', error: '挑战页' } },
+    _fetch: async () => { throw new Error('不应走 fetch') },
+  })
+  ok(r2.success && r2.escalated === true && calls === 2, 'challenge 触发 undetected 升级并命中')
 })
 
 console.log(`\n========================================`)

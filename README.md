@@ -813,9 +813,42 @@ search:
 
 ---
 
+## 🕸️ 网页抓取（web_crawl / crawl4ai）
+
+> `web_crawl` 常驻工具（query 类，全员可用）与知识库 URL 入库/刷新共用同一抓取链路。默认走 [crawl4ai](https://docs.crawl4ai.com) 真浏览器渲染（Playwright Chromium）：SPA/JS 动态页、同态渲染页都能拿到渲染后正文；未安装或失败自动降级纯 HTTP + cheerio（静态兜底）。
+
+**安装真浏览器渲染（可选，强烈建议）**：
+
+```sh
+sh plugins/agents-plugin/scripts/install-crawl4ai.sh   # 独立 venv + Playwright Chromium（约 300~500MB）
+# 国内镜像加速示例：
+PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple sh scripts/install-crawl4ai.sh
+```
+
+安装后 `web_crawl` 默认走浏览器；`config.yaml → agent.kb.crawl.engine: fetch` 可强制纯 HTTP。多个插件副本时注意 venv 装在**正在运行的那一份**目录下（日志会打印实际解释器路径）。
+
+**反爬链**（`agent.kb.crawl`）：
+
+```yaml
+kb:
+  crawl:
+    engine: crawl4ai      # crawl4ai（默认真浏览器）| fetch（纯 HTTP+cheerio）
+    stealth: true         # 浏览器路径反检测（playwright-stealth + 模拟用户行为），默认开
+    retryBlocked: true    # 被反爬拦截（403/CF 挑战等）时自动 undetected+stealth 强化再试一轮
+    allowPrivateHosts: false  # 允许抓取本机/内网/元数据地址（防 SSRF，默认禁）
+```
+
+- **代理**：`agent.proxy` 同时作用于浏览器渲染与降级 fetch（配了代理则浏览器也走代理）；目标为本地/内网地址时始终直连。
+- **降级 fetch 的加固**：自动字符集（GBK/Big5 老站不乱码）、Cookie Jar（跳转携带会话）、反爬挑战页/JS 空壳识别（不把「Just a moment」「加载中」当正文）、Retry-After 退避重试。
+- **高级能力**（仅 crawl4ai 生效）：`wait_for` 等渲染完成、`js_code` 滚动/点击触发懒加载、`extract` CSS schema 结构化抽取、`links` 链接清单、`scroll` 虚拟滚动；降级纯 HTTP 时结果带 `degraded:true + skipped:[...]`（诚实标注）。
+- **失败提示**：结果区分 `blocked`（403/429 反爬）、`challenge`（CF 等挑战页）、`js_required`（JS 空壳）、`empty`、`ssrf_blocked`，并给出下一步建议；crawl4ai 与 fetch 双路失败时附带两路错误。
+- **安全**：默认拒绝抓取环回/私有/链路本地/元数据地址（含混淆 IPv4、IPv6、域名解析结果），fetch 重定向逐跳复验；cookie 仅存进程内存、不落盘不进日志。crawl4ai 浏览器内的子资源/内部重定向不受此层约束（已知边界）。
+
+---
+
 ## 🌐 Stagehand 浏览器自动化（🧪 早期）
 
-> 基于 [@browserbasehq/stagehand](https://docs.stagehand.dev) v4。Agent 用自然语言驱动真实浏览器：打开页面、点击、填表、抽取动态渲染后的结构化数据（弥补 web_crawl 不执行 JS 的不足）。
+> 基于 [@browserbasehq/stagehand](https://docs.stagehand.dev) v4。Agent 用自然语言驱动真实浏览器：打开页面、点击、填表、抽取动态渲染后的结构化数据（适合多步交互/登录态任务，弥补 `web_crawl` 单页只读抓取的局限）。
 
 **4 个工具**（`permission=master` 时 `category:'system'` 仅框架主人；`permission=all` 时 `category:'query'` 全员可用，`stagehand__act` 写动作始终需 `#确认`）：
 - `stagehand__goto({url})` — 打开 URL（多步任务起点，页面跨调用保持）。成功返回 `{ok:true, url, title, status?}`（同时提供 `data` 别名）

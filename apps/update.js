@@ -99,7 +99,7 @@ export class AgentsUpdate extends plugin {
     const changed = (await this.exec(`git diff --name-only ${this.oldCommitId} ${after}`)).stdout
     if (/(^|\n)package\.json($|\n)/.test(changed)) this.isPkgUp = true
     await this.reply(`agents-plugin 更新成功：${this.oldCommitId} → ${after}\n更新时间：${time}`)
-    await this.reply(await this.getLog())
+    await this.sendLogForward(await this.getLogEntries(), { branch, after })
     logger.mark(`[agents-plugin] 更新成功 ${this.oldCommitId} → ${after}，最后更新时间：${time}`)
     return true
   }
@@ -115,9 +115,45 @@ export class AgentsUpdate extends plugin {
 
   async updateLog() {
     if (!this.e.isMaster) return false
-    const log = await this.getLog()
-    await this.reply(log || '暂无更新日志')
+    const branch = await this.getBranch()
+    const entries = await this.getLogEntries()
+    if (!entries.length) { await this.reply('暂无更新日志'); return true }
+    await this.sendLogForward(entries, { branch })
     return true
+  }
+
+  /** 版本类型标签：master=稳定版；beta=beta 版；其余=分支名 */
+  versionLabel(branch) {
+    if (branch === 'master') return '稳定版'
+    if (branch === 'beta') return 'beta 版'
+    return branch ? `分支 ${branch}` : '未知版本'
+  }
+
+  /**
+   * 更新日志以「合并转发聊天记录」发出：每条日志独立一条消息；
+   * 卡片标题 / 节点昵称注明是稳定版还是 beta 更新。转发失败自动降级为文本。
+   */
+  async sendLogForward(entries, { branch, after } = {}) {
+    const label = this.versionLabel(branch)
+    const title = `agents-plugin · ${label} 更新日志${after ? `（${after}）` : ''}`
+    const selfId = String(this.e.self_id || '')
+    const nickname = `agents-plugin ${label}`
+    const nodes = [{ message: `📦 ${title}`, nickname, user_id: selfId }]
+    for (const line of entries) nodes.push({ message: String(line), nickname, user_id: selfId })
+
+    let fwd = null
+    const mk = (this.e.isGroup && this.e.group?.makeForwardMsg) ? this.e.group.makeForwardMsg.bind(this.e.group)
+      : (this.e.friend?.makeForwardMsg) ? this.e.friend.makeForwardMsg.bind(this.e.friend)
+        : (this.e.bot?.makeForwardMsg) ? this.e.bot.makeForwardMsg.bind(this.e.bot)
+          : (typeof Bot !== 'undefined' && Bot.makeForwardMsg) ? Bot.makeForwardMsg.bind(Bot) : null
+    if (mk) {
+      // 优先带 title（部分适配器支持，可让卡片头直接显示版本类型）；不支持则退回无 title
+      try { fwd = await mk(nodes, { title }) } catch { try { fwd = await mk(nodes) } catch { fwd = null } }
+    }
+    if (fwd) { await this.reply(fwd); return true }
+    // 降级：无转发能力时按文本逐段发送
+    await this.reply([title, ...entries].join('\n'))
+    return false
   }
 
   async getCommitId() {
@@ -171,12 +207,13 @@ export class AgentsUpdate extends plugin {
     }).catch((e) => logger.warn('[agents-plugin] 自动重启失败，请手动重启以应用更新', e?.message || e))
   }
 
-  async getLog() {
+  /** 本次更新（自 oldCommitId 起）的提交记录，逐条返回；未设 oldCommitId（#更新日志）则取最近提交。 */
+  async getLogEntries() {
     const cm = await this.exec('git log -100 --pretty="%h||[%cd] %s" --date=format:"%F %T"')
-    if (cm.error) return cm.error.message
+    if (cm.error) return [cm.error.message]
 
     const logAll = cm.stdout.split('\n')
-    if (!logAll.length) return ''
+    if (!logAll.length) return []
 
     const log = []
     for (const str of logAll) {
@@ -185,8 +222,6 @@ export class AgentsUpdate extends plugin {
       if (parts[1]?.includes('Merge branch')) continue
       if (parts[1]) log.push(parts[1])
     }
-    if (log.length <= 0) return ''
-
-    return [`agents-plugin 更新日志`, ...log].join('\n')
+    return log
   }
 }

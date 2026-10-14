@@ -9,6 +9,7 @@ import express from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
 import Config from '../../utils/Config.js'
+import Log from '../../utils/Log.js'
 import { setPath } from '../../utils/path.js'
 import { presets as openaiPresets } from '../openai/presets.js'
 import { presets as anthropicPresets } from '../anthropic/presets.js'
@@ -21,6 +22,7 @@ import { mergeTrend, summarizeKvDays } from '../agent/store/usage-stats.js'
 import { ok, fail, asyncHandler, CODE } from './response.js'
 import { listAllSuggestions, applySuggestion, removeSuggestion } from '../evolution/review.js'
 import { getStickerManager } from '../sticker/manager.js'
+import { RuntimeScope } from '../agent/runtime-scope.js'
 import {
   RefLibrary, IndexTtsClient, normalizeTtsConfig,
   PROVIDERS, PROVIDER_IDS, providerConfigured,
@@ -201,10 +203,61 @@ router.get('/schedule', asyncHandler(async (req, res) => {
   return ok(res, list)
 }))
 
+// GET /api/tasks?scopeKey=&phase=&limit= —— 任务账本列表（P0-3；未启用返回 enabled:false）
+router.get('/tasks', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.taskStore) return ok(res, { enabled: false, tasks: [] })
+  const phases = req.query.phase ? String(req.query.phase).split(',').map((s) => s.trim()).filter(Boolean) : null
+  const tasks = await r.taskStore.list({ scopeKey: req.query.scopeKey || null, phases, limit: Number(req.query.limit) || 50 })
+  return ok(res, { enabled: true, tasks })
+}))
+
+// GET /api/tasks/:id —— 任务详情 + 事件（P0-3）
+router.get('/tasks/:id', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.taskStore) return fail(res, CODE.NOTFOUND, '任务账本未启用')
+  const t = await r.taskStore.get(req.params.id, { scopeKey: req.query.scopeKey || null })
+  if (!t) return fail(res, CODE.NOTFOUND, '任务不存在或无权访问')
+  const events = await r.taskStore.listEvents(t.taskId)
+  const checkpoint = await r.taskStore.getCheckpoint(t.taskId, { scopeKey: req.query.scopeKey || null }).catch(() => null)
+  return ok(res, { task: t, events, checkpoint })
+}))
+
+// GET /api/tasks/:id/recovery —— 恢复计划（P0-3 阶段二；纯推导，不执行副作用）
+router.get('/tasks/:id/recovery', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.taskStore) return fail(res, CODE.NOTFOUND, '任务账本未启用')
+  const out = await r.taskStore.recoveryPlan(req.params.id, { scopeKey: req.query.scopeKey || null })
+  return out.ok ? ok(res, out.plan) : fail(res, CODE.NOTFOUND, `无法读取：${out.code}`)
+}))
+
+// POST /api/tasks/:id/cancel —— 取消任务（P0-3）
+router.post('/tasks/:id/cancel', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.taskStore) return fail(res, CODE.NOTFOUND, '任务账本未启用')
+  const out = await r.taskStore.cancel(req.params.id, { scopeKey: req.body?.scopeKey || req.query.scopeKey || null })
+  return out.ok ? ok(res, out) : fail(res, CODE.BAD, `无法取消：${out.code}`)
+}))
+
+// POST /api/tasks/:id/resume —— 恢复检查点（P0-3 阶段一：不自动重放副作用）
+router.post('/tasks/:id/resume', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.taskStore) return fail(res, CODE.NOTFOUND, '任务账本未启用')
+  const out = await r.taskStore.resume(req.params.id, { scopeKey: req.body?.scopeKey || req.query.scopeKey || null })
+  return out.ok ? ok(res, out) : fail(res, CODE.BAD, `无法继续：${out.code}`)
+}))
+
 // GET /api/confirm —— 待审批队列（内存态）
 router.get('/confirm', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
   return ok(res, r.confirm.list())
+}))
+
+// GET /api/runtime/scopes —— 资源作用域观测（P0-4）：未关闭 scope 数 + 当前运行时作用域统计
+router.get('/runtime/scopes', asyncHandler(async (req, res) => {
+  let r = null
+  try { r = await _runtimeProvider() } catch { r = null }
+  return ok(res, { openScopes: RuntimeScope.openCount, runtime: r?.scope?.stats?.() || null })
 }))
 
 // GET /api/suggestions?scopeId=&status= —— 进化建议（全部 status）
@@ -744,6 +797,114 @@ router.delete('/personas/:id', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
   try { return ok(res, { removed: r.personaStore.remove(req.params.id) }) }
   catch (e) { const msg = e.message || ''; return fail(res, /内置/.test(msg) ? CODE.READONLY : CODE.BAD, msg) }
+}))
+
+// ── 人设资料库（PersonaLore，按人设 id 独立；草稿/生效/定时刷新）──
+// GET /api/persona-lore —— 全部资料
+router.get('/persona-lore', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  return ok(res, r.personaLore ? r.personaLore.list() : [])
+}))
+
+// POST /api/persona-lore/:id/adopt —— 提交「采纳」审批（不再直接生效；进 Web 审批门待主人批准）
+router.post('/persona-lore/:id/adopt', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaLore) return fail(res, CODE.BAD, '人设资料库未启用')
+  if (!r.personaAdoptionQueue) return fail(res, CODE.BAD, '人设采纳审批未启用')
+  const p = r.personaStore?.get?.(req.params.id)
+  const result = r.personaAdoptionQueue.request({ personaId: req.params.id, personaName: p?.name || null, by: req.master, via: 'web' })
+  if (result.error) return fail(res, result.code === 'no_draft' ? CODE.NOTFOUND : CODE.BAD, result.error)
+  return ok(res, { item: result.item, duplicated: !!result.duplicated }, '已提交采纳审批，请在审批门批准')
+}))
+
+// DELETE /api/persona-lore/:id —— 丢弃资料（有独立草稿时只丢草稿；否则删主资料）
+router.delete('/persona-lore/:id', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaLore) return fail(res, CODE.BAD, '人设资料库未启用')
+  try {
+    const removed = r.personaLore.discard(req.params.id)
+    // 草稿丢弃同步撤销其待审采纳项，避免审批门残留已无法采纳的条目
+    if (removed) { try { r.personaAdoptionQueue?.cancelByPersona?.(req.params.id) } catch { /* noop */ } }
+    return ok(res, { removed })
+  } catch (e) { return fail(res, CODE.BAD, e.message || String(e)) }
+}))
+
+// ── 人设采纳审批队列（PersonaAdoptionQueue，持久化；采纳须经此门批准才生效）──
+// GET /api/persona-adoptions?status=pending|all&personaId= —— 待审/历史列表
+router.get('/persona-adoptions', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaAdoptionQueue) return ok(res, [])
+  const status = String(req.query.status || 'pending')
+  return ok(res, r.personaAdoptionQueue.list({
+    status: status === 'all' ? null : status,
+    personaId: req.query.personaId ? String(req.query.personaId) : null,
+  }))
+}))
+
+// POST /api/persona-adoptions —— 提交采纳审批 { personaId }（Web 人设页「采纳」按钮）
+router.post('/persona-adoptions', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaAdoptionQueue) return fail(res, CODE.BAD, '人设采纳审批未启用')
+  const personaId = String((req.body || {}).personaId || '')
+  if (!personaId) return fail(res, CODE.BAD, '缺少 personaId')
+  const p = r.personaStore?.get?.(personaId)
+  const result = r.personaAdoptionQueue.request({ personaId, personaName: p?.name || null, by: req.master, via: 'web' })
+  if (result.error) return fail(res, result.code === 'no_draft' ? CODE.NOTFOUND : CODE.BAD, result.error)
+  return ok(res, { item: result.item, duplicated: !!result.duplicated }, '已提交采纳审批')
+}))
+
+// POST /api/persona-adoptions/:id/approve —— 批准：采纳磁盘当前草稿（draft→active）+ 灌长尾
+router.post('/persona-adoptions/:id/approve', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaAdoptionQueue) return fail(res, CODE.BAD, '人设采纳审批未启用')
+  const result = await r.personaAdoptionQueue.approve(req.params.id, { by: req.master })
+  if (result.error) return fail(res, CODE.BAD, result.error)
+  return ok(res, { item: result.item, lore: result.lore, ingestError: result.ingestError })
+}))
+
+// POST /api/persona-adoptions/:id/reject —— 驳回（保留草稿，可改后重新提交）{ reason? }
+router.post('/persona-adoptions/:id/reject', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaAdoptionQueue) return fail(res, CODE.BAD, '人设采纳审批未启用')
+  const result = r.personaAdoptionQueue.reject(req.params.id, { by: req.master, reason: (req.body || {}).reason })
+  if (result.error) return fail(res, CODE.BAD, result.error)
+  return ok(res, result.item)
+}))
+
+// POST /api/persona-lore/:id/complete —— 触发补齐任务（同步等待；可能较慢，产出草稿）
+router.post('/persona-lore/:id/complete', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.completePersona) return fail(res, CODE.BAD, '人设补齐未启用')
+  // 传入发起者（master）真实身份 ctx：任务并入主任务账本（Web 任务账本可见），浏览器等工具可用
+  const ctx = {
+    userId: String(req.master), isMaster: true, role: 'owner',
+    scopeUserId: String(req.master), scopeId: `u_${req.master}`,
+    groupId: null, conversationId: 'persona-complete',
+  }
+  const result = await r.completePersona(req.params.id, { by: req.master, ctx })
+  if (result.error) return fail(res, CODE.BAD, result.error)
+  return ok(res, { ...result.lore, taskId: result.taskId })
+}))
+
+// POST /api/persona-lore/:id/refresh —— 设定时刷新 { cron }（null/省略=取消）；接受自然语言或 5 段 cron
+router.post('/persona-lore/:id/refresh', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaLore) return fail(res, CODE.BAD, '人设资料库未启用')
+  const raw = (req.body || {}).cron
+  const norm = raw ? (parseCron(String(raw)) || String(raw)) : null
+  let result
+  try { result = await r.personaLore.setRefresh(req.params.id, norm) }
+  catch (e) { return fail(res, CODE.BAD, e.message || String(e)) }
+  if (result.error) return fail(res, CODE.BAD, result.error)
+  return ok(res, result)
+}))
+
+// DELETE /api/persona-lore/:id/refresh —— 取消定时刷新
+router.delete('/persona-lore/:id/refresh', asyncHandler(async (req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.personaLore) return fail(res, CODE.BAD, '人设资料库未启用')
+  try { return ok(res, await r.personaLore.cancelRefresh(req.params.id)) }
+  catch (e) { return fail(res, CODE.BAD, e.message || String(e)) }
 }))
 
 // POST /api/schedule —— 新建任务（type='task'=cron 重复任务链；默认=一次性提醒）

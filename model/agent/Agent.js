@@ -18,6 +18,10 @@ import { makeToolSearchTool } from './tools/tool_search.js'
 import { stringifyArgs, estimateMessages, mergeUsage } from './messages.js'
 import { tokenBreakdown, toolResultFields, decisionFields } from './trace/events.js'
 import { LoopGovernor } from './loop-governor.js'
+import { buildResumeMessages } from './continuation.js'
+import { ToolScheduler, resolveToolConcurrency } from './tool-scheduler.js'
+import { resolveExecutionMeta } from './tool-effects.js'
+import { validateToolArgs } from './tool-schema.js'
 import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, SEARCH_VERIFICATION, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 import { detectScheduleIntent } from './schedule.js'
@@ -63,6 +67,30 @@ function brief(v, n = 160) {
 /** 判定工具结果是否为失败形态：{"error":...}（stringifyArgs 后的 JSON 键） */
 function isToolError(content) {
   return typeof content === 'string' && /"error"\s*:/.test(content)
+}
+
+/** 这些错误码表示工具「未执行」（策略/校验/审批拒绝、未启动取消、账本阻断）→ effectState=none。 */
+const NOT_EXECUTED_ERRORS = new Set([
+  'invalid_arguments', 'schema_invalid', 'rejected_by_policy', 'rejected_by_confirm',
+  'rejected_by_shell_intercept', 'journal_unavailable', 'cancelled',
+])
+
+/** 运行时在途任务注册表（F02）：taskId → { cancel, done }；供 QQ/Web 取消真正中止在途模型/工具/排队。 */
+const _activeRuns = new Map()
+export function abortActiveRun(taskId) {
+  const h = _activeRuns.get(taskId)
+  if (!h) return false
+  try { h.cancel() } catch { /* noop */ }
+  return true
+}
+export function isAgentRunActive(taskId) { return _activeRuns.has(taskId) }
+
+/** F14：中止并等待所有在途 run 结算（热重载/关闭时先于关库调用）。 */
+export async function abortAllActiveRuns() {
+  const handles = [..._activeRuns.values()]
+  for (const h of handles) { try { h.cancel() } catch { /* noop */ } }
+  await Promise.allSettled(handles.map((h) => h.done))
+  return handles.length
 }
 
 /** 工具结果签名（LoopGovernor 判"新事实"用）：长度 + 首尾片段 + 简单散列，
@@ -223,6 +251,18 @@ export class Agent {
     // LoopGovernor：循环智能终止器（审计 §2.1）。config.loop 为假值则不启用（保持原 maxTurns 行为）
     this.governor = config.loop ? new LoopGovernor(config.loop) : null
 
+    // 工具受控并发（P0-2）：未声明并发语义的工具默认独占，内置只读工具显式并发；全局滚动池上限。
+    this.toolMaxParallel = Math.max(1, Number(config.toolConcurrency?.maxParallel) || 3)
+    // F10：优先复用注入的共享调度器（同一运行时跨 Agent 共享资源锁与并发额度）
+    this._toolScheduler = config.toolScheduler || new ToolScheduler({ maxParallel: this.toolMaxParallel })
+    this.toolSchemaValidate = config.toolSchemaValidate !== false // 工具参数 schema 预校验（可关，回滚杠杆）
+    // F13：根任务 token 预算上限（null=不限）；嵌套编排/子代理开始前预留、结算并入 consumed
+    this._rootTokenBudget = Number(config.rootTokenBudget) > 0 ? Number(config.rootTokenBudget) : null
+    this._budget = { limit: this._rootTokenBudget, consumed: 0, reserved: 0 }
+    // 可恢复任务账本（P0-3，opt-in）：传入 TaskStore 时在关键边界落盘检查点；缺省不影响主流程
+    this.taskStore = config.taskStore || null
+    this._journalDegraded = false
+
     // 工具按需发现（Tool Discovery）：null=全量模式；Set=按需模式（常驻核心工具 + 命中后扩充）
     this.toolDiscovery = config.toolDiscovery || null
     this.activeTools = null
@@ -359,6 +399,38 @@ export class Agent {
   reset() { this.messages = [] }
 
   /**
+   * F06：从任务检查点续跑——把已提交步骤重建为合法 tool_call/tool_result 配对作为历史，再继续同一任务。
+   * 调用方应先用 recovery 计划确认「无未知写副作用」；存在 block/reconcile 时不应调用。
+   */
+  async continueFrom(checkpoint, opts = {}) {
+    const messages = buildResumeMessages(checkpoint, { continuationPrompt: opts.continuationPrompt })
+    this.setHistory(messages)
+    return this.run(opts.goal || '请继续完成原任务并给出最终结果。', opts)
+  }
+
+  /** F13：根任务 token 预算——嵌套工作开始前预留，结算真实用量并释放预留。 */
+  reserveBudget(n = 0) {
+    const lim = this._budget?.limit
+    const cost = Math.max(0, Number(n) || 0)
+    if (lim != null && this._budget.consumed + this._budget.reserved + cost > lim) return false
+    this._budget.reserved += cost
+    return true
+  }
+
+  releaseBudget(n = 0) {
+    if (!this._budget) return
+    this._budget.reserved = Math.max(0, this._budget.reserved - Math.max(0, Number(n) || 0))
+  }
+
+  _usageTotal(u) {
+    if (!u) return 0
+    const inp = Number(u.input ?? u.input_tokens ?? u.prompt_tokens) || 0
+    const out = Number(u.output ?? u.output_tokens ?? u.completion_tokens) || 0
+    const tot = Number(u.total ?? u.total_tokens)
+    return Number.isFinite(tot) ? tot : inp + out
+  }
+
+  /**
    * @param {string|object} input 用户文本或消息对象
    * @param {object} opts signal/ctx/onDelta/onReasoning/onToolStart/onToolEnd/onAssistant/onContextPressure/onBeforeTool/onMasterAutoApprove/taskId/stream/...
    *   ctx = { role, isMaster, userId, groupId, isGroup, isGroupAdmin, notify, fetcher, ... }
@@ -382,6 +454,9 @@ export class Agent {
     const systemPromptOverride = opts.systemPrompt || null
     // 情境感知（skill 注入）：如"首次入群"获取的群信息/聊天记录
     const context = opts.context || null
+    // 临时任务模式（如人设补齐）：借用真实 ctx 的身份/权限/任务账本，但不读写会话历史、
+    // 不注入/抽取召回记忆与画像——避免把一次性研究污染用户长期上下文。
+    const ephemeral = opts.ephemeral === true
 
     const rawText = this._inputText(input)
     this._lastUserText = rawText // 本轮用户原始文本（反思 Jev 判定用）
@@ -451,7 +526,9 @@ export class Agent {
     const scopeId = ctx?.scopeId
     const useConv = !!(this.session && ctx && ctx.conversationId != null && typeof this.session.getConversation === 'function')
     let sessKey = null
-    if (useConv) {
+    if (ephemeral) {
+      this.messages = [] // 临时任务：不加载会话历史（任务账本仍按 ctx 的 scopeKey 记账）
+    } else if (useConv) {
       try { this.messages = await this.session.getConversation(scopeUserId, ctx.groupId, ctx.conversationId) } catch { this.messages = [] }
     } else if (this.session && ctx) {
       sessKey = this.session.key(ctx.groupId, scopeUserId)
@@ -460,9 +537,9 @@ export class Agent {
     const sessStart = this.messages.length
     // prompt_cache_key 的会话标识（_promptCacheKeyFor 读取）：多对话模式用 群:用户:会话id，
     // 群:用户 模式用 sessKey。此前从未赋值 → 不同会话算出同一个键，会话级路由隔离失效。
-    this._curConvId = useConv
-      ? `${ctx.groupId || 'p'}:${scopeUserId}:${ctx.conversationId}`
-      : (sessKey || null)
+    this._curConvId = ephemeral
+      ? `ephemeral:${taskId}`
+      : (useConv ? `${ctx.groupId || 'p'}:${scopeUserId}:${ctx.conversationId}` : (sessKey || null))
     let compactedThisRun = false // 本 run 发生过滞回压缩 → 持久化走全量覆写（slice(sessStart) 会错位）
 
     // 清理历史中的空 assistant 消息（之前 bug 可能产生），给占位避免 API 报 "content or tool_calls must be set"
@@ -479,7 +556,7 @@ export class Agent {
     // 前缀缓存，system 尾部若有每轮必变的内容（时间/情境），其后全部历史都 miss。
     let memories = null
     let injectedMemoryIds = []
-    if (this.recall && ctx) {
+    if (this.recall && ctx && !ephemeral) {
       try { memories = await this.recall.retrieve(rawText, scopeUserId, this.recallTopK) } catch { memories = null }
     }
     let recalledMemory = ''
@@ -489,7 +566,7 @@ export class Agent {
     }
     // 统一用户画像：结构化长期归纳（身份/沟通风格/偏好/忌讳），只作偏置参考，与召回记忆同走不可信边界
     let profileBlock = ''
-    if (this.profile && scopeUserId) {
+    if (this.profile && scopeUserId && !ephemeral) {
       try { profileBlock = await this.profile.build(scopeUserId) } catch { profileBlock = '' }
     }
     const dynParts = []
@@ -514,8 +591,22 @@ export class Agent {
     this._jevSelectedNames = new Set() // 每 run 重置：Jev 激活集默认不跨轮持久化
     this._ranTools = new Set() // 每 run 重置：本轮实际执行过的工具名
     this.governor?.reset()
+    // 任务账本：接受任务后、首次调用模型前登记（P0-3 必须落盘边界）
+    if (this.taskStore && ctx) {
+      this._journalDegraded = false
+      await this._journal((s) => s.begin({
+        taskId, ctx, phase: 'running',
+        runtimeGeneration: opts.runtimeGeneration ?? null,
+        providerRoute: this.model || null,
+        parentTaskId: opts.parentTaskId ?? null, // F06：续跑时关联原任务
+        input: rawText, // F06：保存原始任务输入，供恢复重建
+      }))
+    }
     let usage = null
     let turns = 0
+    this._externalUsage = null // F13：嵌套（编排/子代理）用量按 rootTask 归集，结算时并入根 usage
+    this._budget = { limit: this._rootTokenBudget, consumed: 0, reserved: 0 } // F13：根任务 token 预算（含预留）
+    this._runCancelled = false // F02：运行时取消标志（abortActiveRun 置位）
     let stopReason = null
     // ── 最终答案状态机（长任务稳定性审计 P0-1：单一 lastContent 曾同时表示旁白/被否决草稿/最终答案）──
     // narrationContent：带 toolCalls 轮次的中间播报——只允许作为进度消息（onAssistant 转发），永远不能成为最终答案；
@@ -571,10 +662,20 @@ export class Agent {
     const workCtl = new AbortController()
     const onUserAbort = () => workCtl.abort({ kind: 'user' })
     if (signal) {
-      if (signal.aborted) throw new Error('aborted')
+      if (signal.aborted) {
+        // F02：启动前即取消也要落终态（否则任务永久 running）
+        if (this.taskStore && ctx) {
+          await this._journal((s) => s.finish({ taskId, phase: 'cancelled', stopReason: 'cancelled', completion: 'none' }))
+        }
+        throw new Error('aborted')
+      }
       signal.addEventListener('abort', onUserAbort, { once: true })
     }
     const workSignal = workCtl.signal
+    // F02/F14：注册在途任务（含完成 promise），使 QQ/Web 取消与运行时关闭能真正中止并等待本 run
+    let runDoneResolve = () => {}
+    const runDone = new Promise((r) => { runDoneResolve = r })
+    _activeRuns.set(taskId, { cancel: () => { this._runCancelled = true; try { workCtl.abort({ kind: 'user' }) } catch { /* noop */ } }, done: runDone })
     let workTimer = null
     if (this.governor?.timeBudgetMs) {
       workTimer = setTimeout(() => {
@@ -592,7 +693,7 @@ export class Agent {
       this.devLog?.('run_start', { user: ctx?.userId, gid: ctx?.groupId, conv: ctx?.conversationId, scopeUserId, scopeId, model: this.model, msgs: this.messages.length, tools: this.tools?.list?.().length || 0, discoveryOn, activeTools: this.activeTools ? [...this.activeTools] : null, toolsSent: __tools0.length, toolsTokensEst: __toolsTokensEst, maxTurns: this.maxTurns, inputLen: rawText.length }, taskId, ctx?.devScope)
 
       while (turns < this.maxTurns) {
-        if (signal?.aborted) throw new Error('aborted')
+        if (signal?.aborted || this._runCancelled) throw new Error('aborted')
 
         // 预检（调模型前，长任务稳定性审计 P0-2）：时间已超，或「已用 + 预计下一轮上下文占用」超 token 预算
         // → 不再启动一轮注定超支的调用，直接进收尾（为 finalizer 保留空间）。
@@ -812,8 +913,12 @@ export class Agent {
       //  - 用户主动取消 → 上抛（apps 记 cancelled 终态，不再发送过期结果）；
       //  - 工作时间预算到点（在途模型/工具被 workSignal 中止）→ 转为 time_budget 停止，进收尾；
       //  - 其余异常原样上抛（run_error）。
-      if (signal?.aborted) {
+      if (signal?.aborted || this._runCancelled) {
         this.devLog?.('cancel', { at: 'loop', error: e?.message || String(e) }, taskId, ctx?.devScope)
+        // F02：用户/运行时取消必须落终态（否则任务永久 running）。终态保护在 TaskStore.finish 内。
+        if (this.taskStore && ctx) {
+          await this._journal((s) => s.finish({ taskId, phase: 'cancelled', stopReason: 'cancelled', completion: 'none' }))
+        }
         throw new Error('aborted')
       }
       if (workSignal.aborted) {
@@ -823,6 +928,8 @@ export class Agent {
     } finally {
       if (workTimer) clearTimeout(workTimer) // 工作计时到点即清——收尾走独立宽限窗
       if (signal) signal.removeEventListener('abort', onUserAbort)
+      _activeRuns.delete(taskId) // F02：run 结束注销在途登记
+      try { runDoneResolve() } catch { /* noop */ }
     }
 
     if (!stopReason) {
@@ -855,18 +962,30 @@ export class Agent {
       ? [...this.activeTools].filter((n) => !this._jevSelectedNames.has(n) || this._ranTools.has(n))
       : null
     const extra = { cacheEpoch: this.cacheEpoch, ...(this._compactLedger ? { compactLedger: this._compactLedger } : {}), ...(discoveryOn && persistedTools ? { activeTools: persistedTools } : {}) }
-    if (useConv) {
+    let sessionPersisted = false
+    if (ephemeral) {
+      // 临时任务：不持久化会话历史
+    } else if (useConv) {
       try {
         if (compactedThisRun) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
         else await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages.slice(sessStart), extra)
+        sessionPersisted = true
       } catch (e) { this.logger('warn', 'conversation 持久化失败', e) }
     } else if (sessKey) {
       try {
         if (compactedThisRun) await this.session.set(sessKey, this.messages)
         else await this.session.append(sessKey, this.messages.slice(sessStart))
+        sessionPersisted = true
       } catch (e) { this.logger('warn', 'session 持久化失败', e) }
     }
-    if (this.recall && ctx) {
+    // 任务账本：记录已投影到会话的游标（恢复时不重复 append；单调推进）
+    if (this.taskStore && ctx && sessionPersisted) {
+      const sessionKey = useConv
+        ? `conv:${scopeUserId}:${ctx.groupId ?? ''}:${ctx.conversationId ?? ''}`
+        : (sessKey || null)
+      await this._journal((s) => s.markSessionProjected(taskId, { sessionKey, cursor: this.messages.length }))
+    }
+    if (this.recall && ctx && !ephemeral) {
       const snapshot = this.messages.slice()
       const llm = this.recallLlm || null
       // 异步抽取记忆：可观测（原空 catch 吞错，现记 logger + devLog，便于排查抽取失败/验证触发）
@@ -892,6 +1011,26 @@ export class Agent {
       })
     }
 
+    // F13：并入嵌套（编排/子代理）上报的用量，根任务 usage/预算不漏计
+    if (this._externalUsage) usage = mergeUsage(usage, this._externalUsage)
+
+    // 任务账本：结算（完成/等待输入/预算暂停/失败）。只有正常交付才 completed，预算耗尽为 paused。
+    // F04：账本降级（关键写失败）时不得声称 completed/可恢复。
+    if (this.taskStore && ctx) {
+      const degraded = this._journalDegraded
+      const phase = degraded ? 'failed'
+        : stopReason === 'clarify' ? 'waiting_input'
+          : stopReason === 'blocked' ? 'failed'
+            : GOVERNOR_STOP.has(stopReason) ? 'paused'
+              : 'completed'
+      await this._journal((s) => s.finish({
+        taskId, phase,
+        stopReason: degraded ? 'journal_degraded' : stopReason,
+        completion: phase === 'completed' ? 'complete' : (finalContent ? 'partial' : 'none'),
+        usage,
+      }))
+    }
+
     this.logger('mark', 'run end turns=', turns, 'stop=', stopReason, 'usage=', fmtUsage(usage), 'replyLen=', (finalContent || '').length, `totalMs=${Date.now() - __runStart}`)
     this.devLog?.('run_end', {
       turns, stopReason, usage, replyLen: (finalContent || '').length, totalMs: Date.now() - __runStart, usedTools,
@@ -902,6 +1041,10 @@ export class Agent {
     return {
       content: finalContent || '', messages: this.messages, usage, turns, taskId, stopReason,
       ...(finalizedVia ? { finalized: finalizedVia } : {}),
+      // F04：账本降级可见（任务不可恢复）；应用层/UI 据此提示，不静默当成功
+      ...(this._journalDegraded ? { journalDegraded: true } : {}),
+      // F13：根任务 token 预算（配置上限时暴露，含 consumed/reserved）
+      ...(this._budget?.limit != null ? { tokenBudget: { ...this._budget } } : {}),
       // 本轮思考决策（供应用层日志/观测）：auto 生效时有 depth/budget/source/style
       ...(this.thinkInfo ? { think: this.thinkInfo } : {}),
     }
@@ -1430,23 +1573,116 @@ export class Agent {
     const signal = execCtx?.signal || null
     // 取消边界：本轮任何工具尚未启动前若已取消 → 全部标记未执行，不产生副作用
     if (signal?.aborted) return toolCalls.map((tc) => this._cancelledToolResult(tc))
-    const hasInteractive = toolCalls.some((tc) => this.tools?.get?.(tc.name)?.meta?.interactive)
-    if (hasInteractive) {
-      // 串行（含交互式审批）：每项启动前重新检查 signal——前一项触发的取消/预算耗尽
-      // 不得让后续副作用工具开跑。向工具传 signal 只是协作提示，执行层必须自建取消边界。
-      const results = []
-      for (const tc of toolCalls) {
-        results.push(signal?.aborted ? this._cancelledToolResult(tc) : await runOne(tc))
-      }
-      return results
+    // 解析每个工具的调度语义与执行语义（只读/写、可重放、幂等键）
+    const metas = toolCalls.map((tc) => {
+      const tool = this.tools?.get?.(tc.name) ?? this._metaTools?.[tc.name]
+      const { mode, resourceKeys } = resolveToolConcurrency(tool, tc.arguments, ctx)
+      const exec = resolveExecutionMeta(tool, tc.arguments, ctx)
+      // 只读工具的入参可持久化以支持有限自动恢复；写操作只存哈希，避免落敏感入参
+      const payload = { name: tc.name, ...exec, ...(exec.effect === 'read' ? { args: tc.arguments } : { argsHash: shortHash(JSON.stringify(tc.arguments ?? {})) }) }
+      return { mode, resourceKeys, exec, payload }
+    })
+    // 任务账本：副作用开始前记录 planned（先落盘，便于崩溃后判定"尚未开始"）。
+    // F04：关键账本写失败 → 阻止本批新副作用（不执行任何工具），保留已知状态。
+    if (this.taskStore) {
+      const plannedOk = await this._journalCritical((s) => Promise.all(toolCalls.map((tc, i) => s.event({
+        taskId: execCtx.taskId, kind: 'tool_planned', callId: tc.id, payload: metas[i].payload,
+      }))))
+      if (!plannedOk) return toolCalls.map((tc) => this._blockedToolResult(tc, '任务账本写入失败，已阻止本批工具执行以保护可恢复性'))
     }
-    return Promise.all(toolCalls.map((tc) => runOne(tc)))
+    // 受控并发（P0-2）：按 meta.concurrency/resourceKeys 调度——未知工具默认独占、内置只读并发、
+    // exclusive 形成屏障、resource 按资源键串行，结果仍按原始调用顺序回插。取消后不再启动排队项。
+    const tasks = toolCalls.map((tc, i) => ({
+      concurrency: metas[i].mode,
+      resourceKeys: metas[i].resourceKeys,
+      exec: metas[i].exec,
+      run: async () => {
+        // F04：started 关键落盘失败 → 不执行该工具（避免"副作用已发生但账本没有 started"）
+        if (this.taskStore) {
+          const startedOk = await this._journalCritical((s) => s.event({
+            taskId: execCtx.taskId, kind: 'tool_started', callId: tc.id, payload: metas[i].payload,
+          }))
+          if (!startedOk) return this._blockedToolResult(tc, '任务账本写入失败，已阻止该工具执行以保护可恢复性')
+        }
+        return runOne(tc)
+      },
+    }))
+    const settled = await this._toolScheduler.run(tasks, { signal })
+    // 任务账本：记录每个 tool_call 的业务结算（F03：以工具真实结果判定，而非"Promise 正常 resolve"）
+    if (this.taskStore) {
+      await this._journal((s) => Promise.all(settled.map((r, i) => {
+        const cancelled = !!(r && r.cancelled) // 未启动即取消：无副作用
+        const msg = r?.value
+        const content = typeof msg?.content === 'string' ? msg.content : ''
+        const toolFailed = !cancelled && (!!r?.error || isToolError(content))
+        const ok = !cancelled && !toolFailed
+        const effect = metas[i].exec.effect
+        const code = (content.match(/"error"\s*:\s*"([^"]+)"/) || [])[1] || null
+        // 未执行（策略拒绝/参数校验/审批拒绝/未启动取消/账本阻断）→ effectState=none（确无副作用）
+        const notExecuted = cancelled || (toolFailed && code != null && NOT_EXECUTED_ERRORS.has(code))
+        // 成功：只读 none / 写与外部 applied；执行后失败/未知：只读 none / 写与外部 unknown
+        const effectState = ok ? (effect === 'read' ? 'none' : 'applied')
+          : notExecuted ? 'none'
+            : (effect === 'read' ? 'none' : 'unknown')
+        return s.event({
+          taskId: execCtx.taskId, kind: 'tool_result', callId: toolCalls[i].id,
+          payload: {
+            name: toolCalls[i].name, cancelled, ok, failed: toolFailed, errorCode: code,
+            effect, replay: metas[i].exec.replay, effectState,
+            // F06：只读成功结果保存预览，恢复时可复用（写操作不落正文）
+            ...(ok && effect === 'read' && content ? { resultPreview: content.slice(0, 1500) } : {}),
+          },
+        })
+      })))
+    }
+    return settled.map((r, i) => (r && r.cancelled ? this._cancelledToolResult(toolCalls[i]) : r?.value))
+  }
+
+  /** 账本不可用时阻止工具执行的配对结果（不伪装成功、不触发副作用）。 */
+  _blockedToolResult(tc, reason) {
+    return {
+      role: 'tool', tool_call_id: tc.id, name: tc.name,
+      content: stringifyArgs({ error: 'journal_unavailable', reason, _hint: TOOL_FAIL_HINT }),
+    }
   }
 
   /** 回调安全调用：进度/审批等 UI 回调抛错不应打断工具循环。 */
   _safeCb(fn, ...args) {
     if (typeof fn !== 'function') return
     try { fn(...args) } catch (e) { this.logger('warn', '回调异常（已忽略）', e?.message || e) }
+  }
+
+  /**
+   * 任务账本安全写入（P0-3）：记录失败不中断对话，但标记降级——该任务不再声称"可恢复"。
+   * 调用方对关键边界（副作用前）应 await，确保先落盘再执行。
+   */
+  async _journal(fn) {
+    if (!this.taskStore) return
+    try { return await fn(this.taskStore) } catch (e) {
+      this._journalDegraded = true
+      this.logger('warn', '[task] 任务记录写入失败（该任务降级为不可恢复）', e?.message || e)
+    }
+  }
+
+  /**
+   * 关键账本写入（F04）：副作用前必须成功。失败返回 false 并标记降级，调用方据此阻止新副作用。
+   * 返回 true 表示已落盘或未启用账本（未启用时不改变原行为）。
+   */
+  async _journalCritical(fn) {
+    if (!this.taskStore) return true
+    try { await fn(this.taskStore); return true } catch (e) {
+      this._journalDegraded = true
+      this.logger('warn', '[task] 关键账本写入失败，阻止新副作用', e?.message || e)
+      return false
+    }
+  }
+
+  /** F13：外部（嵌套编排/子代理）用量上报入口（工具经 ctx.executionContext.agent 调用），结算时并入根 usage。 */
+  noteExternalUsage(u) {
+    if (!u) return
+    this._externalUsage = mergeUsage(this._externalUsage, u)
+    if (this._budget) this._budget.consumed += this._usageTotal(u)
+    try { this.governor?.noteUsage(u, { scope: 'work' }) } catch { /* noop */ }
   }
 
   async _executeOne(tc, execCtx, cb, ctx) {
@@ -1478,6 +1714,22 @@ export class Agent {
         content = stringifyArgs({ error: '工具参数不是合法 JSON 对象，无法执行', got: String(tc.arguments).slice(0, 200) })
         this.logger('warn', 'tool bad_args', tc.name, brief(tc.arguments))
       } else {
+        // 参数 schema 校验（P0-2）：在副作用与审批之前校验；缺参/类型错误/多余参数结构化回报，
+        // 不静默修改模型参数、不触发副作用。schema 编译失败或无 schema 时放行（由工具自身兜底）。
+        if (this.toolSchemaValidate) {
+          const v = validateToolArgs(tool, tc.arguments)
+          if (!v.ok) {
+            content = stringifyArgs({
+              error: 'invalid_arguments',
+              reason: `参数不符合 ${tc.name} 的 schema`,
+              fields: v.fields,
+              _hint: '请按参数 schema 修正后重试；不要臆造字段或类型。',
+            })
+            this.logger('warn', 'tool invalid args', tc.name, brief(v.fields))
+            this._safeCb(cb.onToolEnd, tc, content)
+            return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
+          }
+        }
         // 调度意图硬门：本轮用户明确要"周期重复"，不得创建一次性提醒（确定性拦截，防模型选错工具）。
         // 仅在 schedule_task 已注册时拦截，避免"周期任务被关闭"时把用户堵死。
         if (tc.name === 'reminder_set' && this._scheduleIntent === 'recurring' && this.tools?.get?.('schedule_task')) {

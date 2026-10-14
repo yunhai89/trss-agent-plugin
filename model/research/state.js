@@ -123,9 +123,9 @@ function extractKeywords(text) {
 // ─── 任务-策略路由（§3.3 决策矩阵）───
 
 export const EFFORT_CONFIG = {
-  light: { agents: 1, maxTurns: 5, maxConcurrent: 1, description: '简单事实查询：1 agent, 3-5 次搜索' },
-  medium: { agents: 4, maxTurns: 10, maxConcurrent: 3, description: '比较/列举类：3-5 agent, 各 10 次' },
-  heavy: { agents: 8, maxTurns: 15, maxConcurrent: 5, description: '复杂开放研究：5-10 agent, 各 15 次' },
+  light: { agents: 1, maxTurns: 200, maxConcurrent: 1, description: '简单事实查询：1 agent' },
+  medium: { agents: 4, maxTurns: 200, maxConcurrent: 3, description: '比较/列举类：3-5 agent' },
+  heavy: { agents: 8, maxTurns: 200, maxConcurrent: 5, description: '复杂开放研究：5-10 agent' },
 }
 
 /**
