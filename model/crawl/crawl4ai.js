@@ -13,13 +13,20 @@
  * 每次调用 spawn 新进程（浏览器启停 ~2-5s）：工具调用频率低，换实现简单性与进程隔离。
  * venv 由 scripts/install-crawl4ai.sh 创建；未安装时 isCrawl4aiAvailable() 探测失败，
  * crawlUrl 自动降级 fetch+cheerio（保持现有降级语义）。
+ *
+ * 沙箱档（agent.sandbox.mode=e2b）：web_crawl 工具改经 runCrawl4aiInSandbox 在会话沙箱内执行
+ * （上传脚本 + 请求文件 stdin 重定向，同一 python 协议与结果映射），宿主不再 spawn python；
+ * 沙箱模板缺 crawl4ai 时探测失败 → crawlUrl 走 fetch 降级（纯 HTTP，非 shell）。
+ * 请求体拼装（buildCrawl4aiRequest）与结果映射（mapCrawl4aiOutput）两档共用，杜绝口径漂移。
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
 import Config from '../../utils/Config.js'
+import { openToolSession, runToolCommand, sandboxTmp, shellQuote } from '../sandbox/bridge.js'
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const IS_WIN = process.platform === 'win32'
@@ -146,33 +153,8 @@ export async function runCrawl4ai(url, {
 
     proc.on('exit', (code, signal) => {
       if (settled) return
-      // 解析 stdout 最后一条可解析 JSON 行（容忍半包/坏帧混排）
-      let parsed = null
-      for (const line of String(stdout).split('\n').reverse()) {
-        const t = line.trim()
-        if (!t.startsWith('{')) continue
-        try { parsed = JSON.parse(t); break } catch { /* 坏帧：继续找上一行 */ }
-      }
-      const stderr = { stderrTail: stderrTail.trim().slice(-2000) }
-      if (parsed == null) {
-        // stdout 无协议输出：按退出原因分类——超时/被杀=请求超时，声称成功=协议错误，其余=子进程崩溃
-        const code2 = timedOut ? 'request_timeout' : (signal ? 'crashed' : (code === 0 ? 'protocol_error' : 'crashed'))
-        finish({ success: false, via: 'crawl4ai', code: code2, error: `stdout 无可解析 JSON（exit=${code}${signal ? ' sig=' + signal : ''}）`, ...stderr })
-        return
-      }
-      if (parsed.ok) {
-        finish({
-          success: true, via: 'crawl4ai',
-          markdown: String(parsed.markdown || ''), title: String(parsed.title || ''),
-          url: parsed.url || url, statusCode: parsed.status_code,
-          ...(Array.isArray(parsed.extracted) ? { extracted: parsed.extracted, extractedCount: parsed.extracted_count ?? parsed.extracted.length } : {}),
-          ...(parsed.links && typeof parsed.links === 'object' ? { links: parsed.links } : {}),
-          ...(parsed.crawl_stats && typeof parsed.crawl_stats === 'object' ? { stats: parsed.crawl_stats } : {}),
-        })
-        return
-      }
-      const code4 = code === 3 ? 'invalid_request' : (timedOut ? 'request_timeout' : (code === 124 ? 'request_timeout' : 'crawl_failed'))
-      finish({ success: false, via: 'crawl4ai', code: parsed.code || code4, error: String(parsed.error || `exit=${code}`), ...stderr })
+      // 解析 stdout 最后一条可解析 JSON 行（容忍半包/坏帧混排）；协议映射与沙箱档共用同一口径
+      finish(mapCrawl4aiOutput(parseProtocolLine(stdout), { url, exitCode: code, timedOut, signal, stderrTail }))
     })
 
     // 无 pid（解释器缺失）：error 事件即将结算，跳过计时器/写 stdin（写失败流已单独消费）
@@ -193,30 +175,172 @@ export async function runCrawl4ai(url, {
     // 请求写 stdin（背压兜底：请求体小，写满管道概率可忽略；destroy on error 已覆盖）
     try {
       if (!proc.stdin) throw new Error('stdin 不可用')
-      const req = { url, timeout_s: Math.round(timeout / 1000), max_chars: maxChars }
-      if (waitFor) req.wait_for = String(waitFor).trim()
-      if (jsCode) req.js_code = Array.isArray(jsCode) ? jsCode : String(jsCode)
-      if (jsBeforeWait) req.js_before_wait = String(jsBeforeWait)
-      if (delayMs != null) req.delay_ms = Number(delayMs)
-      if (cssSelector) req.css_selector = String(cssSelector)
-      if (extract && typeof extract === 'object') req.extract = extract
-      if (links) req.links = true
-      if (stealth) req.stealth = true
-      if (undetected) req.undetected = true
-      if (proxy) req.proxy = String(proxy)
-      if (waitUntil) req.wait_until = String(waitUntil)
-      if (headless === false || headless === true) req.headless = headless
-      if (scanFullPage) req.scan_full_page = true
-      if (maxScrollSteps != null) req.max_scroll_steps = Number(maxScrollSteps)
-      if (Array.isArray(extraArgs) && extraArgs.length) req.extra_args = extraArgs.map(String)
-      if (flatShadowDom) req.flat_shadow_dom = true
-      if (virtualScroll && typeof virtualScroll === 'object') req.virtual_scroll = virtualScroll
+      const req = buildCrawl4aiRequest({
+        url, timeout,
+        maxChars, waitFor, jsCode, jsBeforeWait, delayMs, cssSelector, extract, links,
+        stealth, undetected, proxy, waitUntil, headless, scanFullPage, maxScrollSteps,
+        extraArgs, flatShadowDom, virtualScroll,
+      })
       proc.stdin.write(JSON.stringify(req) + '\n')
       proc.stdin.end()
     } catch (e) {
       finish({ success: false, via: 'crawl4ai', code: 'spawn_failed', error: `stdin 写入失败：${e?.message || e}` })
     }
   })
+}
+
+/**
+ * 请求体拼装（宿主 stdin 与沙箱请求文件共用同一份——避免两处口径漂移）。
+ * 字段与 python/crawl4ai_fetch.py 的请求协议一一对应。
+ */
+export function buildCrawl4aiRequest({
+  url, timeout = CRAWL4AI_TIMEOUTS.defaultMs, maxChars = 60000,
+  waitFor = null, jsCode = null, jsBeforeWait = null, delayMs = null,
+  cssSelector = null, extract = null, links = false,
+  stealth = false, undetected = false, proxy = null, waitUntil = null, headless = null,
+  scanFullPage = false, maxScrollSteps = null, extraArgs = null, flatShadowDom = false, virtualScroll = null,
+} = {}) {
+  const req = { url, timeout_s: Math.round(timeout / 1000), max_chars: maxChars }
+  if (waitFor) req.wait_for = String(waitFor).trim()
+  if (jsCode) req.js_code = Array.isArray(jsCode) ? jsCode : String(jsCode)
+  if (jsBeforeWait) req.js_before_wait = String(jsBeforeWait)
+  if (delayMs != null) req.delay_ms = Number(delayMs)
+  if (cssSelector) req.css_selector = String(cssSelector)
+  if (extract && typeof extract === 'object') req.extract = extract
+  if (links) req.links = true
+  if (stealth) req.stealth = true
+  if (undetected) req.undetected = true
+  if (proxy) req.proxy = String(proxy)
+  if (waitUntil) req.wait_until = String(waitUntil)
+  if (headless === false || headless === true) req.headless = headless
+  if (scanFullPage) req.scan_full_page = true
+  if (maxScrollSteps != null) req.max_scroll_steps = Number(maxScrollSteps)
+  if (Array.isArray(extraArgs) && extraArgs.length) req.extra_args = extraArgs.map(String)
+  if (flatShadowDom) req.flat_shadow_dom = true
+  if (virtualScroll && typeof virtualScroll === 'object') req.virtual_scroll = virtualScroll
+  return req
+}
+
+/** 解析 python 侧单行 JSON 协议输出（容忍半包/坏帧混排） */
+function parseProtocolLine(stdout) {
+  let parsed = null
+  for (const line of String(stdout || '').split('\n').reverse()) {
+    const t = line.trim()
+    if (!t.startsWith('{')) continue
+    try { parsed = JSON.parse(t); break } catch { /* 坏帧：继续找上一行 */ }
+  }
+  return parsed
+}
+
+/** 协议输出 → 统一结果形态（宿主与沙箱共用解析口径） */
+function mapCrawl4aiOutput(parsed, { url, exitCode = null, timedOut = false, signal = null, stderrTail = null } = {}) {
+  const extra = stderrTail ? { stderrTail: String(stderrTail).trim().slice(-2000) } : {}
+  if (parsed == null) {
+    const code = timedOut
+      ? 'request_timeout'
+      : (signal ? 'crashed' : (exitCode === 0 ? 'protocol_error' : 'crashed'))
+    return { success: false, via: 'crawl4ai', code, error: `stdout 无可解析 JSON（exit=${exitCode}${signal ? ' sig=' + signal : ''}）`, ...extra }
+  }
+  if (parsed.ok) {
+    return {
+      success: true, via: 'crawl4ai',
+      markdown: String(parsed.markdown || ''), title: String(parsed.title || ''),
+      url: parsed.url || url, statusCode: parsed.status_code,
+      ...(Array.isArray(parsed.extracted) ? { extracted: parsed.extracted, extractedCount: parsed.extracted_count ?? parsed.extracted.length } : {}),
+      ...(parsed.links && typeof parsed.links === 'object' ? { links: parsed.links } : {}),
+      ...(parsed.crawl_stats && typeof parsed.crawl_stats === 'object' ? { stats: parsed.crawl_stats } : {}),
+    }
+  }
+  const fallback = exitCode === 3
+    ? 'invalid_request'
+    : (timedOut || exitCode === 124 ? 'request_timeout' : 'crawl_failed')
+  return { success: false, via: 'crawl4ai', code: parsed.code || fallback, error: String(parsed.error || `exit=${exitCode}`), ...extra }
+}
+
+// ── 沙箱档（agent.sandbox.mode=e2b）：crawl4ai 在会话沙箱内执行，不落宿主 shell ──
+
+const SANDBOX_SCRIPT_REMOTE = '/home/user/.agent-tmp/crawl4ai_fetch.py'
+const PROBE_TIMEOUT_MS = 20000
+const _scriptUploaded = new Map() // sandboxId -> 脚本内容哈希（同沙箱只传一次；脚本更新后自动重传）
+const _probeCache = new Map() // sandboxId -> { at, result }（探测缓存；按沙箱 id，天然随沙箱回收过期）
+const CACHE_MAX_KEYS = 200 // 长驻进程防无界增长（沙箱 id 全局唯一，不会复用）
+
+/** 写入有界缓存（超限丢最旧条目） */
+function putCapped(map, key, value) {
+  map.set(key, value)
+  if (map.size > CACHE_MAX_KEYS) map.delete(map.keys().next().value)
+}
+
+/** 沙箱内 python3 可 import crawl4ai？（按沙箱 id 缓存：可用 5min / 不可用 30s，便于会话内现装现用） */
+export async function probeCrawl4aiInSandbox(box) {
+  const sess = await openToolSession(box, { purpose: 'tool:web_crawl:probe' })
+  const key = sess.sandboxId
+  const now = Date.now()
+  const cached = _probeCache.get(key)
+  const ttl = cached?.result?.ok ? CRAWL4AI_TIMEOUTS.probeTtlMs : CRAWL4AI_TIMEOUTS.probeNegativeTtlMs
+  if (cached && now - cached.at < ttl) return cached.result
+  const code = 'from importlib.metadata import version; print(version("crawl4ai"))'
+  const r = await runToolCommand(box, sess, `python3 -c ${shellQuote(code)}`, { timeoutMs: PROBE_TIMEOUT_MS, maxOutput: 2000, label: 'web_crawl:probe' })
+  const result = r.ok
+    ? { ok: true, version: (String(r.stdout).trim().split('\n').pop() || 'unknown').slice(0, 40), sandbox: true }
+    : {
+        ok: false, sandbox: true,
+        reason: r.limited ? '本会话命令数已达上限' : (/ModuleNotFoundError|No module named/i.test(String(r.stderr)) ? '沙箱模板未装 crawl4ai' : `沙箱内探测失败（${r.sandboxError?.kind || r.exitCode || 'unknown'}）`),
+        hint: '把 crawl4ai 装进 agent.sandbox.template 指向的 E2B 模板（scripts/install-crawl4ai.sh 是宿主安装，不适用沙箱）',
+      }
+  putCapped(_probeCache, key, { at: now, result })
+  return result
+}
+
+/**
+ * 沙箱档运行一次 crawl4ai 抓取（上传脚本 → 请求文件 → python3 script.py < req.json → 单行 JSON 协议）。
+ * @returns 与 runCrawl4ai 同形的结果
+ */
+export async function runCrawl4aiInSandbox(box, url, opts = {}) {
+  const {
+    script, timeoutMs = CRAWL4AI_TIMEOUTS.defaultMs, maxChars = 60000,
+    waitFor = null, jsCode = null, jsBeforeWait = null, delayMs = null,
+    cssSelector = null, extract = null, links = false, stealth = false,
+    flatShadowDom = false, virtualScroll = null, undetected = false,
+    proxy = null, waitUntil = null, headless = null, scanFullPage = false,
+    maxScrollSteps = null, extraArgs = null, signal = null,
+  } = opts
+  if (waitFor && !/^(css:|js:)/.test(String(waitFor).trim())) {
+    return { success: false, via: 'crawl4ai', code: 'invalid_request', error: 'waitFor 需以 css: 或 js: 开头' }
+  }
+  const scriptPath = script || CRAWL4AI_SCRIPT
+  let src
+  try { src = fs.readFileSync(scriptPath, 'utf8') } catch (e) {
+    return { success: false, via: 'crawl4ai', code: 'spawn_failed', error: `沙箱抓取脚本不可读：${e?.message || e}` }
+  }
+  const req = buildCrawl4aiRequest({
+    url, timeout: timeoutMs, maxChars, waitFor, jsCode, jsBeforeWait, delayMs,
+    cssSelector, extract, links, stealth, undetected, proxy, waitUntil, headless,
+    scanFullPage, maxScrollSteps, extraArgs, flatShadowDom, virtualScroll,
+  })
+  const dir = sandboxTmp('crawl')
+  const sess = await openToolSession(box, { purpose: 'tool:web_crawl' })
+  const hash = createHash('sha256').update(src).digest('hex')
+  if (_scriptUploaded.get(sess.sandboxId) !== hash) {
+    await sess.write({ path: SANDBOX_SCRIPT_REMOTE, data: src })
+    putCapped(_scriptUploaded, sess.sandboxId, hash)
+  }
+  await sess.write({ path: `${dir}/req.json`, data: JSON.stringify(req) })
+  // 沙箱命令为固定拼装；请求体走文件 stdin 重定向（与宿主档同一协议）
+  const shellTimeoutSec = Math.min(Math.ceil(timeoutMs / 1000) + 60, box.maxTimeout)
+  const r = await runToolCommand(box, sess, `python3 ${shellQuote(SANDBOX_SCRIPT_REMOTE)} < ${shellQuote(`${dir}/req.json`)}`, {
+    timeoutMs: shellTimeoutSec * 1000,
+    maxOutput: 32 * 1024,
+    signal,
+    label: 'web_crawl',
+  })
+  try { await runToolCommand(box, sess, `rm -rf ${shellQuote(dir)}`, { timeoutMs: 15000, maxOutput: 300, label: 'web_crawl:cleanup' }) } catch { /* noop */ }
+  if (r.limited) return { success: false, via: 'crawl4ai', code: 'crawl_failed', error: r.error, sandbox: true }
+  if (r.sandboxError || r.error) {
+    return { success: false, via: 'crawl4ai', code: 'crashed', error: `沙箱执行失败（${r.sandboxError?.kind || 'unknown'}）：${String(r.stderr || '').slice(0, 200)}`, sandbox: true }
+  }
+  const out = mapCrawl4aiOutput(parseProtocolLine(r.stdout), { url, exitCode: r.exitCode, timedOut: r.timedOut === true, stderrTail: r.stderr })
+  return { ...out, sandbox: true }
 }
 
 // importlib.metadata 拿发行版号（某些版本 crawl4ai.__version__ 是 module 而非字符串）

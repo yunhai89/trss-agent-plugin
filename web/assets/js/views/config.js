@@ -196,6 +196,7 @@
         if (!form.sandbox) form.sandbox = {}
         if (!form.sandbox.mode) form.sandbox.mode = 'off'
         if (!form.sandbox.network) form.sandbox.network = {}
+        if (form.sandbox.network.allowInternet == null) form.sandbox.network.allowInternet = true
         if (!Array.isArray(form.sandbox.network.allowOut)) form.sandbox.network.allowOut = []
         if (!Array.isArray(form.sandbox.network.denyOut)) form.sandbox.network.denyOut = []
         if (!form.policy) form.policy = {}
@@ -1650,7 +1651,7 @@
             <div class="full" style="margin-top:4px;padding-top:12px;border-top:1px dashed var(--line2)">
               <div class="mut" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="file"/> 媒体下载（yt-dlp · 仅主人，受约束）</div>
               <div class="cf-grid">
-                <cfg-row name="启用媒体下载" desc="web_download 工具；依赖系统 yt-dlp + ffmpeg（合并格式）">
+                <cfg-row name="启用媒体下载" desc="web_download 工具；依赖系统 yt-dlp + ffmpeg（合并格式）；E2B 沙箱启用后在沙箱内下载（模板需含 yt-dlp）">
                   <v-switch v-model="form.download.enable"/>
                 </cfg-row>
                 <cfg-row name="单文件大小上限(MB)" desc="yt-dlp --max-filesize，超限中止">
@@ -1742,8 +1743,8 @@
                 <cfg-row name="技能历史条数"><input type="number" class="inp" style="width:100px" min="0" v-model.number="form.skill.historyCount"></cfg-row>
                 <cfg-row name="米游社默认分区(bbs)"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.miyoushe.defaultGid"></cfg-row>
                 <cfg-row name="米游社单帖最大图"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.miyoushe.maxImages"></cfg-row>
-                <cfg-row name="计算器 python 解释器"><input class="inp mono" style="width:130px" v-model="form.calc.python"></cfg-row>
-                <cfg-row name="文档转 PDF soffice"><input class="inp mono" style="width:140px" v-model="form.document.soffice"></cfg-row>
+                <cfg-row name="计算器 python 解释器" desc="E2B 沙箱启用后改用沙箱内 python3（模板需含 python3）"><input class="inp mono" style="width:130px" v-model="form.calc.python"></cfg-row>
+                <cfg-row name="文档转 PDF soffice" desc="E2B 沙箱启用后在沙箱内执行（模板需含 LibreOffice）"><input class="inp mono" style="width:140px" v-model="form.document.soffice"></cfg-row>
                 <cfg-row name="深度研究并发"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.research.maxConcurrent"></cfg-row>
                 <cfg-row name="研究结果评估"><v-switch v-model="form.research.evaluation"/></cfg-row>
               </div>
@@ -1886,7 +1887,7 @@
         <div :id="'cfg-sandbox'" class="card cf-sec" :class="{open: open.sandbox}">
           <div class="cf-sh" @click="open.sandbox = !open.sandbox">
             <span class="ct-ico" style="background:var(--grad-mint)"><v-icon name="tool"/></span>
-            <div><div class="ct-t">E2B 沙箱（终端执行）</div><div class="ct-s">命令在 Firecracker microVM 内执行 · 无审批 · 出口白名单 · fail-closed</div></div>
+            <div><div class="ct-t">E2B 沙箱（终端执行）</div><div class="ct-s">命令在 Firecracker microVM 内执行 · 无审批 · 出口默认放通 · fail-closed</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.sandbox"><div class="cf-grid">
@@ -1924,7 +1925,7 @@
             <cfg-row name="单会话命令数上限" desc="防空转把配额/账单打爆；0=不限">
               <input type="number" class="inp" style="width:110px" min="0" v-model.number="form.sandbox.maxCommandsPerSession">
             </cfg-row>
-            <cfg-row class="full" name="出口白名单" desc="allowOut：默认只放行包管理器 + api.openai.com，其余一律拒绝（留空=拒绝全部出口）">
+            <cfg-row class="full" name="出口白名单（可选收紧）" desc="allowOut：留空=默认放通全部出口；填了只放行这些域名/CIDR，其余一律拒绝">
               <tag-editor v-model="form.sandbox.network.allowOut" mono placeholder="回车添加域名/CIDR"/>
             </cfg-row>
             <cfg-row class="full" name="命令审计日志" desc="每条命令记录会话键/退出码/命令前 200 字符（不含密钥）">
@@ -1940,10 +1941,10 @@
               <cfg-row name="SDK 请求超时(ms)"><input type="number" class="inp" style="width:130px" min="1000" step="1000" v-model.number="form.sandbox.requestTimeoutMs"></cfg-row>
               <cfg-row name="SDK 重试次数"><input type="number" class="inp" style="width:100px" min="0" max="5" v-model.number="form.sandbox.retries"></cfg-row>
               <cfg-row name="公开 URL 需鉴权" desc="false=沙箱公开 URL 也要 token"><v-switch v-model="form.sandbox.allowPublicTraffic"/></cfg-row>
-              <cfg-row name="允许互联网" desc="network.allowInternet（有白名单时由白名单收窄）"><v-switch v-model="form.sandbox.network.allowInternet"/></cfg-row>
+              <cfg-row name="允许互联网" desc="network.allowInternet：true=放通全部出口（默认）；false=断网（配了白名单时白名单仍放行）"><v-switch v-model="form.sandbox.network.allowInternet"/></cfg-row>
               <cfg-row name="候选验证超时(ms)"><input type="number" class="inp" style="width:120px" min="100" step="500" v-model.number="form.sandbox.toolEvoVerifyTimeoutMs"></cfg-row>
-              <cfg-row class="full" name="兜底拒绝网段" desc="network.denyOut（仅 CIDR/IP；回车添加）">
-                <tag-editor v-model="form.sandbox.network.denyOut" mono placeholder="如 0.0.0.0/0"/>
+              <cfg-row class="full" name="额外拒绝网段" desc="network.denyOut（可选，仅 CIDR/IP）：在默认放通基础上额外封禁（如 169.254.169.254/32 防云元数据）">
+                <tag-editor v-model="form.sandbox.network.denyOut" mono placeholder="如 169.254.169.254/32"/>
               </cfg-row>
             </div></div>
           </div></div>

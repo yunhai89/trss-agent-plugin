@@ -6,6 +6,7 @@
  *   - 装配失败**不抛穿**：返回 manager:null + error，由工具层落成 fail-closed 结构化失败
  *     （配置错/未装包不该把整个 buildRuntime 拖垮，与 stagehand/toolEvo 的降级姿态一致）
  *   - 提供会话绑定键、网络出口选项、单会话命令数计数器的构造
+ *   - 内置 shell 类工具的执行面由 bridge.js 统一接管（见该文件头：mode=e2b 时沙箱内执行/fail-closed）
  */
 import { SandboxError, classify } from './errors.js'
 import { SandboxManager } from './manager.js'
@@ -34,10 +35,13 @@ export function isSandboxEnabled(cfg) {
  * 叠加「allow 优先于 deny」后反而把 denyOut 的兜底拒绝顶掉（曾导致沙箱默认全网可达）。
  * 这里只在白名单非空时下发 allowOut，其余情况用 allowInternetAccess 显式控制。
  *
- * 组合（denyAll 用于候选验证这类不需要出口的一次性沙箱）：
- *   - 有白名单 → allowOut 白名单 + denyOut 全拒 + allowInternetAccess:true（白名单可达，其余全拒）；
- *   - 无白名单 + allowInternet:true → 不下发 allowOut/denyOut + allowInternetAccess:true（显式全网放行）；
- *   - 无白名单 + allowInternet:false（默认）→ denyOut 全拒 + allowInternetAccess:false（全网拒绝）。
+ * 默认策略（2025-10 变更）：**默认放通全部出口**（与 E2B 自身默认一致）——包管理器/API/下载等
+ * 开箱可用；白名单为**可选收紧**（opt-in）：
+ *   - 配了 allowOut 白名单 → 只放行白名单 + denyOut 兜底全拒（allow 优先于 deny）；
+ *   - 未配白名单 + allowInternet:false（显式断网）→ denyOut 全拒 + allowInternetAccess:false；
+ *   - 未配白名单 + 默认 → 不下发 allowOut/denyOut + allowInternetAccess:true（全网放行）；
+ *     用户显式配的 denyOut 仍下发（如 169.254.169.254/32 防云元数据）。
+ * denyAll 用于候选验证/进化工具这类不需要出口的一次性沙箱（恒全拒）。
  * @param {object} cfg agent.sandbox
  * @param {{denyAll?:boolean}} [opt]
  * @returns {{network:object, allowInternetAccess:boolean}}
@@ -45,14 +49,21 @@ export function isSandboxEnabled(cfg) {
 export function buildEgressOpts(cfg = {}, { denyAll = false } = {}) {
   const net = cfg.network || {}
   const allowOut = denyAll ? [] : (Array.isArray(net.allowOut) ? net.allowOut.map((s) => String(s)).filter(Boolean) : [])
-  const denyOut = Array.isArray(net.denyOut) && net.denyOut.length ? net.denyOut.map((s) => String(s)) : ['0.0.0.0/0']
+  const denyOut = Array.isArray(net.denyOut) ? net.denyOut.map((s) => String(s)).filter(Boolean) : []
+  const fallbackDeny = denyOut.length ? denyOut : ['0.0.0.0/0']
+  const narrowed = allowOut.length > 0
+  // allowInternet 缺省 = true（默认放通）；显式 false 且无白名单 = 全拒。白名单恒优先（配了白名单就能用）。
+  const internetOff = net.allowInternet === false && !narrowed
   // 白名单存在时也必须放通"互联网开关"，否则 deny 语义可能盖过 allow；实际可达范围由 allowOut 收窄。
-  const allowInternetAccess = !denyAll && (net.allowInternet === true || allowOut.length > 0)
+  const allowInternetAccess = !denyAll && !internetOff
   const network = { allowPublicTraffic: cfg.allowPublicTraffic === true }
-  if (allowOut.length) {
+  if (narrowed) {
     network.allowOut = allowOut
-    network.denyOut = denyOut
-  } else if (!allowInternetAccess) {
+    network.denyOut = fallbackDeny
+  } else if (denyAll || internetOff) {
+    network.denyOut = fallbackDeny
+  } else if (denyOut.length) {
+    // 默认放通模式下用户仍显式配了 denyOut → 如实下发（allow 优先于 deny 由服务端保证）
     network.denyOut = denyOut
   }
   return { network, allowInternetAccess }

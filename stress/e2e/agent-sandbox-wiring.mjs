@@ -42,7 +42,7 @@ function setMode(mode, { legacyTerminal = false } = {}) {
   })
 }
 
-const { getRuntime } = await import('../../apps/agent.js')
+const { getRuntime, makeSandboxCtx } = await import('../../apps/agent.js')
 
 async function assertMode(mode, { legacyTerminal = false } = {}) {
   console.log(`\n[真实 buildRuntime 接线 · mode=${mode}${legacyTerminal ? ' · 带旧 terminal.enable 残留' : ''}]`)
@@ -64,6 +64,13 @@ async function assertMode(mode, { legacyTerminal = false } = {}) {
   ok((rt.sandbox.manager !== null) === expected, `manager 就绪=${rt.sandbox.manager !== null}（期望 ${expected}）`)
   ok(typeof rt.sandbox.commands?.hit === 'function', '命令数计数器就绪（成本闸）')
   if (!expected) ok(rt.sandbox.error === null, 'mode=off 是正常关闭，不是错误状态')
+  // 工具侧沙箱上下文（terminal 与 shell 类内置工具共用）：mode/manager 必须随配置切换——
+  // 否则显式选择 e2b 后 calculate/下载/转写等工具会静默回落宿主执行（本用例的核心回归点）
+  const toolCtx = makeSandboxCtx({ groupId: null, scopeUserId: 'u1', conversationId: 'c1' }, rt)
+  ok(toolCtx.mode === mode, `工具 ctx.sandbox.mode=${toolCtx.mode}（期望 ${mode}）`)
+  ok((toolCtx.manager !== null) === expected, `工具 ctx.sandbox.manager 就绪=${toolCtx.manager !== null}（期望 ${expected}）`)
+  ok(toolCtx.sessionKey === 'conv:private:u1:c1', '工具会话键与会话绑定（与 terminal 共用同一沙箱）')
+  ok(toolCtx.commands === rt.sandbox.commands, '工具与 terminal 共享命令数预算（成本闸不因换工具而绕过）')
   // toolEvo 的执行面必须跟着模式切档：mode=off → 本地 fork；mode=e2b → 沙箱
   if (rt.toolEvo?.runner) {
     const wantBackend = expected ? 'sandbox' : 'local'

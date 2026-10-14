@@ -1168,6 +1168,9 @@ async function _buildRuntime(scope) {
       miyoushe: b.miyoushe || { cookie: cfg.miyoushe?.cookie || '', defaultGid: cfg.miyoushe?.defaultGid || 2 },
       replyMode: 'text',
     }
+    // 沙箱执行面同样装配：补齐任务里若有 shell 类工具（calculate/网页抓取等），
+    // 必须与交互路径同口径（不能因"没有交互事件"而绕过沙箱选择回落宿主）
+    completionCtx.sandbox = b.sandbox || makeSandboxCtx(completionCtx, { sandbox }, cfg)
     let out
     const taskId = randomUUID()
     try {
@@ -1584,6 +1587,25 @@ function ctxFromInfo(info) {
 }
 
 /**
+ * 工具运行时沙箱上下文（terminal 与所有沙箱化内置工具共用）。
+ * 交互路径与定时任务路径必须同源装配，否则同一工具会「一处走沙箱、一处走宿主」（语义漂移 +
+ * 显式选择 e2b 后仍可能回落宿主执行）。
+ * 导出供接线回归（stress/e2e/agent-sandbox-wiring.mjs）断言模式与 manager 随配置切换。
+ */
+export function makeSandboxCtx(ctx, rt, cfg = Config.get().agent || {}) {
+  return {
+    mode: String(cfg.sandbox?.mode || 'off').toLowerCase(),
+    manager: rt?.sandbox?.manager || null,
+    defaultCwd: cfg.sandbox?.defaultCwd || '/home/user',
+    maxTimeout: cfg.sandbox?.maxTimeout || 600,
+    maxCommandsPerSession: cfg.sandbox?.maxCommandsPerSession ?? 50,
+    audit: cfg.sandbox?.audit !== false,
+    commands: rt?.sandbox?.commands || null,
+    sessionKey: sessionKeyOf(ctx),
+  }
+}
+
+/**
  * 解析当前用户激活的人设接地（身份层 systemPrompt + 长尾检索 context），
  * 供交互对话与 #继续任务 续跑等入口统一复用（避免两处接地语义漂移）。
  * @returns {Promise<{ personaId: string|null, systemPrompt: string|undefined, context: string|undefined }>}
@@ -1616,6 +1638,9 @@ export const makeFireDispatch = (rt) => {
     if (info.type === 'task' && info.prompt) {
       const cfg = Config.get().agent || {}
       const ctx = ctxFromInfo(info)
+      // 定时任务同样装配沙箱上下文：显式选择 e2b 时，沙箱化工具（calculate/下载/转写等）
+      // 在任务链里也必须走沙箱，不能因"无交互事件"而回落宿主执行
+      ctx.sandbox = makeSandboxCtx(ctx, rt)
       const taskId = randomUUID() // 与交互路径同源：定时任务也落 dev trace / 用量 / 采迹
       try {
         const r = await rt.makeAgent().run(info.prompt, {
@@ -1912,15 +1937,7 @@ export class Chat extends plugin {
       cancel: (id) => rt.schedule.cancel(id),
     }
     // terminal 工具运行时配置（沙箱执行；全员可用，无审批无黑名单，只有成本闸）
-    ctx.sandbox = {
-      manager: rt.sandbox?.manager || null,
-      defaultCwd: cfg.sandbox?.defaultCwd || '/home/user',
-      maxTimeout: cfg.sandbox?.maxTimeout || 600,
-      maxCommandsPerSession: cfg.sandbox?.maxCommandsPerSession ?? 50,
-      audit: cfg.sandbox?.audit !== false,
-      commands: rt.sandbox?.commands || null,
-      sessionKey: sessionKeyOf(ctx),
-    }
+    ctx.sandbox = makeSandboxCtx(ctx, rt, cfg)
     // web_download 工具运行时配置（yt-dlp 下载；目录/大小/超时上限，单位 MB→字节）
     ctx.download = {
       dir: cfg.download?.dir || undefined,
@@ -3213,6 +3230,8 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     const ctx = ctxOf(this.e)
     try { ctx.conversationId = await rt.session.getActiveConversation(ctx.scopeUserId, ctx.groupId) } catch { /* 无活动会话按默认 */ }
+    // 任务续跑/恢复会重新跑 Agent 工具链：沙箱执行面与交互路径同口径（防绕过沙箱回落宿主）
+    ctx.sandbox = makeSandboxCtx(ctx, rt)
     return { rt, ctx, scopeKey: scopeKeyOfCtx(ctx) }
   }
 

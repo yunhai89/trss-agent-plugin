@@ -131,9 +131,9 @@
       idleMs: 300000, sandboxTtlMs: 600000, maxSandboxes: 4, concurrencyWaitMs: 15000,
       maxCommandsPerSession: 50, requestTimeoutMs: 60000, retries: 1, allowPublicTraffic: false,
       network: {
-        allowInternet: false,
-        denyOut: ['0.0.0.0/0'],
-        allowOut: ['pypi.org', '*.pypi.org', 'files.pythonhosted.org', 'registry.npmjs.org', 'archive.ubuntu.com', 'api.openai.com'],
+        allowInternet: true,
+        denyOut: [],
+        allowOut: [],
       },
       audit: true,
       toolEvoVerifyTimeoutMs: 5000,

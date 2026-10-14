@@ -21,8 +21,9 @@ import { load } from 'cheerio'
 import net from 'node:net'
 import Config from '../../utils/Config.js'
 import Log from '../../utils/Log.js'
-import { runCrawl4ai, isCrawl4aiAvailable, resetCrawl4aiProbe } from './crawl4ai.js'
+import { runCrawl4ai, isCrawl4aiAvailable, resetCrawl4aiProbe, runCrawl4aiInSandbox, probeCrawl4aiInSandbox } from './crawl4ai.js'
 import { assertUrlAllowed, hostIsBlocked, isPrivateIp, normalizeHost, parseLooseIPv4 } from '../stagehand/guard.js'
+import { toolSandbox, sandboxSelected } from '../sandbox/bridge.js'
 export { resetCrawl4aiProbe }
 
 function kbCfg() {
@@ -659,11 +660,21 @@ export const webCrawlTool = {
     },
     required: ['url'],
   },
-  async execute(args = {}) {
+  async execute(args = {}, ctx = {}) {
     const { url, maxLength, wait_for, js_code, css_selector, extract, links, delay_ms, stealth, scroll } = args
     const u = String(url || '').trim()
     if (!/^https?:\/\//i.test(u)) return { error: 'url 需以 http:// 或 https:// 开头' }
     if (wait_for && !/^(css:|js:)/.test(String(wait_for).trim())) return { error: 'wait_for 需以 css: 或 js: 开头' }
+    // 执行面：显式选择 E2B 时 crawl4ai 只在会话沙箱内跑（宿主 python 子进程不启动）；
+    // 沙箱不可用/模板缺 crawl4ai → crawlUrl 自动降级纯 HTTP fetch（非 shell，结果标注 via/degraded）。
+    const box = toolSandbox(ctx)
+    const engineOverride = {}
+    if (box) {
+      engineOverride._avail = () => probeCrawl4aiInSandbox(box)
+      engineOverride._c4ai = (target, o) => runCrawl4aiInSandbox(box, target, o)
+    } else if (sandboxSelected(ctx)) {
+      engineOverride._avail = async () => ({ ok: false, reason: '沙箱未就绪（已显式选择 e2b，不跑宿主 crawl4ai）；修复 E2B 配置后重试' })
+    }
     const r = await crawlUrl(u, {
       ...(args.engine ? { engine: String(args.engine) } : {}), // 调用方强制引擎（测试/诊断；生产走配置默认）
       waitFor: wait_for, jsCode: js_code, cssSelector: css_selector,
@@ -671,6 +682,7 @@ export const webCrawlTool = {
       // stealth 未传 → 走配置默认；显式传 false 才关闭（避免把「默认开」误标成降级能力）
       ...(stealth === undefined ? {} : { stealth: stealth === true }),
       virtualScroll: scroll && typeof scroll === 'object' ? scroll : null,
+      ...engineOverride,
     })
     if (!r.success) {
       return {

@@ -312,22 +312,30 @@ await test('模式判定 / 网络选项 / 会话键 / 命令数闸', async () =>
   eq(isSandboxEnabled({ mode: 'e2b' }), false, '缺 apiKey 不启用（fail-closed）')
   eq(isSandboxEnabled({ mode: 'e2b', apiKey: 'k' }), true, 'mode=e2b + apiKey 启用')
 
-  // 白名单模式：allowOut 透传 + denyOut 兜底全拒 + 必须 allowInternetAccess:true（否则 allow 被 deny 压掉）
+  // 白名单模式（opt-in 收紧）：allowOut 透传 + denyOut 兜底全拒 + 必须 allowInternetAccess:true（否则 allow 被 deny 压掉）
   const wl = buildEgressOpts({ network: { allowOut: ['pypi.org'], denyOut: [] } })
   eq(wl.network.allowOut, ['pypi.org'], 'allowOut 透传')
-  eq(wl.network.denyOut, ['0.0.0.0/0'], 'denyOut 空 → 默认拒绝全部')
+  eq(wl.network.denyOut, ['0.0.0.0/0'], '白名单模式 denyOut 兜底全拒')
   eq(wl.network.allowPublicTraffic, false, '默认沙箱公开 URL 也要 token')
   eq(wl.allowInternetAccess, true, '白名单模式放通互联网开关（可达范围由 allowOut 收窄）')
-  // 关键回归：无白名单 + 默认（allowInternet 未开）→ 绝不下发空 allowOut，走 allowInternetAccess:false 全拒
+  // 新默认（2025-10）：无任何网络配置 → 放通全部出口（与 E2B 自身默认一致，白名单不再默认启用）
   const def = buildEgressOpts({ network: {} })
-  eq(def.network.allowOut, undefined, '无白名单不下发空 allowOut（避免被归一成“未指定=放行全部”）')
-  eq(def.network.denyOut, ['0.0.0.0/0'], '无白名单显式 denyOut 全拒')
-  eq(def.allowInternetAccess, false, '默认 allowInternetAccess:false（官方等价 deny 全部）')
-  // 显式放开互联网（无白名单）→ 不下发 denyOut，allowInternetAccess:true
-  const open = buildEgressOpts({ network: { allowInternet: true } })
-  eq(open.network.denyOut, undefined, 'allowInternet:true 无白名单时不下发 denyOut')
-  eq(open.allowInternetAccess, true, 'allowInternet:true → allowInternetAccess:true')
-  // denyAll（候选验证）：无白名单 + 全拒
+  eq(def.network.allowOut, undefined, '无白名单不下发 allowOut（空数组会被归一成“未指定=放行全部”的反语义面）')
+  eq(def.network.denyOut, undefined, '默认模式不下发 denyOut（全放通）')
+  eq(def.allowInternetAccess, true, '默认 allowInternetAccess:true（放通全部出口）')
+  // 显式断网（allowInternet:false 且未配白名单）→ 全拒（保留旧口径，老配置语义不变）
+  const off = buildEgressOpts({ network: { allowInternet: false } })
+  eq(off.network.denyOut, ['0.0.0.0/0'], '显式断网 → denyOut 全拒')
+  eq(off.allowInternetAccess, false, '显式断网 → allowInternetAccess:false')
+  // 显式断网 + 白名单 → 白名单恒优先（白名单可达，其余全拒）
+  const wlOff = buildEgressOpts({ network: { allowInternet: false, allowOut: ['pypi.org'] } })
+  eq(wlOff.network.allowOut, ['pypi.org'], 'allowInternet:false + 白名单：白名单仍放行')
+  eq(wlOff.allowInternetAccess, true, '白名单优先于断网开关')
+  // 默认放通 + 显式 denyOut（黑名单模式，如防云元数据）→ 如实下发，其余放通
+  const bl = buildEgressOpts({ network: { denyOut: ['169.254.169.254/32'] } })
+  eq(bl.network.denyOut, ['169.254.169.254/32'], '默认放通下显式 denyOut 仍生效')
+  eq(bl.allowInternetAccess, true, '黑名单模式不关互联网开关')
+  // denyAll（候选验证/进化工具）：无白名单 + 全拒
   const deny = buildEgressOpts({ network: { allowOut: ['pypi.org'] } }, { denyAll: true })
   eq(deny.network.allowOut, undefined, 'denyAll 时不下发白名单')
   eq(deny.network.denyOut, ['0.0.0.0/0'], 'denyAll 拒绝全部出口')

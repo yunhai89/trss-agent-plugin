@@ -52,12 +52,11 @@ const cfg = {
   sandboxTtlMs: 300000,
   concurrencyWaitMs: 30000,
   audit: false,
-  // 网络断言需要放行 pypi；若配置里显式配了 allowOut 就用配置的（便于验证自己的白名单）
-  network: {
-    allowInternet: false,
-    denyOut: ['0.0.0.0/0'],
-    allowOut: Array.isArray(fromCfg.network?.allowOut) && fromCfg.network.allowOut.length ? fromCfg.network.allowOut : ['pypi.org'],
-  },
+  // 网络语义（新默认）：无白名单 → 默认全放通；配置里配了 allowOut → 只放行白名单（其余全拒）。
+  // 用 E2B_NETWORK_WHITELIST=1 可临时构造白名单沙箱验证收紧路径。
+  network: (process.env.E2B_NETWORK_WHITELIST === '1')
+    ? { allowOut: Array.isArray(fromCfg.network?.allowOut) && fromCfg.network.allowOut.length ? fromCfg.network.allowOut : ['pypi.org'] }
+    : { allowInternet: true },
 }
 console.log(`[来源] apiKey=${src('E2B_API_KEY', fromCfg.apiKey)} · apiUrl=${src('E2B_API_URL', fromCfg.apiUrl)} · sandboxUrl=${src('E2B_SANDBOX_URL', fromCfg.sandboxUrl)}`)
 
@@ -119,11 +118,16 @@ try {
   eq(r5.aborted, true, 'abort → aborted=true')
   ok(r5.duration < 10000, `abort 后快速结算（${r5.duration}ms）`)
 
-  console.log('\n[5. 网络出口白名单]')
+  console.log('\n[5. 网络出口]')
+  const white = Array.isArray(cfg.network?.allowOut) && cfg.network.allowOut.length > 0
   const r6 = await runSandboxShell(box, KEY, 'curl -sS -m 10 -o /dev/null -w "%{http_code}" https://pypi.org/ || echo FAILED', { timeout: 30 })
-  ok(!/FAILED/.test(String(r6.stdout)) || /200|301|302|403/.test(String(r6.stdout)), `白名单域名 pypi.org 可达（${String(r6.stdout).trim().slice(0, 20)}）`)
+  ok(!/FAILED/.test(String(r6.stdout)) || /200|301|302|403/.test(String(r6.stdout)), `域名可达（${String(r6.stdout).trim().slice(0, 20)}）`)
   const r7 = await runSandboxShell(box, KEY, 'curl -sS -m 10 https://example.com/ >/dev/null 2>&1 && echo OPEN || echo BLOCKED', { timeout: 30 })
-  ok(String(r7.stdout).includes('BLOCKED'), '未在白名单的域名被拒绝（可选断言：自托管网络拓扑异常时可能抖动）')
+  if (white) {
+    ok(String(r7.stdout).includes('BLOCKED'), '白名单模式：未在白名单的域名被拒绝')
+  } else {
+    ok(String(r7.stdout).includes('OPEN'), '默认模式（无白名单）：非白名单域名同样可达（默认放通）')
+  }
 
   console.log('\n[6. 销毁与 fail-closed]')
   const n = await box.destroy(KEY)

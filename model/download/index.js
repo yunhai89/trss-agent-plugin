@@ -6,11 +6,15 @@
  * 与 terminal 的区别：不接受任意命令，只接受 URL + 格式；输出到固定临时目录；大小/超时硬上限；
  * 下完自动发聊天并清理。category:'system' → 仅框架主人可用。
  *
+ * 执行面（2025-10 变更）：显式选择 E2B（agent.sandbox.mode=e2b）后，yt-dlp **在会话沙箱内执行**，
+ * 文件流式拉回宿主临时目录再发送；沙箱不可用或模板缺 yt-dlp 时结构化失败，绝不回落宿主执行。
+ * mode=off（未配置沙箱）时保持旧的宿主执行路径。
+ *
  * 安全约束（代码层）：
  *   ① 仅 http(s) URL（拒绝 file:// / 本地路径 / 非 http 协议）；
  *   ② 输出到 per-call 临时子目录（无路径穿越）；
  *   ③ --no-playlist（不抓整个播放列表）+ --max-filesize（超限中止）+ 超时 SIGKILL；
- *   ④ spawn 用参数数组（不经 shell，URL/format 无注入面）；
+ *   ④ argv 数组（宿主 spawn 不经 shell）/ sandbox 命令逐参数 shellQuote（URL/format 无注入面）；
  *   ⑤ 大文件不发（超 sendLimitBytes 只返回本地路径，供 SFTP 取，不塞 QQ）。
  */
 import { spawn } from 'node:child_process'
@@ -20,6 +24,7 @@ import { randomUUID } from 'node:crypto'
 import Config from '../../utils/Config.js'
 import { toFileSegment } from '../../utils/SendFile.js'
 import Log from '../../utils/Log.js'
+import { toolSandbox, sandboxSelected, sandboxUnavailableError, openToolSession, runToolCommand, missingCommand, sandboxTmp, shellQuote } from '../sandbox/bridge.js'
 
 const MB = 1024 * 1024
 
@@ -29,7 +34,28 @@ function trunc(s, max) {
 }
 
 /**
- * 用 yt-dlp 下载。返回 { ok, files:[abs], stderr, durationMs, timedOut? }。
+ * yt-dlp 参数（宿主 argv / 沙箱命令共用同一份拼装——避免两处口径漂移）。
+ * @returns {string[]}
+ */
+export function buildYtDlpArgs(url, { outTmpl, format = 'best[ext=mp4]/best', audioOnly = false, maxBytes = 600 * MB, mergeFormat = 'mp4', extraArgs = [] } = {}) {
+  const args = [
+    '--no-playlist', '--no-cache-dir', '--no-warnings', '--newline',
+    '--retries', '3', '--socket-timeout', '30',
+    '--max-filesize', String(Math.floor(maxBytes)),
+    '-o', outTmpl,
+  ]
+  if (audioOnly) {
+    args.push('-x', '--audio-format', 'mp3', '--audio-quality', '5')
+  } else {
+    args.push('-f', format)
+    if (mergeFormat) args.push('--merge-output-format', mergeFormat)
+  }
+  args.push(...extraArgs, url)
+  return args
+}
+
+/**
+ * 用 yt-dlp 下载（宿主档）。返回 { ok, files:[abs], stderr, durationMs, timedOut? }。
  * files 为输出目录里本次产出的文件（按 mtime 排序）。
  */
 export async function runYtDlp(url, opts = {}) {
@@ -46,19 +72,7 @@ export async function runYtDlp(url, opts = {}) {
 
   fs.mkdirSync(dir, { recursive: true })
   const outTmpl = path.join(dir, '%(title).80B.%(ext)s')
-  const args = [
-    '--no-playlist', '--no-cache-dir', '--no-warnings', '--newline',
-    '--retries', '3', '--socket-timeout', '30',
-    '--max-filesize', String(Math.floor(maxBytes)),
-    '-o', outTmpl,
-  ]
-  if (audioOnly) {
-    args.push('-x', '--audio-format', 'mp3', '--audio-quality', '5')
-  } else {
-    args.push('-f', format)
-    if (mergeFormat) args.push('--merge-output-format', mergeFormat)
-  }
-  args.push(...extraArgs, url)
+  const args = buildYtDlpArgs(url, { outTmpl, format, audioOnly, maxBytes, mergeFormat, extraArgs })
 
   const t0 = Date.now()
   const ms = Math.min(Math.max(30, Number(timeoutSec) || 600), 1800) * 1000
@@ -93,6 +107,65 @@ export async function runYtDlp(url, opts = {}) {
 }
 
 /**
+ * 用 yt-dlp 下载（**沙箱档**，agent.sandbox.mode=e2b）：沙箱内执行 + 结果流式拉回宿主目录。
+ * @returns {Promise<{ok, files:[abs], stderr, durationMs, sandboxed:true, timedOut?, error?}>}
+ */
+export async function runYtDlpInSandbox(box, url, opts = {}) {
+  const {
+    dir,
+    format = 'best[ext=mp4]/best',
+    audioOnly = false,
+    maxBytes = 600 * MB,
+    timeoutSec = 600,
+    mergeFormat = 'mp4',
+    signal = null,
+  } = opts
+  const t0 = Date.now()
+  const remoteDir = sandboxTmp('dl')
+  const outTmpl = `${remoteDir}/%(title).80B.%(ext)s`
+  const args = buildYtDlpArgs(url, { outTmpl, format, audioOnly, maxBytes, mergeFormat })
+  const cmd = `mkdir -p ${shellQuote(remoteDir)} && yt-dlp ${args.map((a) => shellQuote(a)).join(' ')}`
+  const sess = await openToolSession(box, { purpose: 'tool:web_download' })
+  const r = await runToolCommand(box, sess, cmd, {
+    timeoutMs: Math.min(timeoutSec, box.maxTimeout) * 1000,
+    maxOutput: 4000,
+    signal,
+    label: 'web_download',
+  })
+  const durationMs = Date.now() - t0
+  const base = { ok: false, files: [], stderr: trunc(r.stderr || '', 4000), durationMs, sandboxed: true }
+
+  if (r.limited) return { ...base, error: r.error }
+  const miss = missingCommand('yt-dlp', r, 'web_download')
+  if (miss) return { ...base, error: miss.error }
+  if (r.timedOut) return { ...base, timedOut: true }
+  if (r.sandboxError || r.error) return { ...base, error: `沙箱执行失败（${r.sandboxError?.kind || 'unknown'}）：${String(r.stderr || '').slice(0, 200)}` }
+  if (!r.ok) return { ...base, exitCode: r.exitCode }
+
+  // 收集产物：列目录 → 取最大文件 → 流式拉回宿主（不整块进内存）
+  let files = []
+  try {
+    const entries = await sess.list(remoteDir, { depth: 1 })
+    files = (entries || []).filter((e) => (e?.type || 'file') === 'file' && e?.name && !String(e.name).endsWith('.part')).map((e) => ({ name: e.name, size: Number(e.size) || 0 })).sort((a, b) => b.size - a.size)
+  } catch (e) {
+    return { ...base, error: `沙箱产物列目录失败：${e?.message || e}` }
+  }
+  const picked = files[0]
+  if (!picked) return { ...base, error: '下载失败（沙箱内未产出文件）' }
+  const hostPath = path.join(dir, path.basename(picked.name))
+  // 拉回上限：yt-dlp 的 --max-filesize 按单流限制，合并（video+audio mux）后可能略超 → 留 64MB 余量
+  const transferCap = maxBytes + 64 * MB
+  try {
+    await sess.downloadTo(`${remoteDir}/${picked.name}`, hostPath, { maxBytes: transferCap, signal })
+  } catch (e) {
+    return { ...base, error: `拉回沙箱文件失败：${e?.message || e}` }
+  }
+  // 沙箱内临时文件仅本次使用：拉回成功后清理（失败不影响结果；同样计入命令数/审计）
+  try { await runToolCommand(box, sess, `rm -rf ${shellQuote(remoteDir)}`, { timeoutMs: 15000, maxOutput: 500, label: 'web_download:cleanup' }) } catch { /* noop */ }
+  return { ...base, ok: true, files: [hostPath], durationMs: Date.now() - t0 }
+}
+
+/**
  * 构造 web_download 工具。
  * ctx.download = { dir?, maxBytes?, maxTimeoutSec?, sendLimitBytes?, ytDlpBin? }（可被 config 覆盖）
  */
@@ -111,7 +184,7 @@ export function makeDownloadTool({ ytDlpBin } = {}) {
         format: { type: 'string', description: 'yt-dlp 格式选择串（可选，如 "best" / "bestvideo+bestaudio"）。留空=自动选最佳 mp4' },
       },
     },
-    async execute(params = {}, ctx) {
+    async execute(params = {}, ctx = {}) {
       const cfg = ctx?.download || {}
       const url = String(params.url || '').trim()
       // ① URL 校验：仅 http(s)
@@ -124,14 +197,29 @@ export function makeDownloadTool({ ytDlpBin } = {}) {
       const maxBytes = Number(cfg.maxBytes) || 600 * MB
       const sendLimit = Number(cfg.sendLimitBytes) || 100 * MB
       const timeoutSec = Number(cfg.maxTimeoutSec) || 600
+      fs.mkdirSync(callDir, { recursive: true })
 
-      // ② 下载
-      const res = await runYtDlp(url, {
-        dir: callDir, bin: undefined, ytDlpBin: bin,
-        format: params.format || undefined,
-        audioOnly: params.audioOnly === true,
-        maxBytes, timeoutSec,
-      }).catch((e) => ({ ok: false, error: String(e?.message || e), files: [], durationMs: 0 }))
+      // ② 下载：显式选择 e2b → 沙箱档（拉回到 callDir）；否则宿主档
+      const box = toolSandbox(ctx)
+      let res
+      if (box) {
+        res = await runYtDlpInSandbox(box, url, {
+          dir: callDir,
+          format: params.format || undefined,
+          audioOnly: params.audioOnly === true,
+          maxBytes, timeoutSec,
+          signal: ctx?.signal || null,
+        }).catch((e) => ({ ok: false, error: String(e?.message || e), files: [], durationMs: 0, sandboxed: true }))
+      } else if (sandboxSelected(ctx)) {
+        return sandboxUnavailableError('web_download')
+      } else {
+        res = await runYtDlp(url, {
+          dir: callDir, ytDlpBin: bin,
+          format: params.format || undefined,
+          audioOnly: params.audioOnly === true,
+          maxBytes, timeoutSec,
+        }).catch((e) => ({ ok: false, error: String(e?.message || e), files: [], durationMs: 0 }))
+      }
 
       const file = (res.files || []).map((p) => ({ p, size: (() => { try { return fs.statSync(p).size } catch { return 0 } })() })).sort((a, b) => b.size - a.size)[0]
 

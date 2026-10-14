@@ -1,5 +1,5 @@
 /**
- * 沙箱「文件包 + 命令」执行原语 —— toolEvo 的候选验证与 stable 工具调用共用。
+ * 沙箱「文件包 + 命令」执行原语 —— toolEvo（候选验证/stable 工具调用）与内置工具的沙箱执行面共用。
  *
  * 与 runSandboxShell 的区别：那条面向「终端会话的任意命令」，这条面向「一组文件 + 固定入口命令，
  * 可跑多次」的脚本包（上传一次、执行 N 次），避免每个用例重复上传/重复冷启动。
@@ -7,10 +7,37 @@
  * 两条使用形态：
  *   - 会话复用（oneShot=false）：绑定固定 key 到会话沙箱，产物留在沙箱内供后续调用；
  *   - 一次性（oneShot=true）：唯一 key + close() 直接销毁，用于跑不可信的候选代码。
+ *
+ * 文件进出：write/writeMany（小文本）、upload（宿主大文件流式上传）、read（小文本读回）、
+ * downloadTo（沙箱文件流式落盘宿主，带字节上限与取消）；list 供产物收集。
  */
+import fs from 'node:fs'
+import path from 'node:path'
+import { Readable } from 'node:stream'
+
 import { SandboxError, classify, toToolFailure, truncateOutput } from './errors.js'
 
 let _seq = 0
+
+/** POSIX shell 单引号安全引用（与 shlex.quote 同形）：命令串里拼动态参数时用，杜绝注入。 */
+export function shellQuote(value) {
+  const s = String(value ?? '')
+  if (s === '') return "''"
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s)) return s
+  return `'${s.replace(/'/g, "'\\''")}'`
+}
+
+/** 沙箱内工具临时目录（每次调用一个；宿主路径在沙箱里无意义） */
+export function sandboxTmp(name = 'tool') {
+  const safe = String(name || 'tool').replace(/[^\w-]/g, '').slice(0, 24) || 'tool'
+  return `/home/user/.agent-tmp/${safe}-${Date.now().toString(36)}-${++_seq}`
+}
+
+/** 字节数的人类可读形态（上限报错用） */
+function fmtBytes(n) {
+  const v = Number(n) || 0
+  return v >= 1048576 ? `${Math.round(v / 1048576)}MB` : `${v}B`
+}
 
 /**
  * 打开一个脚本包会话。
@@ -93,6 +120,93 @@ export async function openSandboxBundle(manager, key, { files = [], execCwd = '/
       if (!oneShot) return false
       try { return await manager.destroy(bindKey) } catch { return false }
     },
+  }
+
+  /** 绝对化沙箱内路径（相对 execCwd） */
+  const absOf = (p) => (String(p).startsWith('/') ? String(p) : `${execCwd}/${p}`)
+
+  /** 读沙箱内文件：默认文本；binary=true → Buffer（小文件用；大文件请 downloadTo） */
+  session.read = async (p, { binary = false } = {}) => {
+    const data = await manager.transport.read(handle, absOf(p), { format: binary ? 'bytes' : 'text' })
+    return binary ? Buffer.from(data) : String(data)
+  }
+
+  /** 列目录（depth=1 仅本级；递归收集产物时调大） */
+  session.list = async (dir, { depth = 1 } = {}) => manager.transport.list(handle, absOf(dir), { depth })
+
+  /**
+   * 宿主 → 沙箱 流式上传（大文件不整块进内存）。
+   * @returns {Promise<{path:string, bytes:number}>}
+   */
+  session.upload = async (hostPath, remotePath, { maxBytes = null } = {}) => {
+    const st = fs.statSync(hostPath)
+    if (maxBytes && st.size > maxBytes) {
+      throw new SandboxError('unknown', `文件超过沙箱上传上限（${fmtBytes(st.size)} > ${fmtBytes(maxBytes)}）`)
+    }
+    const abs = absOf(remotePath)
+    try {
+      await manager.transport.write(handle, abs, Readable.toWeb(fs.createReadStream(hostPath)))
+    } catch (e) {
+      throw ensureSandboxError(e, '上传到沙箱失败')
+    }
+    return { path: abs, bytes: st.size }
+  }
+
+  /**
+   * 沙箱 → 宿主 流式落盘（大文件不整块进内存）+ 字节上限 + 取消；失败清理半成品文件。
+   * @returns {Promise<{path:string, bytes:number}>}
+   */
+  session.downloadTo = async (remotePath, hostPath, { maxBytes = null, signal = null } = {}) => {
+    const abs = absOf(remotePath)
+    if (signal?.aborted) throw new SandboxError('killed', '下载已取消')
+    let webStream
+    try {
+      webStream = await manager.transport.read(handle, abs, { format: 'stream', signal })
+    } catch (e) {
+      throw ensureSandboxError(e, '读取沙箱文件失败')
+    }
+    const src = Readable.fromWeb(webStream)
+    fs.mkdirSync(path.dirname(hostPath), { recursive: true })
+    const out = fs.createWriteStream(hostPath)
+    let bytes = 0
+    let settled = false
+    let rejectFn = null
+    const cleanup = () => { try { signal?.removeEventListener?.('abort', onAbort) } catch { /* noop */ } }
+    const settleFail = (e) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      try { src.destroy() } catch { /* noop */ }
+      try { out.destroy() } catch { /* noop */ }
+      rejectFn?.(e)
+    }
+    const onAbort = () => settleFail(new SandboxError('killed', '下载已取消'))
+    try {
+      await new Promise((resolve, reject) => {
+        rejectFn = reject
+        if (signal) {
+          if (signal.aborted) { settleFail(new SandboxError('killed', '下载已取消')); return }
+          signal.addEventListener('abort', onAbort, { once: true })
+        }
+        src.on('data', (chunk) => {
+          bytes += chunk.length
+          if (maxBytes && bytes > maxBytes) settleFail(new SandboxError('unknown', `文件超过下载上限（${fmtBytes(bytes)} > ${fmtBytes(maxBytes)}）`))
+        })
+        src.on('error', (e) => settleFail(ensureSandboxError(e, '沙箱文件读取中断')))
+        out.on('error', (e) => settleFail(e))
+        out.on('finish', () => {
+          if (settled) return
+          settled = true
+          cleanup()
+          resolve()
+        })
+        src.pipe(out)
+      })
+    } catch (e) {
+      try { fs.rmSync(hostPath, { force: true }) } catch { /* noop */ }
+      throw e
+    }
+    return { path: hostPath, bytes }
   }
   return session
 }

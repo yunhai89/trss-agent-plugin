@@ -6,7 +6,7 @@
  * 不需要装 E2B、不需要联网（与 model/crawl/crawl4ai.test.mjs 的桩子进程范式一致）。
  *
  * 契约（桩必须实现同样形状）：init / ping / create / connect / run / write / writeMany /
- *   kill / setTimeout / list / updateNetwork。handle 是 `{ id, raw }`，raw 为 SDK 实例。
+ *   read / list / kill / setTimeout / updateNetwork。handle 是 `{ id, raw }`，raw 为 SDK 实例。
  */
 import path from 'node:path'
 
@@ -134,6 +134,16 @@ export function makeTransport(cfg = {}, { logger = null } = {}) {
         return
       }
       for (const f of list) await handle.raw.files.write(String(f.path), String(f.data ?? ''))
+    },
+
+    /** 读文件：format='bytes' → Uint8Array；'stream' → ReadableStream（大文件流式落盘用，调用方须消费或 cancel） */
+    async read(handle, absPath, { format = 'bytes', signal = null } = {}) {
+      return handle.raw.files.read(String(absPath), { format, ...(signal ? { signal } : {}) })
+    },
+
+    /** 列目录：depth=1 仅本级；返回 [{name, path, type, size, ...}] */
+    async list(handle, absPath, { depth = 1 } = {}) {
+      return handle.raw.files.list(String(absPath), { depth: Math.max(1, Number(depth) || 1) })
     },
 
     async kill(handle) {

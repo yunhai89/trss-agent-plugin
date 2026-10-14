@@ -6,8 +6,8 @@
  *
  * 安全模型（沙箱化 + 全员开放的产品决策）：
  *   1. 无身份门槛、无审批、无命令黑名单：破坏性命令被限制在会话 microVM 内
- *      （独立 VM/独立 FS/独立网络命名空间），出口按 agent.sandbox.network.allowOut 白名单收紧
- *      （allow 优先于 deny）。
+ *      （独立 VM/独立 FS/独立网络命名空间），网络出口默认放通（可配 agent.sandbox.network.allowOut
+ *      白名单收紧或 allowInternet:false 断网；allow 优先于 deny）。
  *   2. 成本闸：单会话命令数上限 + 单命令超时上限 + 全局并发沙箱上限（agent.sandbox.*），
  *      防任何用户（含被注入诱导的会话）把配额/账单打爆。
  *   3. 失败一律 fail-closed：连不上 E2B / 未配置 → 返回结构化错误，**绝不回退到本机执行**。
@@ -26,7 +26,7 @@ export function makeTerminalTool({ manager = null } = {}) {
   return {
     name: 'terminal',
     description: '在隔离的 Linux 沙箱（E2B 微虚机）里执行 shell 命令并返回 exitCode/stdout/stderr。'
-      + '沙箱与宿主完全隔离：宿主文件、宿主进程都不可见，默认工作目录 /home/user，网络仅放行包管理器与 api.openai.com。'
+      + '沙箱与宿主完全隔离：宿主文件、宿主进程都不可见，默认工作目录 /home/user，网络默认放通全部（管理员可用 allowOut 白名单收紧）。'
       + '每个会话独占一个沙箱，文件与进程状态在会话内连续（多步任务可先安装/写文件再用）。'
       + '无需审批，命令直接执行。'
       + '⚠️下载视频/媒体请用 web_download 工具（基于 yt-dlp，受约束），不要用 terminal 跑 curl/wget/yt-dlp。',

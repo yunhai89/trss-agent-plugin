@@ -9,13 +9,16 @@
  *  - 禁用 open/exec/eval/compile/getattr 等危险内建 + 网络无关、无文件系统
  *  - 子进程隔离 + 超时（默认 10s）防死循环
  *  预导入常用数学库，用户代码直接用 math.sqrt / statistics.mean 等，用 print() 输出答案。
- *  注：非 hardened 沙箱（对象子类遍历类逃逸理论上存在），面向可信模型做数学计算；不处理不可信 prompt。
+ *  注：宿主档非 hardened 沙箱（对象子类遍历类逃逸理论上存在），面向可信模型做数学计算；
+ *  **显式选择 E2B（agent.sandbox.mode=e2b）时改在会话沙箱内执行**（模型提交的代码不落宿主）——
+ *  沙箱不可用则 fail-closed 拒绝，绝不回落宿主；沙箱内用 `python3`（模板自带）。
  *
- * 依赖：python3（本机/容器均需）。缺失时工具返回明确提示。
+ * 依赖：python3（宿主档：本机/容器需装；沙箱档：E2B 模板需含 python3）。缺失时工具返回明确提示。
  */
 
 import { spawn } from 'node:child_process'
 import Config from '../../utils/Config.js'
+import { toolSandbox, sandboxSelected, sandboxUnavailableError, openToolSession, runToolCommand, missingCommand, sandboxTmp, shellQuote } from '../sandbox/bridge.js'
 
 /** 沙箱 wrapper（固定，以 `python3 -c` 运行；用户代码经 stdin 传入，无转义问题） */
 const SANDBOX = `import sys, builtins as _B, math, statistics, decimal, fractions, itertools, json, datetime, random, re, cmath
@@ -75,20 +78,76 @@ export const calcTool = {
     properties: { code: { type: 'string', description: 'Python 计算代码（用 print() 输出结果）' } },
     required: ['code'],
   },
-  async execute(params) {
+  async execute(params, ctx = {}) {
     const cfg = Config.get?.().agent?.calc || {}
-    const r = await runPython(String(params?.code || ''), {
+    const timeoutMs = (cfg.timeout ?? 10) * 1000
+    const code = String(params?.code || '')
+
+    // 沙箱档（agent.sandbox.mode=e2b）：模型提交的代码在会话沙箱内执行
+    const box = toolSandbox(ctx)
+    if (box) {
+      let r
+      try { r = await runCalcInSandbox(box, code, { timeoutMs, signal: ctx?.signal }) } catch (e) { return { error: `沙箱执行失败：${e?.message || e}` } }
+      if (r.error) return { error: r.error }
+      const miss = missingCommand('python3', r, 'calculate')
+      if (miss) return miss
+      if (r.timedOut) return { error: '计算超时（疑似死循环或计算量过大），请简化/拆分代码后重试。' }
+      if (r.aborted) return { error: '计算已取消' }
+      const out = (r.stdout || '').trim()
+      if (!r.ok) return { error: tailOf(r.stderr) || '沙箱内执行失败' }
+      return { ok: true, result: out || '(无输出——请用 print() 输出计算结果)', sandboxed: true }
+    }
+    // 显式选择 e2b 但沙箱未就绪：fail-closed（绝不在宿主跑模型提交的代码）
+    if (sandboxSelected(ctx)) return sandboxUnavailableError('calculate')
+
+    // 宿主档（mode=off / 未配置沙箱）：本机受限解释器，行为与旧版一致
+    const r = await runPython(code, {
       python: cfg.python || 'python3',
-      timeout: (cfg.timeout ?? 10) * 1000,
+      timeout: timeoutMs,
     })
     if (r.missing) return { error: `python3 不可用（${cfg.python || 'python3'} 未安装/不在 PATH）。请在运行环境安装 python3 后重试。` }
     if (r.timedOut) return { error: '计算超时（疑似死循环或计算量过大），请简化/拆分代码后重试。' }
     const out = (r.stdout || '').trim()
-    if (!r.ok) {
-      // traceback 末尾几行最有用
-      const tail = (r.stderr || '执行失败').trim().split('\n').filter(Boolean).slice(-4).join('\n')
-      return { error: tail }
-    }
+    if (!r.ok) return { error: tailOf(r.stderr) }
     return { ok: true, result: out || '(无输出——请用 print() 输出计算结果)' }
   },
+}
+
+/** stderr 末尾几行（traceback 最有用的部分） */
+function tailOf(stderr) {
+  return String(stderr || '执行失败').trim().split('\n').filter(Boolean).slice(-4).join('\n')
+}
+
+/**
+ * 沙箱档执行：上传固定 wrapper + 用户代码两个文件，用 stdin 重定向喂给 wrapper
+ * （与宿主档同一套限制内建；用户代码不经过命令行拼接，无转义/注入面）。
+ * @returns {Promise<{ok, exitCode, stdout, stderr, timedOut?, aborted?, limited?, error?}>}
+ */
+async function runCalcInSandbox(box, code, { timeoutMs = 10000, signal = null } = {}) {
+  const dir = sandboxTmp('calc')
+  const sess = await openToolSession(box, {
+    purpose: 'tool:calculate',
+    files: [
+      { path: `${dir}/wrapper.py`, data: SANDBOX },
+      { path: `${dir}/code.py`, data: String(code || '') },
+    ],
+  })
+  const r = await runToolCommand(box, sess, `python3 ${shellQuote(`${dir}/wrapper.py`)} < ${shellQuote(`${dir}/code.py`)}`, {
+    timeoutMs: Math.min(timeoutMs, box.maxTimeout * 1000),
+    maxOutput: 8000,
+    signal,
+    label: 'calculate',
+  })
+  if (r.limited) return { ok: false, error: r.error }
+  if (r.sandboxError || r.error) {
+    return { ok: false, error: `沙箱执行失败（${r.sandboxError?.kind || 'unknown'}）：${String(r.stderr || '').slice(0, 200)}` }
+  }
+  return {
+    ok: r.ok === true,
+    exitCode: r.exitCode,
+    stdout: r.stdout || '',
+    stderr: r.stderr || '',
+    timedOut: r.timedOut === true,
+    aborted: r.aborted === true,
+  }
 }

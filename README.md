@@ -44,7 +44,7 @@
 - **双协议多模型**：OpenAI / Anthropic 兼容，一行配置接 DeepSeek / Kimi / MiMo / 通义 / 智谱 / Gemini；视觉子模型让无视觉的主模型也能识图。
 - **渐进式披露 + 结构化 prompt**：技能按需加载、工具目录速查、分层 system prompt（执行取向 / 服务准则 / 安全护栏），兼顾能力与上下文成本。
 - **文件即真相的记忆**：`MEMORY.md` / `USER.md` 人可读可编辑 + `memory_search` 主动召回，跨会话不失忆、不串档。
-- **安全纵深**：工具 RBAC + 主人审批 + 注入防御 + 高危执行面隔离（终端与工具进化代码跑在 E2B 沙箱，宿主无 shell 执行面），高危动作不裸奔。
+- **安全纵深**：工具 RBAC + 主人审批 + 注入防御 + 高危执行面隔离（终端、shell 类内置工具与工具进化代码跑在 E2B 沙箱，宿主无模型可驱动的 shell 执行面），高危动作不裸奔。
 - **配置热加载 + 锅巴适配**：改配置即生效、免重启；锅巴 Web 面板可视化编辑。
 - **回复默认渲染成精美图片**：markdown → 浅色卡片图（标题 / 列表 / 代码高亮 / 表格 / 引用全支持），失败退文本。
 - **🧬 工具进化（Tool Evolution）**：Agent 经 LLM 生成新工具 → typescript AST 静态门 → 沙箱行为验证 → 主人审批上线，形成可验证 / 可回滚 / 权限不可自扩的工具生命周期（生成→验证→晋升→淘汰闭环）。
@@ -65,7 +65,7 @@
 | 👥 群聊工具 | 群信息 / 群管理 / 米游社搜索 | ✅ 稳定 |
 | 📥 媒体下载 | 基于 yt-dlp 的视频/音频下载（受约束，仅主人），支持 YouTube/B站/抖音等 1000+ 站点 | ✅ 稳定 |
 | 🗣️ 语音合成 | 四家服务商：IndexTTS 2.5（本地）/ 豆包 / MiniMax / MiMo；`tts_speak` 点播 + 自动语音；情绪统一由 LLM 结合上下文判定（8 维向量 → 各服务商语音指令/情感标签）；pro/max 档位 | ✅ 可用 |
-| 💻 终端执行 | **E2B 沙箱执行**（Firecracker microVM；全员可用 + 出口白名单 + 命令数/并发上限）；服务端用 **E2B 云**或**自托管（需 KVM，普通云主机不支持）** | ⚠️ 高危可选 |
+| 💻 终端执行 | **E2B 沙箱执行**（Firecracker microVM；全员可用 + 出口默认放通/可配白名单 + 命令数/并发上限）；服务端用 **E2B 云**或**自托管（需 KVM，普通云主机不支持）** | ⚠️ 高危可选 |
 | 🌐 浏览器自动化 | **Stagehand**：goto/observe/extract/act 自然语言原语，本地或 Browserbase 云，会话跨调用保持 | 🧪 早期 |
 | 🎭 表情包 | 自动发现（群聊被动采集→视觉打标→入库）+ 手动安装 + LLM 自主引用 `[sticker:名称]` | ✅ 稳定 |
 | 🤖 伪人模式 | 群聊环境参与者：旁听→门控→Planner 决策→Replyer 自然回复（参照 MaiBot） | 🧪 早期 |
@@ -125,7 +125,8 @@
 
 本插件提供**终端（shell）执行能力**，命令跑在 **E2B 沙箱**（Firecracker microVM）里：
 
-- 命令在**独立微虚机内执行**：宿主文件/进程不可见，网络出口按 `agent.sandbox.network.allowOut` 白名单收紧（默认只放行包管理器与 `api.openai.com`）。
+- 命令在**独立微虚机内执行**：宿主文件/进程不可见，网络出口**默认放通全部**（与 E2B 自身默认一致）；需要收紧时配 `agent.sandbox.network.allowOut` 白名单（配了只放行白名单，其余全拒），也可 `allowInternet:false` 显式断网。
+- **内置工具的 shell 子进程同样收进沙箱**（2025-10 起）：`calculate`（python）/`web_download`（yt-dlp）/`transcribe_media`（ffmpeg）/`file_to_pdf`（soffice）/`web_crawl`（crawl4ai）/`install_skill`（skillhub）在 `mode: e2b` 后都在会话沙箱内执行；沙箱不可用即 fail-closed，不回落宿主（详见「终端执行」一节的对照表）。
 - terminal **全员可用**（无身份门槛、无验证码认领）：每个会话（群/用户/对话）独占一个沙箱、文件系统互不可见；沙箱化后**不再有逐条 `#确认` 审批与命令黑名单**（破坏面已被 microVM 限制），成本由单会话命令数上限、单命令超时上限与并发沙箱上限兜底。
 - **终端默认关闭**（`agent.sandbox.mode` 默认 `off`，此时 terminal 工具**根本不注册**），需自行准备 E2B（自托管或云）并填 `apiKey` 后开启。
 - **连不上 E2B 时一律拒绝执行**（fail-closed），**绝不回退到主机执行**——本插件已删除宿主 shell 执行面。
@@ -134,6 +135,8 @@
 > 如不接受该风险，请保持 `agent.sandbox.mode: off`（默认）。此时本插件不涉及任何 shell 执行（含沙箱）。
 >
 > **升级注意**：旧配置 `agent.terminal.*`（`enable`/`maxTimeout`/`blocklist`/`skipConfirm`）已废弃。Config 的自愈机制只增不删，所以旧键会留在你的 `config/config.yaml` 里但**不再被读取**；启动时会打印一条迁移警告，请手工删除该段并改配 `agent.sandbox`。
+>
+> **升级注意（沙箱网络默认变更）**：`agent.sandbox.network` 的默认值改为**全放通**（与 E2B 自身默认一致，白名单只是可选的收紧手段）。你配置里**显式写过**的 `allowInternet`/`allowOut`/`denyOut` 仍然照旧生效、不会被覆盖；要让沙箱联网请在面板把「允许互联网」打开并清空「出口白名单」。
 
 ---
 
@@ -641,7 +644,21 @@ tts:
 
 > **⚠️ 高危**：见上方「安全声明」。`terminal` 默认不注册，需 `agent.sandbox.mode: e2b` + `apiKey` **单独开启**；开启即视为你知晓风险并自担后果。
 
-`terminal` 工具让 Agent 在 **E2B 微虚机**里执行 shell 命令。宿主上**没有任何 shell 执行面**（旧主机执行路径已删除），拿不到沙箱就拒绝执行。
+`terminal` 工具让 Agent 在 **E2B 微虚机**里执行 shell 命令。宿主上**没有任何模型可驱动的 shell 执行面**（旧主机执行路径已删除），拿不到沙箱就拒绝执行。
+
+**同类执行面（2025-10 起）**：内置工具里凡涉及 shell/子进程的，显式选择 `mode: e2b` 后一律改在**会话沙箱内**执行，宿主不再起这些子进程：
+
+| 工具 | 宿主档（mode=off） | 沙箱档（mode=e2b） |
+| --- | --- | --- |
+| `terminal` | 不注册 | 会话沙箱内执行任意命令 |
+| `calculate` | 宿主 `python3`（受限解释器） | 沙箱内 `python3`（代码上传为文件，不拼命令行） |
+| `web_download` | 宿主 `yt-dlp` | 沙箱内 `yt-dlp`，产物流式拉回宿主再发送 |
+| `transcribe_media` | 宿主 `ffmpeg` 提取音频 | 沙箱内 `ffmpeg` 提取，mp3 拉回宿主再调 STT API（Key 不进沙箱） |
+| `file_to_pdf` | 宿主 `soffice` | 沙箱内 `soffice`，PDF 拉回；沙箱缺 soffice 时回退纯 JS 渲染（无 shell） |
+| `web_crawl` | 宿主 python crawl4ai | 沙箱内 crawl4ai（脚本+请求文件上传）；沙箱缺 crawl4ai → 降级纯 HTTP fetch |
+| `install_skill` | 宿主 `skillhub`（固定 argv） | 沙箱内 `skillhub`，只回传 `.md` 产物，校验后进宿主 skills/ |
+
+> 沙箱不可用（E2B 连不上/初始化失败）时这些工具一律 **fail-closed** 结构化失败，**绝不回落宿主执行**；沙箱模板缺依赖（`python3`/`yt-dlp`/`ffmpeg`/`soffice`/`crawl4ai`/`skillhub`）会返回可读提示，请把它们装进 `agent.sandbox.template` 指向的模板。命令同样计入 `maxCommandsPerSession`（与 terminal 共用会话预算），输入/产物的文件传输走流式（大文件不整块进内存）。
 
 **接入准备**（二选一，详见仓库内 `e2b-infra-nodejs-安全shell接入开发文档.md`）：
 - **E2B 云**：只填 `sandbox.apiKey`（注意：命令与文件会送往第三方）。
@@ -761,7 +778,7 @@ E2B_INTEGRATION=1 node model/sandbox/e2b.integration.test.mjs
 | `idleMs` / `sandboxTtlMs` | `300000` / `600000` | 闲置回收阈值 / 沙箱 TTL（毫秒，命中时自动续期） |
 | `maxSandboxes` / `concurrencyWaitMs` | `4` / `15000` | 全局并发上限 / 等名额超时（超时按配额失败） |
 | `maxCommandsPerSession` | `50` | 单会话命令数上限（0=不限） |
-| `network.allowOut` / `denyOut` | 包管理器 + `api.openai.com` / 全拒绝 | 出口白名单（**allow 恒优先于 deny**）；留空白名单=完全断网 |
+| `network.allowOut` / `denyOut` | 空 / 空 | **默认全放通**（E2B 原生默认）；配了 `allowOut` 白名单 → 只放行白名单、其余全拒；`allowInternet:false`（无白名单）→ 完全断网；`denyOut` 可在放通基础上额外封禁网段（如防云元数据 `169.254.169.254/32`） |
 | `audit` | `true` | 每条命令写审计日志（会话键/退出码/命令前 200 字符，不含密钥） |
 
 > 沙箱会话按「群 + 用户 + 会话」绑定：同一会话内文件与进程状态连续（可先装依赖再跑脚本）。群共享模式（`isolation: false`）下同群共用一个沙箱。
