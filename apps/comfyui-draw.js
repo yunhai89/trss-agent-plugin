@@ -138,7 +138,7 @@ export class ComfyDraw extends plugin {
    * 执行工作流（画图/反推共用）：准备 → 输入图上传 → 参数注入 → 提交轮询下载。
    * @returns {{ok:true, exec, prep, seedUsed}|{ok:false, error, needsImage?}}
    */
-  async _runWorkflow({ api, item, prompt, images }) {
+  async _runWorkflow({ api, item, prompt, images, allSteps = false }) {
     const c = cfg()
     const prep = await prepareWorkflow({ api, ref: item.path, ...this._opts() })
     if (!prep.ok) return { ok: false, error: `加载工作流失败：${prep.error}` }
@@ -158,6 +158,7 @@ export class ComfyDraw extends plugin {
       maxInterval: c.pollMaxInterval || 8,
       isVideo,
       maxImages: Number(c.maxImages) || 4,
+      allSteps,
     })
     if (!exec.ok) {
       let msg = `生成失败：${exec.error}`
@@ -224,9 +225,9 @@ export class ComfyDraw extends plugin {
 
     // 2. 提示 + 执行
     const usedPrompt = parsed.prompt || '（用工作流自带默认提示词）'
-    await this.reply(`🎨 开始生成｜${picked.index}. ${item.name}［${kindText(item.kinds)}］${picked.auto ? '（自动选择）' : ''}\n关键字：${usedPrompt}\n预计 30~120 秒，完成后直接发图…`)
+    await this.reply(`🎨 开始生成｜${picked.index}. ${item.name}［${kindText(item.kinds)}］${picked.auto ? '（自动选择）' : ''}\n关键字：${usedPrompt}${parsed.allSteps ? '\n（--all：连中间步骤图一起发）' : ''}\n预计 30~120 秒，完成后直接发图…`)
 
-    const run = await this._runWorkflow({ api, item, prompt: parsed.prompt, images })
+    const run = await this._runWorkflow({ api, item, prompt: parsed.prompt, images, allSteps: parsed.allSteps })
     if (!run.ok) {
       await this.reply(`❌ ${run.error}${run.needsImage ? '（把图随消息一起发，或引用一张图再发指令）' : ''}`)
       return true
@@ -252,8 +253,10 @@ export class ComfyDraw extends plugin {
       }
     }
     if (texts.length) await this.reply(texts.join('\n\n'))
-    if (!sentCount && !texts.length) await this.reply('生成完成，但产物发送失败（查看插件日志）')
-    else if (sentCount && run.seedUsed != null) await this.reply(`✅ 完成（seed ${run.seedUsed}）`)
+    const skipped = run.exec.skippedSteps || []
+    const skippedTip = skipped.length ? `\n（另有 ${skipped.length} 张中间步骤图未发，加 --all 可一起发）` : ''
+    if (!sentCount && !texts.length) await this.reply(`生成完成，但产物发送失败（查看插件日志）${skippedTip}`)
+    else if (sentCount && run.seedUsed != null) await this.reply(`✅ 完成（seed ${run.seedUsed}）${skippedTip}`)
     logger('info', `指令画图完成：${item.name}（图 ${sentCount}，文本 ${texts.length}${isReverse ? '，反推类' : ''}）`)
     return true
   }

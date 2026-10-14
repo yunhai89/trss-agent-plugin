@@ -166,11 +166,54 @@ export async function uploadWorkflowInputs({ api, analysis, image, mask } = {}) 
 }
 
 /**
+ * 计算每个节点在依赖链上的深度（0=源头；每经过一次上游 +1）。
+ * 用于挑「最终成品」输出节点：多段式工作流（底图→修脸→修手→高清）里有多个 SaveImage，
+ * 默认只发依赖链最深（最后一步）的那个，中间步骤图按需再发。
+ */
+export function nodeDepths(graph) {
+  const ids = Object.keys(graph || {})
+  const incoming = new Map(ids.map((id) => [id, new Set()]))
+  for (const id of ids) {
+    for (const v of Object.values(graph[id]?.inputs || {})) {
+      if (Array.isArray(v) && v.length >= 2 && graph[String(v[0])]) incoming.get(id).add(String(v[0]))
+    }
+  }
+  const depth = new Map()
+  const calc = (id, stack = new Set()) => {
+    if (depth.has(id)) return depth.get(id)
+    if (stack.has(id)) return 0 // 环（异常图）：按 0 处理，不死循环
+    stack.add(id)
+    let d = 0
+    for (const src of incoming.get(id) || []) d = Math.max(d, calc(src, stack) + 1)
+    stack.delete(id)
+    depth.set(id, d)
+    return d
+  }
+  for (const id of ids) calc(id)
+  return depth
+}
+
+/**
+ * 挑「最终成品」输出节点 id（依赖链最深；同深度按节点出现顺序取最后一个）。
+ * @returns {string|null} null = 无法判定（调用方应保留全部产物）
+ */
+export function finalOutputNodeId(graph) {
+  const depth = nodeDepths(graph)
+  let best = null
+  let bestDepth = -1
+  for (const id of Object.keys(graph || {})) {
+    const d = depth.get(id) ?? 0
+    if (d >= bestDepth) { best = id; bestDepth = d } // >=：同深度取靠后的
+  }
+  return best
+}
+
+/**
  * 提交 + 轮询 + 下载产物（返回 buffer 列表，由调用方决定怎么发）。
  * @returns {{ok:true, promptId, outputs:[{filename,subfolder,kind,buffer}]}
  *          |{ok:false, status:'submit'|'error'|'cancelled'|'timeout', error, nodeErrors?, promptId?, nodeId?}}
  */
-export async function executeGraph({ api, graph, timeout = 300, interval = 1.5, maxInterval = 8, isVideo = false, maxImages = 4, onProgress } = {}) {
+export async function executeGraph({ api, graph, timeout = 300, interval = 1.5, maxInterval = 8, isVideo = false, maxImages = 4, allSteps = false, onProgress } = {}) {
   const clientId = globalThis.crypto?.randomUUID?.() || String(Date.now())
   let promptId
   try {
@@ -190,7 +233,11 @@ export async function executeGraph({ api, graph, timeout = 300, interval = 1.5, 
     return { ok: false, status: 'timeout', promptId, error: `超时（${wait}s）` }
   }
 
-  const outs = (result.outputs || []).slice(0, Math.max(1, Number(maxImages) || 4))
+  // 默认只发「最终成品」：多段式工作流的中间步骤图（底图/修脸/修手…）过滤掉，allSteps=true 时全发
+  const finalId = allSteps ? null : finalOutputNodeId(graph)
+  const picked = (result.outputs || []).filter((o) => o.kind === 'text' || !finalId || String(o.nodeId) === String(finalId))
+  const skippedSteps = (result.outputs || []).filter((o) => o.kind !== 'text' && finalId && String(o.nodeId) !== String(finalId))
+  const outs = picked.slice(0, Math.max(1, Number(maxImages) || 4))
   const outputs = []
   const seenText = new Set()
   for (const out of outs) {
@@ -208,7 +255,7 @@ export async function executeGraph({ api, graph, timeout = 300, interval = 1.5, 
       outputs.push({ filename: out.filename, subfolder: out.subfolder || '', kind: out.kind, buffer: null, error: e?.message || String(e) })
     }
   }
-  return { ok: true, promptId, outputs }
+  return { ok: true, promptId, outputs, skippedSteps, finalNodeId: finalId }
 }
 
 /** node_errors（{nodeId:{errors:[{message,details}]}}）→ 可读摘要（附节点类型与标题） */

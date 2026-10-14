@@ -19,7 +19,7 @@ import { analyzeGraph } from './analyze.js'
 import { applyParams } from './params.js'
 import { listWorkflowFiles, loadWorkflow, resolveWorkflowRef, clearDiscoveryCache } from './discover.js'
 import { parseDraw, formatWorkflowList, pickWorkflow, kindText } from './command.js'
-import { listWorkflowsSummary } from './run.js'
+import { listWorkflowsSummary, finalOutputNodeId, nodeDepths } from './run.js'
 import { newClient } from './api.js'
 
 const PLUGIN = fileURLToPath(new URL('../../', import.meta.url))
@@ -198,6 +198,21 @@ const FILE_MISSING_DETECTOR = JSON.stringify({
   7: { class_type: 'CLIPTextEncode', inputs: { clip: ['4', 1], text: 'worst quality' } },
 })
 
+/** 多段式工作流（底图→中段→最终）：3 个 SaveImage 串联，验证「默认只发最终成品」 */
+const FILE_MULTISTAGE = JSON.stringify({
+  1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'model-a.safetensors' } },
+  3: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: 'multi girl' } },
+  4: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: 'worst quality' } },
+  5: { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 768, batch_size: 1 } },
+  6: { class_type: 'KSampler', inputs: { model: ['1', 0], seed: 1, steps: 8, cfg: 5, sampler_name: 'euler', scheduler: 'normal', positive: ['3', 0], negative: ['4', 0], latent_image: ['5', 0], denoise: 1 } },
+  7: { class_type: 'VAEDecode', inputs: { samples: ['6', 0], vae: ['1', 2] } },
+  8: { class_type: 'SaveImage', inputs: { images: ['7', 0], filename_prefix: 'm/01_base' } },
+  9: { class_type: 'ImageScale', inputs: { image: ['7', 0], upscale_method: 'lanczos', width: 768, height: 1152, crop: 'center' } },
+  10: { class_type: 'SaveImage', inputs: { images: ['9', 0], filename_prefix: 'm/02_mid' } },
+  11: { class_type: 'ImageScale', inputs: { image: ['9', 0], upscale_method: 'lanczos', width: 1024, height: 1536, crop: 'center' } },
+  12: { class_type: 'SaveImage', inputs: { images: ['11', 0], filename_prefix: 'm/03_final' } },
+})
+
 const FILE_TAGGER = JSON.stringify({
   1: { class_type: 'LoadImage', inputs: { image: 'example.png' }, _meta: { title: '① 输入图片' } },
   2: { class_type: 'WD14Tagger|pysssss', inputs: { image: ['1', 0], model: 'wd-swinv2-tagger-v3', threshold: 0.35, character_threshold: 0.85, replace_underscore: true, trailing_comma: false, exclude_tags: '' }, _meta: { title: '② 反推标签' } },
@@ -229,6 +244,7 @@ const server = http.createServer((req, res) => {
       { path: '05_missing_upscale.json', size: FILE_MISSING_UPSCALE.length, modified: 445 },
       { path: '06_missing_detector.json', size: FILE_MISSING_DETECTOR.length, modified: 446 },
       { path: '07_tagger.json', size: FILE_TAGGER.length, modified: 447 },
+      { path: '08_multistage.json', size: FILE_MULTISTAGE.length, modified: 448 },
       { path: 'note.txt', size: 3, modified: 555 },
     ])
   }
@@ -241,6 +257,7 @@ const server = http.createServer((req, res) => {
     if (p === 'workflows/05_missing_upscale.json') return res.end(FILE_MISSING_UPSCALE)
     if (p === 'workflows/06_missing_detector.json') return res.end(FILE_MISSING_DETECTOR)
     if (p === 'workflows/07_tagger.json') return res.end(FILE_TAGGER)
+    if (p === 'workflows/08_multistage.json') return res.end(FILE_MULTISTAGE)
     res.statusCode = 404; return res.end('nope')
   }
   if (u.pathname === '/prompt' && req.method === 'POST') {
@@ -258,6 +275,14 @@ const server = http.createServer((req, res) => {
     const isTagger = Object.values(submitted).some((n) => n?.class_type === 'WD14Tagger|pysssss')
     // 反推：tagger 节点与 PreviewAny 节点输出同一段文本（验证按内容去重）
     if (isTagger) return json({ p1: { status: { completed: true, status_str: 'success' }, outputs: { 2: { tags: ['1girl, solo, silver hair'] }, 3: { text: ['1girl, solo, silver hair'] } } } })
+    // 多段式：3 个 SaveImage 各自出图（验证默认只发最终成品）
+    if (Object.keys(submitted).includes('12')) {
+      return json({ p1: { status: { completed: true, status_str: 'success' }, outputs: {
+        8: { images: [{ filename: 'base.png', subfolder: 'm', type: 'output' }] },
+        10: { images: [{ filename: 'mid.png', subfolder: 'm', type: 'output' }] },
+        12: { images: [{ filename: 'final.png', subfolder: 'm', type: 'output' }] },
+      } } })
+    }
     return json({ p1: { status: { completed: true, status_str: 'success' }, outputs: { 8: { images: [{ filename: 'out.png', subfolder: '', type: 'output' }] } } } })
   }
   if (u.pathname === '/view') { res.setHeader('Content-Type', 'image/png'); return res.end(PNG) }
@@ -386,7 +411,7 @@ await test('discover：userdata 列表 / 文件读取（路径 %2F 编码）/ �
   clearDiscoveryCache()
   const api = client()
   const entries = await listWorkflowFiles(api, { dir: 'workflows', ttl: 300 })
-  ok(entries.length === 7 && !entries.some((e) => e.name === 'note.txt'), '递归列出 7 个 .json（忽略非 json）')
+  ok(entries.length === 8 && !entries.some((e) => e.name === 'note.txt'), '递归列出 8 个 .json（忽略非 json）')
   const e1 = entries.find((e) => e.path === 'sub/01_txt2img.json')
   ok(e1?.udPath === 'workflows/sub/01_txt2img.json', 'udPath 带 dir 前缀（GET /userdata/{file} 用）')
   ok(e1?.folder === 'sub', 'folder 归一')
@@ -420,7 +445,7 @@ await test('list_workflows：清单（用途提示/参数/缺模型/说明）与
   clearDiscoveryCache()
   const { ctx } = makeCtx()
   const r = await tools['comfyui__list_workflows'].execute({ refresh: true }, ctx)
-  ok(r.ok && r.count === 7, `列出 7 个工作流（count=${r.count}）`)
+  ok(r.ok && r.count === 8, `列出 8 个工作流（count=${r.count}）`)
   const t = r.workflows.find((w) => w.name === '01_txt2img.json')
   ok(t && t.kinds.includes('txt2img') && t.params.includes('prompt') && t.params.includes('seed'), 'txt2img 摘要（kinds/params）')
   ok(t?.note && /用法说明/.test(t.note), 'Note 说明随清单下发')
@@ -447,7 +472,7 @@ await test('inspect_workflow：参数映射 / 模型缺失 / 名称解析', asyn
   ok(r.params.prompt?.node === '3' && r.params.seed?.node === '6', '参数映射下发')
   ok(r.missing_models.length === 0, '模型齐全（model-a 已安装）')
   const bad = await tools['comfyui__inspect_workflow'].execute({ workflow: 'zzz' }, ctx)
-  ok(!bad.ok && bad.candidates?.length === 7, '未找到 → 候选列表')
+  ok(!bad.ok && bad.candidates?.length === 8, '未找到 → 候选列表')
 })
 
 await test('generate：提交图正确（参数注入/seed）+ 产物回发 + 结果字段', async () => {
@@ -504,6 +529,12 @@ await test('command：指令解析（编号/关键字/数字开头关键字的�
   eqp('#画图 5月的天空', { n: null, prompt: '5月的天空' }, '数字开头关键字不被当编号（5 后无空白）')
   eqp('#画图2  两格空格', { n: 2, prompt: '两格空格' }, '多余空白归一')
   ok(parseDraw('#画图0 x').error, '编号 0 报错')
+  const all1 = parseDraw('#画图2 银发少女 --all')
+  ok(all1.n === 2 && all1.prompt === '银发少女' && all1.allSteps === true, `--all 解析并剥离：${JSON.stringify(all1)}`)
+  const all2 = parseDraw('#画图2 关键字 --全部')
+  ok(all2.allSteps === true && all2.prompt === '关键字', '--全部 同样生效')
+  ok(parseDraw('#画图2 关键字').allSteps === false, '默认不带步骤图')
+  ok(parseDraw('#画图2 a--all').allSteps === false && parseDraw('#画图2 a--all').prompt === 'a--all', '词中 --all 不当开关')
   ok(parseDraw('#画图abc').n === null, '「#画图abc」= 关键字（自动选）')
   ok(kindText(['txt2img', 'detailer']) === '文生图+修脸/修手', 'kinds 中文标签')
 })
@@ -529,7 +560,7 @@ await test('run：listWorkflowsSummary（清单数据源，供工具与指令共
   clearDiscoveryCache()
   const api = client()
   const r = await listWorkflowsSummary({ api, dir: 'workflows', ttl: 300 })
-  ok(r.ok && r.items.length === 7, `清单 7 项（${r.items.length}）`)
+  ok(r.ok && r.items.length === 8, `清单 8 项（${r.items.length}）`)
   const t = r.items.find((i) => i.name === '01_txt2img.json')
   ok(t?.kinds?.includes('txt2img') && t?.params?.includes('prompt'), '摘要含 kinds/params')
   ok(t?.path === 'sub/01_txt2img.json' && typeof t?.size === 'number', '摘要含路径与体积')
@@ -544,6 +575,31 @@ await test('generate：反推类工作流返回文本（texts 去重、不发图
   ok(r.texts[0] === '1girl, solo, silver hair', '标签文本原样返回')
   ok((r.outputs || []).length === 0 && sent.length === 0, '文本产物不发图')
   ok(/不产图/.test(r.note || ''), `note 说明不产图：${r.note}`)
+})
+
+await test('run：最终成品判定（依赖链最深输出节点）', async () => {
+  const g = JSON.parse(FILE_MULTISTAGE)
+  ok(finalOutputNodeId(g) === '12', `多段式 → 最终节点 12（高清）：${finalOutputNodeId(g)}`)
+  const single = { 1: { class_type: 'X', inputs: {} }, 2: { class_type: 'SaveImage', inputs: { images: ['1', 0] } } }
+  ok(finalOutputNodeId(single) === '2', '单输出 → 该节点')
+  const depths = nodeDepths(g)
+  ok(depths.get('8') === 4 && depths.get('12') === 6, '依赖链深度计算（base=4, final=6）')
+})
+
+await test('generate：多段式工作流默认只发最终成品；all_steps=true 才全发', async () => {
+  const { ctx, sent } = makeCtx()
+  const r = await tools['comfyui__generate'].execute({ workflow: '08_multistage', prompt: 'x' }, ctx)
+  ok(r.ok, `执行成功：${r.error || ''}`)
+  ok((r.outputs || []).length === 1 && r.outputs[0].filename === 'final.png', `只发最终成品：${JSON.stringify((r.outputs || []).map((o) => o.filename))}`)
+  ok(sent.length === 1, '聊天只收到 1 张图')
+  ok(JSON.stringify(r.skipped_steps) === JSON.stringify(['base.png', 'mid.png']), `中间步骤图列出但不发：${JSON.stringify(r.skipped_steps)}`)
+  ok(/中间步骤图未发/.test(r.note || ''), `note 提示可补发：${r.note}`)
+
+  const { ctx: ctx2, sent: sent2 } = makeCtx()
+  const r2 = await tools['comfyui__generate'].execute({ workflow: '08_multistage', prompt: 'x', all_steps: true }, ctx2)
+  ok(r2.ok && (r2.outputs || []).length === 3, `all_steps=true → 3 张全发：${JSON.stringify((r2.outputs || []).map((o) => o.filename))}`)
+  ok(!r2.skipped_steps, '全发时无被过滤步骤')
+  ok(sent2.length === 3, '聊天收到 3 张')
 })
 
 await test('generate：主人审批可由配置关闭（agent.comfyui.confirm，缺省仍为开）', async () => {
@@ -561,7 +617,7 @@ await test('generate：主人审批可由配置关闭（agent.comfyui.confirm，
 await test('status：连通性/版本/工作流与模型计数', async () => {
   const { ctx } = makeCtx()
   const r = await tools['comfyui__status'].execute({}, ctx)
-  ok(r.ok && r.version === '9.9-test' && r.workflow_count === 7, `状态聚合（version=${r.version}, workflows=${r.workflow_count}）`)
+  ok(r.ok && r.version === '9.9-test' && r.workflow_count === 8, `状态聚合（version=${r.version}, workflows=${r.workflow_count}）`)
   ok(r.models?.checkpoints?.[0] === 'model-a.safetensors' && r.models?.upscale?.[0] === '4x-test.pth', '已安装模型清单（含 COMBO options 口径）')
 })
 

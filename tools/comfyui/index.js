@@ -157,7 +157,8 @@ const generateTool = defineTool({
     '用指定工作流在 ComfyUI 生成图片/视频，生成后自动把产物发到当前会话。工作流名来自 comfyui__list_workflows（服务器上真实存在的工作流）。'
     + 'prompt/seed/steps/width/height/denoise 等按工作流自动映射注入（未传的保留工作流默认值），映射不到的字段用 set 指定节点字段。'
     + '需要输入图的工作流（kinds 含 img2img/detailer/upscale 且 needs_input_image）要提供 input_image。每次生成消耗 GPU。'
-    + 'kinds 含 interrogate 的工作流（提示词反推/打标）不产图，结果在 texts 字段里——原样转述给用户即可。',
+    + 'kinds 含 interrogate 的工作流（提示词反推/打标）不产图，结果在 texts 字段里——原样转述给用户即可。'
+    + '多段式工作流（底图+修脸+修手+高清等）默认只发最终成品；用户明确要看中间步骤时才传 all_steps=true。',
   category: 'query',
   meta: { summary: 'ComfyUI 按工作流生成图片/视频', interactive: true, alwaysConfirm: true, resultCap: 4000 },
   parameters: param.object({
@@ -184,6 +185,7 @@ const generateTool = defineTool({
     },
     timeout: param.int('单次最长等待秒数（默认走配置；视频工作流自动放宽到 900）'),
     send_images: param.bool('是否发送产物到聊天（默认 true）'),
+    all_steps: param.bool('是否连中间步骤图一起发（默认 false=只发最终成品；用户明确要看底图/修脸/修手等中间步骤时设 true）'),
   }, ['workflow']),
   async execute(p, ctx) {
     const c = cfg()
@@ -234,6 +236,7 @@ const generateTool = defineTool({
       maxInterval: c.pollMaxInterval || 8,
       isVideo,
       maxImages: Number(c.maxImages) || 4,
+      allSteps: p.all_steps === true,
     })
     if (!exec.ok) {
       if (exec.status === 'submit') {
@@ -282,8 +285,10 @@ const generateTool = defineTool({
       ...(prep.warnings.length ? { warnings: prep.warnings } : {}),
       ...(texts.length ? { texts } : {}),
       outputs: sent,
+      ...(exec.skippedSteps?.length ? { skipped_steps: exec.skippedSteps.map((o) => o.filename) } : {}),
       note: (texts.length && !sent.length ? `已返回 ${texts.length} 段文本（该工作流不产图）` : (sent.some((s) => s.sent) ? `已发送 ${sent.filter((s) => s.sent).length} 个产物` : (sent.length ? '生成完成但发送失败' : '完成但无可发产物')))
         + (texts.length && sent.length ? `；另有 ${texts.length} 段文本` : '')
+        + (exec.skippedSteps?.length ? `；另有 ${exec.skippedSteps.length} 张中间步骤图未发（用户要看时用 all_steps=true 重跑）` : '')
         + (skippedHint ? `；${skippedHint}` : ''),
     })
   },

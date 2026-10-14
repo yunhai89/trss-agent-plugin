@@ -58,7 +58,20 @@ const TAGGER = {
   2: { class_type: 'WD14Tagger|pysssss', inputs: { image: ['1', 0], model: 'wd-swinv2-tagger-v3', threshold: 0.35, character_threshold: 0.85, replace_underscore: true, trailing_comma: false, exclude_tags: '' } },
   3: { class_type: 'PreviewAny', inputs: { source: ['2', 0] } },
 }
-const FILES = { 'wf/01_txt2img.json': JSON.stringify(UI_TXT2IMG), 'wf/02_img2img.json': JSON.stringify(UI_IMG2IMG), 'wf/03_tagger.json': JSON.stringify(TAGGER) }
+const MULTISTAGE = {
+  1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'm.safetensors' } },
+  3: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: 'multi' } },
+  4: { class_type: 'CLIPTextEncode', inputs: { clip: ['1', 1], text: 'worst quality' } },
+  5: { class_type: 'EmptyLatentImage', inputs: { width: 512, height: 768, batch_size: 1 } },
+  6: { class_type: 'KSampler', inputs: { model: ['1', 0], seed: 1, steps: 8, cfg: 5, sampler_name: 'euler', scheduler: 'normal', positive: ['3', 0], negative: ['4', 0], latent_image: ['5', 0], denoise: 1 } },
+  7: { class_type: 'VAEDecode', inputs: { samples: ['6', 0], vae: ['1', 2] } },
+  8: { class_type: 'SaveImage', inputs: { images: ['7', 0], filename_prefix: 'm/01_base' } },
+  9: { class_type: 'ImageScale', inputs: { image: ['7', 0], upscale_method: 'lanczos', width: 768, height: 1152, crop: 'center' } },
+  10: { class_type: 'SaveImage', inputs: { images: ['9', 0], filename_prefix: 'm/02_mid' } },
+  11: { class_type: 'ImageScale', inputs: { image: ['9', 0], upscale_method: 'lanczos', width: 1024, height: 1536, crop: 'center' } },
+  12: { class_type: 'SaveImage', inputs: { images: ['11', 0], filename_prefix: 'm/03_final' } },
+}
+const FILES = { 'wf/01_txt2img.json': JSON.stringify(UI_TXT2IMG), 'wf/02_img2img.json': JSON.stringify(UI_IMG2IMG), 'wf/03_tagger.json': JSON.stringify(TAGGER), 'wf/04_multistage.json': JSON.stringify(MULTISTAGE) }
 const PNG = Buffer.concat([Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'), Buffer.alloc(16)])
 
 let lastSubmit = null
@@ -82,6 +95,13 @@ const server = http.createServer((req, res) => {
     const submitted = lastSubmit?.prompt || {}
     const isTagger = Object.values(submitted).some((n) => n?.class_type === 'WD14Tagger|pysssss')
     if (isTagger) return json({ p1: { status: { completed: true, status_str: 'success' }, outputs: { 2: { tags: ['1girl, solo, silver hair, blue eyes'] }, 3: { text: ['1girl, solo, silver hair, blue eyes'] } } } })
+    if (Object.keys(submitted).includes('12')) {
+      return json({ p1: { status: { completed: true, status_str: 'success' }, outputs: {
+        8: { images: [{ filename: 'base.png', subfolder: 'm', type: 'output' }] },
+        10: { images: [{ filename: 'mid.png', subfolder: 'm', type: 'output' }] },
+        12: { images: [{ filename: 'final.png', subfolder: 'm', type: 'output' }] },
+      } } })
+    }
     return json({ p1: { status: { completed: true, status_str: 'success' }, outputs: { 8: { images: [{ filename: 'out.png', subfolder: '', type: 'output' }] } } } })
   }
   if (u.pathname === '/view') { res.setHeader('Content-Type', 'image/png'); return res.end(PNG) }
@@ -170,6 +190,22 @@ await test('自动选（画图）排除反推类工作流', async () => {
   await o.draw()
   const txt = o._replies[0] || ''
   ok(/1\. 01_txt2img\.json/.test(txt), `纯文字自动选文生图（非反推）：${txt.split('\n')[0]}`)
+})
+
+await test('#画图（多段式）：默认只发最终成品 + 提示可加 --all；--all 全发', async () => {
+  const o = inst({ msg: '#画图4 关键字', uid: 'm1' })
+  await o.draw()
+  const imgs = o._replies.filter((m) => m && m.type === 'image')
+  ok(imgs.length === 1, `只发 1 张（最终成品），实际 ${imgs.length}`)
+  ok(/另有 2 张中间步骤图未发，加 --all 可一起发/.test(o._replies.join('\n')), '提示可加 --all 补发')
+  ok(/seed \d+/.test(o._replies.join('\n')), '完成提示含 seed')
+
+  const o2 = inst({ msg: '#画图4 关键字 --all', uid: 'm2' })
+  await o2.draw()
+  const imgs2 = o2._replies.filter((m) => m && m.type === 'image')
+  ok(imgs2.length === 3, `--all → 3 张全发，实际 ${imgs2.length}`)
+  ok(/--all：连中间步骤图一起发/.test(o2._replies[0] || ''), '进度提示标注 --all')
+  ok(!/中间步骤图未发/.test(o2._replies.join('\n')), '全发时不再提示补发')
 })
 
 await test('冷却：同用户连发第二次被拦（command.cooldown）', async () => {

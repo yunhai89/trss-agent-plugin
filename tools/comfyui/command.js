@@ -22,9 +22,10 @@ export function kindText(kinds = []) {
 
 /**
  * 解析指令文本：
- *   #画图1 关键字   → { n:1, prompt:'关键字' }
- *   #画图 关键字    → { n:null, prompt:'关键字' }（自动选工作流）
- *   #画图1          → { n:1, prompt:'' }（用工作流自带默认提示词）
+ *   #画图1 关键字        → { n:1, prompt:'关键字' }
+ *   #画图 关键字         → { n:null, prompt:'关键字' }（自动选工作流）
+ *   #画图1              → { n:1, prompt:'' }（用工作流自带默认提示词）
+ *   #画图2 关键字 --all  → 连中间步骤图一起发（默认只发最终成品）
  * 注意：「#画图 5月的天空」里的 5 不是编号（数字后必须跟空白/结尾才算编号）。
  */
 export function parseDraw(text) {
@@ -39,7 +40,10 @@ export function parseDraw(text) {
     body = rest.slice(m[0].length)
   }
   if (n != null && n < 1) return { error: '工作流编号从 1 开始（见 #画图列表）' }
-  return { n, prompt: body.trim() }
+  // --all / --全部：连中间步骤图一起发（默认只发最终成品）
+  let allSteps = false
+  const cleaned = body.replace(/(^|\s)--?(all|全部)(?=\s|$)/gi, (mm, pre) => { allSteps = true; return pre })
+  return { n, prompt: cleaned.trim(), allSteps }
 }
 
 /**
@@ -69,6 +73,7 @@ export function formatWorkflowList(items, { max = 12 } = {}) {
   lines.push('用法：#画图<编号> <关键字>｜例：#画图1 银发少女 樱花')
   lines.push('不带编号=自动选（配图→图生图；纯文字→文生图）；「需配图」的工作流请随消息附图或引用一张图')
   lines.push('提示词反推：#反推（附图或引用一张图）→ 返回 Danbooru 风格标签，可直接拿去画图')
+  lines.push('多段式工作流默认只发最终成品；要看底图/修脸/修手等中间步骤加 --all（如 #画图2 关键字 --all）')
   lines.push('改图类工作流默认只做轻度变化（沿用工作流自带 denoise）；想大改可让 AI 画（可调 denoise 0.6~0.8）')
   return lines.join('\n')
 }
