@@ -439,7 +439,7 @@
                 <cfg-row name="超龄遗忘(天)"><input type="number" class="inp" style="width:100px" min="7" v-model.number="form.memory.forgetDays"></cfg-row>
               </div>
             </div>
-            <div class="full" style="margin-top:8px;padding:10px 14px;border:1px dashed var(--line);border-radius:10px;background:rgba(255,255,255,.42)">
+            <div class="full" style="margin-top:8px;padding:10px 14px;border:1px dashed var(--line);border-radius:10px;background:var(--paper-2)">
               <div class="mut2" style="font-size:12px;line-height:1.7">
                 <b>运行期可观察</b>：群里发 <code>#伪人状态</code> 看活跃运行时；<code>#伪人决策 [n]</code> 看最近 n 条门控/规划 trace；<code>#伪人记忆 [群号]</code> 看独立记忆库（每日 04:47 自动整合近期对话为长时记忆，回复时按相关性注入）；
                 <code>#伪人开关 on|off</code> 快速切换。保存本页即热加载生效（进行中的规划会被取消）。

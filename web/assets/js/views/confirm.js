@@ -64,13 +64,13 @@
     <div>
       <div class="card pad row-b wrap g14" style="--i:0">
         <div class="ct">
-          <span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="confirm"/></span>
+          <span class="ct-ico" style="background:var(--cinnabar)"><v-icon name="confirm"/></span>
           <div>
             <div class="ct-t">待审批队列</div>
             <div class="ct-s">工具确认=纯内存不持久化 · 超时({{ TIMEOUT / 1000 }}s)自动拒绝；人设采纳=持久待审 · 须批准才生效</div>
           </div>
         </div>
-        <span class="pill" :class="(items.length + adoptions.length) ? 'p-honey' : 'p-green'" style="font-size:13px;padding:7px 15px">
+        <span class="pill" :class="(items.length + adoptions.length) ? 'p-rose' : 'p-green'" style="font-size:13px;padding:7px 15px">
           {{ (items.length + adoptions.length) ? (items.length + adoptions.length) + ' 条待审批' : '队列已清空' }}
         </span>
       </div>
@@ -78,7 +78,7 @@
       <!-- 人设资料采纳待审（持久） -->
       <div v-if="adoptions.length" class="card pad" style="margin-top:16px;--i:1">
         <div class="ct" style="margin-bottom:12px">
-          <span class="ct-ico" style="background:var(--grad-vio)"><v-icon name="persona"/></span>
+          <span class="ct-ico" style="background:var(--pri)"><v-icon name="persona"/></span>
           <div>
             <div class="ct-t">人设资料采纳待审</div>
             <div class="ct-s">#采纳补齐 /  Web 采纳 会先进入此队列；批准后草稿才 draft→active 并注入身份层</div>
@@ -88,7 +88,7 @@
           <div v-for="a in adoptions" :key="a.id" class="card pad lift">
             <div class="row-b wrap g10">
               <div class="row g6 wrap">
-                <span class="pill p-vio"><v-icon name="persona"/>{{ a.personaName || a.personaId }}</span>
+                <span class="pill p-pri"><v-icon name="persona"/>{{ a.personaName || a.personaId }}</span>
                 <span class="pill p-line mono">#{{ a.id }}</span>
                 <span class="pill p-line mono">{{ a.personaId }}</span>
               </div>
@@ -108,7 +108,7 @@
       </div>
 
       <div class="ct" v-if="items.length" style="margin:18px 2px 10px">
-        <span class="ct-ico" style="background:var(--grad-honey)"><v-icon name="confirm"/></span>
+        <span class="ct-ico" style="background:var(--cinnabar)"><v-icon name="confirm"/></span>
         <div><div class="ct-t">工具确认</div><div class="ct-s">需二次确认的工具（stagehand act / 定时任务等）</div></div>
       </div>
       <TransitionGroup name="list" tag="div" class="grid g2" :style="{marginTop: items.length ? '0' : '16px', position:'relative'}">
@@ -117,9 +117,9 @@
             <!-- 倒计时环 -->
             <div class="cd-ring">
               <svg width="46" height="46">
-                <circle cx="23" cy="23" r="19" fill="none" stroke="rgba(104,116,186,.16)" stroke-width="5"/>
+                <circle cx="23" cy="23" r="19" fill="none" stroke="var(--well)" stroke-width="5"/>
                 <circle cx="23" cy="23" r="19" fill="none" stroke-linecap="round" stroke-width="5"
-                  :stroke="remainPct(c) > 40 ? 'var(--mint)' : 'var(--rose)'"
+                  :stroke="remainPct(c) > 40 ? 'var(--pri)' : 'var(--cinnabar)'"
                   :stroke-dasharray="2 * Math.PI * 19" :stroke-dashoffset="ringOffset(c)"
                   style="transition:stroke-dashoffset 1s linear, stroke .5s"/>
               </svg>

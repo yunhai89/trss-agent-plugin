@@ -67,7 +67,7 @@
 
       <!-- 消息流 -->
       <div class="card" style="--i:1;overflow:hidden">
-        <div class="row-b wrap g10" style="padding:15px 20px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.38)">
+        <div class="row-b wrap g10" style="padding:15px 20px;border-bottom:1px solid var(--line);background:var(--paper-2)">
           <div style="min-width:0">
             <div style="font-weight:800;font-size:14px">{{ conv?.title || '会话回放' }}</div>
             <div class="mut2 mono ell" style="font-size:11px">{{ session.key }}</div>

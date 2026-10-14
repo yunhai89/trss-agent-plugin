@@ -166,7 +166,7 @@
     template: `
     <div>
       <!-- 顶栏：配置 / 数据浏览 -->
-      <div class="seg" style="display:inline-flex;margin-bottom:14px;background:var(--card,rgba(255,255,255,.7));border:1px solid var(--line);border-radius:10px;padding:3px">
+      <div class="seg" style="display:inline-flex;margin-bottom:14px;background:var(--paper-2);border:1px solid var(--line);border-radius:10px;padding:3px">
         <button class="btn" :class="tab==='config' ? 'b-pri' : 'b-line'" @click="switchTab('config')"><v-icon name="config"/> 配置</button>
         <button class="btn" :class="tab==='data' ? 'b-pri' : 'b-line'" @click="switchTab('data')"><v-icon name="group"/> 数据浏览</button>
       </div>

@@ -104,7 +104,7 @@
             <div class="diff-p old"><div class="diff-tag" style="color:var(--rose)">旧值 payload</div>{{ s.payload }}</div>
             <div class="diff-p new"><div class="diff-tag" style="color:var(--green)">新值 newPayload</div>{{ s.newPayload }}</div>
           </div>
-          <p v-else class="mt12" style="font-size:13px;padding:10px 14px;border-radius:12px;background:rgba(255,255,255,.5);border:1px solid var(--line)">{{ s.payload }}</p>
+          <p v-else class="mt12" style="font-size:13px;padding:10px 14px;border-radius:12px;background:var(--paper-2);border:1px solid var(--line)">{{ s.payload }}</p>
 
           <div class="row-b wrap mt12" style="align-items:center">
             <span class="mut2" style="font-size:11.5px">

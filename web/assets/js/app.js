@@ -79,7 +79,6 @@
       const go = (id) => { location.hash = '#/' + id; menuOpen.value = false }
       const view = computed(() => window.VIEWS[route.value])
       const title = computed(() => TITLES[route.value] || ['', ''])
-      const group = computed(() => (NAV.find((g) => g.items.some((it) => it.id === route.value)) || {}).group || '')
 
       // 登录态：URL ?token= 落地 → localStorage；无 token 显示登录框
       const loggedIn = ref(false)
@@ -103,7 +102,7 @@
         try { await window.store.loadScopes() } catch { /* 未登录或运行时未就绪，各页 load 时再处理 */ }
       })
 
-      return { route, go, view, title, group, NAV, DOCK, menuOpen, loggedIn, loginInput, doLogin, logout }
+      return { route, go, view, title, NAV, DOCK, menuOpen, loggedIn, loginInput, doLogin, logout }
     },
     template: `
     <div v-if="!loggedIn" class="login-wrap">
@@ -140,10 +139,7 @@
       <div class="stage">
         <!-- PC 胶囊顶栏 -->
         <header class="bar">
-          <div>
-            <div class="bar-ts">{{ group }}</div>
-            <div class="bar-tt">{{ title[0] }}</div>
-          </div>
+          <div class="bar-tt">{{ title[0] }}</div>
           <div class="bar-acts">
             <span class="pill p-mint"><span class="st-dot"></span>运行中</span>
             <button class="bar-btn" @click="logout" title="退出登录"><v-icon name="logout"/>退出</button>
@@ -152,10 +148,7 @@
         <!-- 移动端顶条 -->
         <header class="m-top">
           <div class="brand-badge"><v-icon name="bot"/></div>
-          <div>
-            <div class="mut2" style="font-size:10.5px;line-height:1.2">{{ group }}</div>
-            <div class="m-tt">{{ title[0] }}</div>
-          </div>
+          <div class="m-tt">{{ title[0] }}</div>
           <button class="m-x" @click="logout" title="退出登录"><v-icon name="logout"/></button>
         </header>
         <main class="page">

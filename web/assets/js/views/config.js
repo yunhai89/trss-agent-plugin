@@ -1522,7 +1522,7 @@
               </cfg-row>
               <cfg-row class="full" name="常驻工具" desc="不经搜索始终可用；从已注册工具勾选（留空=用内置默认）">
                 <div v-if="!allTools.length" class="mut2" style="font-size:12px">工具列表加载中或运行时未就绪…</div>
-                <div v-else style="max-height:220px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:8px 12px;background:rgba(255,255,255,.42)">
+                <div v-else style="max-height:220px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:8px 12px;background:var(--paper-2)">
                   <div v-for="cat in toolCats" :key="cat" style="margin-bottom:8px">
                     <div class="mut" style="font-size:11px;margin:3px 0 4px;text-transform:uppercase;letter-spacing:.5px">{{ cat }}</div>
                     <div style="display:flex;flex-wrap:wrap;gap:4px">

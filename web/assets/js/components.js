@@ -206,7 +206,7 @@
       <svg :width="size" :height="size">
         <defs>
           <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stop-color="#8b5cf6"/><stop offset="55%" stop-color="#6366f1"/><stop offset="100%" stop-color="#38bdf8"/>
+            <stop offset="0%" style="stop-color:var(--pri2)"/><stop offset="100%" style="stop-color:var(--pri)"/>
           </linearGradient>
         </defs>
         <circle class="ring-t" :cx="size/2" :cy="size/2" :r="r" :stroke-width="stroke"/>
