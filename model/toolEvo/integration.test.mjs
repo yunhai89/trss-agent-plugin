@@ -17,6 +17,14 @@ import { seedBuiltinTools } from './seed.js'
 import { evaluateVersion, failureClusters, convergenceMetrics } from './evaluator.js'
 import { applySuggestion, listPendingSuggestions } from '../evolution/review.js'
 
+// 本地隔离执行面不可用（缺 unshare 网络命名空间 / Node --permission，如 GitHub Actions 容器）
+// → 本文件全部用例依赖真实隔离执行，按仓库约定优雅跳过（runner 计「跳过」，不计失败）
+import { detectIsolation } from './isolation.js'
+if (!detectIsolation()) {
+  console.log('SKIP_FILE: 本地隔离执行面不可用（需要 unshare 网络命名空间 + Node --permission），跳过 toolEvo 执行链路测试')
+  process.exit(0)
+}
+
 let passed = 0, failed = 0
 async function test(name, fn) { console.log(`\n[${name}]`); try { await fn(); passed++ } catch (e) { failed++; console.error('  ✗', name, '—', e?.message || e); console.error(e?.stack?.split('\n').slice(1, 4).join('\n')) } }
 
