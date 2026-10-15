@@ -14,6 +14,8 @@
  *     （GBK/Big5 等乱码修复）、挑战页/JS 空壳识别（不把「Just a moment」「加载中」当正文）、
  *     Retry-After 退避重试。
  *
+ * 执行面（与 diagram 的本机 Kroki 同类）：crawl4ai 是**本地引擎**，跑宿主 venv，
+ * 默认不随 agent.sandbox.mode 进 E2B 沙箱（kb.crawl.execution=sandbox 时才显式改在会话沙箱内执行）。
  * 依赖 cheerio（npm，结构化选择器去噪）。未装 crawl4ai 时自动降级 fetch（scripts/install-crawl4ai.sh）。
  */
 
@@ -460,6 +462,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
  * - stealth：浏览器路径反检测默认开（显式 false 可关）
  * - retryBlocked：被反爬拦截时强化模式再试一轮（默认开）
  * - allowPrivateHosts：允许抓取本机/内网（默认 false，防 SSRF）
+ * 注：执行面（本地 venv / E2B 沙箱）不在本函数——见 resolveCrawlExecution（需要工具 ctx）。
  */
 export function resolveCrawlPolicy(cfg = {}, opts = {}) {
   const c = cfg?.crawl || {}
@@ -470,6 +473,33 @@ export function resolveCrawlPolicy(cfg = {}, opts = {}) {
     retryBlocked: tri(opts.retryBlocked, c.retryBlocked !== false),
     allowPrivateHosts: tri(opts.allowPrivateHosts, c.allowPrivateHosts === true),
   }
+}
+
+/**
+ * 抓取执行面解析（纯函数，可离线测试）：crawl4ai 是本地引擎（宿主 venv），
+ * 默认**不随** agent.sandbox.mode 进沙箱——与 diagram 的本机 Kroki 同类：固定能力的本机引擎，
+ * 走了沙箱反而丢掉已装好的浏览器（沙箱模板缺 crawl4ai 时整条链路恒降级 fetch）。
+ * - kb.crawl.execution: 'local'（默认）：宿主 venv crawl4ai；未装自动降级纯 HTTP fetch。
+ * - kb.crawl.execution: 'sandbox'（显式选择）：会话沙箱内 crawl4ai（需 agent.sandbox.mode=e2b；
+ *   沙箱模板需预装 crawl4ai）；沙箱未就绪时拒绝宿主 crawl4ai、降级纯 HTTP fetch（与旧行为一致）。
+ * 配置矛盾（execution=sandbox 但 mode≠e2b）按本地执行并记 note（以可用能力为准，不静默失败）。
+ * @param {object} cfg agent.kb 配置块（execution 在 cfg.crawl.execution）
+ * @param {object} ctx 工具上下文（ctx.sandbox 由 apps/agent.js 装配）
+ * @returns {{ execution:'local'|'sandbox', box:object|null, sandboxRefused:boolean, note:string|null }}
+ *   execution 为**实际生效**的执行面（矛盾配置下是 local，不是配置字面值）。
+ */
+export function resolveCrawlExecution(cfg = {}, ctx = {}) {
+  const execution = String(cfg?.crawl?.execution || 'local').trim().toLowerCase() === 'sandbox' ? 'sandbox' : 'local'
+  if (execution !== 'sandbox') return { execution, box: null, sandboxRefused: false, note: null }
+  const box = toolSandbox(ctx)
+  if (box) return { execution, box, sandboxRefused: false, note: null }
+  if (sandboxSelected(ctx)) {
+    return {
+      execution, box: null, sandboxRefused: true,
+      note: '沙箱未就绪（kb.crawl.execution=sandbox 且 agent.sandbox.mode=e2b，但沙箱不可用；不跑宿主 crawl4ai）',
+    }
+  }
+  return { execution: 'local', box: null, sandboxRefused: false, note: 'kb.crawl.execution=sandbox 需要 agent.sandbox.mode=e2b，本次按本地 crawl4ai 执行' }
 }
 
 /**
@@ -614,7 +644,11 @@ export async function crawlUrl(url, opts = {}) {
       // 打印探测失败原因 + 实际解释器路径：多个插件副本时能直接看出「venv 装到了另一个目录」
       const why = probe?.reason || 'venv 未安装'
       const py = probe?.python ? `；解释器 ${probe.python}` : ''
-      Log.warn(`[crawl] crawl4ai 不可用（${why}${py}；跑 scripts/install-crawl4ai.sh 启用真浏览器渲染），走 fetch`)
+      // 修复提示按执行面给出：沙箱档的宿主安装脚本对它无效（模板需预装 crawl4ai），本地档才指向安装脚本
+      const fix = probe?.sandbox
+        ? (probe.hint || '把 crawl4ai 装进 agent.sandbox.template 指向的 E2B 模板')
+        : '跑 scripts/install-crawl4ai.sh 启用真浏览器渲染'
+      Log.warn(`[crawl] crawl4ai 不可用（${why}${py}；${fix}），走 fetch`)
     }
   }
   if (!r?.success) {
@@ -665,15 +699,21 @@ export const webCrawlTool = {
     const u = String(url || '').trim()
     if (!/^https?:\/\//i.test(u)) return { error: 'url 需以 http:// 或 https:// 开头' }
     if (wait_for && !/^(css:|js:)/.test(String(wait_for).trim())) return { error: 'wait_for 需以 css: 或 js: 开头' }
-    // 执行面：显式选择 E2B 时 crawl4ai 只在会话沙箱内跑（宿主 python 子进程不启动）；
-    // 沙箱不可用/模板缺 crawl4ai → crawlUrl 自动降级纯 HTTP fetch（非 shell，结果标注 via/degraded）。
-    const box = toolSandbox(ctx)
+    // 执行面：crawl4ai 是本地引擎（宿主 venv），默认不受 sandbox.mode 影响——
+    // 仅当 kb.crawl.execution=sandbox（且 mode=e2b）时才改在会话沙箱内跑（宿主 python 子进程不启动）；
+    // 该档下沙箱不可用/模板缺 crawl4ai → crawlUrl 自动降级纯 HTTP fetch（非 shell，结果标注 via/degraded）。
+    const exec = resolveCrawlExecution(kbCfg(), ctx)
+    if (exec.note) Log.warn(`[crawl] web_crawl ${exec.note}`)
     const engineOverride = {}
-    if (box) {
+    if (exec.box) {
+      const box = exec.box
       engineOverride._avail = () => probeCrawl4aiInSandbox(box)
       engineOverride._c4ai = (target, o) => runCrawl4aiInSandbox(box, target, o)
-    } else if (sandboxSelected(ctx)) {
-      engineOverride._avail = async () => ({ ok: false, reason: '沙箱未就绪（已显式选择 e2b，不跑宿主 crawl4ai）；修复 E2B 配置后重试' })
+    } else if (exec.sandboxRefused) {
+      engineOverride._avail = async () => ({
+        ok: false, sandbox: true, reason: exec.note,
+        hint: '修复 E2B 配置后重试；或把 kb.crawl.execution 改回 local 用宿主 crawl4ai',
+      })
     }
     const r = await crawlUrl(u, {
       ...(args.engine ? { engine: String(args.engine) } : {}), // 调用方强制引擎（测试/诊断；生产走配置默认）

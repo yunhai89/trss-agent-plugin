@@ -15,7 +15,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { runCrawl4ai, isCrawl4aiAvailable, resetCrawl4aiProbe, CRAWL4AI_TIMEOUTS } from './crawl4ai.js'
-import { crawlUrl, resolveCrawlPolicy, checkTargetAllowed, isBlockSignal } from './index.js'
+import { crawlUrl, resolveCrawlPolicy, resolveCrawlExecution, checkTargetAllowed, isBlockSignal } from './index.js'
 
 let passed = 0
 let failed = 0
@@ -360,6 +360,33 @@ await test('策略解析：stealth/retryBlocked 默认开，allowPrivateHosts �
   const p3 = resolveCrawlPolicy({ crawl: { stealth: true } }, { stealth: false, engine: 'fetch' })
   eq2(p3.stealth, false, 'opts 显式值优先于配置')
   eq2(p3.engine, 'fetch', 'opts engine 优先')
+})
+
+await test('执行面解析：crawl4ai 默认本地（不随 sandbox.mode 进沙箱）', async () => {
+  const e2bCtx = { sandbox: { mode: 'e2b', manager: { fake: true } } }
+  // ① 默认（无 execution）→ local：即便 mode=e2b 也不把 crawl4ai 塞进沙箱
+  const d1 = resolveCrawlExecution({ crawl: {} }, e2bCtx)
+  eq2(d1.execution, 'local', '默认执行面 local')
+  eq2(d1.box, null, '默认不取沙箱句柄（宿主 venv crawl4ai）')
+  eq2(d1.sandboxRefused, false, '默认不进入拒绝态')
+  eq2(resolveCrawlExecution({}, { sandbox: { mode: 'e2b', manager: null } }).execution, 'local', '无 kb 配置同样默认 local')
+  // ② execution=sandbox 且沙箱就绪 → 沙箱句柄
+  const d2 = resolveCrawlExecution({ crawl: { execution: 'sandbox' } }, e2bCtx)
+  eq2(d2.execution, 'sandbox', '显式 sandbox')
+  ok(d2.box?.manager?.fake === true, '取得会话沙箱句柄')
+  eq2(d2.sandboxRefused, false, '就绪时不是拒绝态')
+  // ③ execution=sandbox + mode=e2b 但沙箱不可用 → 拒绝宿主 crawl4ai（降级 fetch 由 crawlUrl 兜底）
+  const d3 = resolveCrawlExecution({ crawl: { execution: 'sandbox' } }, { sandbox: { mode: 'e2b', manager: null } })
+  eq2(d3.sandboxRefused, true, '沙箱未就绪 → 拒绝宿主 crawl4ai')
+  ok(String(d3.note).includes('沙箱未就绪'), '拒绝原因可读')
+  // ④ execution=sandbox 但 mode≠e2b（配置矛盾）→ 按本地执行 + 可读提示（不静默失败）
+  const d4 = resolveCrawlExecution({ crawl: { execution: 'sandbox' } }, { sandbox: { mode: 'off', manager: null } })
+  eq2(d4.execution, 'local', '矛盾配置按本地执行')
+  eq2(d4.box, null, '无沙箱句柄')
+  ok(String(d4.note).includes('agent.sandbox.mode=e2b'), '给出矛盾配置提示')
+  // ⑤ 大小写/空白容错
+  eq2(resolveCrawlExecution({ crawl: { execution: '  SANDBOX ' } }, e2bCtx).execution, 'sandbox', 'trim+小写归一')
+  eq2(resolveCrawlExecution({ crawl: { execution: 'host' } }, e2bCtx).execution, 'local', '未知取值回退 local')
 })
 
 await test('拦截升级：命中反爬 → undetected+stealth 强化重试一轮，成功带 escalated 标记', async () => {

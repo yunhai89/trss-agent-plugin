@@ -126,7 +126,7 @@
 本插件提供**终端（shell）执行能力**，命令跑在 **E2B 沙箱**（Firecracker microVM）里：
 
 - 命令在**独立微虚机内执行**：宿主文件/进程不可见，网络出口**默认放通全部**（与 E2B 自身默认一致）；需要收紧时配 `agent.sandbox.network.allowOut` 白名单（配了只放行白名单，其余全拒），也可 `allowInternet:false` 显式断网。
-- **内置工具的 shell 子进程同样收进沙箱**（2025-10 起）：`calculate`（python）/`web_download`（yt-dlp）/`transcribe_media`（ffmpeg）/`file_to_pdf`（soffice）/`web_crawl`（crawl4ai）/`install_skill`（skillhub）在 `mode: e2b` 后都在会话沙箱内执行；沙箱不可用即 fail-closed，不回落宿主（详见「终端执行」一节的对照表）。
+- **内置工具的 shell 子进程同样收进沙箱**（2025-10 起）：`calculate`（python）/`web_download`（yt-dlp）/`transcribe_media`（ffmpeg）/`file_to_pdf`（soffice）/`install_skill`（skillhub）在 `mode: e2b` 后都在会话沙箱内执行；沙箱不可用即 fail-closed，不回落宿主（详见「终端执行」一节的对照表）。例外：`web_crawl` 的 crawl4ai 是**本机引擎**（宿主 venv，与 diagram 的本机 Kroki 同类），默认不受沙箱模式影响（见下）。
 - terminal **全员可用**（无身份门槛、无验证码认领）：每个会话（群/用户/对话）独占一个沙箱、文件系统互不可见；沙箱化后**不再有逐条 `#确认` 审批与命令黑名单**（破坏面已被 microVM 限制），成本由单会话命令数上限、单命令超时上限与并发沙箱上限兜底。
 - **终端默认关闭**（`agent.sandbox.mode` 默认 `off`，此时 terminal 工具**根本不注册**），需自行准备 E2B（自托管或云）并填 `apiKey` 后开启。
 - **连不上 E2B 时一律拒绝执行**（fail-closed），**绝不回退到主机执行**——本插件已删除宿主 shell 执行面。
@@ -648,7 +648,7 @@ tts:
 
 `terminal` 工具让 Agent 在 **E2B 微虚机**里执行 shell 命令。宿主上**没有任何模型可驱动的 shell 执行面**（旧主机执行路径已删除），拿不到沙箱就拒绝执行。
 
-**同类执行面（2025-10 起）**：内置工具里凡涉及 shell/子进程的，显式选择 `mode: e2b` 后一律改在**会话沙箱内**执行，宿主不再起这些子进程：
+**同类执行面（2025-10 起）**：内置工具里凡涉及 shell/子进程的，显式选择 `mode: e2b` 后一律改在**会话沙箱内**执行，宿主不再起这些子进程（唯一例外是 `web_crawl` 的 crawl4ai，它是本机引擎，见下表末行）：
 
 | 工具 | 宿主档（mode=off） | 沙箱档（mode=e2b） |
 | --- | --- | --- |
@@ -657,10 +657,12 @@ tts:
 | `web_download` | 宿主 `yt-dlp` | 沙箱内 `yt-dlp`，产物流式拉回宿主再发送 |
 | `transcribe_media` | 宿主 `ffmpeg` 提取音频 | 沙箱内 `ffmpeg` 提取，mp3 拉回宿主再调 STT API（Key 不进沙箱） |
 | `file_to_pdf` | 宿主 `soffice` | 沙箱内 `soffice`，PDF 拉回；沙箱缺 soffice 时回退纯 JS 渲染（无 shell） |
-| `web_crawl` | 宿主 python crawl4ai | 沙箱内 crawl4ai（脚本+请求文件上传）；沙箱缺 crawl4ai → 降级纯 HTTP fetch |
+| `web_crawl` | 宿主 python crawl4ai（**默认恒走这里**：本地引擎，与 sandbox.mode 无关，同 diagram 的本机 Kroki） | 仅当 `agent.kb.crawl.execution: sandbox` 时在沙箱内 crawl4ai（脚本+请求文件上传，模板需预装 crawl4ai）；沙箱缺 crawl4ai → 降级纯 HTTP fetch |
 | `install_skill` | 宿主 `skillhub`（固定 argv） | 沙箱内 `skillhub`，只回传 `.md` 产物，校验后进宿主 skills/ |
 
 > 沙箱不可用（E2B 连不上/初始化失败）时这些工具一律 **fail-closed** 结构化失败，**绝不回落宿主执行**；沙箱模板缺依赖（`python3`/`yt-dlp`/`ffmpeg`/`soffice`/`crawl4ai`/`skillhub`）会返回可读提示，请把它们装进 `agent.sandbox.template` 指向的模板。命令同样计入 `maxCommandsPerSession`（与 terminal 共用会话预算），输入/产物的文件传输走流式（大文件不整块进内存）。
+>
+> `web_crawl` 例外说明：crawl4ai 是**本机引擎**（宿主 venv，`scripts/install-crawl4ai.sh` 装的就是它；与 diagram 的本机 Kroki 同类），默认**不随** `sandbox.mode` 进沙箱——否则沙箱模板没预装 crawl4ai 时整条抓取链路会恒降级 fetch，反倒丢掉宿主已装好的浏览器。想让网页渲染在沙箱内发生时，显式配 `agent.kb.crawl.execution: sandbox`（需 `mode: e2b` + 模板预装 crawl4ai；该档沙箱未就绪时降级纯 HTTP fetch，不改跑宿主 crawl4ai）。
 
 **接入准备**（二选一，详见仓库内 `e2b-infra-nodejs-安全shell接入开发文档.md`）：
 - **E2B 云**：只填 `sandbox.apiKey`（注意：命令与文件会送往第三方）。

@@ -52,7 +52,7 @@
     maxTokens: null,
     contextWindow: 32000,
     compaction: { enable: true, archiveDir: 'data/context-archive' },
-    kb: { crawl: { engine: 'crawl4ai' } },
+    kb: { crawl: { engine: 'crawl4ai', execution: 'local' } },
     maxToolResultChars: 8000,
     keepReasoning: false,
     stream: false,

@@ -101,6 +101,7 @@
     researchPerm: [['master', '仅主人(防滥用)'], ['all', '所有人']],
     shMode: [['local', 'local 本地(Playwright+chromium,默认)'], ['cloud', 'cloud Browserbase 云']],
     crawlEngine: [['crawl4ai', 'crawl4ai 真浏览器(默认)'], ['fetch', 'fetch 纯 HTTP']],
+    crawlExec: [['local', 'local 宿主 venv(默认)'], ['sandbox', 'sandbox 会话沙箱']],
     dgRenderer: [['kroki', 'kroki 自托管容器(默认)']],
     dgFallback: [['none', '无(结构化失败)'], ['beautiful-mermaid', '本地 beautiful-mermaid']],
     dgTheme: [['paper-blue', '米白纸蓝'], ['soft-pastel', '柔和粉彩'], ['technical', '技术蓝灰'], ['midnight', '午夜深色'], ['sketch', '手绘素描(仅D2)']],
@@ -176,6 +177,7 @@
         if (!form.kb) form.kb = {}
         if (!form.kb.crawl) form.kb.crawl = {}
         if (form.kb.crawl.engine == null) form.kb.crawl.engine = 'crawl4ai'
+        if (form.kb.crawl.execution == null) form.kb.crawl.execution = 'local'
         if (form.kb.crawl.stealth == null) form.kb.crawl.stealth = true
         if (form.kb.crawl.retryBlocked == null) form.kb.crawl.retryBlocked = true
         if (form.kb.crawl.allowPrivateHosts == null) form.kb.crawl.allowPrivateHosts = false
@@ -1552,6 +1554,10 @@
 
             <cfg-row name="网页抓取引擎" desc="crawl4ai 真浏览器渲染(未装自动降级 fetch)">
               <select class="sel" style="width:150px" v-model="form.kb.crawl.engine"><option v-for="o in OPT.crawlEngine" :value="o[0]">{{ o[1] }}</option></select>
+            </cfg-row>
+
+            <cfg-row name="抓取执行面" desc="execution：local=宿主 crawl4ai 本地引擎(默认，不受沙箱模式影响)；sandbox=只在 E2B 会话沙箱内跑(需 mode=e2b+模板预装)">
+              <select class="sel" style="width:170px" v-model="form.kb.crawl.execution"><option v-for="o in OPT.crawlExec" :value="o[0]">{{ o[1] }}</option></select>
             </cfg-row>
 
             <div class="note n-honey full">

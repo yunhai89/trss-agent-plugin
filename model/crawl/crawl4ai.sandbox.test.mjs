@@ -166,6 +166,17 @@ await test('probeCrawl4aiInSandbox：可用判定 + 按沙箱缓存（不重复�
     ok(String(r.reason).includes('crawl4ai'), '原因可读（模板未装 crawl4ai）')
     ok(!!r.hint, '给出修复提示')
   } finally { await box2.shutdown() }
+
+  // importlib.metadata 对未安装的包抛 PackageNotFoundError（真实 E2B 模板即此形态）——
+  // 必须同样报「模板未装 crawl4ai」，不能退化成无信息量的「沙箱内探测失败（1）」
+  const t3 = stubTransport({ runImpl: () => makeHandle({ exitCode: 1, stderr: "importlib.metadata.PackageNotFoundError: No package metadata was found for crawl4ai\n" }) })
+  const box3 = mkBox(t3)
+  try {
+    const r = await probeCrawl4aiInSandbox(boxOf(box3))
+    eq(r.ok, false, 'PackageNotFoundError 判不可用')
+    ok(String(r.reason).includes('模板未装 crawl4ai'), `原因可读（实际 ${r.reason}）`)
+    ok(r.sandbox === true, '标注沙箱执行面（日志据此给沙箱修复提示，不再误导跑宿主安装脚本）')
+  } finally { await box3.shutdown() }
 })
 
 // ---------- 6. 脚本不可读 ----------

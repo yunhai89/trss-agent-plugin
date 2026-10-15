@@ -14,9 +14,12 @@
  * venv 由 scripts/install-crawl4ai.sh 创建；未安装时 isCrawl4aiAvailable() 探测失败，
  * crawlUrl 自动降级 fetch+cheerio（保持现有降级语义）。
  *
- * 沙箱档（agent.sandbox.mode=e2b）：web_crawl 工具改经 runCrawl4aiInSandbox 在会话沙箱内执行
- * （上传脚本 + 请求文件 stdin 重定向，同一 python 协议与结果映射），宿主不再 spawn python；
- * 沙箱模板缺 crawl4ai 时探测失败 → crawlUrl 走 fetch 降级（纯 HTTP，非 shell）。
+ * 沙箱档（显式 kb.crawl.execution=sandbox，且 agent.sandbox.mode=e2b）：web_crawl 工具改经
+ * runCrawl4aiInSandbox 在会话沙箱内执行（上传脚本 + 请求文件 stdin 重定向，同一 python 协议与结果映射），
+ * 宿主不再 spawn python；沙箱模板缺 crawl4ai 时探测失败 → crawlUrl 走 fetch 降级（纯 HTTP，非 shell）。
+ * **默认档是本地**（执行面解析见 index.js 的 resolveCrawlExecution）：crawl4ai 与 diagram 的本机
+ * Kroki 同类，是固定能力的本机引擎，不随 sandbox.mode 进沙箱——沙箱模板没装 crawl4ai 时，
+ * 硬走沙箱会让整条链路恒降级 fetch，反而丢掉宿主已装好的浏览器。
  * 请求体拼装（buildCrawl4aiRequest）与结果映射（mapCrawl4aiOutput）两档共用，杜绝口径漂移。
  */
 import { spawn } from 'node:child_process'
@@ -285,7 +288,11 @@ export async function probeCrawl4aiInSandbox(box) {
     ? { ok: true, version: (String(r.stdout).trim().split('\n').pop() || 'unknown').slice(0, 40), sandbox: true }
     : {
         ok: false, sandbox: true,
-        reason: r.limited ? '本会话命令数已达上限' : (/ModuleNotFoundError|No module named/i.test(String(r.stderr)) ? '沙箱模板未装 crawl4ai' : `沙箱内探测失败（${r.sandboxError?.kind || r.exitCode || 'unknown'}）`),
+        // importlib.metadata 对未安装的包抛 PackageNotFoundError（不是 ModuleNotFoundError）——
+        // 两者都归入「模板未装」，否则退化成无信息量的「探测失败（1）」
+        reason: r.limited
+          ? '本会话命令数已达上限'
+          : (/ModuleNotFoundError|No module named|PackageNotFoundError|No package metadata/i.test(String(r.stderr)) ? '沙箱模板未装 crawl4ai' : `沙箱内探测失败（${r.sandboxError?.kind || r.exitCode || 'unknown'}）`),
         hint: '把 crawl4ai 装进 agent.sandbox.template 指向的 E2B 模板（scripts/install-crawl4ai.sh 是宿主安装，不适用沙箱）',
       }
   putCapped(_probeCache, key, { at: now, result })

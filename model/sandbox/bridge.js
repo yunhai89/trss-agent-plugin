@@ -3,10 +3,14 @@
  *
  * 背景（产品约定）：`agent.sandbox.mode=e2b` 表示执行面已显式选择 E2B 隔离沙箱；
  * 凡此前在宿主 spawn/execFile 的内置工具（calculate / web_download / transcribe_media /
- * file_to_pdf / web_crawl 爬虫引擎 / install_skill），一律改在会话沙箱内执行：
+ * file_to_pdf / install_skill），一律改在会话沙箱内执行：
  *   - mode=off（或未配置沙箱）→ 调用方走宿主路径（行为与旧版一致）；
  *   - mode=e2b 且沙箱就绪 → 在会话沙箱内执行（与本会话 terminal 共用同一 microVM）；
  *   - mode=e2b 但沙箱不可用 → 调用方必须 fail-closed 拒绝（**绝不回落宿主**）。
+ *
+ * 例外：web_crawl 的 crawl4ai 是**本机引擎**（宿主 venv，与 diagram 的本机 Kroki 同类），
+ * 默认不受 sandbox.mode 影响；仅当 `agent.kb.crawl.execution=sandbox` 显式选择时才走会话沙箱
+ * （见 model/crawl/index.js 的 resolveCrawlExecution）。
  *
  * 沙箱内的命令一律由插件拼装：固定 argv 片段 + shellQuote 引用的动态参数（URL/文件名等），
  * 不把不可信字符串直接拼进命令串；用户内容与宿主密钥都不进沙箱。

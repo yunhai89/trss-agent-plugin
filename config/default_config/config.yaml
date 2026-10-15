@@ -153,6 +153,9 @@ agent:
     crawl:
       engine: crawl4ai      # 网页抓取引擎：crawl4ai（默认。真浏览器渲染，SPA/JS 动态页可抓；
                             # 需先跑 scripts/install-crawl4ai.sh，未安装自动降级 fetch）| fetch（纯 HTTP+cheerio，零依赖）
+      execution: local      # 抓取执行面：local（默认）=宿主 venv crawl4ai（本地引擎，与 sandbox.mode 无关，
+                            # 同 diagram 的本机 Kroki）| sandbox=显式改在会话沙箱内跑（需 agent.sandbox.mode=e2b
+                            # 且模板预装 crawl4ai；沙箱未就绪即降级纯 HTTP fetch，不改跑宿主 crawl4ai）
       stealth: true         # 浏览器路径反检测（playwright-stealth + 模拟用户行为）；显式传 stealth:false 可单次关闭
       retryBlocked: true    # 被反爬拦截（403/CF 挑战等）时自动用 undetected+stealth 强化再试一轮（最坏耗时翻倍）
       allowPrivateHosts: false  # 允许抓取本机/内网/元数据地址（防 SSRF，默认禁）；确需抓内网页面再开
