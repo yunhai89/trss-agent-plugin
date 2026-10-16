@@ -715,6 +715,17 @@ export class Agent {
     // miss 263,317 token（占该窗口全部 miss 的 83.7%）。
     const memorySnapshot = ephemeral ? '' : this._memorySnapshot(scopeId)
     if (memorySnapshot) dynParts.push(memorySnapshot)
+    // 表情目录：**只在会话首轮注入一次**（走 user 消息），不进 system。
+    // 理由（2026-10-17 实机取证）：`agent.sticker.autoDiscover: true` 时任意群成员发一张图就会改变目录文本，
+    // 而目录位于 system prompt ⇒ 该用户/该群的下一个会话 system 变化，**跨会话**前缀缓存全部失效
+    // （14 个会话首轮指纹里 stickerVersion 有 4 种取值，其余 systemHash/toolHash/guardHash 全同；
+    //  会话 5 首轮 prompt 66,177 仅命中 4,096 = 6.2%）。受控探针证明 relay 前缀缓存**不按会话分桶**
+    // （换新 sessionId、同前缀仍 97.4% 命中）⇒ 目录一稳定，新会话即可复用 system+tools 前缀。
+    // 只注入首轮也避免了每轮重复写进历史（首轮之后靠历史里的这一段继续可见）。
+    if (!ephemeral && this.messages.length === 0) {
+      const stickerCatalog = this._stickerCatalog()
+      if (stickerCatalog) dynParts.push(stickerCatalog)
+    }
     if (recalledMemory) dynParts.push(this._screenUntrusted(recalledMemory, 'memory'))
     if (profileBlock) dynParts.push(this._screenUntrusted(profileBlock, 'profile'))
     // 周期意图路由提示：本轮明确是"每N小时/每天/每周…"的重复需求 → 必须用 schedule_task，勿用一次性提醒
@@ -1307,6 +1318,19 @@ export class Agent {
     }
   }
 
+  /**
+   * 表情目录文本（可用表情清单 + 使用规则），已过不可信边界标注（任意群成员发图即可触发采集）。
+   * **不准进 system prompt**：目录随自动发现变化，放 system 会让「发一张新图」打穿所有会话的前缀缓存。
+   * 由 run() 在**会话首轮**注入 user 消息尾部一次（见该处注释与实机指纹证据）。
+   */
+  _stickerCatalog() {
+    if (!this.stickers) return ''
+    try { return this._screenUntrusted(buildStickerPromptSection(this.stickers.catalog()), 'sticker_catalog') } catch (e) {
+      this.logger('warn', `[sticker] 表情目录读取失败，本会话不注入：${e?.message || e}`)
+      return ''
+    }
+  }
+
   _buildUserMessage(input, text) {
     if (input && typeof input === 'object' && !Array.isArray(input)) {
       // 多模态：apps 经 createMediaService.buildContent 构造的协议原生 content 数组
@@ -1371,9 +1395,12 @@ export class Agent {
     // 技能目录 / 声明式记忆 / 表情目录进 system：均为可被污染的内容（skillhub 安装、手改 MEMORY.md、
     // 任意群成员发图自动入库的表情描述），命中注入特征时加 <untrusted_data> 边界标注（不阻断，只提示按数据处理）。
     const skillsSection = this.skills ? this._screenUntrusted(buildSkillsPromptSection(this.skills.catalog()), 'skills_catalog') : ''
-    // ⚠ 表情目录此前未过 _screenUntrusted（2026-10-17 审计 B4）：apps/sticker-watch.js 任意群成员发图即可
-    // 触发采集，模型转写的 name/desc/tags 会进**跨群持久**的 system 段 —— 一张带指令文字的图就是系统层注入。
-    const stickerSection = this.stickers ? this._screenUntrusted(buildStickerPromptSection(this.stickers.catalog()), 'sticker_catalog') : ''
+    // 表情目录**不再进 system**（2026-10-17 缓存取证）：目录随自动发现变化（`autoDiscover: true` 时
+    // 任意群成员发图即触发），留在 system 里意味着「谁发了一张新图」就会改掉该用户/该群**后续所有会话**
+    // 前缀 —— 实机 14 个会话首轮指纹 stickerVersion 有 4 种取值，其余 systemHash/toolHash/guardHash 全同。
+    // 改由 run() 在**会话首轮**注入 user 消息尾部一次（仍过 _screenUntrusted，审计 B4：模型转写的
+    // name/desc/tags 属可被污染内容）。此处保持空串，breakdown/指纹字段保留以免下游读取处出现 undefined。
+    const stickerSection = ''
     // 声明式记忆**不再进 system**（见 run 里的 dynParts 与 _memorySnapshot 注释）：
     // 它在会话内会随 memory 工具写入而变化，留在 system 里等于每次写记忆都打穿其后全部历史前缀。
     const memorySnapshot = ''

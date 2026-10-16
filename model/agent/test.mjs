@@ -2500,6 +2500,35 @@ await test('缓存稳定性：会话内 memory 写入不改变 system（快照�
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+// ---------- 缓存：表情目录不得进 system（跨会话前缀复用） ----------
+await test('缓存稳定性：表情目录只进会话首轮 user 消息，system 不随目录变化（跨会话可复用前缀）', async () => {
+  let catalogText = '## 表情包\n- 笑: 开心'
+  const stickers = { catalog: () => catalogText }
+  const provider = mockProvider([
+    { content: '第一轮', finishReason: 'stop' },
+    { content: '第二轮', finishReason: 'stop' },
+    { content: '新会话', finishReason: 'stop' },
+  ])
+  const textOf = (call) => (call.messages || []).map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n')
+  const agent = new Agent({ provider, stickers, maxTurns: 2, reflect: 'off' })
+  await agent.run('你好')
+  const c1 = provider.calls.history[0]
+  eq(String(c1.system).includes('表情包'), false, 'system 不含表情目录（否则发现一张新图就打穿跨会话前缀缓存）')
+  eq(textOf(c1).includes('## 表情包'), true, '会话首轮的 user 消息里注入表情目录')
+  await agent.run('继续')
+  const c2 = provider.calls.history[1]
+  eq((textOf(c2).match(/## 表情包/g) || []).length, 1, '同会话后续轮不重复注入（目录已在历史里可见）')
+  eq(c2.system === c1.system, true, '同会话跨轮 system 逐字节相同')
+  // 模拟「群里有人发了新图 → 自动发现改了目录」：新会话的 system 必须仍逐字节相同，才能复用 system+tools 前缀
+  catalogText = '## 表情包\n- 笑: 开心\n- 新图: 刚发现'
+  const agent2 = new Agent({ provider, stickers, maxTurns: 2, reflect: 'off' })
+  await agent2.run('新会话')
+  const c3 = provider.calls.history[2]
+  eq(c3.system === c1.system, true, '发现新表情后新会话 system 仍与旧会话逐字节相同（跨会话前缀可复用）')
+  eq(textOf(c3).includes('新图'), true, '新会话首轮仍拿到最新目录（功能不退化）')
+  eq(agent2._lastPrefixFp?.stickerVersion === agent._lastPrefixFp?.stickerVersion, true, '指纹 stickerVersion 恒定（不再把表情发现误报成前缀断点）')
+})
+
 // ---------- 缓存：工具目录不随会话内激活变化（前缀缓存稳定性） ----------
 await test('缓存稳定性：system 工具目录静态 + tools 数组跨轮恒定（stableList 默认开）', async () => {
   let agent = null
