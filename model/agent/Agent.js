@@ -24,7 +24,7 @@ import { ToolScheduler, resolveToolConcurrency } from './tool-scheduler.js'
 import { resolveExecutionMeta } from './tool-effects.js'
 import { validateToolArgs } from './tool-schema.js'
 import { isToolErrorContent } from './tool-result.js'
-import { tagUntrusted } from './guard.js'
+import { tagUntrusted, unwrapUntrusted } from './guard.js'
 import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, SEARCH_VERIFICATION, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 import { detectScheduleIntent } from './schedule.js'
@@ -994,8 +994,12 @@ export class Agent {
         // 曾把它当最终回复交付给用户（用户收到一段原始 JSON 错误），并把任务记成 waiting_input。
         const sc = toolResults.find((tr) => tr && !isToolError(tr.content) && this.shortCircuitTools.includes(tr.name))
         if (sc) {
-          let q = sc.content
-          try { const o = JSON.parse(q); if (o && o.clarify) q = o.clarify } catch { /* keep raw */ }
+          // 先剥掉不可信边界标注再解析/交付：标注是给模型的边界提示，
+          // 而 clarify 的结果要**原样当正文发给用户**——带标签交付会让用户看到
+          // `<untrusted_data source="tool:clarify">…`（工具结果被注入扫描命中时即会加壳）。
+          const rawSc = unwrapUntrusted(sc.content)
+          let q = rawSc
+          try { const o = JSON.parse(rawSc); if (o && o.clarify) q = o.clarify } catch { /* keep raw */ }
           finalContent = String(q)
           this.messages.push({ role: 'assistant', content: finalContent })
           stopReason = 'clarify'

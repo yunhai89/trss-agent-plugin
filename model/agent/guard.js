@@ -180,6 +180,15 @@ export function isolate(text) {
 }
 
 /**
+ * 剥掉 <untrusted_data> 边界标签。
+ * 标注是给**模型**看的边界提示；插件自己在解析工具结果/交付正文前必须先剥掉，
+ * 否则用户会看到 `<untrusted_data source="tool:clarify">…` 这种标签（曾被 clarify 短路直接交付）。
+ */
+export function unwrapUntrusted(text) {
+  return stripBoundaryTags(text, 'untrusted_data')
+}
+
+/**
  * 给外部不可信内容（工具结果 / 网页 / MCP / 记忆 / 情境）加来源标注边界。
  * 与 isolate 的区别：带 source 便于模型区分数据来源，且同样中和自带的闭合标签。
  * @param {string} text
