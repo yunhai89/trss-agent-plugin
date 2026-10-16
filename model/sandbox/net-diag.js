@@ -17,26 +17,30 @@
 import { auditEgress, buildEgressOpts, withLegacyEgressFixed } from './index.js'
 import { runSandboxShell } from './shell.js'
 
-/** 沙箱内 7 项探针（@@N@@ 作分段标记，解析见 parseProbes） */
+/** 沙箱内 7 项探针（@@N@@ 作分段标记，解析见 parseProbes）。
+ *  每段末尾都补一个 echo（换行）——`cat /etc/resolv.conf` 之类的输出**可能不以换行结尾**，
+ *  否则下一段的 @@N@@ 会粘在上一段最后一行上（实测踩过：nameserver 被解析成 `8.8.8.8@@2@@`、
+ *  getent 段整体丢失导致「系统解析」被误报为失败）。 */
 export const PROBE_SCRIPT = [
-  'echo "@@1@@ resolv.conf"; cat /etc/resolv.conf 2>&1 | head -6',
-  'echo "@@2@@ getent"; getent hosts example.com 2>&1 || echo "FAIL getent"',
-  `echo "@@3@@ python-dns"; python3 -c "import socket;socket.setdefaulttimeout(5);print('OK:', socket.gethostbyname('example.com'))" 2>&1 | tail -3`,
+  'echo "@@1@@ resolv.conf"; cat /etc/resolv.conf 2>&1 | head -6; echo',
+  'echo "@@2@@ getent"; getent hosts example.com 2>&1 || echo "FAIL getent"; echo',
+  `echo "@@3@@ python-dns"; python3 -c "import socket;socket.setdefaulttimeout(5);print('OK:', socket.gethostbyname('example.com'))" 2>&1 | tail -3; echo`,
   `echo "@@4@@ udp53"; python3 -c "
 import socket
 q=bytes.fromhex('abcd01000001000000000000076578616d706c6503636f6d0000010001')
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(5)
 s.sendto(q,('8.8.8.8',53)); d,_=s.recvfrom(512); print('OK:', len(d), 'bytes')
-" 2>&1 | tail -2`,
-  'echo "@@5@@ https"; curl -sS -m 12 -o /dev/null -w "HTTP %{http_code} %{time_total}s\\n" https://example.com 2>&1',
-  'echo "@@6@@ proxy-env"; env | grep -iE "^(http|https|all|no)_proxy=" || echo "(none)"',
-  'echo "@@7@@ route"; (ip route 2>/dev/null || cat /proc/net/route) | head -4',
+" 2>&1 | tail -2; echo`,
+  'echo "@@5@@ https"; curl -sS -m 12 -o /dev/null -w "HTTP %{http_code} %{time_total}s\\n" https://example.com 2>&1; echo',
+  'echo "@@6@@ proxy-env"; env | grep -iE "^(http|https|all|no)_proxy=" || echo "(none)"; echo',
+  'echo "@@7@@ route"; (ip route 2>/dev/null || cat /proc/net/route) | head -4; echo',
 ].join('\n')
 
-/** 解析探针输出 → 逐项布尔结论（缺段一律按失败处理，避免「没输出=正常」的误判） */
+/** 解析探针输出 → 逐项布尔结论（缺段一律按失败处理，避免「没输出=正常」的误判）。
+ *  标记匹配**不限行首**：即便某段输出没换行、@@N@@ 粘在行尾，也能正确切段。 */
 export function parseProbes(stdout = '') {
   const text = String(stdout || '')
-  const marks = [...text.matchAll(/^@@(\d+)@@[^\n]*\n?/gm)]
+  const marks = [...text.matchAll(/@@(\d+)@@[^\n]*/g)]
   const sec = {}
   marks.forEach((m, i) => {
     const start = m.index + m[0].length

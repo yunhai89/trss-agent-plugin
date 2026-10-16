@@ -164,6 +164,13 @@ await test('parseProbes 分段解析', () => {
   eq([failed.getent.ok, failed.pythonDns.ok, failed.udpDns.ok, failed.https.ok, failed.https.httpCode], [false, false, false, false, '000'], '失败探针全部识别（HTTP 000 不算成功）')
   eq([failed.proxy.present, failed.route.hasDefault], [true, false], '识别代理变量与缺失的默认路由')
   ok(PROBE_SCRIPT.includes('@@7@@') && PROBE_SCRIPT.includes('8.8.8.8'), '探针脚本含全部分段标记与 DNS 直查')
+  // 真实 E2B 沙箱踩到过的形状：resolv.conf 不以换行结尾 → 下一个 @@2@@ 粘在 nameserver 行尾。
+  // 按「行首标记」切段会把 nameserver 解析成 "8.8.8.8@@2@@"、并整体丢掉 getent 段（误报系统解析失败）。
+  const glued = '@@1@@ resolv.conf\nnameserver 8.8.8.8@@2@@ getent\n2606:4700:10::6814:179a example.com\n@@3@@ python-dns\nOK: 104.20.23.154\n@@4@@ udp53\nOK: 61 bytes\n@@5@@ https\nHTTP 200 0.078285s'
+  const gp = parseProbes(glued)
+  eq(gp.resolv.nameservers, ['8.8.8.8'], '标记粘连时 nameserver 仍解析正确（不带 @@2@@）')
+  eq(gp.getent.ok, true, '标记粘连时 getent 段不丢（系统解析不再误报失败）')
+  eq([gp.pythonDns.ok, gp.udpDns.ok, gp.https.httpCode], [true, true, '200'], '粘连输出的其余段照常解析')
 })
 
 await test('judgeProbes 判定分支', () => {
