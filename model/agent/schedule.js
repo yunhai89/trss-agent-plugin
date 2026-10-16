@@ -149,7 +149,20 @@ export class ScheduleStore {
     })
   }
 
-  async listByUser(userId) { return ((await this._load()) || []).filter((r) => r.userId === userId).sort(_sortRec) }
+  /**
+   * 按归属列出。userId 为群共享**新形态**（`__group__:<gid>`）时，同时带上该群的旧版无群号记录
+   * （2026-10-17 回归审计 medium-5：作用域迁移后 reminder_list 看不到升级前设的提醒，
+   *  而 `#定时任务列表` 走 selectScheduleForList 能看到，同一份数据两套可见性）。
+   * @param {string} userId
+   * @param {{ groupId?: string|null }} [opts]
+   */
+  async listByUser(userId, { groupId = null } = {}) {
+    const uid = String(userId)
+    const shared = isSharedScopeId(uid)
+    return ((await this._load()) || [])
+      .filter((r) => String(r?.userId) === uid || (shared && isLegacySharedRecord(r, groupId)))
+      .sort(_sortRec)
+  }
   async listAll() { return ((await this._load()) || []).sort(_sortRec) }
 
   /** 重启恢复：cron 任务始终重排（不过期）；一次性仅 at>now 重排，过期丢弃。
@@ -443,7 +456,8 @@ export const reminderListTool = {
   parameters: { type: 'object', properties: {}, additionalProperties: false },
   async execute(_p, ctx) {
     try {
-      const reminders = ctx?.reminder?.list ? await ctx.reminder.list(ctx.scopeUserId) : []
+      // 带上 groupId：群共享作用域迁移后旧记录靠它判定归属（见 listByUser JSDoc）
+      const reminders = ctx?.reminder?.list ? await ctx.reminder.list(ctx.scopeUserId, { groupId: ctx?.groupId || null }) : []
       const crons = ctx?.cronTask?.list ? await ctx.cronTask.list() : []
       const items = []
       for (const r of reminders) {

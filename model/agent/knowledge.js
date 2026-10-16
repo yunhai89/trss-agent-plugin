@@ -265,11 +265,15 @@ export class KnowledgeStore {
       const doc = data.docs.find((d) => d.id === docId)
       if (!doc) return { error: `文档 ${docId} 不存在` }
       if (!doc.url) return { error: `文档 ${docId} 无 URL，不可设定时刷新` }
-      this._cancelJob(docId) // 取消旧 job（不写 KV，下面统一 save）
-      // 先验证 cron 真能注册成功再落盘：非法 cron 不允许写入（否则列表显示已排期、实际永不触发）
+      // ⚠ 顺序：先注册新 job，成功后才取消旧 job。曾先 _cancelJob 再校验新 cron —— 非法表达式会
+      // 让**已在跑**的定时刷新被取消且不恢复，KV 却仍显示「已排期」，静默停摆（2026-10-17 回归审计 medium-4）。
+      const prevCron = doc.refreshCron || null
       if (cron && this.scheduler && !this._scheduleRefresh(docId, cron)) {
+        // 注册失败：把旧 job 按旧 cron 复原（_scheduleRefresh 失败时不会留下句柄）
+        if (prevCron) this._scheduleRefresh(docId, prevCron)
         return { error: `非法的定时刷新表达式：${cron}（5 段 cron，例如 0 8 * * *）` }
       }
+      if (prevCron !== (cron || null)) this._cancelJob(docId) // 注册成功后再换掉旧 job
       doc.refreshCron = cron || null
       await this._save(data)
       return { id: docId, cron: cron || null }

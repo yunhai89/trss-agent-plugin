@@ -2012,7 +2012,7 @@ export class Chat extends plugin {
           isTask ? makeFireDispatch(rt) : fireReminder,
         )
       },
-      list: (userId) => rt.schedule.listByUser(userId),
+      list: (userId, opts) => rt.schedule.listByUser(userId, opts),
       // 取消前校验归属：直接按 id 取消曾是越权路径（任意用户枚举 5 位顺序号即可删他人提醒/任务链）
       cancel: async (id) => {
         const all = await rt.schedule.listAll()
@@ -3636,19 +3636,25 @@ export class Chat extends plugin {
       if (rems.length) cleared.push(`提醒(${rems.length})`)
       // 任务账本（P0-3）：清理归属当前用户的任务记录（群共享任务不清，避免一人清全群）
       if (rt.taskStore) {
-        let nTask = 0
-        // 分页扫全库（2026-10-17 审计 L2）：list 的 limit 被 clamp 到 500，原实现只看最近 500 条，
-        // 更早的本人记录在「已清空你的所有记录」之后仍留在 sqlite 里 —— 隐私清理不完整。
-        for (let round = 0; round < 200; round++) {
-          const batch = await rt.taskStore.list({ limit: 500 })
-          let hit = 0
+        // 分页扫全库（2026-10-17 审计 L2 + 回归审计 medium-7）：先只**收集**、扫完再删。
+        // 边扫边删会让后续 offset 跳行；且旧实现「本页无命中就 break」，本人记录全在最新 500 条
+        // 之外时一条也删不掉，却照样回「已清空你的所有记录」。
+        const mineTasks = []
+        for (let off = 0; off < 200 * 500; off += 500) {
+          const batch = await rt.taskStore.list({ limit: 500, offset: off })
+          if (!batch.length) break
           for (const t of batch) {
             const au = t.scope?.userId != null ? String(t.scope.userId) : ''
             const su = t.scope?.scopeUserId != null ? String(t.scope.scopeUserId) : ''
             if (isSharedScopeId(su)) continue // 群共享域：按群隔离，不清（避免一人清空全群）
-            if (au === uid || su === uid) { const r = await rt.taskStore.remove(t.taskId, { scopeKey: t.scopeKey }); if (r.ok) { nTask++; hit++ } }
+            if (au === uid || su === uid) mineTasks.push(t)
           }
-          if (!hit) break
+          if (batch.length < 500) break // 已是最后一页
+        }
+        let nTask = 0
+        for (const t of mineTasks) {
+          const r = await rt.taskStore.remove(t.taskId, { scopeKey: t.scopeKey })
+          if (r?.ok) nTask++
         }
         if (nTask) cleared.push(`任务记录(${nTask})`)
       }

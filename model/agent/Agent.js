@@ -27,7 +27,7 @@ import { isToolErrorContent } from './tool-result.js'
 import { tagUntrusted, unwrapUntrusted } from './guard.js'
 import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, SEARCH_VERIFICATION, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
-import { detectScheduleIntent } from './schedule.js'
+import { detectScheduleIntent, isSharedScopeId, SHARED_SCOPE_PREFIX } from './schedule.js'
 import { decideThinkingSmart, classifyComplexity } from '../llm/thinking.js'
 import { decideThinkingWithJev, selectToolsWithJev, assessShellRiskWithJev, decideReflectWithJev, evaluateShellRisk } from './jev/index.js'
 
@@ -611,10 +611,30 @@ export class Agent {
     } else if (presetHistory) {
       // 保留 setHistory 预置的重建历史（不读会话存储）
     } else if (useConv) {
-      try { this.messages = await this.session.getConversation(scopeUserId, ctx.groupId, ctx.conversationId) } catch { this.messages = [] }
+      try {
+        // ⚠ getConversation/get 对**损坏值**返回 null（写路径已拒绝覆盖），读路径若不兜底就是
+        // `null.length` 硬崩在该会话的每一轮、且永不自愈（2026-07-17 回归审计 high-1：旧版对坏值
+        // 返回空数组，属静默降级，今晚的坏值护栏把读路径变成了硬崩）。
+        this.messages = (await this.session.getConversation(scopeUserId, ctx.groupId, ctx.conversationId)) ?? []
+      } catch { this.messages = [] }
     } else if (this.session && ctx) {
       sessKey = this.session.key(ctx.groupId, scopeUserId)
-      try { this.messages = await this.session.get(sessKey) } catch { this.messages = [] }
+      try {
+        let loaded = await this.session.get(sessKey)
+        // 群共享作用域迁移兜底（2026-10-17 回归审计 medium-6）：isolation=false 的群旧键是字面量
+        // `__group__`，新版是 `__group__:<gid>`；新键为空时回退读旧键并迁移，否则表现为「机器人失忆」。
+        if ((!loaded || !loaded.length) && isSharedScopeId(scopeUserId)) {
+          const legacyKey = this.session.key(ctx.groupId, SHARED_SCOPE_PREFIX)
+          const oldConv = await this.session.get(legacyKey)
+          if (oldConv && oldConv.length) {
+            loaded = oldConv
+            try { await this.session.append(sessKey, oldConv) } catch { /* 迁移失败不影响本轮 */ }
+            this.logger('info', `[session] 群共享作用域迁移：${legacyKey} → ${sessKey}（${oldConv.length} 条）`)
+          }
+        }
+        this.messages = loaded ?? []
+        if (loaded === null) this.logger('warn', `会话数据损坏，已按空历史继续（旧值未被覆盖，可 #重置对话 清理）：${sessKey}`)
+      } catch { this.messages = [] }
     }
     // 持久化边界：本轮新生成的消息从「此刻的历史长度」开始。presetHistory 时此刻 = continueFrom
     // 重建的续跑历史（它不在会话存储里，也不该进存储），故边界同样取当前长度。
@@ -627,6 +647,14 @@ export class Agent {
       ? `ephemeral:${taskId}`
       : (useConv ? `${ctx.groupId || 'p'}:${scopeUserId}:${ctx.conversationId}` : (sessKey || null))
     let compactedThisRun = false // 本 run 发生过滞回压缩 → 持久化走全量覆写（slice(sessStart) 会错位）
+    // 续跑（presetHistory）+ 本轮压缩：压缩会把历史压到 sessStart 以下 → slice(sessStart) 为空，
+    // 本轮指令/最终回答/压缩结果全都不落盘（回归审计 high-2：静默数据丢失，下次续跑还从旧检查点重放）。
+    // 压缩保尾，故压缩前记下「本轮新增条数」，写回改追加末 N 条。
+    let presetNewCount = null
+    const notePresetNew = () => {
+      if (!presetHistory) return
+      presetNewCount = Math.max(presetNewCount ?? 0, this.messages.length - sessStart)
+    }
 
     // 清理历史中的空 assistant 消息（之前 bug 可能产生），给占位避免 API 报 "content or tool_calls must be set"
     this.messages = this.messages.map((m) => {
@@ -643,7 +671,13 @@ export class Agent {
     let memories = null
     let injectedMemoryIds = []
     if (this.recall && ctx && !ephemeral) {
-      try { memories = await this.recall.retrieve(rawText, scopeUserId, this.recallTopK) } catch { memories = null }
+      try {
+        memories = await this.recall.retrieve(rawText, scopeUserId, this.recallTopK)
+        // 群共享作用域迁移兜底（同 medium-6）：新 scope 无记忆时回退读旧的 `__group__` 记忆
+        if ((!memories || !memories.length) && isSharedScopeId(scopeUserId)) {
+          memories = await this.recall.retrieve(rawText, SHARED_SCOPE_PREFIX, this.recallTopK)
+        }
+      } catch { memories = null }
     }
     let recalledMemory = ''
     if (this.recall && memories && memories.length) {
@@ -653,7 +687,10 @@ export class Agent {
     // 统一用户画像：结构化长期归纳（身份/沟通风格/偏好/忌讳），只作偏置参考，与召回记忆同走不可信边界
     let profileBlock = ''
     if (this.profile && scopeUserId && !ephemeral) {
-      try { profileBlock = await this.profile.build(scopeUserId) } catch { profileBlock = '' }
+      try {
+        profileBlock = await this.profile.build(scopeUserId)
+        if (!profileBlock && isSharedScopeId(scopeUserId)) profileBlock = await this.profile.build(SHARED_SCOPE_PREFIX)
+      } catch { profileBlock = '' }
     }
     const dynParts = []
     // 外部内容注入扫描：情境（含群聊历史）与召回记忆均为不可信数据，命中注入特征时加边界标注
@@ -816,6 +853,7 @@ export class Agent {
         this._lastSystem = system // 收尾 finalizer 复用同一 system，与主请求逐字节对齐（前缀缓存命中）
 
         // 高低水位滞回：未超 highWater 只追加（前缀逐字节稳定）；超了才一次压到 lowWater + epoch++
+        notePresetNew() // 必须在压缩前记录（压缩就地改写 this.messages）
         const pressure = await this._hysteresisPressure(system, { scopeUserId, groupId: ctx?.groupId, conversationId: ctx?.conversationId })
         if (pressure) {
           const { est, high, low = null, dropped = 0, pruned = 0, epoch, archived = 0, unresolved = false, reason = null, archiveError = null, after = null } = pressure
@@ -1071,6 +1109,7 @@ export class Agent {
     // finalizer 输出追加为最终 assistant 消息后再持久化 → run().content 恒等于持久化历史末条 assistant。
     // 正常通过 reflection 的最终答案已在 messages 中（finalContent 非空 → 跳过，不重复追加）。
     if (finalContent == null && GOVERNOR_STOP.has(stopReason)) {
+      notePresetNew() // 同上：收尾压缩前记录
       const fin = await this._finalize({ stopReason, memories, systemPromptOverride, context, scopeId, userSignal: signal, system: this._lastSystem, taskId, ctx })
       finalContent = fin.text
       finalizedVia = fin.via
@@ -1090,6 +1129,10 @@ export class Agent {
       ? [...this.activeTools].filter((n) => !this._jevSelectedNames.has(n) || this._ranTools.has(n))
       : null
     const extra = { cacheEpoch: this.cacheEpoch, ...(this._compactLedger ? { compactLedger: this._compactLedger } : {}), ...(discoveryOn && persistedTools ? { activeTools: persistedTools } : {}) }
+    // 续跑 + 压缩：追加压缩后保留的末 N 条（N=压缩前本轮新增条数）
+    const appendFrom = presetHistory && compactedThisRun && presetNewCount != null
+      ? Math.max(0, this.messages.length - presetNewCount)
+      : sessStart
     let sessionPersisted = false
     if (ephemeral) {
       // 临时任务：不持久化会话历史
@@ -1098,13 +1141,13 @@ export class Agent {
         // 压缩后必须整体覆写（分代压缩重写了整段历史）；续跑（presetHistory）不再覆写：
         // 续跑历史只用于本次运行，写回只追加本轮新消息，原会话历史原样保留（审计 H1）
         if (compactedThisRun && !presetHistory) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
-        else await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages.slice(sessStart), extra)
+        else await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages.slice(appendFrom), extra)
         sessionPersisted = true
       } catch (e) { this.logger('warn', 'conversation 持久化失败', e) }
     } else if (sessKey) {
       try {
         if (compactedThisRun && !presetHistory) await this.session.set(sessKey, this.messages)
-        else await this.session.append(sessKey, this.messages.slice(sessStart))
+        else await this.session.append(sessKey, this.messages.slice(appendFrom))
         sessionPersisted = true
       } catch (e) { this.logger('warn', 'session 持久化失败', e) }
     }
@@ -1368,7 +1411,10 @@ export class Agent {
   _buildToolList() {
     if (!this.tools) return []
     // 稳定模式：跨轮固定下发全量（tools 一变，整段前缀缓存归零——见构造函数的实测数据）
-    if (this.stableToolList) return this.tools.list()
+    // 稳定模式 = 元工具 + registry 全量。⚠ 不能只返回 registry：`tool_search` 等元工具不注册进
+    // registry（只在 Agent 内创建），漏掉它们会让 system 目录教模型调用一个 tools 数组里没有的工具
+    // （回归审计 medium-3，stableList 默认开时必现）。顺序恒定 → 前缀缓存依旧稳定。
+    if (this.stableToolList) return [...Object.values(this._metaTools), ...this.tools.list()]
     if (!this.activeTools) return this.tools.list()
     const out = []
     const seen = new Set()

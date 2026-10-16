@@ -458,6 +458,35 @@ await test('F14：abortAllActiveRuns 取消并等待在途 run', async () => {
   await s.close()
 })
 
+await test('list 支持 offset：全库分页能找到「最新 500 条之外」的旧记录（clear-data 回归）', async () => {
+  const dir = tmp()
+  const s = new TaskStore({ dir, logger: () => {} }); await s.open()
+  const uid = 'u_me'
+  // 5 条本人旧记录 + 500 条他人新记录 → 本人记录被挤出「最新 500」窗口
+  for (let i = 0; i < 5; i++) await s.begin({ taskId: `me_${i}`, ctx: { groupId: 'g1', userId: uid, scopeUserId: uid, conversationId: null } })
+  for (let i = 0; i < 500; i++) await s.begin({ taskId: `o_${i}`, ctx: { groupId: 'g1', userId: `u${i}`, scopeUserId: `u${i}`, conversationId: null } })
+  const page0 = await s.list({ limit: 500 })
+  eq(page0.length, 500, '第一页仍是 500 条')
+  eq(page0.filter((t) => t.scope?.userId === uid).length, 0, '最新 500 条里没有本人记录（复现前提成立）')
+
+  // apps/agent.js `#清除我的数据` 的新算法：先收集、后删除（扫完再删，offset 不跳行）
+  const mine = []
+  for (let off = 0; off < 200 * 500; off += 500) {
+    const batch = await s.list({ limit: 500, offset: off })
+    if (!batch.length) break
+    for (const t of batch) {
+      const au = String(t.scope?.userId ?? ''); const su = String(t.scope?.scopeUserId ?? '')
+      if (au === uid || su === uid) mine.push(t)
+    }
+    if (batch.length < 500) break
+  }
+  eq(mine.length, 5, '分页扫全库能找到全部 5 条本人旧记录')
+  for (const t of mine) await s.remove(t.taskId, { scopeKey: t.scopeKey })
+  const left = await s.list({ scopeKey: mine[0].scopeKey, limit: 500 })
+  eq(left.filter((t) => String(t.taskId).startsWith('me_')).length, 0, '本人记录已清空')
+  await s.close()
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)

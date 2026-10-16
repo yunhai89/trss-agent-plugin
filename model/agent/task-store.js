@@ -344,13 +344,21 @@ export class TaskStore {
     }))
   }
 
-  async list({ scopeKey = null, phases = null, limit = 50 } = {}) {
+  /**
+   * 列表（按 updated_at 倒序）。
+   * @param {{scopeKey?: string|null, phases?: string[]|null, limit?: number, offset?: number}} [opts]
+   * offset 用于**全库扫描**（如 `#清除我的数据` 分页找本人记录）：limit 会被 clamp 到 500，
+   * 没有 offset 就永远只看得到最新 500 条，更早的本人记录清不掉却回报「已清空」
+   * （2026-10-17 回归审计 medium-7）。
+   */
+  async list({ scopeKey = null, phases = null, limit = 50, offset = 0 } = {}) {
     const where = []
     const args = []
     if (scopeKey != null) { where.push('scope_key = ?'); args.push(scopeKey) }
     if (Array.isArray(phases) && phases.length) { where.push(`phase IN (${phases.map(() => '?').join(',')})`); args.push(...phases) }
     args.push(Math.max(1, Math.min(500, Number(limit) || 50)))
-    const rows = await allP(this._db, `SELECT * FROM tasks ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY updated_at DESC LIMIT ?`, args)
+    args.push(Math.max(0, Math.floor(Number(offset) || 0)))
+    const rows = await allP(this._db, `SELECT * FROM tasks ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY updated_at DESC LIMIT ? OFFSET ?`, args)
     return rows.map(rowToTask)
   }
 

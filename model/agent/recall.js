@@ -8,6 +8,9 @@
 
 import { createKeyedLock } from './store/lock.js'
 
+/** 群共享新作用域（`__group__:<gid>`）：读不到时回退旧作用域 `__group__`（同模式下的共享池） */
+const SHARED_SCOPE_RE = /^__group__:.+$/
+
 function rid() {
   return `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
 }
@@ -195,9 +198,16 @@ export class RecallStore {
    */
   async _all(userId) {
     const v = await this.kv.get(this._key(userId))
-    if (v == null || v === '') return []
-    if (Array.isArray(v)) return v
-    return null
+    const mine = v == null || v === '' ? [] : (Array.isArray(v) ? v : null)
+    if (mine === null) return null
+    // 群共享作用域迁移兜底（2026-10-17 回归审计 medium-6）：旧键是字面量 `__group__`，新版是
+    // `__group__:<gid>`。新作用域读不到时把旧记录并进来（该模式下本来就是跨群共享池），
+    // 否则 isolation=false 的群升级后「机器人失忆」。写路径不进这里（新记忆只写新作用域）。
+    if (mine.length === 0 && SHARED_SCOPE_RE.test(String(userId))) {
+      const legacy = await this.kv.get(this._key('__group__'))
+      if (Array.isArray(legacy) && legacy.length) return legacy.slice()
+    }
+    return mine
   }
   /** 写路径专用：坏值时抛错拒绝写回（否则一次坏值就把整份记忆覆盖掉） */
   async _allForWrite(userId) {

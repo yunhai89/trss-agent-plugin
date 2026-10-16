@@ -2692,6 +2692,46 @@ await test('记忆来源校验（端到端）：Agent 注入 userTexts，幻觉�
 })
 
 // ---------- 总结 ----------
+// ---------- 回归审计 2026-10-17 high-1：会话坏值读路径不得硬崩 ----------
+await test('会话坏值：run 不崩、按空历史继续、坏值不被覆盖（回归审计 high-1）', async () => {
+  const kv = memoryKv()
+  const session = new SessionStore({ kv })
+  const logs = []
+  const ctx = { userId: 'u1', groupId: 'g1', scopeUserId: 'u1', scopeId: 'default', conversationId: null }
+  const key = session.key(ctx.groupId, ctx.scopeUserId)
+  await kv.set(key, '{"messages": "not-an-array"') // 截断/非法结构 → unpack 判损坏
+  eq(await session.get(key), null, 'get 对坏值返回 null（写路径据此拒绝覆盖）')
+  const agent = new Agent({ provider: mockProvider([{ content: 'ok', finishReason: 'stop' }]), session, tools: new ToolRegistry(), maxTurns: 1, reflect: 'off', logger: (l, m) => logs.push(`${l}:${m}`) })
+  const r = await agent.run('你好', { ctx })
+  eq(r.content, 'ok', 'run 正常返回（旧行为：null.length 抛 TypeError，该会话每轮都崩）')
+  eq(String(await kv.get(key)), '{"messages": "not-an-array"', '坏值未被覆盖（仍可由用户 #重置对话 清理）')
+  ok(logs.some((m) => m.includes('会话数据损坏')), '写入失败有明确告警')
+})
+
+// ---------- 回归审计 2026-10-17 high-2：续跑 + 压缩不得丢本轮消息 ----------
+await test('续跑（presetHistory）+ 压缩：本轮消息仍落盘（回归审计 high-2）', async () => {
+  const kv = memoryKv()
+  const session = new SessionStore({ kv })
+  const ctx = { userId: 'u1', groupId: null, scopeUserId: 'u1', conversationId: 'c1' }
+  await session.createConversation('u1', null, 'c1')
+  await session.appendConversation('u1', null, 'c1', [{ role: 'user', content: '旧问题' }, { role: 'assistant', content: '旧回答' }])
+  const long = '这是重建的续跑历史内容。'.repeat(20)
+  const rebuilt = []
+  for (let i = 0; i < 40; i++) rebuilt.push({ role: 'user', content: `续跑重建${i} ${long}` }, { role: 'assistant', content: 'ok' })
+  const agent = new Agent({
+    provider: mockProvider([{ content: '续跑完成', finishReason: 'stop' }]),
+    session, tools: new ToolRegistry(), maxTurns: 1, reflect: 'off',
+    contextWindow: 1600, contextKeepRecent: 4,
+    estimateTokens: (t) => Math.ceil(String(t || '').length / 4),
+  })
+  agent.setHistory(rebuilt)
+  await agent.run('续跑指令', { ctx, presetHistory: true, systemPrompt: '短身份' })
+  const after = await session.getConversation('u1', null, 'c1')
+  ok(after.length > 2, `本轮消息已追加（压缩前会 slice 成空 → 静默丢失；实际 ${after.length} 条）`)
+  ok(after.some((m) => String(m.content || '').includes('续跑完成')), '最终回答在存储里')
+  eq(after[0].content, '旧问题', '原会话历史未被续跑历史覆写')
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)

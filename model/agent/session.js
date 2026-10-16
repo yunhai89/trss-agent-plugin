@@ -49,8 +49,18 @@ export class SessionStore {
   }
 
   async get(k) {
+    // 群共享作用域迁移兜底（2026-10-17 回归审计 medium-6）：新键 `…:<gid>:__group__:<gid>` 为空时
+    // 回退到旧键 `…:<gid>:__group__`（群号在同一键里，不会跨群串数据）；写路径仍只写新键。
     if (!this._cache.has(k)) {
       const val = await this.kv.get(k)
+      const legacy = LEGACY_SHARED_KEY_RE.exec(k)
+      if ((val == null || val === '') && legacy) {
+        const oldVal = await this.kv.get(legacy[1])
+        if (oldVal != null && oldVal !== '') {
+          const oldArr = unpack(oldVal)
+          if (oldArr && oldArr.length) { this._cacheSet(k, oldArr); return oldArr }
+        }
+      }
       const arr = unpack(val)
       // 坏值返回 null（不缓存、不伪装成空会话）：读路径按空处理，写路径必须拒绝写回
       if (arr === null) return null
@@ -335,6 +345,8 @@ function isConvShape(c) {
   return !!(c && typeof c === 'object' && !Array.isArray(c) && Array.isArray(c.messages))
 }
 const CORRUPT_CONV_MSG = '会话数据损坏（不是可识别的对话结构），已拒绝写入以免清空历史'
+/** 群共享新键 `…:<gid>:__group__:<gid>` → 捕获组为旧键 `…:<gid>:__group__`（群号同键，回退不跨群） */
+const LEGACY_SHARED_KEY_RE = /^(.*:__group__):[^:]+$/
 
 /**
  * 滑动窗口裁剪，但始终保留首条消息（用户原始意图），避免长对话丢失最初目标。
