@@ -140,6 +140,7 @@ export function supportGuoba() {
         { field: 'agent.toolDiscovery.enable', label: '启用按需发现', bottomHelpMessage: 'LLM 只常驻少数核心工具，其余经 tool_search 检索后动态注入（省 token）；默认开，关则回退全量常驻', component: 'Switch' },
         { field: 'agent.toolDiscovery.alwaysOn', label: '常驻工具(每行一个)', bottomHelpMessage: '不经过搜索、始终可用的工具名；留空用内置默认（含 tool_search / clarify / memory_search / web_search / skill / get_chat_history / reminder_set / schedule_task / 群文件工具等）', component: 'InputTextArea' },
         { field: 'agent.toolDiscovery.topK', label: 'tool_search 返回数', component: 'InputNumber', componentProps: { min: 1, max: 20 } },
+        { field: 'agent.toolDiscovery.stableList', label: '工具数组跨轮恒定', bottomHelpMessage: '每轮下发全量工具定义（首轮多付约 1 万 token，之后全部命中缓存）。关掉会随工具激活改变 tools 数组，实测任何变化都会让整段 prompt 缓存归零（命中率 0%）', component: 'Switch' },
         { field: 'agent.toolDiscovery.minScore', label: '最低相似度', bottomHelpMessage: '低于此值不返回；jaccard 下 0.1 较宽松', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
 
         { label: '在线自进化', component: 'SOFT_GROUP_BEGIN' },
@@ -202,6 +203,8 @@ export function supportGuoba() {
         { field: 'agent.guardAction', label: '注入防御动作', component: 'Select', componentProps: { options: OPT.guardAction } },
         { field: 'agent.guardSensitivity', label: '防御灵敏度', component: 'Select', componentProps: { options: OPT.guardSensitivity } },
         { field: 'agent.untrustedGuard', label: '外部内容注入扫描', bottomHelpMessage: '工具结果/网页/MCP/记忆等外部内容命中注入特征时加边界标注（不阻断）；默认开，关闭会削弱间接注入防御', component: 'Switch' },
+        { field: 'agent.contextHighRatio', label: '压缩高水位比例', bottomHelpMessage: '历史占 contextWindow 的比例超过它触发压缩（默认 0.65；256K 窗口建议 0.8）。越晚压越省缓存，命中率公式见 README「缓存经济性」', component: 'InputNumber', componentProps: { min: 0.3, max: 0.95, step: 0.05 } },
+        { field: 'agent.contextLowRatio', label: '压缩低水位比例', bottomHelpMessage: '压缩后保留到该比例（默认 0.45，须小于高水位）。压得越深则每轮新增相对越少、稳态命中率越高', component: 'InputNumber', componentProps: { min: 0.05, max: 0.9, step: 0.05 } },
         { field: 'agent.redactSecrets', label: '回复脱敏(屏蔽 API Key)', bottomHelpMessage: '发送前屏蔽回复里的密钥/token；默认开', component: 'Switch' },
         { field: 'agent.confirmTimeout', label: '审批超时(秒)', component: 'InputNumber', componentProps: { min: 10 } },
         {
@@ -237,8 +240,26 @@ export function supportGuoba() {
         { field: 'agent.search.brave.apiKey', label: 'Brave API Key', component: 'Input' },
         { field: 'agent.search.searxng.url', label: 'SearXNG 地址', bottomHelpMessage: '自建/公共 SearXNG 实例', component: 'Input', componentProps: { placeholder: 'http://localhost:8080' } },
         { field: 'agent.search.ddg', label: 'DDG 兜底', bottomHelpMessage: '本地 DuckDuckGo，免 key、默认开（最后兜底）', component: 'Switch' },
+        { field: 'agent.search.timeout', label: '搜索超时(ms)', bottomHelpMessage: '0/留空=各源默认（DDG 15s）；慢源可调大', component: 'InputNumber', componentProps: { min: 0, max: 120000 } },
 
         // —— MCP ——
+        { label: '网页抓取（抗反爬）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.kb.crawl.engine', label: '抓取引擎', bottomHelpMessage: 'crawl4ai=真浏览器渲染（默认，需 scripts/install-crawl4ai.sh 装好）；fetch=纯 HTTP+cheerio', component: 'Select', componentProps: { options: [{ label: 'crawl4ai 浏览器', value: 'crawl4ai' }, { label: '纯 HTTP fetch', value: 'fetch' }] } },
+        { field: 'agent.kb.crawl.execution', label: '抓取执行位置', bottomHelpMessage: 'host=宿主 venv（默认，与 sandbox.mode 无关）；sandbox=在 E2B 沙箱内跑（需模板预装 crawl4ai，未就绪降级纯 HTTP）', component: 'Select', componentProps: { options: [{ label: '宿主(推荐)', value: 'host' }, { label: '沙箱', value: 'sandbox' }] } },
+        { field: 'agent.kb.crawl.stealth', label: '反检测', bottomHelpMessage: 'playwright-stealth + 模拟用户行为，默认开', component: 'Switch' },
+        { field: 'agent.kb.crawl.retryBlocked', label: '被拦后强化重试', bottomHelpMessage: '403/CF 挑战等被拦时自动 undetected+stealth 再试一轮', component: 'Switch' },
+        { field: 'agent.kb.crawl.allowPrivateHosts', label: '允许抓内网', bottomHelpMessage: '允许抓本机/内网/元数据地址（默认禁，防 SSRF）。本机 DNS 把公网域名解析到内网时也需要它', component: 'Switch' },
+        { field: 'agent.kb.crawl.sessionPersist', label: '站点会话持久化', bottomHelpMessage: '按 host 保存 cookie（含 CF 清关凭证）到 data/crawl/sessions.json（0600），12h 内复用', component: 'Switch' },
+        { field: 'agent.kb.crawl.sessionTtlHours', label: '会话有效期(小时)', component: 'InputNumber', componentProps: { min: 0.1, max: 720, step: 1 } },
+        { field: 'agent.kb.crawl.sessionProfile', label: '持久浏览器 profile', bottomHelpMessage: '保留完整浏览器 profile（登录态更稳），但浏览器会全局串行、占磁盘；默认关', component: 'Switch' },
+        { field: 'agent.kb.crawl.siteMemory', label: '站点难度记忆', bottomHelpMessage: '记住上次哪档有效：fetch 够用就不再起浏览器；被拦过下次直接 undetected', component: 'Switch' },
+        { field: 'agent.kb.crawl.perHostIntervalMs', label: '同站最小间隔(ms)', bottomHelpMessage: '默认 1200，含抖动；同一对话连抓几个页面时最重要', component: 'InputNumber', componentProps: { min: 0, max: 60000, step: 100 } },
+        { field: 'agent.kb.crawl.hostConcurrency', label: '同站并发', bottomHelpMessage: '默认 1（串行）', component: 'InputNumber', componentProps: { min: 1, max: 8 } },
+        { label: '临时文件与下载', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.tempFiles.enable', label: '自动清理 data/temp', bottomHelpMessage: '转档/截图/下载产物长期堆积占盘；默认开', component: 'Switch' },
+        { field: 'agent.tempFiles.ttlHours', label: '保留小时数', component: 'InputNumber', componentProps: { min: 1, max: 720 } },
+        { field: 'agent.tempFiles.maxFiles', label: '最多保留文件数', component: 'InputNumber', componentProps: { min: 10, max: 100000 } },
+        { field: 'agent.download.allowPrivateHosts', label: '允许下载内网地址', bottomHelpMessage: 'web_download 默认拒绝环回/内网/元数据地址（防 SSRF）；确认环境可信时才开', component: 'Switch' },
         { label: 'MCP 服务端', component: 'SOFT_GROUP_BEGIN' },
         { field: 'agent.mcp.requestTimeout', label: '请求超时(毫秒)', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
         {
