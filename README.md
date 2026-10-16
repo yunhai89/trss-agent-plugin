@@ -1115,6 +1115,21 @@ AGENTS_CONFIG=/path/to/config.yaml SIM_WINDOW=256000 SIM_HIGH=0.8 SIM_LOW=0.1 SI
   node stress/real/cache-hit-sim.mjs
 ```
 
+#### 核对线上命中率（`scripts/cache-hit-report.mjs`）
+
+面板只给一个总数，排查时要看「miss 花在哪」。该脚本直接读 `data/logs`（默认目录，可用 `--dir` 指定实机插件日志目录），
+按面板同口径算出 `cacheRead / observedInput`，并把 miss 归到具体原因（支持 `--dir/--since/--top/--target/--json`）：
+
+```bash
+node scripts/cache-hit-report.mjs --dir /path/to/plugins/agents-plugin/data/logs
+# --since '2026-10-16 21:00' 只看重载后的新会话；--target 0.95 自定义目标；--json 供脚本消费
+```
+
+输出的四类 miss 含义：`break:tool_schema` 等 `break:*` = 前缀被打断（工具目录/记忆快照变化，v1.26.3 起目录已固定）；
+`COMPACTED/after cache_compact` = 压缩后整段重建（放大 `contextWindow` 可消除）；`cold` = 会话首个请求，必然 miss；
+`turn:纯新增内容` = 每轮真正新增的 token，**无法靠缓存消除**，只能靠减小 `d`（`keepReasoning:false`、收紧
+`maxToolResultChars`、控制情境注入量）。
+
 ---
 
 ## 🙏 鸣谢
