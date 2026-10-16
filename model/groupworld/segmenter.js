@@ -221,9 +221,13 @@ export class ConversationSegmenter {
    */
   async pendingSegments(groupId, cfg = {}, { maxSegmentsPerRun = 50 } = {}) {
     const minMsg = Math.max(1, Number(cfg.minSegmentMessages) || 4)
+    // 失败片段可重试（修复 H2）：此前只有 status='closed' 会被取走，一次瞬时异常（SQLITE_BUSY/入库抛错）
+    // 把片段置 'failed' 后就再无入口 → attempt/retryCount 形同虚设、整段知识永久丢失。
+    // 重试上限用 analysis.retryCount（与单轮内重试同源），attempt 超过上限的不再取。
+    const retryLimit = Number.isFinite(Number(cfg.retryCount)) ? Math.max(0, Number(cfg.retryCount)) : 1
     const rows = await this.dao.all(
-      `SELECT * FROM gw_segments WHERE group_id=? AND status='closed' ORDER BY id ASC LIMIT ?`,
-      [groupId, Math.max(1, maxSegmentsPerRun) + 20],
+      `SELECT * FROM gw_segments WHERE group_id=? AND (status='closed' OR (status IN ('failed','dead_letter') AND attempt<=?)) ORDER BY id ASC LIMIT ?`,
+      [groupId, retryLimit, Math.max(1, maxSegmentsPerRun) + 20],
     )
     const out = []
     for (const r of rows) {
@@ -233,12 +237,29 @@ export class ConversationSegmenter {
         await this.dao.run('UPDATE gw_segments SET status=?, analyzed_at=? WHERE id=?', ['analyzed', Date.now(), r.id])
         continue
       }
-      // 装载片段消息：时间窗用 [started_at, 末条消息 sent_at]（不用 closed_at——那是闭合墙钟，远晚于末条，会吸进相邻片段消息）
-      const endRow = await this.dao.get('SELECT sent_at FROM gw_messages WHERE group_id=? AND message_id=?', [groupId, r.end_msg_id])
-      const msgs = await this.dao.all(
-        'SELECT message_id,sender_id,reply_to_user_id,reply_to_msg_id,mentioned_users,plain_text,message_type,sent_at FROM gw_messages WHERE group_id=? AND sent_at BETWEEN ? AND ? ORDER BY sent_at ASC, id ASC',
-        [groupId, Number(r.started_at) || 0, Number(endRow?.sent_at) || Number(r.started_at) || Date.now()],
-      )
+      // 装载片段消息：按**行 id 区间**取（修复 H3：此前按 sent_at 时间窗取，而 QQ 时间戳是秒级，
+      // 话题切换落在同一秒时相邻片段会互相吸消息 —— 实测 5 条同秒消息切两段后 4 条同时在两段，
+      // 同一消息重复送 LLM、新片段把上一话题整段当上下文）。行 id 单调递增，边界由 start/end_msg_id 定位。
+      const bounds = await this.dao.get(
+        `SELECT (SELECT id FROM gw_messages WHERE group_id=? AND message_id=?) AS lo,
+                (SELECT id FROM gw_messages WHERE group_id=? AND message_id=?) AS hi`,
+        [groupId, r.start_msg_id, groupId, r.end_msg_id],
+      ).catch(() => null)
+      const MSG_COLS = 'message_id,sender_id,reply_to_user_id,reply_to_msg_id,mentioned_users,plain_text,message_type,sent_at'
+      let msgs
+      if (bounds?.lo != null && bounds?.hi != null) {
+        msgs = await this.dao.all(
+          `SELECT ${MSG_COLS} FROM gw_messages WHERE group_id=? AND id>=? AND id<=? ORDER BY id ASC`,
+          [groupId, bounds.lo, bounds.hi],
+        )
+      } else {
+        // 边界消息已被清理（purge/保留期）→ 退回时间窗；秒级精度可能多吸同秒消息，属极端兜底
+        const endRow = await this.dao.get('SELECT sent_at FROM gw_messages WHERE group_id=? AND message_id=?', [groupId, r.end_msg_id])
+        msgs = await this.dao.all(
+          `SELECT ${MSG_COLS} FROM gw_messages WHERE group_id=? AND sent_at BETWEEN ? AND ? ORDER BY sent_at ASC, id ASC`,
+          [groupId, Number(r.started_at) || 0, Number(endRow?.sent_at) || Number(r.started_at) || Date.now()],
+        )
+      }
       out.push({ segment: r, messages: msgs, informative })
       if (out.length >= maxSegmentsPerRun) break
     }

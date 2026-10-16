@@ -245,7 +245,6 @@ agent:
 | 字段 | 说明 |
 | --- | --- |
 | `debug` | `true` 打开详细日志（工具入参/每轮 token/搜索词等），排查时开启 |
-| `prefix` | 命令前缀（保留备用） |
 
 ### `agent` —— 对话与模型
 
@@ -260,13 +259,13 @@ agent:
 | `protocol` / `preset` / `baseURL` / `apiKey` / `model` | 镜像 | 上面引用的**解析结果**，加载时自动回填；勿手改，改厂商 Key / 换模型会自动跟随 |
 | `utilityModel` | 空 | 播报等旁路小模型（留空=沿用主模型）；可填任意已注册厂商的模型（运行时按注册表解析端点，不再局限主厂商） |
 | `reasoningFields` | `[]` | 推理字段归一化（如 `["reasoning_content"]`），preset 通常已带 |
-| `maxTurns` | `50` | 单次对话工具调用轮次预算 |
-| `temperature` | 空 | 采样温度 |
+| `maxTurns` | `200` | 单次对话工具调用轮次预算（面板上限已放宽到 1000；旧版面板上限 100 会把默认值静默截断） |
+| `temperature` | `0.2` | 采样温度 |
 | `maxTokens` | 空 | 单次回复最大 token（留空=厂商默认；Anthropic 默认 4096） |
 | `contextWindow` | 空 | 模型上下文窗口 token 数（如 `100000`）；配置后启用 token 高低水位压缩（超 `contextHighRatio` 压到 `contextLowRatio`、保留首条意图、`cacheEpoch` 分代），未配置按消息条数水位（30→18）。**这是提升多轮缓存命中率的头号开关**：窗口吃满后每轮几乎全量命中前缀缓存，见下方「缓存经济性」 |
 | `contextHighRatio` | `0.65` | token 压缩高水位比例（占 `contextWindow`，0.3~0.95）。想进一步提高命中率可上调（如 `0.8`），代价是单次请求更长 |
 | `contextLowRatio` | `0.45` | 压后目标比例（须小于高水位）。压得更深（如 `0.15`）能让「新增→再压」周期更长、命中率更高；压缩无损（原文归档，`context_recall` 可恢复） |
-| `maxToolResultChars` | `4000` | 单条工具结果字符上限，超长截断防上下文膨胀 |
+| `maxToolResultChars` | `8000` | 单条工具结果字符上限，超长截断防上下文膨胀 |
 | `promptCacheKey` | `false` | OpenAI 官方 `prompt_cache_key` 稳定会话路由（多轮命中前缀缓存的命中率更高）。仅当当前 provider 声明支持该能力（OpenAI 官方 preset）时才下发，兼容网关/其它厂商一律不发 |
 | `keepReasoning` | `false` | 是否把推理(`reasoning_content`)回灌历史；默认 `false` 省 context。thinking 模式下带工具调用的轮次按协议必需始终回传（不受此开关影响），否则上游会报 "reasoning_content must be passed back" |
 | `stream` | `false` | 逐字流式输出（依赖适配器、不稳，默认关） |
@@ -275,9 +274,9 @@ agent:
 | `reply.mode` | `image` | 回复渲染：`image`（markdown→浅色图片，默认）/ `text`（纯文本） |
 | `reply.atSender` | `true` | 群聊回复时艾特发言人（私聊不艾特） |
 | `reply.narrate` | `true` | 中途播报：模型调工具时附带的思路/进展文本自动转发给用户（参考 OpenClaw） |
-| `reply.renderScale` | `2` | 回复图片渲染倍率（deviceScaleFactor，2=高清；越大越清晰但越耗内存/体积） |
+| `reply.renderScale` | `3` | 回复图片渲染倍率（deviceScaleFactor，3=超清；越大越清晰但越耗内存/体积） |
 | `thinking` | 空 | 思考模式（手动），如 `{ type: "enabled", budget_tokens: 16000 }` |
-| `thinkingAuto` | 关 | 思考自动决策：`{ enable, classifier, model, timeoutMs, maxBudget, budgets:{low,medium,high}, style }`。判档方式 `classifier`：`auto`=规则不确定时用小模型判（省调用）/`always`=总是小模型/`off`=纯规则；小模型带超时、缓存，失败自动回退规则，不阻塞对话。档位→厂商原生字段（MiMo/Kimi/GLM/豆包→`thinking`、DeepSeek→`thinking`+`reasoning_effort`、Qwen→`enable_thinking`+`thinking_budget`、MiniMax→`adaptive`、Anthropic→`budget_tokens`、o/GPT→`reasoning_effort`、Gemini→`thinking_level`）。模型级 `thinking` 显式覆盖仍优先 |
+| `thinkingAuto` | 关 | 思考自动决策：`{ enable, classifier, model, timeoutMs, maxBudget, budgets:{low,medium,high}, style }`。判档方式 `classifier`：`auto`=规则不确定时用小模型判（省调用）/`always`=总是小模型/`off`=纯规则/`jev`=由 Jev 判档（需开启 Jev）；小模型带超时、缓存，失败自动回退规则，不阻塞对话。档位→厂商原生字段（MiMo/Kimi/GLM/豆包→`thinking`、DeepSeek→`thinking`+`reasoning_effort`、Qwen→`enable_thinking`+`thinking_budget`、MiniMax→`adaptive`、Anthropic→`budget_tokens`、o/GPT→`reasoning_effort`、Gemini→`thinking_level`）。模型级 `thinking` 显式覆盖仍优先 |
 | `memoryLimits` | 空 | 声明式记忆字符上限，如 `{ memory: 2200, user: 1375 }` |
 | `systemPrompt` | 空 | 默认身份 system prompt（留空用富默认身份；被人设覆盖时失效） |
 | `chatPermission` | `master` | `#ai` 命令权限：`master`/`admin`/`owner`/`all` |
@@ -639,6 +638,76 @@ tts:
 | `#agents重载` | 热重载**配置**并立即重建运行时（model/tools/skills/mcp，无需重启框架）。注意：只重建运行时、不重新加载代码文件——跟着 `git pull` 更新代码后请用 `#重启`（或 `#agents更新`，有代码改动会自动重启），见文首更新说明 |
 | `#agents更新` / `#agents强制更新` | git pull 拉取最新代码（强制=reset 后 rebase），有代码改动时自动重启 Yunzai 生效 |
 | `#agents版本` / `#agents更新日志` | 最近提交时间 / 本次更新日志 |
+
+### 知识库（RAG）
+| 指令 | 说明 |
+| --- | --- |
+| `#知识库添加 +名称 +内容或链接` | 添加/追加知识条目（支持多行文本与网页链接） |
+| `#知识库列表` | 列出所有知识库及条目数 |
+| `#知识库删除 +名称` | 删除知识库 |
+| `#知识库重建` | 重建全部索引（embedding） |
+| `#知识库刷新全部` / `#知识库刷新 +名称` | 重新抓取网页来源并更新条目 |
+| `#知识库定时 +名称 +cron` | 为某知识库设置定时刷新（如 `0 8 * * *`） |
+| `#知识库取消定时 +名称` | 取消定时刷新 |
+
+### 定时任务 / 长任务
+| 指令 | 说明 |
+| --- | --- |
+| `#定时任务 +描述` | 用自然语言创建定时任务（如「#定时任务 每天 8 点提醒我喝水」） |
+| `#定时任务列表` | 查看已创建的定时任务 |
+| `#取消定时任务 +id` | 取消定时任务 |
+| `#任务列表` / `#任务状态 +id` | 长任务（token/时间预算中断后落盘）列表 / 状态 |
+| `#继续任务 +id` / `#恢复任务 +id` | 让中断的长任务接着跑 / 从落盘恢复 |
+| `#取消任务 +id` | 取消长任务 |
+
+### 人设资料（自动补齐）
+| 指令 | 说明 |
+| --- | --- |
+| `#人设详情 +id` | 查看人设正文 |
+| `#新建人设 +名称 +内容` / `#删除人设 +id` | 创建 / 删除人设 |
+| `#人设补齐 +id` | 让模型按人设生成资料草稿（世界观/口癖等） |
+| `#查看补齐 +id` / `#采纳补齐 +id` / `#丢弃补齐 +id` | 查看 / 采纳 / 丢弃草稿 |
+| `#刷新人设资料 +id` | 重新生成草稿 |
+| `#人设资料定时 +id +cron` / `#人设资料定时列表` / `#人设资料取消定时 +id` | 定时自动补齐 |
+
+### 进化审阅（提示词 / 工具）
+| 指令 | 说明 |
+| --- | --- |
+| `#审阅进化` | 查看待审阅的提示词/工具进化提案 |
+| `#采纳 +id` / `#拒绝进化 +id` | 采纳 / 拒绝提案 |
+| `#回滚 +id` | 回滚已采纳的提示词变更 |
+| `#进化 prompt +键名` | 手动触发某提示词模板的进化 |
+| `#LLM进化` | 让模型自主提出进化方向 |
+| `#工具进化列表` / `#采纳工具 +名` / `#淘汰工具 +名` / `#回滚工具 +名 +版本` / `#工具健康` | 工具进化（自动生成新工具）的审阅与运维 |
+
+### 群世界（群聊画像建模）
+| 指令 | 说明 |
+| --- | --- |
+| `#查看我的群聊画像` | 查看机器人为你建立的画像 |
+| `#纠正我的群聊画像 +内容` / `#删除我的群聊画像` | 纠正 / 删除自己的画像 |
+| `#开启我的群聊建模` / `#关闭我的群聊建模` | 自助开关（opt-out 会同时清除该群的画像与关系边） |
+| `#群世界状态 +群号` / `#群世界清理 +天数` | 运行状态 / 清理过期数据（master） |
+
+### 伪人模式 🧪
+| 指令 | 说明 |
+| --- | --- |
+| `#伪人状态` | 开关、白名单群、待处理缓冲 |
+| `#伪人决策 +条数` | 最近的决策 trace（先 `shadow=true` 观察质量） |
+| `#伪人开关 on|off` | 快速开关（仍需 `groups` 白名单） |
+| `#伪人记忆 +条数` | 伪人独立记忆库（与主 Agent 记忆隔离） |
+
+**易漏配置**（都有代码默认值、但面板不显示，需手改 `config.yaml` 的 `agent.humanize`）：
+- `persona.aliases: []` —— 角色别名数组，参与 @/昵称提及判定（与 `persona.name` 一同构成 `identityNames`）。
+- `memory.minConsolidateMessages: 6` —— 睡眠整合所需最少消息数（低于此不跑整合；增量整合另见 `incrementalMinMessages`）。
+- `redactSecrets: true` —— **伪人链路**发送前脱敏。⚠️ 与顶层 `agent.redactSecrets`（主 Agent 链路）同名不同层，改错层不生效。
+- `vision.allowPrivateHosts: false` —— 伪人看图是否放行私网/回环图床（默认拒，防 SSRF）；Web 面板「伪人」页有开关。
+
+### 画图（ComfyUI）
+| 指令 | 说明 |
+| --- | --- |
+| `#画图列表` | 列出可用工作流 |
+| `#画图 +提示词` | 按提示词出图 |
+| `#反推 +图片` | 反推图片提示词 |
 
 ---
 
@@ -1025,6 +1094,20 @@ utils/       Config 配置读写（插件目录 + 热加载） · Log 分级日�
 
 ## 🔧 日志与排查
 
+### 环境变量（可选）
+
+| 变量 | 作用 |
+| --- | --- |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | 进程级代理兜底（优先级低于 `agent.proxy`）；浏览器渲染与降级 fetch 均遵守 |
+| `PUPPETEER_EXECUTABLE_PATH` | 指定渲染用 Chromium/Chrome 可执行文件（容器/自定义安装时用） |
+| `GEMINI_API_KEY` | Gemini 协议未配 apiKey 时的兜底 Key |
+| `CRAWL4AI_VENV` / `CRAWL4AI_PYSCRIPT` | 自建 crawl4ai 虚拟环境路径 / 抓取脚本路径（默认自动探测） |
+| `E2B_API_KEY` / `E2B_API_URL` / `E2B_DOMAIN` / `E2B_SANDBOX_URL` | E2B 沙箱凭据与自托管端点（优先级高于 `agent.sandbox.*`） |
+| `AGENTS_CONFIG` | 指定插件配置文件路径（真实模型冒烟/模拟器用它读实机配置） |
+| `REAL_LLM_SMOKE` / `REAL_LLM_*` | 真实模型冒烟开关与模型覆盖（`stress/real/*`；未设则打印 `SKIP_FILE:` 跳过） |
+| `KROKI_INTEGRATION` / `KROKI_ENDPOINT` | 真实 Kroki 容器集成测试开关与端点（默认跳过） |
+| `E2B_INTEGRATION` | E2B 真连接集成测试开关（默认跳过） |
+
 分级日志（`utils/Log.js`）：`mark`（里程碑）/ `info`（研究进度）/ `debug`（工具入参·每轮 token）/ `warn` / `error`。开启 `debug: true` 可看到 AI 每次调用工具的名称、入参、结果与每轮 token 用量，深度研究的迭代轮次与搜索词，便于排查。
 
 ### 日志字段说明
@@ -1065,7 +1148,7 @@ utils/       Config 配置读写（插件目录 + 热加载） · Log 分级日�
 | --- | --- |
 | `msgs` | 发给模型的历史消息条数（会话窗口裁剪后，含本轮 user） |
 | `tools` | 注册给模型的工具总数（内置 + 自定义 + MCP） |
-| `maxTurns` | 工具调用轮次预算上限（`agent.maxTurns`，默认 50） |
+| `maxTurns` | 工具调用轮次预算上限（`agent.maxTurns`，默认 200） |
 
 **`[agent] run end` / `[chat] reply`** —— 循环结束 / 回复发出后：
 

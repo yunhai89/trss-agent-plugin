@@ -223,7 +223,8 @@ export class GroupWorldService {
       episodes: await count("SELECT COUNT(*) c FROM gw_episodes WHERE status='active' AND group_id=?"),
       communities: await count("SELECT COUNT(*) c FROM gw_communities WHERE group_id=?"),
       pendingSegments: await count("SELECT COUNT(*) c FROM gw_segments WHERE status='closed' AND group_id=?"),
-      deadSegments: await count("SELECT COUNT(*) c FROM gw_segments WHERE status='dead_letter' AND group_id=?"),
+      // 'failed' 是「等下一轮重试」的中间态，此前不计入任何面板数字 → 用户看到「失败 0」而片段已卡住（H2）
+      deadSegments: await count("SELECT COUNT(*) c FROM gw_segments WHERE status IN ('failed','dead_letter') AND group_id=?"),
       cursor: await this.dao.get('SELECT * FROM gw_cursor WHERE group_id=?', [g]).catch(() => null),
     }
   }

@@ -13,8 +13,8 @@ import path from 'node:path'
 const ENDPOINT = process.env.KROKI_ENDPOINT || 'http://127.0.0.1:8000'
 
 if (process.env.KROKI_INTEGRATION !== '1') {
-  console.log('SKIPPED：未设置 KROKI_INTEGRATION=1（真实容器集成测试未运行；HTTP mock 全覆盖见 kroki.test.mjs）')
-  console.log('通过 0，失败 0')
+  // AGENTS.md 约定：整文件未运行时必须打印 SKIP_FILE:，测试运行器才会计为「跳过」而不是「通过」
+  console.log('SKIP_FILE: 未设置 KROKI_INTEGRATION=1（真实容器集成测试未运行；HTTP mock 全覆盖见 kroki.test.mjs）')
   process.exit(0)
 }
 

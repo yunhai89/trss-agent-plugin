@@ -563,17 +563,20 @@ agent:
       maxPerQuery: 5               # Planner 单次注入条数
       maxPerGroup: 300             # 单群容量（超量按重要性×使用率淘汰）
       incrementalMinMessages: 20   # 每小时增量整合水位（新增≥N条才跑——梗当天入库，不用等次日）
+      minConsolidateMessages: 6    # 整合所需最少消息数（低于此不跑整合）
       forgetDays: 30               # 超龄硬遗忘（天）
     idleBackoffBaseSeconds: 15     # 连续无动作退避基数（15/30/60/120/240…）
     idleBackoffCapSeconds: 300     # 退避上限
     idleBackoffStartCount: 2       # 第几次无动作起开始退避
     bypassPendingCount: 6          # 待处理新消息达此数绕过退避
+    redactSecrets: true            # 伪人回复发送前脱敏（拦截秘钥/Token）。⚠️ 与顶层 agent.redactSecrets 同名不同层：这里管伪人链路，顶层管主 Agent 链路
     personaName: ""                # 机器人在群里的名字（留空=用 Bot.nickname）
     botId: ""                      # 机器人自身 QQ（留空=自动探测 Bot.uin）
     persona:                       # 群聊角色人设（MaiBot 式，与主 Agent 人设独立）
       name: ""                     # 角色名（留空=用 personaName）
       prompt: ""                   # 角色卡正文（自由多段，最高优先级）。示例见下方注释
       fromPersonaId: ""            # prompt 为空时，按 id/名复用 PersonaStore 人设（如 raiden-ei）
+      aliases: []                  # 角色别名（参与 @/提及昵称判定；与 name 一同构成 identityNames）
       # prompt 示例（MaiBot 式角色卡，取消注释按需改）：
       # prompt: |
       #   你是「小汐」，群里一个爱聊天的技术宅。性格随和有点皮，喜欢接梗。

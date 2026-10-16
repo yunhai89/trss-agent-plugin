@@ -19,18 +19,22 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 // 曾因此从未被发现——顶层 web/ 是前端静态资源，无 test.mjs/*.test.mjs，无需跳过）
 const SKIP_DIRS = new Set(['node_modules', '.git', 'data', 'temp', 'resources', 'out'])
 // 这些是人工/网络入口或模块装载钩子，不是可直接执行的离线测试。
+// 前端自检里依赖浏览器/DOM 的文件不在此跑（由人工或 CI 浏览器环境执行）
+const SKIP_WEBDEV_FILES = new Set(['render-check.mjs'])
 const SKIP_STRESS_FILES = new Set(['real-llm.mjs', 'run-real.mjs', 'e2e-fullchain.mjs', 'hooks.mjs'])
 
-function find(dir, out, { stress = false } = {}) {
+function find(dir, out, { stress = false, webdev = false } = {}) {
   for (const name of readdirSync(dir)) {
     if (SKIP_DIRS.has(name)) continue
     const p = join(dir, name)
     let st
     try { st = statSync(p) } catch { continue }
-    if (st.isDirectory()) find(p, out, { stress })
+    if (st.isDirectory()) find(p, out, { stress, webdev })
     else if (stress
       ? (name.endsWith('.mjs') && !name.startsWith('_') && !SKIP_STRESS_FILES.has(name))
-      : (name === 'test.mjs' || name.endsWith('.test.mjs')) && !name.startsWith('_')) out.push(p)
+      : webdev
+        ? (name.endsWith('.mjs') && !name.startsWith('_') && !SKIP_WEBDEV_FILES.has(name))
+        : (name === 'test.mjs' || name.endsWith('.test.mjs')) && !name.startsWith('_')) out.push(p)
   }
 }
 
@@ -38,12 +42,26 @@ const tests = []
 find(join(root, 'model'), tests)
 find(join(root, 'apps'), tests) // 入口层离线自检（apps/*.test.mjs，如更新日志转发）
 find(join(root, 'tools'), tests) // 外置工具离线自检（tools/<包>/*.test.mjs）
+find(join(root, 'web', 'dev'), tests, { webdev: true }) // 前端纯逻辑自检（web/dev/*.mjs，无需浏览器）
 const stressTests = []
 find(join(root, 'stress'), stressTests, { stress: true })
 tests.sort()
 const e2eRank = (p) => (p.endsWith('e2e/run.mjs') ? 0 : 1)
 stressTests.sort((a, b) => e2eRank(a) - e2eRank(b) || a.localeCompare(b))
 tests.push(...stressTests)
+
+// 被 SKIP_STRESS_FILES 排除的文件（需真实凭据/为驱动器）：如实列出并计入总数，避免"静默消失"
+const excludedStress = []
+for (const dir of ['stress/anti-misread', 'stress/e2e', 'stress/real', 'stress']) {
+  let names = []
+  try { names = readdirSync(join(root, dir)) } catch { continue }
+  for (const name of names) {
+    if (!name.endsWith('.mjs') || name.startsWith('_')) continue
+    if (!SKIP_STRESS_FILES.has(name)) continue
+    const rel = join(dir, name)
+    if (!excludedStress.includes(rel)) excludedStress.push(rel)
+  }
+}
 
 let passFiles = 0
 let failFiles = 0
@@ -98,7 +116,12 @@ for (const t of tests) {
   }
 }
 
+for (const rel of excludedStress) {
+  skipFiles++
+  console.log(`  ⊘ ${rel}  (skip: 需真实凭据或为驱动器，人工/CI 显式运行)`)
+}
+
 console.log(`\n========================================`)
-console.log(`测试文件 通过 ${passFiles}，失败 ${failFiles}，跳过 ${skipFiles}（共 ${tests.length}）`)
+console.log(`测试文件 通过 ${passFiles}，失败 ${failFiles}，跳过 ${skipFiles}（共 ${tests.length + excludedStress.length}）`)
 console.log(`========================================`)
 process.exit(failFiles > 0 ? 1 : 0)

@@ -38,6 +38,22 @@ export class WorldAnalyzer {
 
   /** 一轮小时分析。返回统计。 */
   async runHourly(groupId) {
+    // 单飞（修复 M6）：此前无任何互斥，cron 与手动/上一轮超时重叠时会重复分析同一片段
+    // （同一消息进两次 LLM → 证据重复、daily_calls_today 翻倍）。
+    return this._singleFlight(`hourly:${groupId}`, () => this._runHourlyInner(groupId))
+  }
+
+  _singleFlight(key, fn) {
+    this._inflight = this._inflight || new Set()
+    if (this._inflight.has(key)) {
+      this.trace?.record?.('gw_analyze', { skipped: 'in_flight', key })
+      return Promise.resolve({ skipped: 'in_flight', analyzed: 0 })
+    }
+    this._inflight.add(key)
+    return Promise.resolve().then(fn).finally(() => this._inflight.delete(key))
+  }
+
+  async _runHourlyInner(groupId) {
     const c = this._cfgFn()
     const now = Date.now()
     // 1. 切片（折叠新消息 + 闭合静默片段）
@@ -81,15 +97,22 @@ export class WorldAnalyzer {
 
     let parsed = null
     let lastErr = null
+    let callsMade = 0
     for (let attempt = 0; attempt < maxAttempts && !parsed; attempt++) {
       try {
+        callsMade++
         const out = await this._call(model, prompt, acfg)
         parsed = parseAnalyzerOutput(out)
       } catch (e) { lastErr = e?.message || String(e) }
     }
+    // 失败也要计预算（修复 L3）：此前只有成功路径 +1，失败/死信片段的 LLM 调用完全不计数，
+    // maxDailyCallsPerGroup 形同虚设（挂起或持续非法 JSON 的片段可无限烧调用）
+    if (callsMade) await this._bumpCalls(groupId, callsMade, now)
     if (!parsed) {
-      await this.dao.run('UPDATE gw_segments SET status=?, attempt=attempt+1, error=? WHERE id=?', ['dead_letter', String(lastErr || 'invalid_json').slice(0, 200), seg.segment.id])
-      this.trace?.record?.('gw_analyze', { groupId, segId: seg.segment.id, dead: true, err: String(lastErr).slice(0, 80) })
+      const nextAttempt = (Number(seg.segment.attempt) || 0) + 1
+      const status = nextAttempt <= retryCount ? 'failed' : 'dead_letter'
+      await this.dao.run('UPDATE gw_segments SET status=?, attempt=?, error=? WHERE id=?', [status, nextAttempt, String(lastErr || 'invalid_json').slice(0, 200), seg.segment.id])
+      this.trace?.record?.('gw_analyze', { groupId, segId: seg.segment.id, dead: status === 'dead_letter', retry: status === 'failed', err: String(lastErr).slice(0, 80) })
       return false
     }
 
@@ -120,14 +143,16 @@ export class WorldAnalyzer {
           const participants = (e.participant_ids || []).map((a) => revMap[a]).filter(Boolean)
           await this.resolver.mergeEpisodeCandidate({ groupId, candidate: e, participantIds: participants, topicTags: e.topic_tags || [], evidenceMsgs: evOf(e.evidence_message_ids), optOut, now })
         }
-        await this.dao.run("UPDATE gw_segments SET status='analyzed', analyzed_at=?, attempt=attempt+1 WHERE id=?", [now, seg.segment.id])
-        await this.dao.run('UPDATE gw_cursor SET last_analyzed_segment_id=?, daily_calls_today=daily_calls_today+1, daily_calls_date=? WHERE group_id=?', [seg.segment.id, dateKey(new Date(now)), groupId])
+        await this.dao.run("UPDATE gw_segments SET status='analyzed', analyzed_at=?, attempt=? WHERE id=?", [now, (Number(seg.segment.attempt) || 0) + 1, seg.segment.id])
+        await this.dao.run('UPDATE gw_cursor SET last_analyzed_segment_id=? WHERE group_id=?', [seg.segment.id, groupId])
       })
       this.trace?.record?.('gw_trait', { groupId, segId: seg.segment.id, traits: validated.trait_candidates.length, relations: validated.relation_candidates.length, episodes: validated.episode_candidates.length, sensitive: validated.sensitive_inferences.length })
       return true
     } catch (e) {
       Log.warn('[groupworld] 片段入库失败', groupId, seg.segment.id, e?.message || e)
-      await this.dao.run('UPDATE gw_segments SET status=?, attempt=attempt+1, error=? WHERE id=?', ['failed', String(e?.message || e).slice(0, 200), seg.segment.id]).catch(() => {})
+      const nextAttempt = (Number(seg.segment.attempt) || 0) + 1
+      const status = nextAttempt <= retryCount ? 'failed' : 'dead_letter'
+      await this.dao.run('UPDATE gw_segments SET status=?, attempt=?, error=? WHERE id=?', [status, nextAttempt, String(e?.message || e).slice(0, 200), seg.segment.id]).catch(() => {})
       return false
     }
   }
@@ -142,6 +167,8 @@ export class WorldAnalyzer {
   }
 
   async _call(model, prompt, acfg) {
+    // 超时（修复 M6）：此前不传 signal，provider 挂起会让整轮分析无限等待（cron 重叠 → 重复分析）
+    const timeoutMs = Number.isFinite(Number(acfg.timeoutMs)) ? Math.max(5000, Number(acfg.timeoutMs)) : 120000
     const res = await this.provider.chat({
       model: model || undefined,
       system: ANALYZER_SYSTEM,
@@ -151,8 +178,17 @@ export class WorldAnalyzer {
       max_tokens: Number(acfg.maxTokens) || 1200,
       thinking: { type: 'disabled' },
       stream: false,
+      signal: AbortSignal.timeout(timeoutMs),
     })
     return res?.content || ''
+  }
+
+  /** 累计当日 LLM 调用数（成功与失败都算，见 L3）。 */
+  async _bumpCalls(groupId, n, now) {
+    if (!n) return
+    try {
+      await this.dao.run('UPDATE gw_cursor SET daily_calls_today=daily_calls_today+?, daily_calls_date=? WHERE group_id=?', [n, dateKey(new Date(now)), groupId])
+    } catch (e) { Log.warn('[groupworld] 预算计数失败', e?.message || e) }
   }
 
   /** 预算检查 + 日期滚动。返回 { ok, used, max }。 */

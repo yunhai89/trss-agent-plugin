@@ -95,19 +95,28 @@ export class StateMaintenance {
   async _enforceMoodCeiling({ botId, groupId, now }) {
     const cfg = this._cfgFn()
     const maxHours = cfg.stability?.maxNegativeMoodHours ?? 24
-    const s = await this.dao.get('SELECT valence, energy, social_security, last_transition_at FROM ss_group_state WHERE bot_id=? AND group_id=?', [botId, groupId]).catch(() => null)
+    const s = await this.dao.get('SELECT valence, energy, social_security, negative_since, last_transition_at FROM ss_group_state WHERE bot_id=? AND group_id=?', [botId, groupId]).catch(() => null)
     if (!s || Number(s.valence) >= -0.15) return 0
-    const hours = s.last_transition_at ? (now - s.last_transition_at) / 3600000 : 0
+    // 负心境起点（修复：此前拿 last_transition_at 当"负心境持续时长"，而每次情绪迁移都会重置它 →
+    // 只要群里还有互动，负心境永远"刚开始"，恢复流程永不触发）。旧库/旧行缺该标记时就地补一次起点。
+    let since = Number(s.negative_since) || 0
+    if (!since) {
+      // 旧库/旧行没有 negative_since：用 last_transition_at 作为近似起点并落库为正式标记。
+      // 既修掉「每次迁移都重置计时 → 永不恢复」，也不让历史负心境白等一个 24h 周期。
+      since = Number(s.last_transition_at) || now
+      await this.dao.run('UPDATE ss_group_state SET negative_since=? WHERE bot_id=? AND group_id=? AND negative_since IS NULL', [since, botId, groupId]).catch(() => {})
+    }
+    const hours = (now - since) / 3600000
     if (hours < maxHours) return 0
-    // 恢复：即时情绪强度减半 → 心境回归一半 → 记稳定性修正审计
+    // 恢复：即时情绪强度减半 → 心境回归一半 → 记稳定性修正审计（negative_since 重置，重新计时）
     await this.dao.run(
       "UPDATE ss_emotions SET intensity=intensity*0.5, updated_at=? WHERE bot_id=? AND group_id=? AND status='active'",
       [now, botId, groupId],
     ).catch(() => {})
     await this.dao.run(
       `UPDATE ss_group_state SET valence=valence*0.5, energy=MAX(energy,0.5), social_security=MAX(social_security,0.45),
-        last_transition_at=?, state_version=state_version+1, updated_at=? WHERE bot_id=? AND group_id=?`,
-      [now, now, botId, groupId],
+        negative_since=?, last_transition_at=?, state_version=state_version+1, updated_at=? WHERE bot_id=? AND group_id=?`,
+      [now, now, now, botId, groupId],
     ).catch(() => {})
     await this.dao.run(
       "INSERT INTO ss_transitions(bot_id,group_id,source_event_id,before_state_json,delta_json,after_state_json,transition_reason,engine_version,created_at) VALUES (?,?,?,?,?,?,?,?,?)",

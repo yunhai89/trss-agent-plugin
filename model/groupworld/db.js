@@ -230,6 +230,7 @@ const SCHEMA = {
     attention_satisfaction REAL NOT NULL DEFAULT 0.5,
     expression_frozen INTEGER NOT NULL DEFAULT 0,
     last_transition_at INTEGER,
+    negative_since INTEGER,
     updated_at INTEGER NOT NULL,
     state_version INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (bot_id, group_id)
@@ -407,6 +408,9 @@ const COLUMN_MIGRATIONS = [
   ['gw_bot_rel', 'guardedness', 'ALTER TABLE gw_bot_rel ADD COLUMN guardedness REAL NOT NULL DEFAULT 0'],
   ['gw_bot_rel', 'unresolved_event_count', 'ALTER TABLE gw_bot_rel ADD COLUMN unresolved_event_count INTEGER NOT NULL DEFAULT 0'],
   ['gw_bot_rel', 'last_affective_event_at', 'ALTER TABLE gw_bot_rel ADD COLUMN last_affective_event_at INTEGER'],
+  // 负心境起点（稳定性天花板修复）：此前 _enforceMoodCeiling 拿 last_transition_at 当"负心境持续时长"，
+  // 而每次迁移都会重置它 → 持续负面永不触发恢复流程。negative_since 只在跨过阈值时打标、回正时清空。
+  ['ss_group_state', 'negative_since', 'ALTER TABLE ss_group_state ADD COLUMN negative_since INTEGER'],
 ]
 
 /**

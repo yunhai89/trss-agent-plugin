@@ -95,6 +95,15 @@ export class SelfStateService {
       const now = Date.now()
       const botId = this.botId
 
+      // 退出建模优先（修复：gw_optout 此前只有 groupworld 侧读取，SelfState 照写
+      // ss_events/ss_emotions/ss_concerns —— 用户 #关闭 建模后情绪与心事仍被更新）。
+      // 与 gw_* 同库，直接查同一张表。
+      const uid = String(norm?.userId || '')
+      if (uid) {
+        const opted = await this.dao.get('SELECT 1 FROM gw_optout WHERE group_id=? AND user_id=?', [groupId, uid]).catch(() => null)
+        if (opted) return { events: 0, ignored: 0, optedOut: true }
+      }
+
       // 期待解析（先于检测：回应可完成期待；到期可产生冷落事件）
       const fulfilled = await this.expectations.resolveForMessage({ botId, groupId, norm, quoteIsBot: !!ctx.quoteIsBot, now })
       // 得到回应的正反馈（§12.1/§16.2）：期待被真实回应 → response_received 事件

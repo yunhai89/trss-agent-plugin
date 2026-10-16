@@ -122,7 +122,8 @@ export class WorldRetriever {
     // 圈子摘要（仅 planner 用；context-builder 按 role 决定是否带）
     let community = null
     if (g.weeklyCommunityDetection !== false) {
-      const comms = await this.dao.all('SELECT member_ids,topic_tags,summary,confidence FROM gw_communities WHERE group_id=? ORDER BY created_at DESC LIMIT 30', [groupId])
+      // valid_until 过滤（修复 L1）：此前只写不读，8~13 天前的过期圈子仍被当「活跃小圈子」注入 Planner
+      const comms = await this.dao.all('SELECT member_ids,topic_tags,summary,confidence FROM gw_communities WHERE group_id=? AND (valid_until IS NULL OR valid_until>?) ORDER BY created_at DESC LIMIT 30', [groupId, Date.now()])
       for (const cm of comms) {
         let members = []; try { members = JSON.parse(cm.member_ids || '[]') } catch { /* noop */ }
         if (members.includes(focusUserId)) {

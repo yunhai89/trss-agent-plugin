@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 // utils/Config.js 桩——E2E harness 用（真实 Config 读写源码仓 config/*.yaml，测试需内存配置 + 临时目录）。
 // __setConfig 由驱动脚本在 import apps 之前调用（hooks 已把本模块替换为所有 import 方的 Config）。
 export const __state = { config: { agent: {} } }
@@ -21,9 +22,15 @@ __state.cbs = new Set()
 
 const TMP = process.env.E2E_TMP || '/tmp/e2e-harness'
 const P = (...seg) => [TMP, ...seg].join('/')
+const pkg = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'))
+
 export default {
   get: () => __state.config,
+  // set 只改内存（真实 Config.set 会触发 onChange；e2e 里够用，避免桩比真实模块弱太多）
+  set: (path, value) => { const seg = String(path).split('.'); let o = __state.config; for (const k of seg.slice(0, -1)) { if (!o[k] || typeof o[k] !== 'object') o[k] = {}; o = o[k] } o[seg.at(-1)] = value; return value },
   save: () => { throw new Error('E2E 桩不支持 Config.save') },
+  // 版本/包元信息：真实 utils/Config.js 提供（面板 Hero 与启动日志读 Config.version）——缺了会让版本接线在 e2e 下恒 undefined
+  pkg, name: 'agents-plugin', version: pkg.version,
   onChange: (cb) => { if (typeof cb === 'function') __state.cbs.add(cb); return () => __state.cbs.delete(cb) },
   reload: () => false,
   startWatch: () => {},

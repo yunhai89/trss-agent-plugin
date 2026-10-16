@@ -268,6 +268,48 @@ await test('配置校验：红线强制、上限钳制', async () => {
   ok(v.config.emotion.maxNormalImpulse <= 0.5 && v.config.emotion.maxHighSalienceImpulse >= v.config.emotion.maxNormalImpulse, '脉冲上限钳制且高≥普通')
 })
 
+// ───────── 审计回归：期待状态守卫 / not_before_at 下界 / 负心境起点回填（M3/H1/M7）─────────
+await test('审计回归：期待判定有状态守卫，重复判定不二次下发', async () => {
+  const ss = mkSvc(); await ss.init()
+  const now = Date.now()
+  const expId = await ss.expectations.register({ botId: '999', groupId: 'RG', sourceMessageId: 'rg1', targetUserId: 'U1', sentText: '你觉得呢？', replyGuide: '问 U1', now })
+  ok(!!expId, `期待已建立（id=${expId}）`)
+  // 造一条到期行（not_before_at 已过、expires_at 已过）→ 第一次判定应落 status，第二次必须 null
+  await dao.run("UPDATE ss_expectations SET created_at=?, not_before_at=?, expires_at=? WHERE id=?", [now - 3600000, now - 3000000, now - 600000, expId])
+  const row = await dao.get('SELECT * FROM ss_expectations WHERE id=?', [expId])
+  const r1 = await ss.expectations._judgeExpiry(row, 'RG', now, BASE_CFG.expectations)
+  const st1 = await dao.get('SELECT status FROM ss_expectations WHERE id=?', [expId])
+  const r2 = await ss.expectations._judgeExpiry(row, 'RG', now, BASE_CFG.expectations)
+  const st2 = await dao.get('SELECT status FROM ss_expectations WHERE id=?', [expId])
+  ok(st1.status !== 'pending', `首次判定落状态（${st1.status}）`)
+  ok(r2 === null, '二次判定被状态守卫拦下（返回 null，不再重复下发事件）')
+  ok(st2.status === st1.status, `状态未被二次覆盖（${st2.status}）`)
+})
+
+await test('审计回归：not_before_at 之前不做冷落判定（只写不读的修复）', async () => {
+  const ss = mkSvc(); await ss.init()
+  const now = Date.now()
+  const expId = await ss.expectations.register({ botId: '999', groupId: 'RN', sourceMessageId: 'rn1', targetUserId: 'U2', sentText: '在吗？', replyGuide: '问 U2', now })
+  await dao.run("UPDATE ss_expectations SET created_at=?, not_before_at=?, expires_at=? WHERE id=?", [now, now + 300000, now + 3600000, expId])
+  const row = await dao.get('SELECT * FROM ss_expectations WHERE id=?', [expId])
+  const r = await ss.expectations._judgeExpiry(row, 'RN', now, BASE_CFG.expectations)
+  const st = await dao.get('SELECT status FROM ss_expectations WHERE id=?', [expId])
+  ok(r === null && st.status === 'pending', `下界未到不判定（status=${st.status}）`)
+})
+
+await test('审计回归：旧行无 negative_since 时用 last_transition_at 回填起点并触发恢复', async () => {
+  const ss = mkSvc(); await ss.init()
+  const now = Date.now(); const H = 3600000
+  await dao.run("INSERT OR IGNORE INTO ss_group_state(bot_id,group_id,valence,energy,updated_at) VALUES ('999','RB',-0.8,0.3,?)", [now])
+  // 关键：只写 last_transition_at（旧库形态），不写 negative_since
+  await dao.run("UPDATE ss_group_state SET valence=-0.8, energy=0.3, negative_since=NULL, last_transition_at=?, state_version=1 WHERE bot_id='999' AND group_id='RB'", [now - 25 * H])
+  const r = await ss.runMaintenance('RB')
+  const st = await dao.get('SELECT valence, energy, negative_since FROM ss_group_state WHERE bot_id=\'999\' AND group_id=\'RB\'')
+  ok(r?.recoveries === 1, `25h 旧行触发恢复（recoveries=${r?.recoveries}）`)
+  ok(Math.abs(st.valence - (-0.4)) < 0.01, `心境减半（${Number(st.valence).toFixed(3)}）`)
+  ok(Number(st.negative_since) > 0, 'negative_since 已回填（后续按新标记计时）')
+})
+
 // ───────── 总结 ─────────
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

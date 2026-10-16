@@ -116,30 +116,30 @@ export class GroupWorldIngester {
   async _upsertProfile(groupId, userId, norm, msgType, now) {
     const len = [...String(norm.text || '')].length
     const hour = new Date(Number(norm.timestamp) || now).getHours()
+    const name = String(norm.displayName || userId).slice(0, 128)
+    const spokeAt = Number(norm.timestamp) || now
     try {
-      const existing = await this.dao.get('SELECT message_count_30d, active_hour_histogram, avg_message_length FROM gw_member_profiles WHERE group_id=? AND user_id=?', [groupId, userId])
-      if (existing) {
-        const hist = (() => { try { return JSON.parse(existing.active_hour_histogram || '{}') } catch { return {} } })()
-        hist[String(hour)] = (Number(hist[String(hour)]) || 0) + 1
-        const count = Number(existing.message_count_30d) || 0
-        const oldAvg = Number(existing.avg_message_length) || 0
-        const avg = count > 0 ? (oldAvg * count + len) / (count + 1) : len
-        await this.dao.run(
-          `UPDATE gw_member_profiles
-             SET current_nickname=?, message_count_30d=message_count_30d+1, message_count_7d=message_count_7d+1,
-                 active_hour_histogram=?, avg_message_length=?, last_spoke_at=?, updated_at=?
-           WHERE group_id=? AND user_id=?`,
-          [String(norm.displayName || userId).slice(0, 128), JSON.stringify(hist), Math.round(avg * 100) / 100,
-            Number(norm.timestamp) || now, now, groupId, userId],
-        )
-      } else {
-        const hist = {}; hist[String(hour)] = 1
-        await this.dao.run(
-          `INSERT INTO gw_member_profiles(group_id,user_id,current_nickname,activity_tier,message_count_7d,message_count_30d,active_days_30d,avg_message_length,active_hour_histogram,last_spoke_at,opt_out,created_at,updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [groupId, userId, String(norm.displayName || userId).slice(0, 128), 'warm', 1, 1, 1, len, JSON.stringify(hist), Number(norm.timestamp) || now, 0, now, now],
-        )
-      }
+      // 原子 upsert（修复 M1）：此前是 SELECT→本地累加→UPDATE/INSERT 的 check-then-act，
+      // 并发（apps/groupworld.js 每个 message 事件独立并发摄入）时两条链都走 INSERT，
+      // 后者撞 PRIMARY KEY(group_id,user_id) 被 catch 吞掉 → 该条消息的计数/直方图/均值永久丢失
+      // （实测并发两条：message_count_30d=1 而 gw_messages=2）。
+      // 现在计数、均值、时间戳全部交给 SQL 累加；直方图仍是尽力而为（并发下可能少记一格，可接受）。
+      const row = await this.dao.get('SELECT active_hour_histogram FROM gw_member_profiles WHERE group_id=? AND user_id=?', [groupId, userId]).catch(() => null)
+      const hist = (() => { try { return JSON.parse(row?.active_hour_histogram || '{}') } catch { return {} } })()
+      hist[String(hour)] = (Number(hist[String(hour)]) || 0) + 1
+      await this.dao.run(
+        `INSERT INTO gw_member_profiles(group_id,user_id,current_nickname,activity_tier,message_count_7d,message_count_30d,active_days_30d,avg_message_length,active_hour_histogram,last_spoke_at,opt_out,created_at,updated_at)
+         VALUES (?,?,?,'warm',1,1,1,?,?,?,0,?,?)
+         ON CONFLICT(group_id,user_id) DO UPDATE SET
+           current_nickname=excluded.current_nickname,
+           message_count_7d=gw_member_profiles.message_count_7d+1,
+           message_count_30d=gw_member_profiles.message_count_30d+1,
+           avg_message_length=ROUND((IFNULL(gw_member_profiles.avg_message_length,0)*gw_member_profiles.message_count_30d+?)/(gw_member_profiles.message_count_30d+1),2),
+           active_hour_histogram=excluded.active_hour_histogram,
+           last_spoke_at=excluded.last_spoke_at,
+           updated_at=excluded.updated_at`,
+        [groupId, userId, name, len, JSON.stringify(hist), spokeAt, now, now, len],
+      )
     } catch (e) { Log.warn('[groupworld] upsert profile 失败', groupId, userId, e?.message || e) }
   }
 
@@ -150,18 +150,15 @@ export class GroupWorldIngester {
   async _bumpEdge(groupId, fromUserId, toUserId, kind, now) {
     const col = kind === 'reply' ? 'reply_count_30d' : 'mention_count_30d'
     try {
-      const res = await this.dao.run(
-        `UPDATE gw_edges SET ${col}=${col}+1, last_interacted_at=?, updated_at=?
-         WHERE group_id=? AND from_user_id=? AND to_user_id=?`,
-        [now, now, groupId, fromUserId, toUserId],
+      // 原子 upsert（修复 M1 同族）：UPDATE 无命中再 INSERT 的写法在并发下同样会撞
+      // PRIMARY KEY(group_id,from_user_id,to_user_id) 并被 catch 吞掉 → 边计数少记。
+      await this.dao.run(
+        `INSERT INTO gw_edges(group_id,from_user_id,to_user_id,${col},first_interacted_at,last_interacted_at,updated_at)
+         VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT(group_id,from_user_id,to_user_id) DO UPDATE SET
+           ${col}=gw_edges.${col}+1, last_interacted_at=excluded.last_interacted_at, updated_at=excluded.updated_at`,
+        [groupId, fromUserId, toUserId, 1, now, now, now],
       )
-      if (!res?.changes) {
-        await this.dao.run(
-          `INSERT INTO gw_edges(group_id,from_user_id,to_user_id,${col},first_interacted_at,last_interacted_at,updated_at)
-           VALUES (?,?,?,?,?,?,?)`,
-          [groupId, fromUserId, toUserId, 1, now, now, now],
-        )
-      }
     } catch (e) { Log.warn('[groupworld] bump edge 失败', groupId, fromUserId, toUserId, e?.message || e) }
   }
 
@@ -186,6 +183,12 @@ export class GroupWorldIngester {
         await this.dao.run('DELETE FROM gw_traits WHERE group_id=? AND user_id=?', [groupId, userId])
         await this.dao.run('DELETE FROM gw_edges WHERE group_id=? AND (from_user_id=? OR to_user_id=?)', [groupId, userId, userId])
         await this.dao.run('DELETE FROM gw_bot_rel WHERE group_id=? AND user_id=?', [groupId, userId])
+        // SelfState（ss_*）同库：此前只清 gw_*，导致 #删除我的画像 后 ss_events/ss_emotions/
+        // ss_concerns/ss_expectations 里该成员的行仍留着并继续影响情绪投影与心事面板。
+        await this.dao.run('DELETE FROM ss_events WHERE group_id=? AND actor_user_id=?', [groupId, userId])
+        await this.dao.run('DELETE FROM ss_emotions WHERE group_id=? AND target_user_id=?', [groupId, userId])
+        await this.dao.run('DELETE FROM ss_concerns WHERE group_id=? AND target_user_id=?', [groupId, userId])
+        await this.dao.run('DELETE FROM ss_expectations WHERE group_id=? AND target_user_id=?', [groupId, userId])
         // 事件为群级数据不整行删，但参与者列表必须移除该用户（可恢复画像的关联）
         const eps = await this.dao.all('SELECT id, participant_ids FROM gw_episodes WHERE group_id=?', [groupId]).catch(() => [])
         for (const ep of eps) {
@@ -228,7 +231,10 @@ export class GroupWorldIngester {
   /** 删某群全部派生数据（保留原始消息可选）。true=已清理，false=写库失败（调用方不再回假成功，M-058）。 */
   async purgeGroup(groupId, { keepMessages = false } = {}) {
     if (!groupId) return false
-    const tables = ['gw_segments', 'gw_member_profiles', 'gw_traits', 'gw_evidence', 'gw_edges', 'gw_bot_rel', 'gw_episodes', 'gw_communities', 'gw_cursor', 'gw_optout']
+    // ss_* 与 gw_* 同库：整群清理必须一并删掉 SelfState 的情绪/心事/期待/迁移/群心境，
+    // 否则「已有画像已清除」的承诺不成立（情绪投影与心事面板仍带着旧群的残留）
+    const tables = ['gw_segments', 'gw_member_profiles', 'gw_traits', 'gw_evidence', 'gw_edges', 'gw_bot_rel', 'gw_episodes', 'gw_communities', 'gw_cursor', 'gw_optout',
+      'ss_events', 'ss_emotions', 'ss_concerns', 'ss_expectations', 'ss_transitions', 'ss_group_state']
     if (!keepMessages) tables.unshift('gw_messages')
     try {
       await this.dao.txn(async () => {

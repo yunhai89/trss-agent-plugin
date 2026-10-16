@@ -186,6 +186,11 @@ export class WorldMaintenance {
     try { await this.dao.run('DELETE FROM gw_messages WHERE group_id=? AND sent_at<?', [groupId, cutoff]) } catch { /* noop */ }
     try { await this.dao.run('DELETE FROM gw_communities WHERE group_id=? AND created_at<?', [groupId, now - 14 * dayMs]) } catch { /* noop */ }
     try { await this.dao.run("UPDATE gw_segments SET status='archived' WHERE group_id=? AND status='closed' AND closed_at<?", [groupId, cutoff]) } catch { /* noop */ }
+    // 无界增长修复（L2）：证据行此前只随 purgeUser 删除，SelfState 事件行更是全仓无清理点
+    // （DELETE FROM ss_events 0 命中）→ 证据/事件/归档片段永久累积。这里按保留期清理：
+    // 证据跟随消息保留期，情绪事件保留 3 倍时长（够投影/回溯，又不无限涨）。
+    try { await this.dao.run('DELETE FROM gw_evidence WHERE group_id=? AND observed_at<?', [groupId, cutoff]) } catch { /* noop */ }
+    try { await this.dao.run('DELETE FROM ss_events WHERE group_id=? AND occurred_at<?', [groupId, now - retentionDays * 3 * dayMs]) } catch { /* noop */ }
   }
 
   // ─────────────── P0 语义层：embedding 回填 + 近义合并 ───────────────

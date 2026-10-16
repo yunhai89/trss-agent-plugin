@@ -79,7 +79,7 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
   },
   safety: {
     privateMemoryInGroup: false, // 不可改的硬约束
-    maxConcurrentGroups: 2,
+    maxConcurrentGroups: 1,   // 与 config.yaml/面板一致（此前写 2，但 raw 优先故从不生效，属误导性死值）
   },
   redactSecrets: true,
 })

@@ -51,14 +51,17 @@ export class HumanizeMemoryStore {
 
   async init() {
     if (this._ready) return true
+    // 失败退避：持续性故障（目录不可写/库损坏）下不要每次召回、每轮 Planner 都重试一遍刷屏
+    if (this._failedAt && Date.now() - this._failedAt < 60000) return false
     if (this._initPromise) return this._initPromise
     this._initPromise = (async () => {
+      let db = null
       try {
         const { createRequire } = await import('node:module')
         const require = createRequire(import.meta.url)
         const sqlite3 = require('sqlite3')
         fs.mkdirSync(this.dataDir, { recursive: true })
-        const db = new sqlite3.Database(path.join(this.dataDir, 'memory.db'))
+        db = new sqlite3.Database(path.join(this.dataDir, 'memory.db'))
         const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this) }))
         const get = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => e ? rej(e) : res(r)))
         const all = (sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => e ? rej(e) : res(r || [])))
@@ -99,7 +102,11 @@ export class HumanizeMemoryStore {
         this._ready = true
         return true
       } catch (e) {
-        Log.warn('[humanize-memory] 初始化失败（记忆功能降级禁用）', e?.message || e)
+        // 初始化中途失败必须关掉已打开的句柄，否则每次 recall/jargonDict/consolidate 重试都会再开一个
+        // （审计 2026-10-17：全文件原先没有 db.close()，持续性故障 → 句柄与 FD 泄漏 + 日志刷屏）
+        try { db?.close?.() } catch { /* noop */ }
+        this._failedAt = Date.now()
+        Log.warn('[humanize-memory] 初始化失败（记忆功能降级禁用，60s 内不重试）', e?.message || e)
         this._ready = false
         return false
       } finally { this._initPromise = null }

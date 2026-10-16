@@ -15,8 +15,8 @@
  */
 const ENABLED = process.env.E2B_INTEGRATION === '1'
 if (!ENABLED) {
-  console.log('SKIPPED：未设置 E2B_INTEGRATION=1（真连接测试默认不跑）')
-  console.log('通过 0，失败 0')
+  // AGENTS.md 约定：整文件未运行时打印 SKIP_FILE:（runner 计为「跳过」）
+  console.log('SKIP_FILE: 未设置 E2B_INTEGRATION=1（真连接测试默认不跑）')
   process.exit(0)
 }
 
@@ -62,8 +62,7 @@ console.log(`[来源] apiKey=${src('E2B_API_KEY', fromCfg.apiKey)} · apiUrl=${s
 
 // ── 可达性/鉴权预检：失败即 SKIPPED（环境问题不是代码失败）──
 if (!cfg.apiKey) {
-  console.log('SKIPPED：没有可用的 E2B API Key（既未设 E2B_API_KEY，插件配置 agent.sandbox.apiKey 也为空）')
-  console.log('通过 0，失败 0')
+  console.log('SKIP_FILE: 没有可用的 E2B API Key（既未设 E2B_API_KEY，插件配置 agent.sandbox.apiKey 也为空）')
   process.exit(0)
 }
 const probeTransport = makeTransport(cfg, { logger: null })
@@ -71,8 +70,7 @@ try {
   await probeTransport.init()
   await probeTransport.ping(3000)
 } catch (e) {
-  console.log(`SKIPPED：E2B 不可达或鉴权失败（${e?.message || e}）`)
-  console.log('通过 0，失败 0')
+  console.log(`SKIP_FILE: E2B 不可达或鉴权失败（${e?.message || e}）`)
   process.exit(0)
 }
 console.log('[E2B 真连接可用，开始集成断言]\n')

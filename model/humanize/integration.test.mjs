@@ -722,6 +722,76 @@ await test('记忆回流：高热行换皮变体并回同一行（不再四行�
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+// ───────── 审计 2026-10-17：Replyer 上下文 / scene 打断 / 自身发言重复 ─────────
+await test('Replyer 收到滚动 ctxWindow（含 bot 自身发言），markObserved 仍用 external', async () => {
+  const { runtime } = mkCtx()
+  const cfg = () => validateHumanizeConfig({
+    enable: true, groups: ['g1'], shadow: false, threshold: 80, talkValue: 0.35,
+    debounceMs: 5, cooldownSeconds: 1, planner: { maxRounds: 2 }, replyer: { maxChars: 200 },
+  }).config
+  const selfMsg = { id: 'self_prev', groupId: 'g1', userId: 'bot', displayName: '我', timestamp: Date.now() - 2000, text: '明早八点，老地方', segments: [], isSelf: true, isCommand: false, handledByDirectAgent: false, atBot: false, mentionsBotName: false, quotesBot: false, replyToId: null, media: [] }
+  runtime.buffer.append(selfMsg)
+  runtime.buffer.append(mkMsg('我们先定个地方', {}, 'm_early'))
+  const target = mkMsg('@bot 那地方在哪来着', { mentionsBotName: true }, 'm_now')
+  runtime.buffer.append(target)
+  // external = 本轮新消息（不含 self）；ctxWindow = 滚动窗口（含 self + 更早上下文）
+  const external = [runtime.buffer.get('m_early'), runtime.buffer.get('m_now')]
+  const ctxWindow = runtime.buffer.snapshot(30, { includeSelf: true })
+  let seenBatch = null
+  const replyer = { generate: async ({ batch }) => { seenBatch = batch; return { text: '那就老地方' } } }
+  const composer = { deliver: async () => ({ sentIds: ['s1'], sentTexts: ['那就老地方'], cancelled: false }) }
+  const sched = new TurnScheduler({ runtime, cfg, planner: {}, replyer, composer, send: async () => 's1' })
+  await sched._applyAction(
+    { type: 'human_reply', targetMessageId: 'm_now', replyGuide: '', quote: false },
+    external, { targetMessage: target }, runtime.plannerGeneration, 't1', ctxWindow,
+  )
+  const texts = (seenBatch || []).map((m) => m.text)
+  ok(texts.includes('明早八点，老地方'), `Replyer 的 batch 含 bot 自身上一句（实际 ${JSON.stringify(texts)}）`)
+  ok(texts.includes('我们先定个地方'), 'Replyer 的 batch 含更早的上下文')
+  ok(!(seenBatch || []).some((m) => m.id === 'm_early' && m.isSelf), 'batch 是 ctxWindow 而非仅本轮新消息')
+})
+
+await test('scene 分析期间到达的新消息打断本轮（不拿旧快照回复）', async () => {
+  const { runtime, trace } = mkCtx()
+  const cfg = () => validateHumanizeConfig({
+    enable: true, groups: ['g1'], shadow: false, threshold: 80, talkValue: 0.35,
+    debounceMs: 5, cooldownSeconds: 0, planner: { maxRounds: 2 }, replyer: { maxChars: 200 },
+  }).config
+  const planner = { decide: async ({ snapshot }) => ({ type: 'human_reply', targetMessageId: (snapshot.find((m) => !m.isSelf) || {}).id || 'm1', replyGuide: 'x', quote: false, toolCallId: 'c1' }) }
+  const replyer = { generate: async () => ({ text: '收到' }) }
+  let delivered = 0
+  const composer = { deliver: async () => { delivered++; return { sentIds: ['s' + delivered], sentTexts: ['收到'], cancelled: false } } }
+  let entered = null
+  const enteredP = new Promise((r) => { entered = r })
+  const sched = new TurnScheduler({
+    runtime, cfg, planner, replyer, composer,
+    send: async () => 's',
+    getScene: async () => { entered(); await sleep(60); return null },
+  })
+  await sched.onMessage(mkMsg('@bot 第一句', { mentionsBotName: true }, 'm1'))
+  await Promise.race([enteredP, sleep(400)]) // 等到确实进入 scene 分析（相位已切 planning）
+  const enteredScene = await Promise.race([enteredP.then(() => true), sleep(1).then(() => false)])
+  ok(enteredScene, '本轮确实进入了 scene 分析（否则本用例无意义）')
+  await sched.onMessage(mkMsg('@bot 第二句', { mentionsBotName: true }, 'm2'))
+  await sleep(400)
+  const stale = trace.recent({ limit: 100 }).filter((e) => e.event === 'scene_stale')
+  ok(stale.length >= 1, `scene 期间的新消息被判为过期回合（scene_stale=${stale.length}）`)
+  ok(delivered >= 1, '新消息重新决策后仍能正常回复（不是零回复）')
+})
+
+await test('多气泡回复不重复入账：_appendSelf 不改写首段条目', async () => {
+  const { runtime } = mkCtx()
+  const sched = new TurnScheduler({ runtime, cfg: () => ({}), planner: {}, replyer: {}, composer: {}, send: async () => 'x' })
+  for (const [id, text] of [['s1', '甲。'], ['s2', '乙。'], ['s3', '丙。']]) {
+    runtime.buffer.append({ id, groupId: 'g1', userId: 'bot', displayName: '我', timestamp: Date.now(), text, segments: [], isSelf: true, isCommand: false, handledByDirectAgent: false, atBot: false, mentionsBotName: false, quotesBot: false, replyToId: null, media: [] })
+  }
+  sched._appendSelf('甲。\n乙。\n丙。', 's1')
+  const texts = runtime.buffer.snapshot(10, { includeSelf: true }).filter((m) => m.isSelf).map((m) => m.text)
+  ok(texts.filter((t) => t === '乙。').length === 1, `「乙。」只入账一次（实际 ${JSON.stringify(texts)}）`)
+  ok(texts.filter((t) => t === '丙。').length === 1, '「丙。」只入账一次')
+  ok(runtime.buffer.get('s1')?.text === '甲。', '首段条目保持首段文本（未被改写成整段拼接）')
+})
+
 // ───────── 总结 ─────────
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

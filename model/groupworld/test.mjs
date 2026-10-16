@@ -476,6 +476,43 @@ await test('迁移：subject_user_id 列 + 存量回填，重复执行幂等', a
   fs.rmSync(tmp2, { recursive: true, force: true })
 })
 
+// ───────── 审计回归：purgeUser 必须同时清掉 ss_* 残留（M5）─────────
+// 通用造行助手：按 PRAGMA 补齐 NOT NULL 列，避免逐列试错、也不怕后续加列
+const seedRow = async (table, cols = {}) => {
+  const info = await dao.all(`PRAGMA table_info(${table})`)
+  const names = []; const vals = []
+  for (const c of info) {
+    if (c.name === 'id') continue
+    if (Object.prototype.hasOwnProperty.call(cols, c.name)) { names.push(c.name); vals.push(cols[c.name]); continue }
+    if (c.notnull && c.dflt_value == null) {
+      const t = String(c.type || '').toUpperCase()
+      names.push(c.name); vals.push(t.includes('INT') || t.includes('REAL') ? 0 : '')
+    }
+  }
+  await dao.run(`INSERT INTO ${table}(${names.join(',')}) VALUES (${names.map(() => '?').join(',')})`, vals)
+}
+
+await test('审计回归：purgeUser 清除 gw_* 与 ss_*（#删除我的画像 不再留情绪/心事残留）', async () => {
+  await Db.initDb({ dir: TMP }) // 迁移用例关闭过共享库，这里重开（getDb 幂等）
+  const ing = new GroupWorldIngester({ dao })
+  const gid = 'PURGE_G', uid = 'PURGE_U', now = Date.now()
+  await seedRow('gw_member_profiles', { group_id: gid, user_id: uid, current_nickname: '被删者', activity_tier: 'hot', created_at: now, updated_at: now })
+  await seedRow('gw_bot_rel', { bot_id: '999', group_id: gid, user_id: uid, created_at: now, updated_at: now })
+  await seedRow('ss_events', { bot_id: '999', group_id: gid, event_type: 'directed_message', actor_user_id: uid, occurred_at: now, created_at: now })
+  await seedRow('ss_emotions', { bot_id: '999', group_id: gid, emotion_type: 'annoyance', target_user_id: uid, status: 'active', started_at: now, created_at: now, updated_at: now })
+  await seedRow('ss_concerns', { bot_id: '999', group_id: gid, target_user_id: uid, concern_type: 'unresolved', status: 'open', created_at: now, updated_at: now })
+  await seedRow('ss_expectations', { bot_id: '999', group_id: gid, source_message_id: 'pm1', target_user_id: uid, expectation_type: 'reply_expected', status: 'pending', created_at: now })
+  const okDel = await ing.purgeUser(gid, uid)
+  ok(okDel === true, 'purgeUser 返回成功')
+  const cnt = async (sql) => Number((await dao.get(sql, [gid, uid]))?.c || 0)
+  ok(await cnt('SELECT COUNT(*) c FROM gw_member_profiles WHERE group_id=? AND user_id=?') === 0, 'gw_member_profiles 已清')
+  ok(await cnt('SELECT COUNT(*) c FROM gw_bot_rel WHERE group_id=? AND user_id=?') === 0, 'gw_bot_rel 已清')
+  ok(await cnt('SELECT COUNT(*) c FROM ss_events WHERE group_id=? AND actor_user_id=?') === 0, 'ss_events 已清')
+  ok(await cnt('SELECT COUNT(*) c FROM ss_emotions WHERE group_id=? AND target_user_id=?') === 0, 'ss_emotions 已清')
+  ok(await cnt('SELECT COUNT(*) c FROM ss_concerns WHERE group_id=? AND target_user_id=?') === 0, 'ss_concerns 已清')
+  ok(await cnt('SELECT COUNT(*) c FROM ss_expectations WHERE group_id=? AND target_user_id=?') === 0, 'ss_expectations 已清')
+})
+
 // ───────── 总结 ─────────
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

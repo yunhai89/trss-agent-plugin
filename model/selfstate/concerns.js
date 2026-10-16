@@ -38,7 +38,20 @@ export class ConcernManager {
    * 事件后更新心事（显著负面 → 创建/升级；无目标不建）。返回 concern 行或 null。
    * @param {object} o { botId, groupId, actorUserId, eventType, appraisal, eventId, significance(=事件 base), now }
    */
-  async onEvent({ botId, groupId, actorUserId, eventType, appraisal, eventId, significance = 0, now = Date.now() }) {
+  async onEvent(o) {
+    // 串行化（修复：SELECT active → INSERT 的 check-then-act 在并发链下会各建一行同型心事
+    // ——apps/humanize.js 对每条消息 fire-and-forget 调 onMessage，相邻两条消息的处理链并发；
+    // 实测并发两条 onEvent 得到 2 行 unresolved_disrespect。emotion 侧早已用 _serialize，此处对齐）
+    return this._serialize(() => this._onEventInner(o))
+  }
+
+  _serialize(fn) {
+    const run = (this._writeChain || Promise.resolve()).then(fn, fn)
+    this._writeChain = run.catch(() => {})
+    return run
+  }
+
+  async _onEventInner({ botId, groupId, actorUserId, eventType, appraisal, eventId, significance = 0, now = Date.now() }) {
     if (!actorUserId) return null
     const cfg = this._cfgFn()
     const rcfg = cfg.resentment || {}

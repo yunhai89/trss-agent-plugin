@@ -47,6 +47,7 @@
     reply: { maxBubbles: 3, typingSpeed: 1.0, minDelayMs: 600, maxDelayMs: 3500, typos: false, allowSticker: true },
     behaviorPolicy: { topics: [], avoidTopics: [], initiative: 0.35, humor: 0.4, answerUnknownQuestions: false, interruptHumanConversation: false, maxRepliesPer10Minutes: 4 },
     safety: { privateMemoryInGroup: false, maxConcurrentGroups: 1 },
+    vision: { allowPrivateHosts: false },
     knownBots: [],
     memory: { enabled: true, maxPerQuery: 5, maxPerGroup: 300, incrementalMinMessages: 20, forgetDays: 30 },
   }
@@ -426,6 +427,9 @@
             </cfg-row>
             <cfg-row name="同时 Planning 群数上限" desc="全局信号量；默认 1（MVP）">
               <input type="number" class="inp" style="width:90px" min="1" max="10" v-model.number="form.safety.maxConcurrentGroups">
+            </cfg-row>
+            <cfg-row name="允许抓取内网图片" desc="伪人看图（humanize.vision.allowPrivateHosts）：默认关（防 SSRF）；自建图床调试时才开">
+              <v-switch v-model="form.vision.allowPrivateHosts"/>
             </cfg-row>
             <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.safety = !adv.safety">
               {{ adv.safety ? '▾' : '▸' }} 高级参数

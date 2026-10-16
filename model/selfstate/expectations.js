@@ -83,6 +83,9 @@ export class ExpectationManager {
 
     const fromSender = String(norm.userId)
     const text = String(norm.text || '')
+    // 消息时间下界（修复：此前完全不比对时间，迟投/乱序/回放的旧消息可直接 fulfill 期待 →
+    // 假的 response_received 并抑制本应产生的 ignored 判定）。QQ 时间戳为秒级，故允许同秒（>= created_at）通过。
+    const msgAt = Number(norm.timestamp) || now
     const repliedToBotMsg = !!(norm.replyToId && quoteIsBot)
     const mentionsBot = !!norm.atBot
 
@@ -91,15 +94,20 @@ export class ExpectationManager {
     const replyingToOther = !!(norm.replyToId && !quoteIsBot) // 回复链指向他人 → 不是对机器人说话
     const casualReaction = /^[哈嘿嘻嘻xX～~\s!！。.,，?？]{1,6}$|^\[.+\]$/.test(text.trim()) // 纯语气/表情反应不算回答
     for (const exp of pending) {
+      if (msgAt < Number(exp.created_at)) continue // 消息早于期待创建 → 不可能是对它的回应（迟投/乱序/回放）
       const isTarget = !exp.target_user_id || String(exp.target_user_id) === fromSender
       // 无显式指向的"语义回答"从严：目标本人 + 未在回复他人 + 实质内容（≥4 字、非问句、非纯反应）
       const semanticAnswer = exp.expectation_type === 'direct_answer' && isTarget && !replyingToOther
         && !/[?？]/.test(text) && [...text].length >= 4 && !casualReaction
       if (isTarget && (repliedToBotMsg || mentionsBot || semanticAnswer)) {
-        await this.dao.run(
-          "UPDATE ss_expectations SET status='fulfilled', fulfilled_by_message_id=?, outcome='fulfilled', outcome_confidence=0.85, resolved_at=? WHERE id=?",
+        // 状态守卫（修复：此前无 AND status='pending'，apps/humanize.js 对每条消息 fire-and-forget 调
+        // onMessage，两条相邻消息的处理链会各自 SELECT 到同一 pending 行并各结算一次 →
+        // fulfilled 事件重复下发，情绪/心事/关系残留双计）。changes=0 说明已被并发链结算，跳过。
+        const r = await this.dao.run(
+          "UPDATE ss_expectations SET status='fulfilled', fulfilled_by_message_id=?, outcome='fulfilled', outcome_confidence=0.85, resolved_at=? WHERE id=? AND status='pending'",
           [String(norm.id), now, exp.id],
         )
+        if (!r?.changes) continue
         out.push({ expectation: exp, outcome: 'fulfilled' })
         this.trace?.record?.('ss_expectation', { groupId, kind: 'fulfilled', expId: exp.id })
       }
@@ -112,6 +120,10 @@ export class ExpectationManager {
    *  判定顺序（修复：此前"目标无活跃→uncertain"抢在"全群沉默→naturally_expired"之前，群集体沉默大多误落 uncertain）；
    *  无 target 的群级期待以"群自身活跃度"为证据（修复：此前 null 被当"无证据"→ 永远 uncertain）。 */
   async _judgeExpiry(exp, groupId, now, ec) {
+    // 判定下界（修复：not_before_at 此前只写不读）：早于该时刻不做冷落判定，避免"刚问完就判被冷落"。
+    // 只有当 not_before_at 落在期待生命周期内（< expires_at）时才作为下界，数据不自洽时忽略它，避免永久卡住判定。
+    const nb = Number(exp.not_before_at) || 0
+    if (nb > now && nb < Number(exp.expires_at)) return null
     const groupActiveAfter = await this._groupActiveAfter(groupId, exp.created_at, now)
     const hasTarget = !!exp.target_user_id
     const targetActiveAfter = hasTarget ? await this._userActiveAfter(groupId, exp.target_user_id, exp.created_at, now) : null
@@ -136,7 +148,10 @@ export class ExpectationManager {
         else { status = 'naturally_expired'; outcome = 'naturally_expired'; conf = 0.55 }
       }
     }
-    await this.dao.run('UPDATE ss_expectations SET status=?, outcome=?, outcome_confidence=?, resolved_at=? WHERE id=?', [status, outcome, Math.round(conf * 100) / 100, now, exp.id])
+    // 状态守卫（修复：此前无 AND status='pending'，两条并发链会各判一次并各下发 ignored 事件 →
+    // 情绪/心事/关系残留双计，后写覆盖前写）
+    const upd = await this.dao.run('UPDATE ss_expectations SET status=?, outcome=?, outcome_confidence=?, resolved_at=? WHERE id=? AND status=\'pending\'', [status, outcome, Math.round(conf * 100) / 100, now, exp.id])
+    if (!upd?.changes) return null
     this.trace?.record?.('ss_expectation', { groupId, kind: outcome, expId: exp.id, conf: Math.round(conf * 100) / 100, target: exp.target_user_id })
     // 返回给 service：仅 ignored 产生明确事件（uncertain 不影响长期关系 §16.3）
     return outcome === 'ignored' ? { expectation: exp, outcome: 'ignored', confidence: conf, targetUserId: exp.target_user_id } : null
@@ -149,8 +164,8 @@ export class ExpectationManager {
     // 此前 sweepExpired 漏判 → 关掉开关仍继续产出 ignored_expectation 累积负面关系）
     if (ec.enabled === false) return []
     const expired = await this.dao.all(
-      "SELECT * FROM ss_expectations WHERE bot_id=? AND group_id=? AND status='pending' AND expires_at<?",
-      [botId, groupId, now],
+      "SELECT * FROM ss_expectations WHERE bot_id=? AND group_id=? AND status='pending' AND expires_at<? AND (not_before_at<=? OR not_before_at>=expires_at)",
+      [botId, groupId, now, now],
     )
     const ignoredEvents = []
     for (const exp of expired) {

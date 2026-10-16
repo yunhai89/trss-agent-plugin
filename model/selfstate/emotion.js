@@ -231,7 +231,14 @@ export class EmotionTransition {
    *    valence = (1-α)·prev + α·target，α = emotion.moodEmaAlpha（默认 0.3）
    *  心境跟随情绪但带惯性——被骂后低落持续一晚上而不是半小时；超过 moodResetHours（默认 6h）
    *  无迁移则 α→1，一觉醒来自动回基线。 */
-  async _transitionAffect({ botId, groupId, entries, eventType, eventId, now }) {
+  async _transitionAffect(o) {
+    // 串行化（修复：此前不串行 → 并发 applyEvent 各自读到同一 state_version，乐观锁冲突后
+    // 走下面的无条件覆盖分支，用陈旧快照重算并覆盖前者：前一事件的贡献丢失，
+    // 且 ss_transitions 的 before/after 与真实序列不衔接，审计链断裂）
+    return this._serialize(() => this._transitionAffectInner(o))
+  }
+
+  async _transitionAffectInner({ botId, groupId, entries, eventType, eventId, now }) {
     const emc = this._cfgFn().emotion || {}
     const active = await this.decayAndGetActive(botId, groupId, now) // 含刚写入的
     let pValence = 0; let pArousal = 0; let pSecurity = 0
@@ -241,36 +248,51 @@ export class EmotionTransition {
       pArousal += (AFFECT_PROJECTION.arousal[e.emotion_type] || 0) * i
       pSecurity += (AFFECT_PROJECTION.social_security[e.emotion_type] || 0) * i
     }
-    const state = await this._getOrCreateState(botId, groupId)
-    const before = { valence: state.valence, arousal: state.arousal, energy: state.energy, social_security: state.social_security, agency: state.agency }
     const target = {
       valence: clamp11(pValence * 0.5),
       arousal: clamp01(0.2 + pArousal * 0.4),
       energy: clamp01(0.7 - Math.max(0, -clamp11(pValence * 0.5)) * 0.3), // 负面按当前深度消耗精力（随情绪消退自动恢复）
       social_security: clamp01(0.6 + pSecurity * 0.5),
     }
-    const elapsed = state.last_transition_at ? now - Number(state.last_transition_at) : Infinity
-    const alpha = elapsed >= (emc.moodResetHours ?? 6) * 3600000
-      ? 1
-      : clamp01(emc.moodEmaAlpha ?? 0.3)
-    const blend = (prev, tgt) => (1 - alpha) * Number(prev) + alpha * tgt
-    const after = {
-      valence: clamp11(blend(state.valence, target.valence)),
-      arousal: clamp01(blend(state.arousal, target.arousal)),
-      energy: clamp01(blend(state.energy, target.energy)),
-      social_security: clamp01(blend(state.social_security, target.social_security)),
-      agency: Number(state.agency),
+    // 乐观锁（§21.4）+ 冲突重试：冲突说明有其它写者（跨进程/未串行路径），此时必须
+    // 基于**最新**状态重算再写，否则后写者用陈旧快照覆盖前者、审计 before/after 不衔接。
+    let before = null; let after = null
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const state = await this._getOrCreateState(botId, groupId)
+      before = { valence: state.valence, arousal: state.arousal, energy: state.energy, social_security: state.social_security, agency: state.agency }
+      const elapsed = state.last_transition_at ? now - Number(state.last_transition_at) : Infinity
+      const alpha = elapsed >= (emc.moodResetHours ?? 6) * 3600000
+        ? 1
+        : clamp01(emc.moodEmaAlpha ?? 0.3)
+      const blend = (prev, tgt) => (1 - alpha) * Number(prev) + alpha * tgt
+      after = {
+        valence: clamp11(blend(state.valence, target.valence)),
+        arousal: clamp01(blend(state.arousal, target.arousal)),
+        energy: clamp01(blend(state.energy, target.energy)),
+        social_security: clamp01(blend(state.social_security, target.social_security)),
+        agency: Number(state.agency),
+      }
+      const upd = await this.dao.run(
+        `UPDATE ss_group_state SET valence=?, arousal=?, energy=?, social_security=?, agency=?,
+           negative_since=CASE WHEN ? < -0.15 THEN IFNULL(negative_since, ?) ELSE NULL END,
+           last_transition_at=?, updated_at=?, state_version=state_version+1
+         WHERE bot_id=? AND group_id=? AND state_version=?`,
+        [after.valence, after.arousal, after.energy, after.social_security, after.agency, after.valence, now, now, now, botId, groupId, state.state_version],
+      )
+      if (upd?.changes) break
+      this.trace?.record?.('ss_affect', { groupId, kind: 'version_conflict', attempt })
+      after = null
     }
-    // 乐观锁（§21.4）：冲突时直接覆盖写（投影是绝对值，与重算等价，无累加风险）
-    const upd = await this.dao.run(
-      `UPDATE ss_group_state SET valence=?, arousal=?, energy=?, social_security=?, agency=?, last_transition_at=?, updated_at=?, state_version=state_version+1
-       WHERE bot_id=? AND group_id=? AND state_version=?`,
-      [after.valence, after.arousal, after.energy, after.social_security, after.agency, now, now, botId, groupId, state.state_version],
-    )
-    if (!upd?.changes) {
+    if (!after) {
+      // 3 次都冲突（极端并发）：退回绝对值覆盖，但 before 取最新快照，保证审计链仍可衔接
+      const state = await this._getOrCreateState(botId, groupId)
+      before = { valence: state.valence, arousal: state.arousal, energy: state.energy, social_security: state.social_security, agency: state.agency }
+      after = { ...before, valence: target.valence, arousal: target.arousal, energy: target.energy, social_security: target.social_security }
       await this.dao.run(
-        'UPDATE ss_group_state SET valence=?, arousal=?, energy=?, social_security=?, agency=?, last_transition_at=?, updated_at=?, state_version=state_version+1 WHERE bot_id=? AND group_id=?',
-        [after.valence, after.arousal, after.energy, after.social_security, after.agency, now, now, botId, groupId],
+        `UPDATE ss_group_state SET valence=?, arousal=?, energy=?, social_security=?, agency=?,
+           negative_since=CASE WHEN ? < -0.15 THEN IFNULL(negative_since, ?) ELSE NULL END,
+           last_transition_at=?, updated_at=?, state_version=state_version+1 WHERE bot_id=? AND group_id=?`,
+        [after.valence, after.arousal, after.energy, after.social_security, after.agency, after.valence, now, now, now, botId, groupId],
       ).catch(() => {})
     }
     // 审计（§6.8）

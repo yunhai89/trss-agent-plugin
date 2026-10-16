@@ -291,10 +291,21 @@ export class TurnScheduler {
 
     // ConversationScene（Grounding → Scene → Gate → Planner → Replyer；同一对象全程共用）。
     // 失败/未注入 → scene=null，门控与下游全部零影响（降级不阻塞链路）。
+    // ⚠ scene 是一次 LLM 调用（默认上限 6s），期间必须让新消息能打断本轮：先把相位切到 planning，
+    // 否则 onMessage 看到的仍是 debouncing（既不 abort 也不 bump 代）→ 用旧快照回复、随后再补一条
+    // （审计 2026-10-17 复现：m2 在 scene 期间到达 → 未打断 → 实际发送 2 条、第一条完全没看到 m2）。
+    const sceneGen = rt.plannerGeneration
+    rt.setPhase('planning')
     let scene = null
     try {
       scene = await this.getScene?.({ runtime: rt, decision, messages: ctxWindow, now }) || null
     } catch { scene = null }
+    if (rt.plannerGeneration !== sceneGen) {
+      // scene 分析期间来了新消息：放弃本轮（onMessage 已重排 debounce，会用最新上下文重新决策）
+      rt.trace?.record('scene_stale', { turnId, by: 'new_message' })
+      rt.setPhase('idle')
+      return
+    }
     rt.currentScene = scene
 
     // 场景门控（强信号可豁免——@/引用机器人的消息不受场景压制）：
@@ -345,11 +356,12 @@ export class TurnScheduler {
         return
       }
       rt.trace?.record('planner_action', { turnId, gen, action: { type: action.type, target: action.targetMessageId || null, reason: action.reason || '' } })
-      // 把 ctxWindow（含 self + 近期上下文）作为 batch 透传给 Replyer；
-      // markObserved 取其末尾 seq 前移游标（命令类已在 onMessage 即时标记，无副作用）。
-      // batch 用 external（含被纠错策略压制的消息——它们已被"考虑并压制"，算已处理；
-      // ctxWindow 已把 blocked 过滤掉，用它会让被压制消息永远挡住水位）
-      await this._applyAction(action, external, decision, gen, turnId)
+      // 送 Replyer 的上下文用 ctxWindow（含 bot 自身发言 + 近期滚动上下文）；markObserved 仍用
+      // external 前移游标（含被纠错策略压制的消息——它们已被"考虑并压制"，算已处理；ctxWindow 已把
+      // blocked 过滤掉，用它会让被压制消息永远挡住水位）。
+      // ⚠ 二者曾合用一个参数：Replyer 只拿到本轮新消息 → 追问/指代失去上文、familiarityOf 恒为默认值
+      // （审计 2026-10-17 复现：bot 自己那句「明早八点，老地方」不在 Replyer 的近期群聊块里）。
+      await this._applyAction(action, external, decision, gen, turnId, ctxWindow)
     } catch (e) {
       // 打断（新消息 abortPlanning / 热重载 cancelAll / planner 超时）不是「决定沉默」，
       // 不得计入 no_action 退避：否则用户正常插话两次就把整群静音 15~300s（与 idle-backoff.js
@@ -379,9 +391,13 @@ export class TurnScheduler {
     const rt = this.runtime
     const c = this.cfg()
     try {
-      // appendOrUpdate：composer 已用首段 sentId 先入 buffer（只含首段文本），此处合并为完整回复文本
+      const id = String(sentId || `self_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`)
+      // composer 已按「每段一条」写入 buffer；此处只在缺失时补写。
+      // ⚠ 绝不把首段条目改写成整段拼接：那会让 getRecentBotTexts / 滚动 ctxWindow / 记忆整合
+      // 把同一句话看到两次（审计 2026-10-17 复现：多气泡回复「乙。丙。」各入账两遍）。
+      if (rt.buffer.get?.(id)) return
       rt.buffer.appendOrUpdate({
-        id: String(sentId || `self_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`),
+        id,
         groupId: rt.groupId,
         userId: c.botId || 'self',
         displayName: c.personaName || '我',
@@ -399,11 +415,11 @@ export class TurnScheduler {
     if (isStrongSignal(target)) this.runtime.recordStrongReply?.(target.userId, now)
   }
 
-  async _applyAction(action, batch, decision, gen, turnId) {
+  async _applyAction(action, batch, decision, gen, turnId, replyBatch = null) {
     const rt = this.runtime
     if (!rt.isCurrent(gen)) return
     switch (action.type) {
-      case 'human_reply': return this._doReply(action, batch, decision, gen, turnId)
+      case 'human_reply': return this._doReply(action, batch, decision, gen, turnId, replyBatch)
       case 'human_react': return this._doReact(action, batch, decision, gen, turnId)
       case 'human_wait': {
         // 连续 wait 上限（MaiBot max_consecutive_wait_count 同款）：连续 3 次"等等再看"仍无后续
@@ -432,7 +448,7 @@ export class TurnScheduler {
     }
   }
 
-  async _doReply(action, batch, decision, gen, turnId) {
+  async _doReply(action, batch, decision, gen, turnId, replyBatch = null) {
     const rt = this.runtime
     const c = this.cfg()
     const target = rt.buffer.get(action.targetMessageId) || decision.targetMessage
@@ -454,7 +470,9 @@ export class TurnScheduler {
     let text = ''
     try {
       Log.info('[humanize] Replyer 开始生成回复', `${ANSI.c}群${rt.groupId}${ANSI.R}`)
-      const res = await this.replyer.generate({ action, batch, decision, target, runtime: rt, signal: rt.signal, cfg: c, scene: rt.currentScene || null })
+      // 上下文用 ctxWindow（缺失时退回 batch）；markObserved 仍走 batch（见 _applyAction 注释）
+      const ctxBatch = (Array.isArray(replyBatch) && replyBatch.length) ? replyBatch : batch
+      const res = await this.replyer.generate({ action, batch: ctxBatch, decision, target, runtime: rt, signal: rt.signal, cfg: c, scene: rt.currentScene || null })
       if (!rt.isCurrent(gen)) { Log.info('[humanize] Replyer 完成但代已过期，取消'); return }
       text = (res?.text || '').trim()
       Log.mark('[humanize] Replyer 完成', `${ANSI.g}len=${text.length}${ANSI.R}`, res?.cancelReason ? `${ANSI.y}取消:${res.cancelReason}${ANSI.R}` : `${ANSI.g}"${text.slice(0, 60)}"${ANSI.R}`)
