@@ -1185,9 +1185,18 @@ export class Agent {
     const regIdentity = this.promptRegistry?.get('agent')?.system
     const identity = systemPromptOverride || regIdentity || this.systemPrompt
     // 工具目录：按需发现模式→常驻工具速查 + 分类总览（不列全量工具名，防抵消 token 收益）；全量模式→原速查
+    // ⚠ 缓存关键（KV 前缀）：目录只能由**配置决定的静态常驻集**拼出，绝不并入运行中增长的 this.activeTools。
+    // 目录位于 system 中部（身份→准则→取向→**目录**→技能→记忆→安全），一旦随会话内激活的工具改名，
+    // 目录之后的全部段落逐轮失效（实机归因：45 次 tool_search 断点吃掉 35% 的 cache miss，断点轮命中率仅 9.6%）。
+    // 工具定义走独立的 tools 数组，不经此路径；实测「数组尾部追加」不打断前缀缓存（探针见 commit 说明），
+    // 故会话内新激活的工具仍照常下发可用，能力无损。
     let toolCatalog = ''
     if (this.toolDiscovery?.enable && this.tools) {
-      const alwaysOnTools = this.activeTools ? [...Object.values(this._metaTools), ...[...this.activeTools].map((n) => this.tools.get(n)).filter(Boolean)] : []
+      const staticNames = this.toolDiscovery.alwaysOn?.length ? this.toolDiscovery.alwaysOn : DEFAULT_ALWAYS_ON
+      const names = [...staticNames]
+      // Jev 的 LLM 工具常驻（同样由配置决定，与会话内激活无关）
+      if (this.jev?.client?.configured && this.jev.decisions?.llmTool && this.tools.has?.('jev')) names.push('jev')
+      const alwaysOnTools = [...Object.values(this._metaTools), ...names.map((n) => this.tools.get(n)).filter(Boolean)]
       toolCatalog = buildToolDiscoverySection({ alwaysOnTools, categories: ['query', 'personal', 'message', 'group_manage', 'system'] })
     } else if (this.tools && this.tools.list().length) {
       toolCatalog = buildToolCatalogSection(this.tools.list())

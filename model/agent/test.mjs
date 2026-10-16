@@ -2193,6 +2193,42 @@ await test('F06：continueFrom 用检查点重建历史并续跑', async () => {
   ok(seen.some((m) => m.role === 'user' && String(m.content).includes('原任务描述')), '历史含原始输入')
 })
 
+// ---------- 缓存：工具目录不随会话内激活变化（前缀缓存稳定性） ----------
+await test('缓存稳定性：system 工具目录不随 activeTools 增长而变，tools 数组仍追加', async () => {
+  let agent = null
+  const mk = (name, execute) => ({
+    name,
+    description: `${name} 的描述文本`,
+    parameters: { type: 'object', properties: {} },
+    async execute(p) { return execute ? execute(p) : 'ok' },
+  })
+  // tool_a 执行时激活 tool_b——等价于 tool_search 在本轮内扩充 activeTools
+  const tools = new ToolRegistry()
+    .register(mk('tool_a', () => { agent.activeTools.add('tool_b'); return 'activated' }))
+    .register(mk('tool_b'))
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'tool_a', arguments: {} }], finishReason: 'tool_calls' },
+    { content: '完成', finishReason: 'stop' },
+  ])
+  agent = new Agent({
+    provider, tools, maxTurns: 4, reflect: 'off',
+    toolDiscovery: { enable: true, alwaysOn: ['tool_a'] },
+  })
+  await agent.run('跑一次工具')
+
+  eq(provider.calls.count, 2, '两次 provider 调用（工具轮 + 收尾轮）')
+  const c1 = provider.calls.history[0]
+  const c2 = provider.calls.history[1]
+  const names1 = (c1.tools || []).map((t) => t.name)
+  const names2 = (c2.tools || []).map((t) => t.name)
+
+  eq(c1.system === c2.system, true, '两轮 system 逐字节相同（目录不随激活变化，前缀缓存不被打断）')
+  eq(String(c1.system).includes('tool_b：'), false, '工具目录不列出会话内激活的工具')
+  eq(names1.includes('tool_a') && !names1.includes('tool_b'), true, '首轮只下发配置的常驻工具')
+  eq(names2.includes('tool_b'), true, '会话内激活的工具下一轮仍下发（能力无损）')
+  eq(agent.activeTools.has('tool_b'), true, '激活集在 run 内保留')
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
