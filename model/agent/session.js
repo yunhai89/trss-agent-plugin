@@ -328,7 +328,9 @@ export class SessionStore {
   /** 读会话级状态（不含 messages）。Agent.run 恢复 activeTools/cacheEpoch/compactLedger 用；
    *  旧对话无该字段返回空；compactLedger 未设置时不产出该键（保持旧形状兼容既有消费方）。 */
   async getConversationState(userId, groupId, convId) {
-    const c = await this.kv.get(this.convKey(userId, groupId, String(convId)))
+    // 与其它读取路径同口径：旧群共享键（…conv:<gid>:__group__:<cid>）也要回退 + 顺手迁移，
+    // 否则续跑（presetHistory）路径读到默认状态 → cacheEpoch 归零并被写回覆盖（审计 low-3）
+    const c = await this._readConv(userId, groupId, String(convId), { migrate: true })
     return {
       activeTools: c && Array.isArray(c.activeTools) ? c.activeTools : null,
       cacheEpoch: c && Number.isFinite(Number(c.cacheEpoch)) ? Number(c.cacheEpoch) : 0,

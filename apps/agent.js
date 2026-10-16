@@ -1749,7 +1749,7 @@ export const makeFireDispatch = (rt) => {
           })
         } catch { /* noop */ }
         try { rt.traceStore?.record({ scope: ctx.scopeUserId, scopeId: ctx.scopeId, input: info.prompt, output: r?.content, turns: r?.turns, usage: r?.usage, stopReason: r?.stopReason, taskId }) } catch (e) { Log.warn('[evolution] 定时任务采迹失败', e?.message || e) }
-        try { rt.selfReview?.tick(ctx, { input: info.prompt, output: r?.content, turns: r?.turns, usage: r?.usage, stopReason: r?.stopReason }) } catch (e) { Log.warn('[evolution] 定时任务自评审触发失败', e?.message || e) }
+        try { rt.selfReview?.tick({ ...ctx, userTexts: [] }, { input: info.prompt, output: r?.content, turns: r?.turns, usage: r?.usage, stopReason: r?.stopReason }) } catch (e) { Log.warn('[evolution] 定时任务自评审触发失败', e?.message || e) }
         // 定时任务结果外发前剥离 sticker 标记：任务链的回复不走主回复出口，
         // 若模型输出 [sticker:x]（尤其表情发送失败时）会字面泄漏给群。
         const text = `🤖 定时任务：${stripMarkers(String(r?.content || '')).trim() || '(无输出)'}`
@@ -2305,7 +2305,9 @@ export class Chat extends plugin {
       Log.mark('[chat]', `user=${ctx.userId} gid=${ctx.groupId || '-'} conv=${ctx.conversationId} model=${cfg.model} persona=${personaId || 'default'} vision=${caps.vision ? 'on' : 'off'} ${thinkingLogFields(agentInst, cfg)}${context ? ` ctx=${String(context).length}字` : ''}`)
       // —— 在线自进化：采迹（数据闭环）+ 后台自评审触发（全异步、兜底，绝不阻塞回复）——
       try { rt.traceStore?.record({ scope: ctx.scopeUserId, scopeId: ctx.scopeId, input: __inputText, output: content, turns, usage, stopReason, taskId: traceId }) } catch (e) { Log.warn('[evolution] 采迹失败', e?.message || e) }
-      try { rt.selfReview?.tick(ctx, { input: __inputText, output: content, turns, usage, stopReason }) } catch (e) { Log.warn('[evolution] 自评审触发失败', e?.message || e) }
+      // 自评审的 memory 建议要过来源闸门：必须带**真实用户发言**才能写「用户要求」类条目
+      // （2026-10-17 审计 S2：此前 ctx 里没有 userTexts，带 evidence 的正当建议反而全被拒）。
+      try { rt.selfReview?.tick({ ...ctx, userTexts: agentInst?._userTexts || [] }, { input: __inputText, output: content, turns, usage, stopReason }) } catch (e) { Log.warn('[evolution] 自评审触发失败', e?.message || e) }
       const u = usage ? `in:${usage.prompt_tokens ?? usage.input_tokens ?? usage.input ?? '-'}/out:${usage.completion_tokens ?? usage.output_tokens ?? usage.output ?? '-'}` : '-'
       Log.mark('[chat]', `reply turns=${turns} stop=${stopReason} usage=${u} replyLen=${(content || '').length}`)
       // 发送前脱敏：屏蔽 API Key / token 等敏感信息（agent.redactSecrets 默认开；异常不阻塞回复）
@@ -2734,7 +2736,12 @@ export class Chat extends plugin {
   }
 
   async reviewAdopt() {
-    const id = this.e.msg.replace(/^#采纳\s+/, '').trim()
+    // 支持 `#采纳 <id> <用户原话>`：人工放行「用户要求」类记忆时必须由操作者提供用户原话，
+    // 不能用建议自带的 evidence 自证（2026-10-17 审计 medium-1：否则幻觉条目连同伪造 evidence 一起落库）。
+    const raw = this.e.msg.replace(/^#采纳\s+/, '').trim()
+    const sp = raw.indexOf(' ')
+    const id = (sp > 0 ? raw.slice(0, sp) : raw).trim()
+    const operatorText = (sp > 0 ? raw.slice(sp + 1) : '').trim()
     let rt; try { rt = await getRuntime() } catch (e) { await this.e.reply(String(e?.message || e)); return true }
     const ctx = ctxOf(this.e)
     const list = listPendingSuggestions(rt.suggestionDir, ctx.scopeId)
@@ -2748,7 +2755,7 @@ export class Chat extends plugin {
     // 其余类型统一复用 Web 面板那条路径（prompt/memory/tool）：命令与面板行为一致，
     // 失败时 applySuggestion 会保留 suggestion（不再出现「已采纳但什么都没写、建议文件已删」的静默丢失）。
     try {
-      const r = await applySuggestion(rt, s)
+      const r = await applySuggestion(rt, s, { userTexts: operatorText ? [operatorText] : [] })
       await this.e.reply(`✅ ${r?.note || '已采纳'}`)
     } catch (e) {
       Log.warn('[evolution] 采纳失败', e?.message || e)

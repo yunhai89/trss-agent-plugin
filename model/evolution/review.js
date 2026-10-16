@@ -279,7 +279,7 @@ export function persistSuggestion(suggestionDir, s) {
  * @param {object} rt getRuntime() 返回值（需 promptRegistry/memory/promptDir/suggestionDir）
  * @param {object} s suggestion（须含 scopeId/id/kind/action/target/payload[/newPayload]）
  */
-export async function applySuggestion(rt, s) {
+export async function applySuggestion(rt, s, opts = {}) {
   if (!s || !s.scopeId) throw new Error('suggestion 缺少 scopeId')
   if (s.kind === 'prompt') {
     const key = s.target || 'agent'
@@ -315,8 +315,11 @@ export async function applySuggestion(rt, s) {
       // 人工采纳路径同样过来源闸门（第 8 轮审计 high-1）：指令性条目没有用户原话佐证就拒绝写入，
       // 否则幻觉条目经一次「采纳」就永久生效。错误信息会回给操作者，suggestion 保留待审。
       const src = s.action === 'replace' ? String(s.newPayload || s.payload || '') : String(s.payload || '')
-      const gate = guardMemoryWrite(src, s.evidence, s.evidence ? [s.evidence] : [])
-      if (!gate.ok) throw new Error(`${gate.error}（可改用对话里的 memory 工具/让用户自己说一遍再记录）`)
+      // ⚠ 2026-10-17 审计 medium-1：此前把 `[s.evidence]` 当 userTexts 传给闸门 ⇒ `evidenceAppears(ev,[ev])`
+      // 恒真，人工采纳路径形同虚设（幻觉条目+伪造 evidence 照样落库，还被盖上「据用户原话」假背书）。
+      // 现在只认操作者提供的真实原话：`#采纳 <id> <用户原话>`（userTexts 为空即拒绝指令性条目）。
+      const gate = guardMemoryWrite(src, s.evidence, Array.isArray(opts?.userTexts) ? opts.userTexts : [])
+      if (!gate.ok) throw new Error(`${gate.error}（若确为用户交代：发送 #采纳 ${s.id} <用户原话>；或让用户自己在对话里说一遍后由 memory 工具记录）`)
       if (s.action === 'replace') rt.memory.replace(target, String(s.payload || ''), gate.text, s.scopeId)
       else rt.memory.add(target, gate.text, s.scopeId)
     }

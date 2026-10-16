@@ -281,7 +281,10 @@ export class Agent {
       return Number.isFinite(n) && n >= min && n <= max ? n : dflt
     }
     this.contextHighRatio = ratio(config.contextHighRatio, 0.65, 0.3, 0.95)
-    this.contextLowRatio = ratio(config.contextLowRatio, 0.45, 0.05, this.contextHighRatio - 0.05)
+    // 低水位必须严格小于高水位：ratio() 的**默认值分支**不经过 max 夹紧，
+    // 若用户只把 contextHighRatio 调到 0.3，默认 0.45 就会出现 low > high（第 9 轮审计 S4）
+    const lowCap = Math.max(0.05, this.contextHighRatio - 0.05)
+    this.contextLowRatio = Math.min(ratio(config.contextLowRatio, 0.45, 0.05, lowCap), lowCap)
     this.cacheEpoch = 0
     // 无损压缩（Hermes ContextCompressor 可逆化）：compactArchive 注入后压缩 = 原文整块归档
     // （sha256 内容寻址）+ 窗口内结构化台账 + context_recall 恢复；未注入降级为纯台账压缩。
@@ -414,7 +417,10 @@ export class Agent {
       if (this.contextWindow) {
         try {
           const fn = this.estimateTokens || estimateTokensApprox
-          if (this._estimateHistory(wrapSys) > this.contextWindow) {
+          // 压缩前压力（审计 low-1：此前 devLog 的 est 在 this.messages 被替换**之后**才估，
+          // 恒 ≤ low、看起来「刚好」，与主循环事件口径不一致 → 断点被读成已解决的轻度压缩）
+          const estBeforeFinalize = this._estimateHistory(wrapSys)
+          if (estBeforeFinalize > this.contextWindow) {
             const target = Math.max(128, Math.floor(this.contextWindow * this.contextLowRatio) - fn(String(wrapSys ?? '')) - this._estimateToolsTokens() - 16)
             const ck = ctx ? `${ctx.scopeUserId || ctx.userId || 'u'}:${ctx.groupId || 'p'}:${ctx.conversationId || 'unknown'}` : 'unknown'
             const rr = await compactMessages(this.messages, {
@@ -430,10 +436,13 @@ export class Agent {
               // 收尾前压缩同样 cacheEpoch++（前缀断点），必须写 cache_compact devLog：
               // AGENTS.md 缓存友好约束第 4 条要求压缩可归因，否则命中率报告把这次断点算成「无归因」
               // （第 8 轮审计 low-6）。
+              const afterFinalize = this._estimateHistory(wrapSys)
               this.devLog?.('cache_compact', {
-                est: this._estimateHistory(wrapSys), high: this.contextWindow, low: target,
+                est: estBeforeFinalize, high: Math.max(1, Math.floor(this.contextWindow * this.contextHighRatio)), low: target,
                 dropped: rr.dropped, pruned: rr.pruned, archived: 0, cacheEpoch: this.cacheEpoch,
-                msgsAfter: this.messages.length, unresolved: false, reason: 'finalize',
+                msgsAfter: this.messages.length, after: afterFinalize,
+                unresolved: afterFinalize > Math.max(1, Math.floor(this.contextWindow * this.contextHighRatio)),
+                reason: 'finalize',
                 archiveError: rr.archiveError || null,
                 ledger: this._compactLedger ? { facts: this._compactLedger.facts?.length || 0, archiveRefs: this._compactLedger.archive_refs?.length || 0, compactions: this._compactLedger.stats?.compactions || 0 } : null,
               }, taskId, ctx?.devScope)
@@ -626,6 +635,9 @@ export class Agent {
         // `null.length` 硬崩在该会话的每一轮、且永不自愈（2026-07-17 回归审计 high-1：旧版对坏值
         // 返回空数组，属静默降级，今晚的坏值护栏把读路径变成了硬崩）。
         this.messages = (await this.session.getConversation(scopeUserId, ctx.groupId, ctx.conversationId)) ?? []
+        // 并发写入检测基准（第 9 轮审计 S3）：压缩轮的全量覆写会抹掉「本轮读入之后」别的
+        // 任务轮（定时任务/子代理）追加的消息；持久化前比对存储长度即可发现。
+        this._loadedConvCount = this.messages.length
       } catch { this.messages = [] }
     } else if (this.session && ctx) {
       sessKey = this.session.key(ctx.groupId, scopeUserId)
@@ -743,11 +755,17 @@ export class Agent {
 
     // 用户亲述文本（剥掉系统注入块）→ 供工具做「来源校验」：memory 写「用户要求」类条目时
     // 必须能在这些文本里找到原话，否则拒绝写入（实机事故：模型把幻觉出的「主人要求」写进长期记忆）。
+    // ⚠ 2026-10-17 审计 S1：续跑（presetHistory）时，continuation.js 生成的**合成 user 消息**
+    // （「【恢复续跑】…请接着完成剩余步骤」/「请继续完成原任务…」）此前也被当成「用户亲述」，
+    // 合成文本只要照着注入块写，就能自我佐证写入长期记忆。这里只收真实用户发言：
+    // presetHistory 时跳过本轮开始前的历史（全是合成续跑上下文），并显式滤掉续跑提示文案。
+    const SYNTHETIC_USER_RE = /^(?:【恢复续跑】|请继续完成原任务|请接着完成剩余步骤)/
     this._userTexts = this.messages
       .filter((m) => m.role === 'user')
-      .slice(-20)
+      .slice(presetHistory ? sessStart : -20)
       .map((m) => this._stripInjectedFromUserText(m.content))
-      .filter(Boolean)
+      .filter((t) => t && !SYNTHETIC_USER_RE.test(t))
+      .slice(-20)
 
     this._pendingReflect = null // 每 run 重置反思反馈（防跨 run 串）
     this._jevSelectedNames = new Set() // 每 run 重置：Jev 激活集默认不跨轮持久化
@@ -1171,8 +1189,23 @@ export class Agent {
       try {
         // 压缩后必须整体覆写（分代压缩重写了整段历史）；续跑（presetHistory）不再覆写：
         // 续跑历史只用于本次运行，写回只追加本轮新消息，原会话历史原样保留（审计 H1）
-        if (compactedThisRun && !presetHistory) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
-        else await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, appendMsgs, extra)
+        if (compactedThisRun && !presetHistory) {
+          // 并发保护（第 9 轮审计 S3）：本轮读入后若同一会话又被别的运行写过（定时任务/子代理），
+          // 全量覆写会把它的消息整段抹掉（convRunQueues 只串行化交互路径）。检测到增长就退化为追加
+          // ——代价是本次压缩视图不落盘（历史仍完整），比丢消息安全。
+          let concurrent = false
+          try {
+            const cur = await this.session.getConversation(scopeUserId, ctx.groupId, ctx.conversationId)
+            const curLen = Array.isArray(cur) ? cur.length : (Array.isArray(cur?.messages) ? cur.messages.length : 0)
+            concurrent = curLen > (Number(this._loadedConvCount) || 0)
+          } catch { /* 读失败按原逻辑覆写 */ }
+          if (concurrent) {
+            this.logger('warn', '[session] 检测到同一会话存在并发写入，本次改追加以免覆盖他人消息（压缩视图未落盘）')
+            await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, appendMsgs, extra)
+          } else {
+            await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
+          }
+        } else await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, appendMsgs, extra)
         sessionPersisted = true
       } catch (e) { this.logger('warn', 'conversation 持久化失败', e) }
     } else if (sessKey) {
@@ -1359,7 +1392,12 @@ export class Agent {
     if (!text) return ''
     const marker = '【用户消息】'
     const i = text.lastIndexOf(marker)
-    return (i >= 0 ? text.slice(i + marker.length) : text).trim()
+    let body = i >= 0 ? text.slice(i + marker.length) : text
+    // 【引用消息】块是被引用的**别人**说的话（apps/agent.js 拼在用户消息之后），
+    // 不能算作「用户亲述」（2026-10-17 审计 S1：引用块里的指令性语句曾被当作来源佐证）。
+    const quoted = body.indexOf('【引用消息】')
+    if (quoted >= 0) body = body.slice(0, quoted)
+    return body.trim()
   }
 
   // context/scopeId 保留在签名里（调用点位置参数），但已不再使用：声明式记忆快照自 v1.26.22 起
@@ -1424,8 +1462,12 @@ export class Agent {
     // 前缀指纹（P2 版本化）：只记 hash 不重复写 prompt 原文；与上次比对，变化即记 cacheBreakReason
     // memoryVersion 已移除：声明式记忆快照不再参与 system（改注入 user 消息尾部），
     // 保留该字段会让「会话内写记忆」被误报成前缀断点（实际前缀没断）。
+    // tools 数组（渲染在请求最前缀）也必须纳入指纹：MCP 运行期注册等让数组变化时，
+    // 此前指纹只含静态目录 toolHash → 整段前缀失效却记不到任何 cacheBreakReason（第 9 轮审计 S5）
+    const toolListNames = this._buildToolList().map((t) => t?.name).filter(Boolean)
     const fp = {
       systemHash: shortHash(identity + SERVICE_DIRECTIVE + SEARCH_VERIFICATION),
+      toolListHash: shortHash(toolListNames.join(',')),
       toolHash: shortHash(toolCatalog),
       stickerVersion: shortHash(stickerSection),
       guardHash: shortHash(guardHardening),
@@ -1434,6 +1476,7 @@ export class Agent {
     let cacheBreakReason = null
     if (this._lastPrefixFp) {
       if (fp.systemHash !== this._lastPrefixFp.systemHash) cacheBreakReason = 'system_identity'
+      else if (fp.toolListHash !== this._lastPrefixFp.toolListHash) cacheBreakReason = 'tool_list'
       else if (fp.toolHash !== this._lastPrefixFp.toolHash) cacheBreakReason = 'tool_schema'
       else if (fp.stickerVersion !== this._lastPrefixFp.stickerVersion) cacheBreakReason = 'sticker_catalog'
       else if (fp.guardHash !== this._lastPrefixFp.guardHash) cacheBreakReason = 'guard_rules'

@@ -67,8 +67,8 @@ function mkStore(doc = { id: 'd1', url: 'https://example.com/a', refreshCron: nu
   ok(!!r.error, '非法 cron 返回错误')
   ok(store._refreshJobs.get('d1') === alive, '非法 cron 后旧 job 句柄仍在（未静默停摆）')
   ok(sched.cancelled.length === 0, '非法 cron 不会取消任何 job')
-  const kv = await store.kv?.get?.() // kv 桩挂在闭包里，这里只校验句柄语义
-  ok(kv === undefined || true, '（占位：KV 读取由下方用例校验）')
+  // （原在此处有一行 `ok(kv === undefined || true, …)` 恒真占位断言，属假绿，已删——
+  //   KV 里的 refreshCron 由下方用例真实校验。第 8 轮回归审计 low-4）
 }
 
 // 3) 非法 cron 不改 KV 里的 refreshCron（仍是旧值）

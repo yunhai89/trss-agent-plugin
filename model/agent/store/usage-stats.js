@@ -141,6 +141,7 @@ export function createUsageStats({ kv, logger = () => {}, flushIntervalMs = 2000
     const pending = [...buffer.entries()]
     for (const [key, inc] of pending) if (buffer.get(key) === inc) buffer.delete(key)
     try {
+      let failedDays = 0
       while (pending.length) {
         const [key, inc] = pending[0]
         const fullKey = DAY_KEY_PREFIX + key
@@ -150,10 +151,14 @@ export function createUsageStats({ kv, logger = () => {}, flushIntervalMs = 2000
         } catch (e) {
           // 读失败 ≠ 当天无数据：继续写会把「只有本次增量」的对象覆盖当日累计，当天 chats/tokens/
           // toolCalls/cacheRead 全部静默丢失（第 8 轮审计 medium-3，同仓 knowledge/memory 已有
-          // 「读失败不清库」原则）。这里跳过该天，pending 由 finally 并回缓冲等下轮重试。
-          log('warn', '[usage-stats] 读取当日统计失败，本次跳过写入以免覆盖：', e?.message || e)
-          break
+          // 「读失败不清库」原则）。跳过**该天**并把它挪到队尾重试；不能用 break 放弃后面所有天
+          // （审计 low-2：单键故障会让故障天之后的天永久 head-of-line 不落盘，而 lastFlushAt 照常推进）。
+          log('warn', '[usage-stats] 读取当日统计失败，本次跳过该天以便重试：', e?.message || e)
+          pending.push(pending.shift())
+          if (failedDays++ >= pending.length) break // 全部天都读失败：本轮放弃，pending 由 finally 并回缓冲
+          continue
         }
+        failedDays = 0
         const merged = mergeDay(existing && typeof existing === 'object' ? existing : emptyDay(key), { ...inc, updatedAt: now().getTime() })
         await kv.set(fullKey, merged, keepDays * 86400)
         pending.shift() // set 成功才出缓冲（失败保留重试）

@@ -86,6 +86,42 @@ await test('gitErr：本地改动会被覆盖时，给出文件清单 + 暂存�
   ok(!/否则发送 #agents强制更新$/.test(msg.trim()), '不再无警告地引导强更')
 })
 
+await test('untrackedCollisions：只挑出「未跟踪 ∩ 目标新增」文件（2026-10-17 审计 high）', async () => {
+  const o = inst()
+  const calls = []
+  o.exec = async (cmd) => {
+    calls.push(cmd)
+    if (cmd.includes('ls-files --others')) return { stdout: 'package-lock.json\ntools/qqmusic/index.js\ntools/qqmusic/util.js\n', error: null }
+    if (cmd.includes('--diff-filter=A')) return { stdout: 'tools/qqmusic/index.js\ntools/qqmusic/util.js\napps/render.test.mjs\n', error: null }
+    return { stdout: '', error: null }
+  }
+  const cols = await o.untrackedCollisions('origin/master')
+  eq(cols, ['tools/qqmusic/index.js', 'tools/qqmusic/util.js'], '只报「未跟踪 ∩ 新增」交集（package-lock 不报）')
+  ok(calls.length === 2 && calls[1].includes('--diff-filter=A HEAD origin/master'), '第二条命令带 HEAD 与 target')
+})
+
+await test('overwriteFiles：同时解析未跟踪文件冲突（stash 不带 -u 救不了）', async () => {
+  const o = inst()
+  const err = 'error: Untracked working tree files would be overwritten by merge:\n\ttools/qqmusic/util.js\nPlease move or remove them before you merge.\nAborting'
+  eq(o.overwriteFiles('Updating a..b', err), ['tools/qqmusic/util.js'], '解析出未跟踪冲突文件')
+})
+
+await test('gitErr：未跟踪文件冲突时提示 -u 暂存 / clean（不再只教普通 stash）', async () => {
+  const o = inst()
+  const err = 'error: Untracked working tree files would be overwritten by merge:\n\ttools/qqmusic/util.js\nAborting'
+  await o.gitErr('Updating a..b', err)
+  const msg = o._replies.join('\n')
+  ok(msg.includes('tools/qqmusic/util.js'), '列出冲突文件')
+  ok(msg.includes('git stash push -u'), '提示带 -u 的暂存（未跟踪文件也能保住）')
+  ok(msg.includes('git clean -n'), '给出 git clean 预览指引')
+})
+
+await test('backupUntracked：不存在的文件不产生备份目录（no-op）', async () => {
+  const o = inst()
+  const r = await o.backupUntracked(['data/temp/__not-exist-xyz.js'])
+  eq(r, { dir: null, count: 0 }, '没有可备份文件时 dir=null / count=0')
+})
+
 console.log('\n========================================')
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log('========================================')
