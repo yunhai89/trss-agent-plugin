@@ -19,6 +19,7 @@
  *   SIM_RUNS                     每个会话的 run 次数（默认 1；一次用户消息 = 一个 run，可累积上下文）
  *   SIM_GAP_MS                    run 之间的空闲间隔毫秒（默认 0）
  *   SIM_TAG                      场景标签（避免不同场景共享前缀，默认取配置指纹）
+ *   SIM_REGISTRY                 额外注册的哑工具数（默认 0；实机 registry 约 88 个，用于还原冷启动代价）
  *   SIM_TOOL_CHARS               每次工具结果字符数（默认 3800）
  *   SIM_CTX_CHARS                每轮情境注入字符数（默认 3200）
  *   SIM_STABLE=0                 关闭 toolDiscovery.stableList（复现「tools 数组追加式增长打穿缓存」的旧行为）
@@ -74,6 +75,7 @@ const WINDOW = process.env.SIM_WINDOW ? Number(process.env.SIM_WINDOW) : null
 const HIGH = Number(process.env.SIM_HIGH || 0.65)
 const LOW = Number(process.env.SIM_LOW || 0.45)
 const TURNS = Number(process.env.SIM_TURNS || 36)
+const REGISTRY = Number(process.env.SIM_REGISTRY || 0)
 const TOOL_CHARS = Number(process.env.SIM_TOOL_CHARS || 3800)
 const CTX_CHARS = Number(process.env.SIM_CTX_CHARS || 3200)
 const TAG = process.env.SIM_TAG || `${WINDOW ?? 'msg'}-${HIGH}-${LOW}`
@@ -160,6 +162,25 @@ const mkTools = () => {
     parameters: { type: 'object', properties: { q: { type: 'string' } } },
     async execute() { return toolResult('probe') },
   })
+  // 哑工具：还原实机 registry 规模（实机 88 个工具、约 170 token/个定义）。
+  // stableList 默认开＝每轮下发全量，冷启动要多付这部分；关掉则是「首轮省 token、每次激活打穿缓存」。
+  for (let i = 0; i < REGISTRY; i++) {
+    t.register({
+      name: `dummy_${i}`,
+      description: `哑工具 ${i}：用于还原实机 registry 规模，说明文本按实机工具定义的量级填充。`,
+      parameters: {
+        type: 'object',
+        properties: {
+          target: { type: 'string', description: '目标标识（群号 / 用户号 / 文件名等）' },
+          limit: { type: 'number', description: '返回条数上限，默认 20' },
+          verbose: { type: 'boolean', description: '是否返回详细字段' },
+          keyword: { type: 'string', description: '可选关键词过滤' },
+        },
+        required: ['target'],
+      },
+      async execute() { return toolResult('dummy') },
+    })
+  }
   return t
 }
 
