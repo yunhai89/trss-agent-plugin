@@ -155,6 +155,25 @@ export class SessionStore {
   seqKey(userId, groupId) {
     return `${this.prefix}conv:seq:${groupId || 'private'}:${userId}`
   }
+  /** 群共享旧键：v1.26.30 前作用域是字面量 `__group__`（无群号后缀）。仅共享作用域返回，否则 null。
+   *  第 8 轮审计 medium-1：`get()` 里的迁移兜底只覆盖 group:user 会话键，而正常聊天走 conversation
+   *  API（直读 kv）→ 旧群共享对话读不到，跨版本升级后共享群机器人「失忆」。 */
+  legacyConvKey(userId, groupId, convId) {
+    if (!/^__group__:/.test(String(userId))) return null
+    return `${this.prefix}conv:${groupId || 'private'}:__group__:${convId}`
+  }
+  /** 读对话对象：新键优先，未命中时回退旧群共享键（migrate=true 时顺手迁移到新键，避免每次回退） */
+  async _readConv(userId, groupId, convId, { migrate = false } = {}) {
+    const k = this.convKey(userId, groupId, convId)
+    const c = await this.kv.get(k)
+    if (c) return c
+    const lk = this.legacyConvKey(userId, groupId, convId)
+    if (!lk) return null
+    const old = await this.kv.get(lk)
+    if (!old) return null
+    if (migrate) { try { await this.kv.set(k, old) } catch { /* 迁移失败不影响本次读取 */ } }
+    return old
+  }
 
   async _nextConvId(userId, groupId) {
     const seq = (await this.kv.get(this.seqKey(userId, groupId))) || 0
@@ -187,8 +206,24 @@ export class SessionStore {
     const gid = groupId || 'private'
     const scanPrefix = `${this.prefix}conv:${gid}:${userId}:`
     const keys = (await this.kv.scan(scanPrefix)).filter((k) => !k.endsWith(':active') && !k.includes(':seq:'))
+    // 旧群共享键一并列出（第 8 轮审计 medium-1）：否则共享群升级后 listConversations 看不到历史对话，
+    // getActiveConversation 会直接新建空对话 → 表现为「失忆」。按对话 id 去重，新键优先。
+    const legacyPrefix = this.legacyConvKey(userId, gid, '')
+    const allKeys = [...keys]
+    if (legacyPrefix) {
+      const seen = new Set(keys.map((k) => k.slice(scanPrefix.length)))
+      for (const k of await this.kv.scan(legacyPrefix)) {
+        if (k.includes(':seq:')) continue
+        const id = k.slice(legacyPrefix.length)
+        // ⚠ 新键 `…:conv:<gid>:__group__:<gid>:<cid>` 以旧前缀开头，会被这次 scan 一并扫到
+        //（旧前缀 `…:conv:<gid>:__group__:` 是新键的真前缀）→ 不去掉就会把同一条对话列两遍
+        //（2026-10-17 回归审计：listConversations 返回重复 id）。旧键的剩余段只有 `<cid>`，不含冒号。
+        if (id.includes(':')) continue
+        if (!seen.has(id)) { seen.add(id); allKeys.push(k) }
+      }
+    }
     const out = []
-    for (const k of keys) {
+    for (const k of allKeys) {
       const c = await this.kv.get(k)
       if (!c) continue
       out.push({
@@ -245,20 +280,22 @@ export class SessionStore {
   }
 
   async setActiveConversation(userId, groupId, convId) {
-    const exists = await this.kv.get(this.convKey(userId, groupId, String(convId)))
+    // 旧群共享键也算存在（第 8 轮审计 medium-1），否则恢复历史对话时会判为不存在
+    const exists = await this._readConv(userId, groupId, String(convId), { migrate: true })
     if (!exists) return false
     await this.kv.set(this.activeKey(userId, groupId), String(convId))
     return true
   }
 
   async getConversation(userId, groupId, convId) {
-    const c = await this.kv.get(this.convKey(userId, groupId, String(convId)))
+    // migrate：读到旧群共享键就顺手写到新键，后续 append/set 都落在新键上
+    const c = await this._readConv(userId, groupId, String(convId), { migrate: true })
     return (c?.messages || []).map((m) => ({ ...m }))
   }
 
   /** 读对话 meta（id/title/createdAt/updatedAt，不含 messages），供 devLog 拼 per-会话日志文件名 */
   async getConversationMeta(userId, groupId, convId) {
-    const c = await this.kv.get(this.convKey(userId, groupId, String(convId)))
+    const c = await this._readConv(userId, groupId, String(convId))
     if (!c) return null
     return { id: c.id, title: c.title, createdAt: c.createdAt, updatedAt: c.updatedAt }
   }
@@ -266,7 +303,8 @@ export class SessionStore {
   async appendConversation(userId, groupId, convId, msgs, extra = {}) {
     const k = this.convKey(userId, groupId, String(convId))
     return this._withLock(k, async () => {
-      const raw = await this.kv.get(k)
+      // 旧群共享键回退（第 8 轮审计 medium-1）：否则升级后第一次 append 会从空对话重建，历史被割裂
+      const raw = await this._readConv(userId, groupId, String(convId))
       // 坏值护栏（2026-10-17 审计 M2/C4）：旧会话 API 早就拒绝写坏值，对话 API 漏了。
       // 字符串值会让 `[...c.messages]` 静默产出单字符垃圾消息；setConversation 更直接抛裸 TypeError，
       // 被 Agent 的 catch 吞成一行日志 ⇒ 该会话此后每轮都不落盘，用户历史永久丢失且无提示。
@@ -302,7 +340,8 @@ export class SessionStore {
   async setConversation(userId, groupId, convId, messages, extra = {}) {
     const k = this.convKey(userId, groupId, String(convId))
     return this._withLock(k, async () => {
-      const raw = await this.kv.get(k)
+      // 同上：旧群共享键回退，压缩后的全量覆写也要落在同一份历史上
+      const raw = await this._readConv(userId, groupId, String(convId))
       if (raw && !isConvShape(raw)) {
         this.logger?.('warn', `[session] 对话数据损坏，已拒绝覆写以免误判为压缩后落盘：${k}`)
         throw new Error(CORRUPT_CONV_MSG)

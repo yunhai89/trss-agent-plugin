@@ -21,6 +21,10 @@ export const clarifyTool = {
     required: ['question'],
   },
   async execute(params) {
-    return { clarify: String(params.question || '') }
+    const q = String(params?.question ?? '').trim()
+    // 空问题不能把原始 JSON 当正文发给用户（第 8 轮审计 low-5：`question:""` 过 schema 校验，
+    // 原来回落成字面量 `{"clarify":""}` 发给用户）。空则给一句可用的兜底提问。
+    if (!q) return { clarify: '我需要你再补充一点信息才能继续——请说明你想让我确认什么。' }
+    return { clarify: q }
   },
 }

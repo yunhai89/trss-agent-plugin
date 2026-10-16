@@ -231,5 +231,30 @@ await test('mergeDay：入参不被修改（纯函数）', async () => {
   eq(m.byTool.x.fail, 1, '合并嵌套值')
 })
 
+await test('flush 读失败不覆盖当日累计（第 8 轮审计 medium-3）', async () => {
+  // 读失败 ≠ 当天无数据：若照旧写入「只有本次增量」的对象，当日 chats/tokens/toolCalls/cacheRead 会静默清零
+  const day = localDayKey(new Date())
+  const store = new Map([[DAY_KEY_PREFIX + day, { dayKey: day, chats: 100, inputTokens: 5000, outputTokens: 10, reasoningTokens: 0, uncachedTokens: 0, cacheRead: 4000, cacheWrite: 0, observedRequests: 5, observedInput: 4000, observedOutput: 10, observedUncached: 0, toolCalls: 7, byTool: {}, errors: 0, turns: 3 }]])
+  let failGet = true
+  const sets = []
+  const kv = {
+    async get(k) { if (failGet && k.startsWith(DAY_KEY_PREFIX)) throw new Error('redis 抖动'); return store.get(k) ?? null },
+    async set(k, v) { sets.push(k); store.set(k, JSON.parse(JSON.stringify(v))) },
+  }
+  const st = createUsageStats({ kv, flushIntervalMs: 0 })
+  st.recordRun({ chats: 1, inputTokens: 50, outputTokens: 5, turns: 1 })
+  await st.flushNow()
+  eq(sets.filter((k) => k.startsWith(DAY_KEY_PREFIX)).length, 0, '读失败时没有写当日键（不覆盖）')
+  eq(store.get(DAY_KEY_PREFIX + day).chats, 100, '当日累计保持原值')
+  // 恢复读取后重试：增量与既有累计合并落盘（缓冲没有被丢）
+  failGet = false
+  await st.flushNow()
+  const after = store.get(DAY_KEY_PREFIX + day)
+  eq(after.chats, 101, '重试后 chats 合并（100+1）')
+  eq(after.inputTokens, 5050, '重试后 inputTokens 合并（5000+50）')
+  eq(after.toolCalls, 7, '既有工具计数未被清零')
+  st.stop()
+})
+
 console.log(`\n通过 ${passed}，失败 ${failed}`)
 process.exit(failed ? 1 : 0)

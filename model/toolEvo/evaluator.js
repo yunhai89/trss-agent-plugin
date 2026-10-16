@@ -81,7 +81,11 @@ export async function convergenceMetrics() {
   const verified = await count("status='verified'")
   const rejected = await count("status='rejected'")
   const deprecated = await count("status='deprecated'")
-  const activeStable = (await dao.get(`SELECT COUNT(*) AS n FROM tools WHERE active_version_id IS NOT NULL`))?.n || 0
+  // 口径与 registry.listStable 同源（JOIN + status='stable'）：原来只数 active_version_id 非空，
+  // 淘汰最后一个 stable 而指针残留时，会把已下线工具也算成「在线」（第 8 轮审计 low-1）
+  const activeStable = (await dao.get(
+    `SELECT COUNT(*) AS n FROM tools t JOIN tool_versions tv ON tv.id=t.active_version_id WHERE tv.status='stable'`,
+  ))?.n || 0
   const invokedStable = (await dao.get(
     `SELECT COUNT(DISTINCT tv.id) AS n FROM tool_versions tv JOIN tool_invocations ti ON ti.version_id=tv.id WHERE tv.status='stable'`,
   ))?.n || 0

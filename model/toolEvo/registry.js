@@ -260,6 +260,12 @@ export class ToolEvoRegistry {
         try { await dao.run(`UPDATE tool_versions SET status=? WHERE id=?`, [v.status, versionId]) } catch { /* noop */ }
         throw new Error(`切换 active 失败，已回滚版本状态：${e?.message || e}`)
       }
+    } else {
+      // 离开 stable（deprecated/quarantined/rejected）：若 tools.active_version_id 正指向本版本，必须清空，
+      // 否则工具已下线却仍标 ★active、`evaluator` 的 activeStable 指标虚高（第 8 轮审计 low-1：
+      // 全仓原来没有任何 active_version_id=NULL 的路径）。回滚由调用方另行 setActiveVersion 指定目标。
+      try { await dao.run(`UPDATE tools SET active_version_id=NULL WHERE id=? AND active_version_id=?`, [v.tool_id, versionId]) }
+      catch { /* 清理失败不影响状态机（下次 setStatus 会再试） */ }
     }
     if (actor) await this._recordApproval(versionId, actor, to, reason)
     return { ...v, status: to }

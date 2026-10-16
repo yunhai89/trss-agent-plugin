@@ -427,6 +427,16 @@ export class Agent {
               this.cacheEpoch++
               compactedInFinalize = true
               this.logger('mark', `[finalize] 收尾前压缩以适配窗口：归档 ${rr.dropped} 条（修剪 ${rr.pruned} 条）`)
+              // 收尾前压缩同样 cacheEpoch++（前缀断点），必须写 cache_compact devLog：
+              // AGENTS.md 缓存友好约束第 4 条要求压缩可归因，否则命中率报告把这次断点算成「无归因」
+              // （第 8 轮审计 low-6）。
+              this.devLog?.('cache_compact', {
+                est: this._estimateHistory(wrapSys), high: this.contextWindow, low: target,
+                dropped: rr.dropped, pruned: rr.pruned, archived: 0, cacheEpoch: this.cacheEpoch,
+                msgsAfter: this.messages.length, unresolved: false, reason: 'finalize',
+                archiveError: rr.archiveError || null,
+                ledger: this._compactLedger ? { facts: this._compactLedger.facts?.length || 0, archiveRefs: this._compactLedger.archive_refs?.length || 0, compactions: this._compactLedger.stats?.compactions || 0 } : null,
+              }, taskId, ctx?.devScope)
             } else if (rr.archiveError) {
               this.logger('warn', `[finalize] 收尾前压缩失败：${rr.archiveError}（原文保留，请求可能超窗）`)
             }
@@ -649,11 +659,15 @@ export class Agent {
     let compactedThisRun = false // 本 run 发生过滞回压缩 → 持久化走全量覆写（slice(sessStart) 会错位）
     // 续跑（presetHistory）+ 本轮压缩：压缩会把历史压到 sessStart 以下 → slice(sessStart) 为空，
     // 本轮指令/最终回答/压缩结果全都不落盘（回归审计 high-2：静默数据丢失，下次续跑还从旧检查点重放）。
-    // 压缩保尾，故压缩前记下「本轮新增条数」，写回改追加末 N 条。
-    let presetNewCount = null
+    // ⚠ 不能用「压缩前条数」做减法：压缩后 this.messages.length 已变小，length − 条数 会落回
+    // 已持久化的预设历史里，把旧消息当新增重复追加（第 8 轮审计 low-4）。改为记下本轮新增消息的
+    // **对象引用**——compactMessages 只做 slice/flat 不改引用，写回时按身份定位存活段起点。
+    let presetNewRefs = null
+    let presetFirstMsg = null
     const notePresetNew = () => {
-      if (!presetHistory) return
-      presetNewCount = Math.max(presetNewCount ?? 0, this.messages.length - sessStart)
+      if (!presetHistory || presetNewRefs) return // 只记第一次（此刻尚未压缩，下标与引用都有效）
+      presetNewRefs = new Set(this.messages.slice(sessStart))
+      presetFirstMsg = this.messages[sessStart] || null
     }
 
     // 清理历史中的空 assistant 消息（之前 bug 可能产生），给占位避免 API 报 "content or tool_calls must be set"
@@ -1046,7 +1060,7 @@ export class Agent {
           // `<untrusted_data source="tool:clarify">…`（工具结果被注入扫描命中时即会加壳）。
           const rawSc = unwrapUntrusted(sc.content)
           let q = rawSc
-          try { const o = JSON.parse(rawSc); if (o && o.clarify) q = o.clarify } catch { /* keep raw */ }
+          try { const o = JSON.parse(rawSc); if (o && typeof o.clarify === 'string' && o.clarify.trim()) q = o.clarify } catch { /* keep raw */ }
           finalContent = String(q)
           this.messages.push({ role: 'assistant', content: finalContent })
           stopReason = 'clarify'
@@ -1129,10 +1143,16 @@ export class Agent {
       ? [...this.activeTools].filter((n) => !this._jevSelectedNames.has(n) || this._ranTools.has(n))
       : null
     const extra = { cacheEpoch: this.cacheEpoch, ...(this._compactLedger ? { compactLedger: this._compactLedger } : {}), ...(discoveryOn && persistedTools ? { activeTools: persistedTools } : {}) }
-    // 续跑 + 压缩：追加压缩后保留的末 N 条（N=压缩前本轮新增条数）
-    const appendFrom = presetHistory && compactedThisRun && presetNewCount != null
-      ? Math.max(0, this.messages.length - presetNewCount)
-      : sessStart
+    // 续跑 + 压缩：追加「本轮新增消息中仍存活的那一段」。按对象引用定位起点；若本轮首条（用户
+    // 指令）已被压缩归档掉，则补回追加列表首部——否则续跑指令永远不落盘（第 8 轮审计 high-2）。
+    let appendMsgs = this.messages.slice(sessStart)
+    if (presetHistory && compactedThisRun && presetNewRefs) {
+      const i = this.messages.findIndex((m) => presetNewRefs.has(m))
+      appendMsgs = this.messages.slice(i >= 0 ? i : this.messages.length)
+      if (presetFirstMsg && presetFirstMsg.role === 'user' && !appendMsgs.includes(presetFirstMsg)) {
+        appendMsgs = [presetFirstMsg, ...appendMsgs]
+      }
+    }
     let sessionPersisted = false
     if (ephemeral) {
       // 临时任务：不持久化会话历史
@@ -1141,13 +1161,13 @@ export class Agent {
         // 压缩后必须整体覆写（分代压缩重写了整段历史）；续跑（presetHistory）不再覆写：
         // 续跑历史只用于本次运行，写回只追加本轮新消息，原会话历史原样保留（审计 H1）
         if (compactedThisRun && !presetHistory) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
-        else await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages.slice(appendFrom), extra)
+        else await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, appendMsgs, extra)
         sessionPersisted = true
       } catch (e) { this.logger('warn', 'conversation 持久化失败', e) }
     } else if (sessKey) {
       try {
         if (compactedThisRun && !presetHistory) await this.session.set(sessKey, this.messages)
-        else await this.session.append(sessKey, this.messages.slice(appendFrom))
+        else await this.session.append(sessKey, appendMsgs)
         sessionPersisted = true
       } catch (e) { this.logger('warn', 'session 持久化失败', e) }
     }

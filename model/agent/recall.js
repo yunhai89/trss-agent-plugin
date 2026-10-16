@@ -202,8 +202,10 @@ export class RecallStore {
     if (mine === null) return null
     // 群共享作用域迁移兜底（2026-10-17 回归审计 medium-6）：旧键是字面量 `__group__`，新版是
     // `__group__:<gid>`。新作用域读不到时把旧记录并进来（该模式下本来就是跨群共享池），
-    // 否则 isolation=false 的群升级后「机器人失忆」。写路径不进这里（新记忆只写新作用域）。
-    if (mine.length === 0 && SHARED_SCOPE_RE.test(String(userId))) {
+    // 否则 isolation=false 的群升级后「机器人失忆」。
+    // ⚠ 只有「键不存在」才回退：「显式空数组」是刚被清空/删空的结果，若也回退，删掉的记忆会复活并
+    // 继续注入提示词（第 8 轮审计 medium-2）。
+    if (mine.length === 0 && v == null && SHARED_SCOPE_RE.test(String(userId))) {
       const legacy = await this.kv.get(this._key('__group__'))
       if (Array.isArray(legacy) && legacy.length) return legacy.slice()
     }
@@ -502,7 +504,12 @@ export class RecallStore {
     })
   }
 
-  async clearAll(userId) { await this.kv.del(this._key(userId)) }
+  async clearAll(userId) {
+    await this.kv.del(this._key(userId))
+    // 群共享作用域：遗留跨群池一并删除。否则「清空」之后 _all 又回退到旧池，用户没有任何手段清掉
+    // 这批跨群条目（第 8 轮审计 medium-2）。
+    if (SHARED_SCOPE_RE.test(String(userId))) await this.kv.del(this._key('__group__'))
+  }
   async listByUser(userId) { return this._all(userId) }
 
   /** 规则抽取每轮 + LLM 抽取节流（意图词强制触发） */

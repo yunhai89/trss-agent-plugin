@@ -16,6 +16,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { guardMemoryWrite } from '../agent/memory/index.js'
 
 const DEFAULT_EVERY = 20
 const DEFAULT_BUDGET = 200000
@@ -191,26 +192,38 @@ export class SelfReviewer {
     s.id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
     const conf = Number(s.confidence) || 0
     if (s.kind === 'memory' && this.autoApplyMemory && conf >= 0.6) {
-      try {
-        const r = await this._applyMemory(ctx, s)
-        s.status = 'applied'
-        s.applyResult = r
-        this.logger('mark', `[selfReview] 自动应用 memory：${String(s.payload || '').slice(0, 50)}`)
-      } catch (e) { s.status = 'apply_failed'; s.error = e?.message || String(e) }
+      // 来源闸门（第 8 轮审计 high-1）：自评审是**第二条写记忆路径**，原来直接 memory.add，绕过了
+      // memory 工具的 guardMemoryWrite —— 模型幻觉出的「主人要求…」会被自动写库并长期注入执行
+      // （实机事故正是这条文本）。命中「指令性条目且无用户原话佐证」时降级为待审，交人工 #采纳 决定。
+      const src = s.action === 'replace' ? String(s.newPayload || s.payload || '') : String(s.payload || '')
+      const gate = s.action === 'remove' ? { ok: true, text: '' } : guardMemoryWrite(src, s.evidence, ctx?.userTexts || [])
+      if (!gate.ok) {
+        s.status = 'pending'
+        s.gateRejected = gate.error
+        this.logger('warn', `[selfReview] memory 建议未自动应用，转为待审：${gate.error}`)
+      } else {
+        try {
+          const r = await this._applyMemory(ctx, s, gate.text)
+          s.status = 'applied'
+          s.applyResult = r
+          this.logger('mark', `[selfReview] 自动应用 memory：${String(gate.text || s.payload || '').slice(0, 50)}`)
+        } catch (e) { s.status = 'apply_failed'; s.error = e?.message || String(e) }
+      }
     } else {
       s.status = 'pending' // skill/prompt 或低置信 memory → 待审
     }
     await this._persist(ctx, s) // 已应用也落盘留痕（回溯/审计）
   }
 
-  /** 写声明式记忆（payload 当 bullet 文本；target 指 memory/user） */
-  async _applyMemory(ctx, s) {
+  /** 写声明式记忆（payload 当 bullet 文本；target 指 memory/user）。text 为已过来源闸门的文本 */
+  async _applyMemory(ctx, s, text = null) {
     if (!this.memory) throw new Error('memory 未注入')
     const target = s.target === 'user' ? 'user' : 'memory'
     const scopeId = ctx?.scopeId
     if (s.action === 'remove') return this.memory.remove(target, String(s.payload || ''), scopeId)
-    if (s.action === 'replace') return this.memory.replace(target, String(s.payload || ''), String(s.newPayload || s.payload || ''), scopeId)
-    return this.memory.add(target, String(s.payload || ''), scopeId)
+    const body = String(text || s.payload || '')
+    if (s.action === 'replace') return this.memory.replace(target, String(s.payload || ''), body, scopeId)
+    return this.memory.add(target, body, scopeId)
   }
 
   /** 落盘 suggestion（按 scope 隔离目录；待审的供 #审阅进化，已应用的供回溯） */
@@ -273,7 +286,11 @@ export async function applySuggestion(rt, s) {
     const tpl = rt.promptRegistry && rt.promptRegistry.get(key)
     if (!tpl) throw new Error(`未找到 prompt 模板：${key}`)
     const oldSystem = tpl.system
-    const payload = String(s.payload || '')
+    // payload 必须是非空字符串（第 8 轮审计 M1）：空串会把线上 system prompt 清成 ""、对象会写成
+    // "[object Object]"，落盘后重启仍生效，agent 从此失去全部行为约束与安全边界。
+    if (typeof s.payload !== 'string' || !s.payload.trim()) throw new Error('prompt payload 必须是非空字符串，已拒绝应用（建议保留待审）')
+    if (s.payload.trim().length < 8) throw new Error('prompt payload 过短（<8 字符），疑似产出异常，已拒绝应用')
+    const payload = s.payload
     const nextVersion = `${tpl.version || '1.0.0'}-evolved`
     const changeText = `采纳：${String(s.rationale || '').slice(0, 50)}`
     // 先落盘、成功后再改内存 registry 并移出待审：写失败不污染内存、也不丢 suggestion（调用方置 apply_failed）
@@ -294,8 +311,15 @@ export async function applySuggestion(rt, s) {
     if (!rt.memory) throw new Error('memory 未就绪')
     const target = s.target === 'user' ? 'user' : 'memory'
     if (s.action === 'remove') rt.memory.remove(target, String(s.payload || ''), s.scopeId)
-    else if (s.action === 'replace') rt.memory.replace(target, String(s.payload || ''), String(s.newPayload || s.payload || ''), s.scopeId)
-    else rt.memory.add(target, String(s.payload || ''), s.scopeId)
+    else {
+      // 人工采纳路径同样过来源闸门（第 8 轮审计 high-1）：指令性条目没有用户原话佐证就拒绝写入，
+      // 否则幻觉条目经一次「采纳」就永久生效。错误信息会回给操作者，suggestion 保留待审。
+      const src = s.action === 'replace' ? String(s.newPayload || s.payload || '') : String(s.payload || '')
+      const gate = guardMemoryWrite(src, s.evidence, s.evidence ? [s.evidence] : [])
+      if (!gate.ok) throw new Error(`${gate.error}（可改用对话里的 memory 工具/让用户自己说一遍再记录）`)
+      if (s.action === 'replace') rt.memory.replace(target, String(s.payload || ''), gate.text, s.scopeId)
+      else rt.memory.add(target, gate.text, s.scopeId)
+    }
     removeSuggestion(rt.suggestionDir, s.scopeId, s.id)
     return { ok: true, note: `memory ${s.action} 已应用` }
   }

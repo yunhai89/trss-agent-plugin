@@ -31,7 +31,9 @@ export function chunkText(text, size = 500, overlap = 50) {
   // 参数夹紧（2026-10-17 审计 M3）：`kb.chunkOverlap >= kb.chunkSize` 时 i 会停在原地
   // ⇒ while 死循环 + out 无界增长，CPU 打满直至 OOM，且崩前无任何日志（用户只是改了个配置）。
   const sz = Math.max(1, Math.floor(Number(size) || 500))
-  const ov = Math.max(0, Math.min(Math.floor(Number(overlap) || 0), sz - 1))
+  // 除 size-1 上限外再夹到半块：overlap 接近块长时每块只前进 1 个字符，分片数线性膨胀
+  //（1MB 文档 + size=500/overlap=499 ≈ 100 万块 × 500 字符 → 内存直接打爆），且这类配置没有检索价值。
+  const ov = Math.max(0, Math.min(Math.floor(Number(overlap) || 0), sz - 1, Math.floor(sz / 2)))
   if (t.length <= sz) return [t]
   const out = []
   let i = 0
@@ -268,12 +270,24 @@ export class KnowledgeStore {
       // ⚠ 顺序：先注册新 job，成功后才取消旧 job。曾先 _cancelJob 再校验新 cron —— 非法表达式会
       // 让**已在跑**的定时刷新被取消且不恢复，KV 却仍显示「已排期」，静默停摆（2026-10-17 回归审计 medium-4）。
       const prevCron = doc.refreshCron || null
-      if (cron && this.scheduler && !this._scheduleRefresh(docId, cron)) {
-        // 注册失败：把旧 job 按旧 cron 复原（_scheduleRefresh 失败时不会留下句柄）
-        if (prevCron) this._scheduleRefresh(docId, prevCron)
-        return { error: `非法的定时刷新表达式：${cron}（5 段 cron，例如 0 8 * * *）` }
+      // ⚠ 必须先取旧句柄：_scheduleRefresh 成功时会用**新** job 覆盖句柄表。第 8 轮审计 high-1：
+      // 原来在注册成功后调 `_cancelJob(docId)`，从同一张表读到的正是刚注册的新 job → 当场取消，
+      // 定时刷新永不触发，而命令/面板/KV 都回报「已排期」；同 cron 重复保存还会让旧 job 变孤儿
+      // （句柄被覆盖、取消不掉），每个 tick 重复抓同一 URL。
+      const prevJob = this._refreshJobs.get(docId) || null
+      if (cron && this.scheduler) {
+        if (!this._scheduleRefresh(docId, cron)) {
+          // 注册失败：旧 job 未被覆盖则继续跑（不重复注册）；句柄缺失时才按旧 cron 复原
+          if (!prevJob && prevCron) this._scheduleRefresh(docId, prevCron)
+          return { error: `非法的定时刷新表达式：${cron}（5 段 cron，例如 0 8 * * *）` }
+        }
+        // 换掉旧 job：句柄表此刻已指向新 job，按引用取消旧的那个（不能用按 docId 查表的 _cancelJob）
+        if (prevJob && prevJob !== this._refreshJobs.get(docId)) {
+          try { this.scheduler.cancelJob(prevJob) } catch { /* noop */ }
+        }
+      } else if (prevJob) {
+        this._cancelJob(docId) // cron=null：取消定时刷新
       }
-      if (prevCron !== (cron || null)) this._cancelJob(docId) // 注册成功后再换掉旧 job
       doc.refreshCron = cron || null
       await this._save(data)
       return { id: docId, cron: cron || null }

@@ -145,7 +145,15 @@ export function createUsageStats({ kv, logger = () => {}, flushIntervalMs = 2000
         const [key, inc] = pending[0]
         const fullKey = DAY_KEY_PREFIX + key
         let existing = null
-        try { existing = await kv.get(fullKey) } catch { existing = null }
+        try {
+          existing = await kv.get(fullKey)
+        } catch (e) {
+          // 读失败 ≠ 当天无数据：继续写会把「只有本次增量」的对象覆盖当日累计，当天 chats/tokens/
+          // toolCalls/cacheRead 全部静默丢失（第 8 轮审计 medium-3，同仓 knowledge/memory 已有
+          // 「读失败不清库」原则）。这里跳过该天，pending 由 finally 并回缓冲等下轮重试。
+          log('warn', '[usage-stats] 读取当日统计失败，本次跳过写入以免覆盖：', e?.message || e)
+          break
+        }
         const merged = mergeDay(existing && typeof existing === 'object' ? existing : emptyDay(key), { ...inc, updatedAt: now().getTime() })
         await kv.set(fullKey, merged, keepDays * 86400)
         pending.shift() // set 成功才出缓冲（失败保留重试）
