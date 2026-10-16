@@ -1,4 +1,3 @@
-import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import plugin from '../../../lib/plugins/plugin.js'
@@ -7,52 +6,6 @@ let uping = false
 
 /** 插件根目录（绝对路径）——不依赖进程 cwd，避免 pm2/外部启动 cwd 非 Yunzai 根时 git 在错误目录执行。 */
 const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-
-/**
- * 同步读取工作树的当前提交（短 sha）。用 fs 直接读 .git 而不调 git：
- * 该值必须在**模块加载时**（= 进程启动、代码被加载的那一刻）取到，异步 exec 会晚于代码加载。
- */
-export function readGitHead(dir) {
-  try {
-    const gitDir = path.join(dir, '.git')
-    const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim()
-    if (!head.startsWith('ref:')) return head.slice(0, 7)
-    const ref = head.slice(4).trim()
-    try {
-      return fs.readFileSync(path.join(gitDir, ref), 'utf8').trim().slice(0, 7)
-    } catch {
-      const packed = fs.readFileSync(path.join(gitDir, 'packed-refs'), 'utf8')
-      const line = packed.split('\n').find((l) => l.endsWith(` ${ref}`))
-      return line ? line.split(' ')[0].slice(0, 7) : null
-    }
-  } catch {
-    return null
-  }
-}
-
-/** 同步读取 package.json 的 version（磁盘当前值）。 */
-export function readPkgVersion(dir) {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).version || null
-  } catch {
-    return null
-  }
-}
-
-/**
- * 「磁盘代码是否比本进程加载的更新」——命中则必须重启才生效。
- * 场景：先手动 git pull / 上次自动重启失败 / 更新只改了配置——此时再发 #agents更新，
- * git 层面显示「已是最新」而不会重启，用户会以为已经生效（实机踩过：磁盘已 v1.26.8、进程仍跑 v1.25.2）。
- */
-export function diskChangedSinceLoad({ diskHead, loadedHead, diskVersion, loadedVersion }) {
-  if (diskHead && loadedHead && diskHead !== loadedHead) return 'head'
-  if (diskVersion && loadedVersion && diskVersion !== loadedVersion) return 'version'
-  return null
-}
-
-/** 本进程启动时代码所在提交与版本（模块加载时捕获一次） */
-const LOADED_HEAD = readGitHead(PLUGIN_DIR)
-const LOADED_VERSION = readPkgVersion(PLUGIN_DIR)
 
 /**
  * agents-plugin 更新命令（参考 TRSS 标准更新模式，用 Bot.exec）。
@@ -137,18 +90,6 @@ export class AgentsUpdate extends plugin {
     const after = await this.getCommitId()
     const time = await this.getTime()
     if (after === this.oldCommitId) {
-      // git 层面已是最新，但进程里跑的可能是旧代码（手动 pull / 上次重启失败 / 只改了配置）：
-      // 不重启则磁盘上的新代码永远不会生效，必须主动重启并说明原因。
-      const why = diskChangedSinceLoad({
-        diskHead: after, loadedHead: LOADED_HEAD,
-        diskVersion: readPkgVersion(PLUGIN_DIR), loadedVersion: LOADED_VERSION,
-      })
-      if (why) {
-        this.isUp = true // 交给 update() 触发 restart()
-        await this.reply(`agents-plugin 磁盘代码已是最新（${after} @ v${readPkgVersion(PLUGIN_DIR) ?? '?'}），但当前进程加载的是 ${LOADED_HEAD || '未知提交'}${LOADED_VERSION ? ` @ v${LOADED_VERSION}` : ''}\n正在重启以加载磁盘上的新代码…`)
-        logger.mark(`[agents-plugin] 磁盘 ${after} ≠ 进程加载 ${LOADED_HEAD}（${why}），重启以生效`)
-        return true
-      }
       if (!this.quiet) await this.reply(`agents-plugin 已是最新（${target} @ ${after}）\n最后更新时间：${time}`)
       logger.mark(`[agents-plugin] 已是最新（${target} @ ${after}）`)
       return true
