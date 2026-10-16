@@ -193,6 +193,12 @@
         if (form.kb.crawl.stealth == null) form.kb.crawl.stealth = true
         if (form.kb.crawl.retryBlocked == null) form.kb.crawl.retryBlocked = true
         if (form.kb.crawl.allowPrivateHosts == null) form.kb.crawl.allowPrivateHosts = false
+        if (form.kb.crawl.sessionPersist == null) form.kb.crawl.sessionPersist = true
+        if (form.kb.crawl.sessionTtlHours == null) form.kb.crawl.sessionTtlHours = 12
+        if (form.kb.crawl.sessionProfile == null) form.kb.crawl.sessionProfile = false
+        if (form.kb.crawl.siteMemory == null) form.kb.crawl.siteMemory = true
+        if (form.kb.crawl.perHostIntervalMs == null) form.kb.crawl.perHostIntervalMs = 1200
+        if (form.kb.crawl.hostConcurrency == null) form.kb.crawl.hostConcurrency = 1
         // diagram 示意图兜底（旧配置无此块防 v-model 报错）
         if (!form.diagram) form.diagram = {}
         if (!form.diagram.kroki) form.diagram.kroki = {}
@@ -1764,6 +1770,12 @@
                 <cfg-row name="抓取反检测" desc="crawl4ai stealth（默认开）"><v-switch v-model="form.kb.crawl.stealth"/></cfg-row>
                 <cfg-row name="被拦截自动升级" desc="undetected 强化重试一轮"><v-switch v-model="form.kb.crawl.retryBlocked"/></cfg-row>
                 <cfg-row name="允许抓内网地址" desc="防 SSRF，默认关"><v-switch v-model="form.kb.crawl.allowPrivateHosts"/></cfg-row>
+              <cfg-row name="会话复用(清关凭证)" desc="按站点持久化 cookie（cf_clearance 等），12h 内复用；cookie 值不进日志"><v-switch v-model="form.kb.crawl.sessionPersist"/></cfg-row>
+              <cfg-row name="会话有效期(小时)"><input type="number" class="inp" style="width:100px" min="0.1" max="720" step="0.1" v-model.number="form.kb.crawl.sessionTtlHours"></cfg-row>
+              <cfg-row name="站点难度记忆" desc="上次 fetch 够用就不再起浏览器；上次被拦就直接 undetected"><v-switch v-model="form.kb.crawl.siteMemory"/></cfg-row>
+              <cfg-row name="同站抓取间隔(毫秒)" desc="两次抓同一站的最小间隔（含抖动）；节奏比单次快慢更易触发风控"><input type="number" class="inp" style="width:100px" min="0" max="60000" step="100" v-model.number="form.kb.crawl.perHostIntervalMs"></cfg-row>
+              <cfg-row name="同站并发上限" desc="1=串行（默认）；并发抓同站会显著提高被拦概率"><input type="number" class="inp" style="width:100px" min="1" max="8" v-model.number="form.kb.crawl.hostConcurrency"></cfg-row>
+              <cfg-row name="持久浏览器 profile" desc="user_data_dir（默认关）：共享 profile 目录无法并发开浏览器，开启后浏览器全局串行"><v-switch v-model="form.kb.crawl.sessionProfile"/></cfg-row>
                 <cfg-row name="抓取超时(秒)"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.kb.crawlTimeout"></cfg-row>
                 <cfg-row name="分块大小"><input type="number" class="inp" style="width:110px" min="50" v-model.number="form.kb.chunkSize"></cfg-row>
                 <cfg-row name="分块重叠"><input type="number" class="inp" style="width:100px" min="0" v-model.number="form.kb.chunkOverlap"></cfg-row>

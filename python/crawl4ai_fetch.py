@@ -13,6 +13,9 @@
     override_navigator/magic）、undetected（UndetectedAdapter 深度补丁，可与 stealth 叠加）、
     proxy（走 agent.proxy；浏览器与 fetch 一致地处理受限网络）
   - Shadow DOM 组件页：flat_shadow_dom（flatten_shadow_dom）
+  - 会话复用：storage_state（宿主把该站点已有 cookie 注入浏览器上下文 → cf_clearance 等
+    清关凭证可跨次复用）、user_data_dir（显式 opt-in 的持久 profile）、
+    session_capture（抓完尽力导出浏览器 cookie 回传宿主，供下次注入）
 
 协议（python-subprocess-supervision 契约）：
   - stdin  ：单行 JSON 请求；stdout：单行 JSON 结果；stderr：日志（父进程留尾部）
@@ -30,6 +33,8 @@ import json
 import re
 import signal
 import sys
+from http.cookies import SimpleCookie
+from urllib.parse import urlparse
 
 MAX_CHARS_DEFAULT = 60000
 MIN_FIT_CHARS = 200        # fit_markdown 低于此长度视为修剪过度，回退 raw_markdown
@@ -37,6 +42,8 @@ DEFAULT_DELAY_MS = 800     # hydration 余量：同态渲染组件挂载后 DOM 
 JS_MAX_CHARS = 10_000      # 单段 JS 上限（防超长注入目标页）
 JS_MAX_ITEMS = 10          # js_code 数组段数上限
 PROXY_MAX_CHARS = 500      # 代理 URL 上限
+COOKIE_MAX_ITEMS = 200     # 会话 cookie 条数上限（注入与回传同一口径）
+COOKIE_VALUE_MAX = 4096    # 单条 cookie 值上限（防超长注入）
 WAIT_UNTIL_ALLOWED = ("domcontentloaded", "load", "networkidle", "commit")
 
 # 反爬拦截 / 挑战页识别（保守：只在标题或 Cloudflare 挑战运行时变量命中，
@@ -160,7 +167,112 @@ def parse_request():
         "flat_shadow_dom": req.get("flat_shadow_dom") is True,
         "virtual_scroll": vs,
         "extra_args": extra_args,
+        "user_data_dir": _s(req.get("user_data_dir"), 500, "user_data_dir") or None,
+        "storage_state": parse_storage_state(req.get("storage_state"), urlparse(url).hostname or ""),
+        "session_capture": req.get("session_capture") is True,
     }
+
+
+def sanitize_cookie(c, fallback_domain):
+    """把宿主注入或浏览器导出的 cookie 归一为 playwright/crawl4ai 认得的形态（非法项返回 None）。"""
+    if not isinstance(c, dict):
+        return None
+    name = str(c.get("name") or "").strip()
+    if not name or len(name) > 200:
+        return None
+    domain = str(c.get("domain") or fallback_domain or "").strip()
+    if not domain:
+        return None
+    out = {
+        "name": name,
+        "value": str(c.get("value") or "")[:COOKIE_VALUE_MAX],
+        "domain": domain,
+        "path": str(c.get("path") or "/") or "/",
+        "secure": bool(c.get("secure")),
+        "httpOnly": bool(c.get("httpOnly", c.get("http_only", False))),
+        "sameSite": str(c.get("sameSite") or c.get("same_site") or "Lax"),
+    }
+    exp = c.get("expires", c.get("expiry"))
+    if exp is not None:
+        try:
+            exp = float(exp)
+            if exp > 0:
+                out["expires"] = exp
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def parse_storage_state(raw, fallback_domain):
+    """宿主 storage_state → CrawlerRunConfig.storage_state（只保留白名单字段，防注入垃圾参数）。"""
+    if not isinstance(raw, dict):
+        return None
+    cookies = raw.get("cookies")
+    if not isinstance(cookies, list):
+        return None
+    items = [c for c in (sanitize_cookie(c, fallback_domain) for c in cookies[:COOKIE_MAX_ITEMS]) if c]
+    if not items:
+        return None
+    origins = raw.get("origins") if isinstance(raw.get("origins"), list) else []
+    return {"cookies": items, "origins": origins}
+
+
+def cookies_from_set_cookie(header, fallback_domain):
+    """Set-Cookie 头 → cookie 列表（回退通道；主通道是宿主 fetch 路径的 getSetCookie）。"""
+    if not header:
+        return []
+    values = header if isinstance(header, list) else [header]
+    out = []
+    for v in values:
+        # 组合头（多个 Set-Cookie 被并成一行）按「, 后紧跟 name=」切分；SimpleCookie 对组合串会整体失配
+        for part in re.split(r",\s*(?=[^=;,\s]+\s*=)", str(v)):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                jar = SimpleCookie()
+                jar.load(part)
+            except Exception:
+                continue
+            for name, morsel in jar.items():
+                out.append({
+                    "name": name, "value": morsel.value,
+                    "domain": morsel["domain"] or fallback_domain,
+                    "path": morsel["path"] or "/",
+                    "secure": bool(morsel["secure"]), "httpOnly": bool(morsel["httponly"]),
+                })
+    return out
+
+
+async def collect_browser_cookies(crawler, result, fallback_domain):
+    """尽力导出浏览器 cookie（crawl4ai 各版本落点不同，全部 guarded）；cookie 值不进日志。"""
+    raw = []
+    for attr in ("cookies", "response_cookies"):
+        v = getattr(result, attr, None)
+        if isinstance(v, list):
+            raw.extend(v)
+        elif isinstance(v, dict):
+            raw.extend({"name": k, "value": val} for k, val in v.items())
+    headers = getattr(result, "response_headers", None)
+    if isinstance(headers, dict):
+        raw.extend(cookies_from_set_cookie(headers.get("set-cookie") or headers.get("Set-Cookie"), fallback_domain))
+    try:
+        ctx = getattr(getattr(crawler, "crawler_strategy", None), "browser_context", None)
+        ctx = getattr(ctx, "browser_context", None) or ctx
+        if ctx is not None and hasattr(ctx, "cookies"):
+            raw.extend(await ctx.cookies())
+    except Exception as e:  # 版本差异/上下文已关闭都不影响抓取结果
+        sys.stderr.write(f"浏览器 cookie 导出失败（{type(e).__name__}: {e}）\n")
+    out, seen = [], set()
+    for c in (sanitize_cookie(c, fallback_domain) for c in raw):
+        if not c:
+            continue
+        key = f'{c["domain"]}|{c["path"]}|{c["name"]}'
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out[:COOKIE_MAX_ITEMS]
 
 
 def _init_params(cls):
@@ -198,6 +310,8 @@ def build_browser_config(BrowserConfig, p):
             sys.stderr.write("crawl4ai 版本不支持浏览器代理配置，已忽略 proxy\n")
     if p["extra_args"]:
         kwargs["extra_args"] = list(p["extra_args"])
+    if p["user_data_dir"]:
+        kwargs["user_data_dir"] = p["user_data_dir"]  # 持久 profile（显式 opt-in；与并发浏览器互斥）
     return BrowserConfig(**filter_kwargs(BrowserConfig, kwargs, "BrowserConfig"))
 
 
@@ -246,6 +360,9 @@ def build_run_config(deps, p):
             )
         except ImportError:
             sys.stderr.write("此版本 crawl4ai 不支持 VirtualScrollConfig，忽略 virtual_scroll\n")
+    if p["storage_state"]:
+        # 该站点已有 cookie（含 cf_clearance 等清关凭证）注入浏览器上下文；老版本经 filter_kwargs 跳过
+        run_kwargs["storage_state"] = p["storage_state"]
     if p["extract"]:
         from crawl4ai import JsonCssExtractionStrategy
         schema = {"name": str(p["extract"].get("name") or "Items"), **{k: v for k, v in p["extract"].items() if k != "name"}}
@@ -362,6 +479,7 @@ async def crawl(p):
     if crawler is None:
         crawler = AsyncWebCrawler(config=browser_config)
 
+    fallback_domain = urlparse(p["url"]).hostname or ""
     async with crawler:
         result = await crawler.arun(url=p["url"], config=run_config)
         status = getattr(result, "status_code", None) or getattr(result, "status", None)
@@ -369,24 +487,36 @@ async def crawl(p):
         title = str(meta.get("title") or "") if isinstance(meta, dict) else ""
         if not title:
             title = str(getattr(result, "title", "") or "")
+        # 会话回传：失败/挑战路径同样要导出（CF 在挑战响应里也下发 __cf_bm 等）
+        session_cookies = await collect_browser_cookies(crawler, result, fallback_domain) if p["session_capture"] else []
+        if session_cookies:
+            sys.stderr.write(f"导出浏览器 cookie {len(session_cookies)} 条（供宿主按站点复用）\n")
 
         if not result.success:
             err = getattr(result, "error_message", None) or f"HTTP {status or '?'}"
             err = str(err)
             # crawl4ai v0.9+ 自带反爬检测（"Blocked by anti-bot protection: ..."）→ 结构化 blocked
             code = "blocked" if re.search(r"anti-bot|blocked", err, re.I) else "crawl_failed"
-            emit({"ok": False, "url": p["url"], "status_code": status, "code": code, "error": err})
+            payload = {"ok": False, "url": p["url"], "status_code": status, "code": code, "error": err}
+            if session_cookies:
+                payload["cookies"] = session_cookies
+            emit(payload)
             return 2
 
         kind = blocked_kind(title, status, getattr(result, "html", ""))
         if kind:
-            emit({
+            payload = {
                 "ok": False, "url": p["url"], "status_code": status, "code": kind,
                 "error": f"内容为反爬{'挑战页' if kind == 'challenge' else '拦截页'}（title={title[:80]}）",
-            })
+            }
+            if session_cookies:
+                payload["cookies"] = session_cookies
+            emit(payload)
             return 2
 
         out = {"ok": True, "url": str(getattr(result, "url", None) or p["url"]), "status_code": status, "title": title}
+        if session_cookies:
+            out["cookies"] = session_cookies
         stats = crawl_stats_payload(result)
         if stats:
             out["crawl_stats"] = stats
@@ -412,14 +542,17 @@ async def crawl(p):
                 items = data
             if not items:
                 out.update(code="extract_empty", error="extract 未命中任何条目（检查 baseSelector/fields 与页面结构）", extracted=[])
-                emit(out)
+                emit(out)  # out 已含 cookies（若有）
                 return 2
             out["extracted"] = items[:500]
             out["extracted_count"] = len(items)
         else:
             markdown, fit_used = extract_markdown(result)
             if not markdown or len(markdown.strip()) < 20:
-                emit({"ok": False, "url": p["url"], "status_code": status, "code": "empty", "error": "页面无有效正文"})
+                payload = {"ok": False, "url": p["url"], "status_code": status, "code": "empty", "error": "页面无有效正文"}
+                if session_cookies:
+                    payload["cookies"] = session_cookies
+                emit(payload)
                 return 2
             full_len = len(markdown)
             truncated = full_len > p["max_chars"]

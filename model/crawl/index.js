@@ -21,12 +21,18 @@
 
 import { load } from 'cheerio'
 import net from 'node:net'
+import path from 'node:path'
 import Config from '../../utils/Config.js'
 import Log from '../../utils/Log.js'
 import { runCrawl4ai, isCrawl4aiAvailable, resetCrawl4aiProbe, runCrawl4aiInSandbox, probeCrawl4aiInSandbox } from './crawl4ai.js'
 import { assertUrlAllowed, hostIsBlocked, isPrivateIp, normalizeHost, parseLooseIPv4 } from '../stagehand/guard.js'
 import { toolSandbox, sandboxSelected } from '../sandbox/bridge.js'
+import { createCookieJar, getSetCookieLines } from './cookies.js'
+import { sessionStoreFor } from './session-store.js'
+import { createHostGate, createSiteMemory, defaultCrawlDir } from './host-policy.js'
 export { resetCrawl4aiProbe }
+// cookie 基础件已迁到 ./cookies.js（避免与 session-store.js 循环依赖）；此处保留导出兼容既有调用方
+export { createCookieJar, toPlaywrightCookie, fromPlaywrightCookie } from './cookies.js'
 
 function kbCfg() {
   return Config.get?.()?.agent?.kb || {}
@@ -183,126 +189,8 @@ async function readBody(res, { maxBytes = MAX_BODY_BYTES } = {}) {
   return { text: '', truncated: false }
 }
 
-// ───────────────────────── Cookie Jar（内存，按 host 隔离） ─────────────────────────
-
-function defaultCookiePath(reqPath) {
-  const p = String(reqPath || '/')
-  if (!p.startsWith('/')) return '/'
-  const i = p.lastIndexOf('/')
-  return i <= 0 ? '/' : p.slice(0, i)
-}
-
-function cookieDomainMatch(cookieDomain, host) {
-  const d = String(cookieDomain || '').replace(/^\./, '').toLowerCase()
-  if (!d) return false
-  return host === d || host.endsWith('.' + d)
-}
-
-function cookiePathMatch(cookiePath, reqPath) {
-  const cp = String(cookiePath || '/')
-  const rp = String(reqPath || '/')
-  if (rp === cp) return true
-  if (!rp.startsWith(cp)) return false
-  return cp.endsWith('/') || rp[cp.length] === '/'
-}
-
-function parseSetCookie(line, host, reqPath) {
-  const s = String(line || '')
-  const semi = s.indexOf(';')
-  const pair = (semi === -1 ? s : s.slice(0, semi)).trim()
-  const eq = pair.indexOf('=')
-  if (eq <= 0) return null
-  const name = pair.slice(0, eq).trim()
-  const value = pair.slice(eq + 1).trim()
-  if (!name) return null
-  let domain = host
-  let path = defaultCookiePath(reqPath)
-  let expires = null
-  let secure = false
-  if (semi !== -1) {
-    for (const attr of s.slice(semi + 1).split(';')) {
-      const i = attr.indexOf('=')
-      const k = (i === -1 ? attr : attr.slice(0, i)).trim().toLowerCase()
-      const v = i === -1 ? '' : attr.slice(i + 1).trim()
-      if (k === 'domain' && v) {
-        const d = v.replace(/^\./, '').toLowerCase()
-        if (!cookieDomainMatch(d, host)) return null // 跨域伪造的 Domain 直接拒绝
-        domain = d
-      } else if (k === 'path' && v.startsWith('/')) {
-        path = v
-      } else if (k === 'max-age' && /^-?\d+$/.test(v)) {
-        expires = Date.now() + Number(v) * 1000
-      } else if (k === 'expires') {
-        const t = Date.parse(v)
-        if (!Number.isNaN(t)) expires = t
-      } else if (k === 'secure') {
-        secure = true
-      }
-    }
-  }
-  if (expires != null && expires <= Date.now()) return null
-  return { key: `${domain}\n${path}\n${name}`, domain, path, name, value, expires, secure }
-}
-
-/** 组合 Set-Cookie 头（无 getSetCookie 时）按 `, name=` 切分——Expires 里的逗号不会命中该模式 */
-function splitCombinedSetCookie(raw) {
-  return String(raw || '').split(/,(?=\s*[!#$%&'*+\-.^_`|~0-9A-Za-z]+\s*=)/g).map((s) => s.trim()).filter(Boolean)
-}
-
-function getSetCookieLines(res) {
-  const h = res?.headers
-  if (!h) return []
-  try {
-    if (typeof h.getSetCookie === 'function') {
-      const list = h.getSetCookie()
-      if (Array.isArray(list) && list.length) return list.filter(Boolean).map(String)
-    }
-  } catch { /* 继续用组合头 */ }
-  const raw = typeof h.get === 'function' ? h.get('set-cookie') : null
-  return raw ? splitCombinedSetCookie(raw) : []
-}
-
-/**
- * 极简 Cookie Jar —— 纯 HTTP 重定向/重试之间保持会话（很多站点首访发 cookie 才给正文）。
- * 安全：只在内存（不落盘）、只发往 domain/path/secure 匹配的 host、容量上限、日志不打印 cookie 值。
- */
-export function createCookieJar({ max = 300 } = {}) {
-  const store = new Map() // key -> cookie（插入序即 LRU 顺序）
-  const evict = () => { while (store.size > max) store.delete(store.keys().next().value) }
-  return {
-    size: () => store.size,
-    clear: () => store.clear(),
-    /** 组装请求 Cookie 头（匹配 host/path/secure；顺带清理过期项） */
-    header(target) {
-      let u
-      try { u = new URL(String(target)) } catch { return '' }
-      const host = u.hostname.toLowerCase()
-      const path = u.pathname || '/'
-      const https = u.protocol === 'https:'
-      const parts = []
-      for (const [key, c] of store) {
-        if (c.expires != null && c.expires <= Date.now()) { store.delete(key); continue }
-        if (c.secure && !https) continue
-        if (!cookieDomainMatch(c.domain, host) || !cookiePathMatch(c.path, path)) continue
-        parts.push(`${c.name}=${c.value}`)
-      }
-      return parts.join('; ')
-    },
-    /** 存入响应 Set-Cookie（不合法/过期/跨域拒绝） */
-    store(target, lines) {
-      let u
-      try { u = new URL(String(target)) } catch { return }
-      const host = u.hostname.toLowerCase()
-      for (const line of lines || []) {
-        const c = parseSetCookie(line, host, u.pathname || '/')
-        if (!c) continue
-        store.delete(c.key)
-        store.set(c.key, c)
-      }
-      evict()
-    },
-  }
-}
+// Cookie Jar / Set-Cookie 解析已迁到 ./cookies.js（fetch 与浏览器两条路径共用同一套基础件，
+// 并由 ./session-store.js 负责按站点落盘复用）。
 
 // ───────────────────────── 挑战页 / JS 空壳识别 ─────────────────────────
 
@@ -498,16 +386,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
  * - stealth：浏览器路径反检测默认开（显式 false 可关）
  * - retryBlocked：被反爬拦截时强化模式再试一轮（默认开）
  * - allowPrivateHosts：允许抓取本机/内网（默认 false，防 SSRF）
+ * - sessionPersist/sessionTtlHours：按站点持久化 cookie（清关通行证复用；默认开 / 12 小时）
+ * - siteMemory：站点难度记忆（记住有效档位，默认开）
+ * - perHostIntervalMs/hostConcurrency：同站点最小抓取间隔与并发上限（默认 1200ms / 1）
  * 注：执行面（本地 venv / E2B 沙箱）不在本函数——见 resolveCrawlExecution（需要工具 ctx）。
  */
 export function resolveCrawlPolicy(cfg = {}, opts = {}) {
   const c = cfg?.crawl || {}
   const tri = (v, dflt) => (v === undefined ? dflt : v === true)
+  const num = (v, dflt, min, max) => {
+    const n = Number(v)
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt
+  }
   return {
     engine: String(opts.engine || c.engine || 'crawl4ai'),
     stealth: tri(opts.stealth, c.stealth !== false),
     retryBlocked: tri(opts.retryBlocked, c.retryBlocked !== false),
     allowPrivateHosts: tri(opts.allowPrivateHosts, c.allowPrivateHosts === true),
+    sessionPersist: tri(opts.sessionPersist, c.sessionPersist !== false),
+    sessionTtlHours: num(opts.sessionTtlHours ?? c.sessionTtlHours, 12, 0.1, 24 * 30),
+    sessionDir: typeof opts.sessionDir === 'string' && opts.sessionDir ? opts.sessionDir : null,
+    sessionProfile: tri(opts.sessionProfile, c.sessionProfile === true),
+    siteMemory: tri(opts.siteMemory, c.siteMemory !== false),
+    perHostIntervalMs: num(opts.perHostIntervalMs ?? c.perHostIntervalMs, 1200, 0, 60000),
+    hostConcurrency: Math.round(num(opts.hostConcurrency ?? c.hostConcurrency, 1, 1, 8)),
   }
 }
 
@@ -598,12 +500,62 @@ export function isBlockSignal(r) {
 
 const mergeHints = (...hints) => [...new Set(hints.filter(Boolean).map(String))].join('；')
 
+// ───────────────────────── 站点调度运行期单例（配置变化即重建） ─────────────────────────
+// 限速闸门必须跨调用保有状态（否则「同站最小间隔」形同虚设），故按配置键缓存单例。
+
+let _gate = null
+let _gateKey = ''
+/** 同站点限速/并发闸门（按 intervalMs+concurrency 缓存；配置热加载后自动换新实例） */
+function hostGateFor(policy) {
+  const key = `${policy.perHostIntervalMs}|${policy.hostConcurrency}`
+  if (_gate && _gateKey === key) return _gate
+  _gate = createHostGate({
+    intervalMs: policy.perHostIntervalMs,
+    concurrency: policy.hostConcurrency,
+    jitterMs: Math.min(400, Math.round(policy.perHostIntervalMs / 3)), // 抖动：避免固定节奏
+  })
+  _gateKey = key
+  return _gate
+}
+
+// profile 档（user_data_dir）全局串行：同一 profile 目录被两个浏览器同时打开会撞 ProcessSingleton 锁，
+// 因此 profile 档下浏览器全局排队（不同站点之间也串行）——这是 sessionProfile 的已知代价。
+let _profileGate = null
+function profileGate() {
+  if (!_profileGate) _profileGate = createHostGate({ intervalMs: 0, concurrency: 1 })
+  return _profileGate
+}
+
+let _memory = null
+let _memoryKey = ''
+function siteMemoryFor(policy) {
+  const key = String(policy.sessionDir || '')
+  if (_memory && _memoryKey === key) return _memory
+  _memory = createSiteMemory(policy.sessionDir ? { dir: policy.sessionDir } : {})
+  _memoryKey = key
+  return _memory
+}
+
+/** 仅测试用：丢弃调度单例（限速状态、站点记忆缓存） */
+export function resetCrawlSchedulers() {
+  if (_gate) _gate.reset()
+  _gate = null
+  _gateKey = ''
+  if (_profileGate) _profileGate.reset()
+  _profileGate = null
+  _memory = null
+  _memoryKey = ''
+}
+
 /** 统一抓取入口：crawl4ai（默认，真浏览器渲染——SPA/JS 动态页可抓 + JS 交互/结构化抽取）→ 失败/未装自动降级 fetch+cheerio。
  *  engine: 'crawl4ai'（默认）| 'fetch'（强制纯 HTTP，零子进程）。
  *  安全：默认拒绝本机/内网/元数据目标（kb.crawl.allowPrivateHosts 放开）；重定向逐跳复验（fetch 路径）。
  *  高级参数（waitFor/jsCode/jsBeforeWait/delayMs/cssSelector/extract/links/stealth/flatShadowDom/virtualScroll）
  *  仅 crawl4ai 路径生效；降级 fetch 时结果带 degraded:true + skipped:[未生效能力]（诚实标注，不静默吞）。
  *  反爬：stealth 默认开；被拦截时（kb.crawl.retryBlocked）用 undetected+stealth 升级再试一轮（结果带 escalated:true）。
+ *  站点策略（抗反爬）：会话持久化（kb.crawl.sessionPersist，按 host 复用清关 cookie，fetch/浏览器共用）、
+ *  站点难度记忆（kb.crawl.siteMemory，已知有效档位直接命中、已知被拦不反复试）、
+ *  同站限速（kb.crawl.perHostIntervalMs/hostConcurrency，串行 + 最小间隔含抖动）。
  *  保留 crawlUrl 名兼容 KnowledgeStore 调用。 */
 export async function crawlUrl(url, opts = {}) {
   const cfg = kbCfg()
@@ -634,6 +586,27 @@ export async function crawlUrl(url, opts = {}) {
     if (Array.isArray(v)) return v.length > 0
     return true
   })
+  // ② 站点调度：按 host 复用会话 / 难度记忆 / 同站限速（配置关闭时对应实例为 null，行为与旧版一致）
+  let host = ''
+  try { host = new URL(u).hostname.toLowerCase() } catch { host = '' }
+  const session = policy.sessionPersist && host ? sessionStoreFor(policy) : null
+  const memory = policy.siteMemory && host ? siteMemoryFor(policy) : null
+  const gate = host ? hostGateFor(policy) : null
+  // 记忆档位：'fetch' 只在没有高级参数时才可插队（wait_for/js_code/extract 等 fetch 根本做不了）
+  const remembered = (memory && host && memory.preferredTier(host)) || null
+  const startTier = remembered === 'undetected'
+    ? 'undetected'
+    : (remembered === 'fetch' && advancedUsed.length === 0 ? 'fetch' : null)
+  const release = gate ? await gate.acquire(host) : null
+  // profile 档：持久 user_data_dir（显式 opt-in）——浏览器全局串行，避免 profile 锁冲突
+  const profileDir = policy.sessionProfile ? path.join(policy.sessionDir || defaultCrawlDir(), 'profile') : null
+  const profileRelease = profileDir ? await profileGate().acquire('*') : null
+  // fetch 路径与持久会话共用：预置该站已有 cookie，结束后（finally）回写
+  const fetchJar = session && host ? createCookieJar({ seed: session.cookiesFor(host) }) : null
+  const storageState = session && host ? session.storageStateFor(host) : null
+  let attempted = { tier: engine === 'fetch' ? 'fetch' : 'crawl4ai', blocked: false }
+  let r = null
+
   const c4aiOpts = {
     timeoutMs: o.timeout * 1000, maxChars: o.maxChars,
     waitFor: o.waitFor, jsCode: o.jsCode, jsBeforeWait: o.jsBeforeWait, delayMs: o.delayMs,
@@ -641,67 +614,114 @@ export async function crawlUrl(url, opts = {}) {
     stealth: policy.stealth, // 配置默认开；工具显式 stealth:false 可关
     flatShadowDom: o.flatShadowDom === true, virtualScroll: o.virtualScroll,
     proxy: browserProxy,
+    // 会话：把该站已有 cookie 注入浏览器上下文（storage_state），并请求回传本次新拿到的 cookie
+    storageState, sessionCapture: !!(session && host),
+    userDataDir: profileDir,
   }
-  let r = null
-  let c4aiErr = null
-  if (engine !== 'fetch') {
-    let probe = null
-    try { probe = await avail() } catch { probe = { ok: false } }
-    const ok = !!(probe && probe.ok)
-    if (ok) {
-      try { r = await doC4ai(u, c4aiOpts) } catch (e) { r = { success: false, code: 'crashed', error: e?.message || String(e) } }
-      // 反爬拦截 → 强化升级一轮：undetected（patchright 深度补丁）+ stealth + load 等待 + 更长 hydration
-      if (r?.success) {
-        Log.info(`[crawl] ${u} via=crawl4ai${r.escalated ? '（升级档）' : ''}${r.extractedCount != null ? ` extracted=${r.extractedCount}` : ''} len=${r.markdown?.length ?? 0}`)
-      } else {
-        c4aiErr = r
-        Log.warn(`[crawl] ${u} crawl4ai 失败（${r?.code || '?'} ${r?.error || ''}）`)
-        if (policy.retryBlocked && isBlockSignal(r)) {
-          Log.info(`[crawl] ${u} 命中反爬，升级模式重试（undetected+stealth）`)
-          let r2 = null
-          try {
-            r2 = await doC4ai(u, {
-              ...c4aiOpts, stealth: true, undetected: true, waitUntil: 'load',
-              delayMs: Math.max(Number(o.delayMs) || 0, 1500),
-            })
-          } catch (e) { r2 = { success: false, code: 'crashed', error: e?.message || String(e) } }
-          if (r2?.success) {
-            r = { ...r2, escalated: true }
-            Log.info(`[crawl] ${u} via=crawl4ai（升级档命中）len=${r.markdown?.length ?? 0}`)
-          } else {
-            c4aiErr = r2 || c4aiErr
-            Log.warn(`[crawl] ${u} 升级模式仍失败（${r2?.code || '?'} ${r2?.error || ''}），降级 fetch`)
-          }
+
+  const runOnce = async () => {
+    let c4aiErr = null
+    // 站点记忆命中「fetch 就够」→ 先纯 HTTP（省一次浏览器启动）；失败再进浏览器阶梯
+    if (startTier === 'fetch' && engine !== 'fetch') {
+      attempted.tier = 'fetch'
+      r = await doFetch(u, { ...o, checkUrl: checkTarget, ...(fetchJar ? { jar: fetchJar } : {}) })
+      if (r?.success) Log.info(`[crawl] ${u} via=fetch（站点记忆命中，跳过浏览器）len=${r.markdown?.length ?? 0}`)
+    }
+    if (engine !== 'fetch' && !r?.success) {
+      let probe = null
+      try { probe = await avail() } catch { probe = { ok: false } }
+      const ok = !!(probe && probe.ok)
+      if (ok) {
+        // 站点记忆命中「普通档会被拦」→ 首次就用强化档（少打一次注定被拦的请求）
+        const strong = startTier === 'undetected'
+        attempted.tier = strong ? 'undetected' : 'crawl4ai'
+        const firstOpts = strong
+          ? { ...c4aiOpts, stealth: true, undetected: true, waitUntil: 'load', delayMs: Math.max(Number(o.delayMs) || 0, 1500) }
+          : c4aiOpts
+        try { r = await doC4ai(u, firstOpts) } catch (e) { r = { success: false, code: 'crashed', error: e?.message || String(e) } }
+        if (strong && r?.success) r = { ...r, escalated: true } // 与升级档同标注（调用方/记忆可见）
+        // 反爬拦截 → 强化升级一轮：undetected（patchright 深度补丁）+ stealth + load 等待 + 更长 hydration
+        if (r?.success) {
+          Log.info(`[crawl] ${u} via=crawl4ai${r.escalated ? '（升级档）' : ''}${r.extractedCount != null ? ` extracted=${r.extractedCount}` : ''} len=${r.markdown?.length ?? 0}`)
         } else {
-          Log.warn(`[crawl] ${u} 降级 fetch`)
+          c4aiErr = r
+          const blocked = isBlockSignal(r)
+          if (blocked) attempted.blocked = true
+          Log.warn(`[crawl] ${u} crawl4ai 失败（${r?.code || '?'} ${r?.error || ''}）`)
+          if (policy.retryBlocked && blocked && !strong) {
+            attempted.tier = 'undetected'
+            Log.info(`[crawl] ${u} 命中反爬，升级模式重试（undetected+stealth）`)
+            let r2 = null
+            try {
+              r2 = await doC4ai(u, {
+                ...c4aiOpts, stealth: true, undetected: true, waitUntil: 'load',
+                delayMs: Math.max(Number(o.delayMs) || 0, 1500),
+              })
+            } catch (e) { r2 = { success: false, code: 'crashed', error: e?.message || String(e) } }
+            if (r2?.success) {
+              r = { ...r2, escalated: true }
+              Log.info(`[crawl] ${u} via=crawl4ai（升级档命中）len=${r.markdown?.length ?? 0}`)
+            } else {
+              c4aiErr = r2 || c4aiErr
+              if (isBlockSignal(r2)) attempted.blocked = true
+              Log.warn(`[crawl] ${u} 升级模式仍失败（${r2?.code || '?'} ${r2?.error || ''}），降级 fetch`)
+            }
+          } else {
+            Log.warn(`[crawl] ${u} 降级 fetch`)
+          }
+        }
+      } else {
+        // 打印探测失败原因 + 实际解释器路径：多个插件副本时能直接看出「venv 装到了另一个目录」
+        const why = probe?.reason || 'venv 未安装'
+        const py = probe?.python ? `；解释器 ${probe.python}` : ''
+        // 修复提示按执行面给出：沙箱档的宿主安装脚本对它无效（模板需预装 crawl4ai），本地档才指向安装脚本
+        const fix = probe?.sandbox
+          ? (probe.hint || '把 crawl4ai 装进 agent.sandbox.template 指向的 E2B 模板')
+          : '跑 scripts/install-crawl4ai.sh 启用真浏览器渲染'
+        Log.warn(`[crawl] crawl4ai 不可用（${why}${py}；${fix}），走 fetch`)
+      }
+    }
+    if (!r?.success) {
+      // 降级标注：本次请求的高级能力未生效（fetch 无浏览器/无 JS），调用方据 degraded 决定是否重试或提示
+      r = await doFetch(u, { ...o, checkUrl: checkTarget, ...(fetchJar ? { jar: fetchJar } : {}) })
+      if (advancedUsed.length) r = { ...r, degraded: true, skipped: advancedUsed }
+      if (!r.success && c4aiErr) {
+        r = {
+          ...r,
+          crawl4ai: { code: c4aiErr.code || '', error: String(c4aiErr.error || '').slice(0, 300) },
+          ...(mergeHints(r.hint, c4aiErr.hint) ? { hint: mergeHints(r.hint, c4aiErr.hint) } : {}),
         }
       }
-    } else {
-      // 打印探测失败原因 + 实际解释器路径：多个插件副本时能直接看出「venv 装到了另一个目录」
-      const why = probe?.reason || 'venv 未安装'
-      const py = probe?.python ? `；解释器 ${probe.python}` : ''
-      // 修复提示按执行面给出：沙箱档的宿主安装脚本对它无效（模板需预装 crawl4ai），本地档才指向安装脚本
-      const fix = probe?.sandbox
-        ? (probe.hint || '把 crawl4ai 装进 agent.sandbox.template 指向的 E2B 模板')
-        : '跑 scripts/install-crawl4ai.sh 启用真浏览器渲染'
-      Log.warn(`[crawl] crawl4ai 不可用（${why}${py}；${fix}），走 fetch`)
+      if (r.success) Log.info(`[crawl] ${u} via=fetch len=${r.markdown.length}${advancedUsed.length ? `（降级：跳过 ${advancedUsed.join('/')}）` : ''}`)
     }
+    if (!r?.success) Log.warn(`[crawl] ${u} 抓取失败：${r?.error}${r?.crawl4ai ? `（crawl4ai：${r.crawl4ai.code}）` : ''}`)
+    return r
   }
-  if (!r?.success) {
-    // 降级标注：本次请求的高级能力未生效（fetch 无浏览器/无 JS），调用方据 degraded 决定是否重试或提示
-    r = await doFetch(u, { ...o, checkUrl: checkTarget })
-    if (advancedUsed.length) r = { ...r, degraded: true, skipped: advancedUsed }
-    if (!r.success && c4aiErr) {
-      r = {
-        ...r,
-        crawl4ai: { code: c4aiErr.code || '', error: String(c4aiErr.error || '').slice(0, 300) },
-        ...(mergeHints(r.hint, c4aiErr.hint) ? { hint: mergeHints(r.hint, c4aiErr.hint) } : {}),
-      }
+
+  try {
+    return await runOnce()
+  } finally {
+    // 会话回写：即使被判挑战/失败也要存（CF 在挑战响应里同样下发 __cf_bm 等）
+    if (session && host) {
+      try {
+        if (fetchJar) session.merge(host, fetchJar.cookies())
+        if (Array.isArray(r?.cookies) && r.cookies.length) session.mergeFromBrowser(host, r.cookies)
+        session.flush()
+      } catch { /* 会话落盘失败绝不影响抓取结果 */ }
     }
-    if (r.success) Log.info(`[crawl] ${u} via=fetch len=${r.markdown.length}${advancedUsed.length ? `（降级：跳过 ${advancedUsed.join('/')}）` : ''}`)
+    if (memory && host) {
+      try {
+        if (r?.success) {
+          memory.note(host, { ok: true, tier: r.via === 'fetch' ? 'fetch' : (r.escalated ? 'undetected' : 'crawl4ai') })
+        } else {
+          memory.note(host, { ok: false, tier: attempted.tier, code: attempted.blocked ? 'blocked' : (r?.code || r?.crawl4ai?.code || 'failed') })
+        }
+        memory.flush() // 记忆要跨进程生效（下次抓取前的档位决策据此），故每次抓完落盘
+      } catch { /* 记忆写失败不影响结果 */ }
+    }
+    if (release) release()
+    if (profileRelease) profileRelease()
   }
-  if (!r?.success) Log.warn(`[crawl] ${u} 抓取失败：${r?.error}${r?.crawl4ai ? `（crawl4ai：${r.crawl4ai.code}）` : ''}`)
-  return r
 }
 
 /** web_crawl 常驻工具：抓取网页正文（category=query，人人可用，只读）。

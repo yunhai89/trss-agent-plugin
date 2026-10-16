@@ -104,6 +104,7 @@ export async function runCrawl4ai(url, {
   flatShadowDom = false, virtualScroll = null,
   undetected = false, proxy = null, waitUntil = null, headless = null,
   scanFullPage = false, maxScrollSteps = null, extraArgs = null,
+  userDataDir = null, storageState = null, sessionCapture = false,
 } = {}) {
   const py = python || venvPython()
   const sc = script || CRAWL4AI_SCRIPT
@@ -182,7 +183,7 @@ export async function runCrawl4ai(url, {
         url, timeout,
         maxChars, waitFor, jsCode, jsBeforeWait, delayMs, cssSelector, extract, links,
         stealth, undetected, proxy, waitUntil, headless, scanFullPage, maxScrollSteps,
-        extraArgs, flatShadowDom, virtualScroll,
+        extraArgs, flatShadowDom, virtualScroll, userDataDir, storageState, sessionCapture,
       })
       proc.stdin.write(JSON.stringify(req) + '\n')
       proc.stdin.end()
@@ -202,6 +203,7 @@ export function buildCrawl4aiRequest({
   cssSelector = null, extract = null, links = false,
   stealth = false, undetected = false, proxy = null, waitUntil = null, headless = null,
   scanFullPage = false, maxScrollSteps = null, extraArgs = null, flatShadowDom = false, virtualScroll = null,
+  userDataDir = null, storageState = null, sessionCapture = false,
 } = {}) {
   const req = { url, timeout_s: Math.round(timeout / 1000), max_chars: maxChars }
   if (waitFor) req.wait_for = String(waitFor).trim()
@@ -221,6 +223,12 @@ export function buildCrawl4aiRequest({
   if (Array.isArray(extraArgs) && extraArgs.length) req.extra_args = extraArgs.map(String)
   if (flatShadowDom) req.flat_shadow_dom = true
   if (virtualScroll && typeof virtualScroll === 'object') req.virtual_scroll = virtualScroll
+  // 会话：user_data_dir 为显式 opt-in（共享 profile 目录与并发浏览器互斥，见 kb.crawl.sessionProfile）；
+  // storage_state 是默认路径（把该站已有 cookie 注入浏览器上下文，无 profile 锁问题）
+  if (userDataDir) req.user_data_dir = String(userDataDir)
+  const cookies = storageState && Array.isArray(storageState.cookies) ? storageState.cookies : null
+  if (cookies && cookies.length) req.storage_state = { cookies, origins: Array.isArray(storageState.origins) ? storageState.origins : [] }
+  if (sessionCapture) req.session_capture = true
   return req
 }
 
@@ -252,6 +260,8 @@ function mapCrawl4aiOutput(parsed, { url, exitCode = null, timedOut = false, sig
       ...(Array.isArray(parsed.extracted) ? { extracted: parsed.extracted, extractedCount: parsed.extracted_count ?? parsed.extracted.length } : {}),
       ...(parsed.links && typeof parsed.links === 'object' ? { links: parsed.links } : {}),
       ...(parsed.crawl_stats && typeof parsed.crawl_stats === 'object' ? { stats: parsed.crawl_stats } : {}),
+      // 浏览器回传的 cookie（best-effort，取决于 crawl4ai 版本能否导出）：交 session-store 合并
+      ...(Array.isArray(parsed.cookies) && parsed.cookies.length ? { cookies: parsed.cookies } : {}),
     }
   }
   const fallback = exitCode === 3

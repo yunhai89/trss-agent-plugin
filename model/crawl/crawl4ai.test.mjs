@@ -15,7 +15,11 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { runCrawl4ai, isCrawl4aiAvailable, resetCrawl4aiProbe, CRAWL4AI_TIMEOUTS } from './crawl4ai.js'
-import { crawlUrl, resolveCrawlPolicy, resolveCrawlExecution, checkTargetAllowed, isBlockSignal } from './index.js'
+import { crawlUrl as crawlUrlRaw, resolveCrawlPolicy, resolveCrawlExecution, checkTargetAllowed, isBlockSignal } from './index.js'
+
+// 测试隔离：本文件覆盖「降级/升级阶梯」本身，站点记忆与会话持久化会跨用例（并跨进程写真实 data 目录）
+// 改变同站后续行为 → 统一关掉；两项能力各自的专项测试见 model/crawl/session.test.mjs。
+const crawlUrl = (url, opts = {}) => crawlUrlRaw(url, { siteMemory: false, sessionPersist: false, ...opts })
 
 let passed = 0
 let failed = 0

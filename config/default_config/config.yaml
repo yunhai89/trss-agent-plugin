@@ -161,6 +161,16 @@ agent:
       retryBlocked: true    # 被反爬拦截（403/CF 挑战等）时自动用 undetected+stealth 强化再试一轮（最坏耗时翻倍）
       allowPrivateHosts: false  # 允许抓取本机/内网/元数据地址（防 SSRF，默认禁）；确需抓内网页面再开
       # proxy 复用 agent.proxy（浏览器路径与 fetch 一致；逐次生效）
+      sessionPersist: true  # 按站点持久化 cookie（含 cf_clearance 等清关凭证，12h 内复用）：抓取不再是「每次都是新访客」；
+                            # 存于 data/crawl/sessions.json（0600，cookie 值不进日志，可在该目录删除）
+      sessionTtlHours: 12   # 会话有效期（小时）：超期视为过期，避免拿早已失效的凭证反复重试
+      sessionProfile: false # 是否另用持久浏览器 profile（user_data_dir，落 data/crawl/profile）。
+                            # 默认关：共享 profile 目录无法并发打开浏览器（ProcessSingleton 锁），开了会全局串行、
+                            # 且 profile 里的历史 cookie 不受 sessionTtlHours 约束（想彻底隔离就别开）
+      siteMemory: true      # 站点难度记忆：记住「哪个档位真的能过」——上次 fetch 够用就不再起浏览器；
+                            # 上次被反爬拦过就直接用 undetected，少打注定被拦的请求（存于 data/crawl/sites.json）
+      perHostIntervalMs: 1200  # 同站点两次抓取的最小间隔毫秒（含随机抖动）：请求节奏比单次快慢更容易触发风控
+      hostConcurrency: 1    # 同站点并发抓取上限（1=串行；多页并发抓取同一站会显著提高被拦概率）
     crawlTimeout: 60        # 单页抓取超时秒（慢站可调大；crawl4ai 含浏览器启停另加 30s 余量）
     chunkSize: 500          # 文档分块字符数
     chunkOverlap: 50        # 分块重叠（保上下文连贯）
