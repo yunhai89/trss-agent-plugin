@@ -1303,9 +1303,13 @@ await test('reflect：反馈走 system 不进 messages（草稿 pop），仅留�
   ])
   const agent = new Agent({ provider, session, reflect: 'always', reflectMaxIterations: 1, maxTurns: 5 })
   await agent.run('写结论', { ctx: { role: 'member', isMaster: true, userId: 'u1', groupId: 'g1' } })
-  // 反馈拼入 turn2 的 system（非 messages user）→ 模型视为系统自检指令，不当用户话（根治"你说的对…"）
-  ok(provider.calls.history[2].system.includes('自检反馈'), '反思反馈走 system（turn2 system 含自检反馈）')
-  ok(!provider.calls.history[2].messages.some((m) => m.role === 'user' && String(m.content || '').includes('自检反馈')), '反馈不进 messages（无 role:user 的自检反馈）')
+  // 反馈必须以 messages 尾部 role:'system' 消息下发（非 user：会被模型当用户话；非 system 参数：
+  // 拼进 system 等于改请求最前缀，其后全部历史失去前缀复用——实机 revise 后命中率仅 13.6%）
+  ok(!provider.calls.history[2].system.includes('自检反馈'), '反馈不拼进 system（system 保持逐字节稳定，前缀缓存不被打穿）')
+  ok(provider.calls.history[2].system === provider.calls.history[0].system, 'turn2 与 turn1 的 system 逐字节相同（前缀缓存可复用）')
+  const lastMsg = provider.calls.history[2].messages.at(-1)
+  ok(lastMsg?.role === 'system' && String(lastMsg.content).includes('自检反馈'), '反馈作为尾部 system 消息下发（模型仍视为系统自检指令）')
+  ok(!provider.calls.history[2].messages.some((m) => m.role === 'user' && String(m.content || '').includes('自检反馈')), '反馈不进 user 消息（不被当作用户说的话）')
   const hist = await session.get(session.key('g1', 'u1'))
   ok(!hist.some((m) => typeof m.content === 'string' && (m.content.includes('自检反馈') || m.content === '草稿回复')), '草稿与反馈均未持久化（草稿 pop、反馈走 system）')
   ok(hist.some((m) => m.content === '最终回复'), '仅最终回复持久化')

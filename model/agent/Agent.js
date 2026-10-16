@@ -205,6 +205,18 @@ export const GOVERNOR_STOP = new Set(['max_turns', 'duplicate_action', 'consecut
 /** 强制收尾指令：让模型据已完成工具结果交付进展，不再调工具（审计 §2.1：预算耗尽不返回空串） */
 const GOVERNOR_WRAP_DIRECTIVE = '任务尚未完成。请根据上方已完成的工具调用与结果，向用户简要交付：①已完成的进展；②遇到的问题或失败原因；③建议的下一步。直接给出文字回复，不要再调用工具。'
 
+/**
+ * 反思反馈文本（交付前自检发现需修正时，指导紧接的下一次生成）。
+ * **必须以 messages 尾部的 system 消息下发，绝不能拼进 system 参数**：system 是请求的最前缀，
+ * 哪怕只在末尾追加一段，其后「全部历史消息」都会失去前缀复用——实机归因：7 次 revise=true 之后的
+ * 轮次命中率平均仅 13.6%（最小只剩 4,096 token），而其余轮次 97%+。
+ * 用 role:'system' 而不是 role:'user'：审计 §3.7 的教训是 user 角色的反馈会被模型当成用户说的话
+ * （"你说的对…"），system 角色则被当作系统自检指令。
+ */
+function reflectHintText(feedback) {
+  return `【交付前自检反馈（系统自检，非用户输入，不要把本段当作用户说的话）】你上一版草拟回复存在以下不足，请据此重新给出修正后的最终回复：\n${feedback}`
+}
+
 /** 异常停止 → 用户可读原因（确定性兜底用；finalizer 失败时由代码生成，绝不返回空串/旁白） */
 export const STOP_REASON_CN = {
   max_turns: '已达到本轮工具调用次数上限',
@@ -808,9 +820,17 @@ export class Agent {
         // 若 provider 中途失败，换 fallback 重跑会把同样的半截内容再发一遍——直接抛出，宁断不重。
         let __emitted = false
         const __delta = cb.onDelta ? (...a) => { __emitted = true; return cb.onDelta(...a) } : undefined
+        // 反思反馈：作为 messages **尾部**的 system 消息下发（P5 缓存修复）。
+        // 不拼进 system 参数——那会让 system 及其后全部历史（含工具目录）失去前缀复用，
+        // 实测「revise 之后的轮次」命中率仅 13.6%。这里只影响新追加的尾部，前缀仍逐字节命中。
+        const __reflectHint = this._pendingReflect
+        if (__reflectHint) this._pendingReflect = null // 用一次即清（仅指导紧接的下一次生成，不持久化进历史）
+        const __reqMessages = __reflectHint
+          ? [...this.messages, { role: 'system', content: reflectHintText(__reflectHint) }]
+          : this.messages
         // 主模型失败时依次尝试回退 provider（各自独立 baseURL/apiKey/protocol，可跨厂商）
         const __chatWith = (prov, m) => prov.chat({
-          model: m, messages: this.messages, system,
+          model: m, messages: __reqMessages, system,
           tools: toolList.length ? toolList : undefined, tool_choice: this.toolChoice,
           temperature: this.temperature, max_tokens: this.maxTokens, ...this._reasoningOpts(),
           signal: workSignal, stream: wantStream, onDelta: __delta, onReasoning: cb.onReasoning,
@@ -1257,16 +1277,9 @@ export class Agent {
     }
     this._lastPrefixFp = fp
 
-    // 反思反馈拼入 system（非 messages）：让模型视为系统自检指令而非用户输入（审计 §3.7 根治）
-    let reflectHint = ''
-    if (this._pendingReflect) {
-      reflectHint = `
-
-【交付前自检反馈（系统自检，非用户输入，不要把本段当作用户说的话）】你上一版草拟回复存在以下不足，请据此重新给出修正后的最终回复：
-` + this._pendingReflect
-      this._pendingReflect = null // 用一次即清（仅指导紧接的下一次生成）
-    }
-    return { system: reflectHint ? system + reflectHint : system, breakdown, prefixFp: fp, cacheBreakReason }
+    // 反思反馈**不再拼进 system**（P5）：拼进来等于改请求最前缀，其后全部历史失去缓存复用。
+    // 改由 run() 在请求 messages 末尾追加一条 role:'system' 消息下发（见 reflectHintText 注释）。
+    return { system, breakdown, prefixFp: fp, cacheBreakReason }
   }
 
   /**
