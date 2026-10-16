@@ -1274,7 +1274,7 @@
             <cfg-row name="单次回复最大 token" desc="留空=厂商默认">
               <input type="number" class="inp" style="width:130px" min="1" v-model.number="form.maxTokens" placeholder="null">
             </cfg-row>
-            <cfg-row name="上下文窗口" desc="超高水位压到低水位(滞回分代)。缓存经济性:命中率≈1−2·d·H/(H²−K²),压得深(H大K小)命中率更高">
+            <cfg-row name="上下文窗口" desc="填模型真实窗口(按估算 token 计,中文≈1字1token)。超高水位压到低水位(滞回分代)。缓存经济性:命中率≈1−2·d·H/(H²−K²),压得深(H大K小)命中率更高">
               <input type="number" class="inp" style="width:130px" min="1000" v-model.number="form.contextWindow">
             </cfg-row>
             <cfg-row name="压缩高水位比例" desc="占上下文窗口比例(0.3~0.95)。调大=单次请求更长但缓存命中率更高">

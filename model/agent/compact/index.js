@@ -17,6 +17,7 @@
  * 本文件纯函数（除 compactMessages 通过注入的 archive 异步落盘）；存储见 ./archive.js。
  */
 import { createHash } from 'node:crypto'
+import { estimateTokensApprox } from '../token-estimate.js'
 
 /** 稳定 JSON（键排序）——内容寻址 hash 的输入必须确定 */
 export function stableStringify(v) {
@@ -173,7 +174,7 @@ export function mergeLedger(prev, next) {
  */
 export function renderCompactionMessage({ ledger, nextRole, budgetTokens = null, reversible = null }) {
   const role = nextRole === 'assistant' ? 'user' : 'assistant'
-  const tok = (s) => Math.ceil(String(s || '').length / 4)
+  const tok = (s) => estimateTokensApprox(s)
   const L = []
   let used = 0
   const push = (line) => { L.push(line); used += tok(line) }
@@ -228,7 +229,8 @@ export function renderCompactionMessage({ ledger, nextRole, budgetTokens = null,
   return { role, content: L.join('\n') }
 }
 
-function defaultEstimate(t) { return Math.ceil(String(t || '').length / 4) }
+/** 默认估算与 Agent 同口径（CJK 感知；见 ../token-estimate.js） */
+function defaultEstimate(t) { return estimateTokensApprox(t) }
 
 /**
  * 四阶段压缩主入口（async：归档落盘）。

@@ -444,6 +444,9 @@ await test('contextWindow 配置进入 token 压缩：epoch 递增/首条意图�
   const agent = new Agent({
     provider, tools, session, maxTurns: 5, reflect: 'off',
     contextWindow: 1600, contextKeepRecent: 4,
+    // 本用例验证「token 水位机制 + 压后不超高水位」，固定估算口径；默认估算器自 v1.26.6 起
+    // CJK 感知（中文 1 token/字），此处长中文内容估算翻倍会顶住 minKeep 导致压不到低水位
+    estimateTokens: (t) => Math.ceil(String(t || '').length / 4),
   })
   const pressures = [] // 每次压缩后立即采样 messages token（应 ≤ 高水位）
   const high = Math.floor(1600 * 0.65)

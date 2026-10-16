@@ -47,6 +47,7 @@ import {
   buildChatListHtml,
 } from './index.js'
 import { normalizeUsage, mergeUsage } from './messages.js'
+import { estimateTokensApprox } from './token-estimate.js'
 import { createClient as createOpenAIClient } from '../openai/index.js'
 import { presets as openaiPresets } from '../openai/index.js'
 import { createClient as createAnthropicClient } from '../anthropic/index.js'
@@ -1698,6 +1699,9 @@ await test('会话前缀：token 水位滞回（65% 触发压到 45%）优先于
   const agent = new Agent({
     provider, tools, session, maxTurns: 5, reflect: 'off',
     contextWindow: 1600, contextKeepRecent: 4,
+    // 本用例验证「token 水位机制」本身，固定估算口径（默认估算器自 v1.26.6 起 CJK 感知，
+    // 中文 1 token/字 → 这里的长中文内容估算翻倍，会顶住 minKeep 导致压不到低水位）
+    estimateTokens: (t) => Math.ceil(String(t || '').length / 4),
   })
   const high = Math.floor(1600 * 0.65)
   const postCompact = []
@@ -1739,6 +1743,28 @@ await test('压缩水位比例可配：contextHighRatio/contextLowRatio 生效�
   const d = mk({ contextWindow: 1000 })
   eq(d.contextHighRatio, 0.65, '未配置时默认 0.65')
   eq(d.contextLowRatio, 0.45, '未配置时默认 0.45')
+})
+
+// ---------- P3：CJK 感知 token 估算（压缩水位口径） ----------
+await test('token 估算 CJK 感知：中文 1 token/字、ASCII 1 token/4 字符、混合按占比', async () => {
+  eq(estimateTokensApprox('中'.repeat(100)), 100, '中文 100 字 ≈ 100 token')
+  eq(estimateTokensApprox('a'.repeat(100)), 25, 'ASCII 100 字符 ≈ 25 token')
+  eq(estimateTokensApprox(''), 0, '空串 0')
+  eq(estimateTokensApprox(null), 0, 'null 0')
+  const mixed = estimateTokensApprox('中文ab')
+  ok(mixed === 2 + Math.ceil(2 / 4), `混合按占比（实际 ${mixed}）`)
+  // 中文内容必须触发压缩、等长 ASCII 不该触发：同一 contextWindow 下估算口径决定水位
+  const mk = (text) => new Agent({
+    provider: mockProvider([{ content: 'x', finishReason: 'stop' }]),
+    tools: new ToolRegistry(), maxTurns: 1, reflect: 'off', contextWindow: 4000,
+  })
+  const cjk = mk('中文'); const ascii = mk('ascii')
+  cjk.messages = [{ role: 'user', content: '中'.repeat(4000) }]
+  ascii.messages = [{ role: 'user', content: 'a'.repeat(4000) }]
+  ok(cjk._estimateMessagesTokens() > 3000, `中文 4000 字估算 >3000（实际 ${cjk._estimateMessagesTokens()}）`)
+  ok(ascii._estimateMessagesTokens() < 1500, `ASCII 4000 字符估算 <1500（实际 ${ascii._estimateMessagesTokens()}）`)
+  const p = await cjk._hysteresisPressure('s', { scopeUserId: 'u', groupId: null, conversationId: 'c' })
+  ok(p && p.dropped >= 0, '中文长内容触发水位判定')
 })
 
 // ---------- P1：工具 schema 追加式增长（tools 前缀稳定性） ----------

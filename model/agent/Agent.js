@@ -13,6 +13,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { estimateTokensApprox } from './token-estimate.js'
 import { ExecutionContext } from './tools/context.js'
 import { makeToolSearchTool } from './tools/tool_search.js'
 import { stringifyArgs, estimateMessages, mergeUsage } from './messages.js'
@@ -402,7 +403,7 @@ export class Agent {
       // 压缩改变历史中段 → 回报 compacted 让 run 端用全量覆写持久化（否则 append 切片错位）。
       if (this.contextWindow) {
         try {
-          const fn = this.estimateTokens || ((t) => Math.ceil((t || '').length / 4))
+          const fn = this.estimateTokens || estimateTokensApprox
           if (this._estimateHistory(wrapSys) > this.contextWindow) {
             const target = Math.max(128, Math.floor(this.contextWindow * this.contextLowRatio) - fn(String(wrapSys ?? '')) - this._estimateToolsTokens() - 16)
             const ck = ctx ? `${ctx.scopeUserId || ctx.userId || 'u'}:${ctx.groupId || 'p'}:${ctx.conversationId || 'unknown'}` : 'unknown'
@@ -1322,7 +1323,7 @@ export class Agent {
    * 和 content 数组里的长文本，导致"压后仍超窗口"。
    */
   _estimateHistory(system, { toolTokens = null } = {}) {
-    const fn = this.estimateTokens || ((t) => Math.ceil((t || '').length / 4))
+    const fn = this.estimateTokens || estimateTokensApprox
     let n = fn(String(system ?? ''))
     n += this._estimateMessagesTokens({ includeReasoning: true })
     n += toolTokens == null ? this._estimateToolsTokens() : toolTokens
@@ -1331,7 +1332,7 @@ export class Agent {
 
   /** 仅估算 messages（不含 system/tools）的 token 数 */
   _estimateMessagesTokens({ includeReasoning = this.keepReasoning } = {}) {
-    const fn = this.estimateTokens || ((t) => Math.ceil((t || '').length / 4))
+    const fn = this.estimateTokens || estimateTokensApprox
     let n = 0
     for (const m of this.messages) {
       n += 4
@@ -1360,7 +1361,7 @@ export class Agent {
 
   async _hysteresisPressure(system, ctxMeta = null) {
     const useToken = !!this.contextWindow
-    const fn = this.estimateTokens || ((t) => Math.ceil((t || '').length / 4))
+    const fn = this.estimateTokens || estimateTokensApprox
     const REQUEST_OVERHEAD = 16
     const sysTokens = fn(String(system ?? ''))
     const toolsTokens = this._estimateToolsTokens()
@@ -2088,3 +2089,5 @@ export class Agent {
 
 export { ExecutionContext } from './tools/context.js'
 export { estimateMessages } from './messages.js'
+
+export { estimateTokensApprox }
