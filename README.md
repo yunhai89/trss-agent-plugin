@@ -1115,6 +1115,16 @@ AGENTS_CONFIG=/path/to/config.yaml SIM_WINDOW=256000 SIM_HIGH=0.8 SIM_LOW=0.1 SI
   node stress/real/cache-hit-sim.mjs
 ```
 
+要贴近实机「多个群各自冷启动」的形态，用 `SIM_SESSIONS`（会话数，每个会话有独立 system 前缀＝各自冷启动）、
+`SIM_RUNS`（每会话的 run 次数；一次用户消息 = 一个 run，上下文在其中累积）、`SIM_GAP_MS`（run 之间的空闲间隔）：
+
+```bash
+AGENTS_CONFIG=/path/to/config.yaml SIM_WINDOW=256000 SIM_HIGH=0.8 SIM_LOW=0.1 \
+  SIM_SESSIONS=5 SIM_RUNS=3 SIM_TURNS=6 node stress/real/cache-hit-sim.mjs
+```
+
+汇总会额外打印每个会话各自的命中率与「命中 <50% 的轮」清单（冷启动轮应只出现在每个会话的首次调用）。
+
 #### 核对线上命中率（`scripts/cache-hit-report.mjs`）
 
 面板只给一个总数，排查时要看「miss 花在哪」。该脚本直接读 `data/logs`（默认目录，可用 `--dir` 指定实机插件日志目录），
