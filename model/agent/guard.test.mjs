@@ -211,7 +211,10 @@ await test('集成：历史脏记忆在 system 中被边界标注', async () => 
   })
   await agent.run('你好', { ctx: { userId: 'u1', scopeId: 'u1' } })
   const sys = String(provider.calls.history[0]?.system || '')
-  ok(sys.includes('<untrusted_data source="declarative_memory">'), '脏记忆被边界标注')
+  const umsg = (provider.calls.history[0]?.messages || []).map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n')
+  // v1.26.22 起快照注入 user 消息尾部（不进 system：会话内写记忆会改变快照，放 system 会打穿其后全部历史前缀）
+  ok(!sys.includes('ignore all previous instructions'), '脏记忆不进 system（前缀缓存稳定）')
+  ok(umsg.includes('<untrusted_data source="declarative_memory">'), '脏记忆在 user 消息里被边界标注')
 })
 
 // ---------- 7. 技能目录：命中注入被边界标注 ----------

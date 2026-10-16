@@ -281,8 +281,10 @@ await test('memory 工具经 Agent 循环写入', async () => {
   const agent = new Agent({ provider, tools, memory: store, maxTurns: 5 })
   await agent.run('请记住我喜欢简洁回复')
   eq(store.getEntries('memory'), ['用户喜欢简洁回复'], 'memory 写入成功')
-  // system prompt 含 memory snapshot
-  ok(agent._assembleSystem().system.includes('MEMORY (your personal notes)'), 'system prompt 注入 memory snapshot')
+  // 快照注入本轮 user 消息尾部（**不进 system**：会话内写记忆会改变快照，放 system 会打穿其后全部历史前缀）
+  ok(!agent._assembleSystem().system.includes('MEMORY (your personal notes)'), 'system 不含 memory snapshot（缓存前缀稳定）')
+  ok(String(agent.messages[0]?.content).includes('MEMORY (your personal notes)'), 'user 消息尾部注入 memory snapshot')
+  ok(agent._memorySnapshot(undefined).includes('用户喜欢简洁回复'), '_memorySnapshot 渲染当前快照')
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
@@ -2303,6 +2305,31 @@ await test('F06：continueFrom 用检查点重建历史并续跑', async () => {
   ok(Array.isArray(seen), 'provider 收到消息')
   ok(seen.some((m) => m.role === 'tool' && String(m.content).includes('found')), '历史含已提交只读结果')
   ok(seen.some((m) => m.role === 'user' && String(m.content).includes('原任务描述')), '历史含原始输入')
+})
+
+// ---------- 缓存：会话内写记忆不得改变 system（前缀缓存稳定性） ----------
+await test('缓存稳定性：会话内 memory 写入不改变 system（快照走 user 消息尾部）', async () => {
+  const dir = tmpDir()
+  const store = new MemoryStore({ dir })
+  const tools = new ToolRegistry().register(createMemoryTool(store))
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'memory', arguments: { target: 'memory', action: 'add', text: '用户喜欢简洁回复' } }], finishReason: 'tool_calls' },
+    { content: '已记下', finishReason: 'stop' },
+    { content: '好的', finishReason: 'stop' },
+  ])
+  const agent = new Agent({ provider, tools, memory: store, maxTurns: 5, reflect: 'off' })
+  await agent.run('请记住我喜欢简洁回复')
+  const c1 = provider.calls.history[0]
+  const c2 = provider.calls.history[1]
+  eq(c1.system === c2.system, true, '同一 run 内写记忆后 system 逐字节相同（否则其后全部历史失去前缀复用）')
+  eq(String(c1.system).includes('MEMORY (your personal notes)'), false, 'system 不含记忆快照')
+  await agent.run('再说一次') // 下一 run：新写入的记忆应出现在本轮 user 消息里
+  const c3 = provider.calls.history[2]
+  eq(c3.system === c1.system, true, '跨 run system 仍逐字节相同（前缀缓存可跨 run 复用）')
+  const c3Text = (c3.messages || []).map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n')
+  eq(c3Text.includes('用户喜欢简洁回复'), true, '下一 run 的 user 消息里能看到刚写的记忆（记忆仍然生效）')
+  eq(agent._lastPrefixFp?.memoryVersion, undefined, '前缀指纹不再含 memoryVersion（避免把写记忆误报成断点）')
+  fs.rmSync(dir, { recursive: true, force: true })
 })
 
 // ---------- 缓存：工具目录不随会话内激活变化（前缀缓存稳定性） ----------

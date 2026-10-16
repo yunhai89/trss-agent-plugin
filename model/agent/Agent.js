@@ -655,6 +655,12 @@ export class Agent {
     const dynParts = []
     // 外部内容注入扫描：情境（含群聊历史）与召回记忆均为不可信数据，命中注入特征时加边界标注
     if (context) dynParts.push(this._screenUntrusted(context, 'context'))
+    // 声明式记忆快照（MEMORY.md/USER.md）也走**本轮 user 消息尾部**，不进 system：
+    // 模型在本会话里写一条记忆就会改变快照——放在 system 里等于每次写记忆都打穿其后全部历史前缀。
+    // 实机证据（2026-10-16 23:00 窗口）：3 轮 break:memory_snapshot，命中率仅 4.5%，
+    // miss 263,317 token（占该窗口全部 miss 的 83.7%）。
+    const memorySnapshot = ephemeral ? '' : this._memorySnapshot(scopeId)
+    if (memorySnapshot) dynParts.push(memorySnapshot)
     if (recalledMemory) dynParts.push(this._screenUntrusted(recalledMemory, 'memory'))
     if (profileBlock) dynParts.push(this._screenUntrusted(profileBlock, 'profile'))
     // 周期意图路由提示：本轮明确是"每N小时/每天/每周…"的重复需求 → 必须用 schedule_task，勿用一次性提醒
@@ -1218,6 +1224,17 @@ export class Agent {
     return tagUntrusted(body, source) // 幂等：tagUntrusted 内部先剥掉自带的 untrusted_data 标签再包
   }
 
+  /**
+   * 声明式记忆快照（MEMORY.md/USER.md，按 scopeId 隔离）。
+   * **必须注入本轮 user 消息尾部，不能进 system**：模型在会话内调用 memory 工具写一条记忆就会改变快照，
+   * 快照一旦位于 system，其后全部历史消息都会失去前缀缓存复用（实机 2026-10-16 23:00 窗口：
+   * 3 轮 break:memory_snapshot 命中率 4.5%、miss 263,317 token = 该窗口全部 miss 的 83.7%）。
+   */
+  _memorySnapshot(scopeId) {
+    if (!this.memory) return ''
+    try { return this._screenUntrusted(this.memory.snapshotAll(scopeId) || '', 'declarative_memory') } catch { return '' }
+  }
+
   _buildUserMessage(input, text) {
     if (input && typeof input === 'object' && !Array.isArray(input)) {
       // 多模态：apps 经 createMediaService.buildContent 构造的协议原生 content 数组
@@ -1277,10 +1294,9 @@ export class Agent {
     // 命中注入特征时加 <untrusted_data> 边界标注（不阻断注入，只提示模型按数据处理）。
     const skillsSection = this.skills ? this._screenUntrusted(buildSkillsPromptSection(this.skills.catalog()), 'skills_catalog') : ''
     const stickerSection = this.stickers ? buildStickerPromptSection(this.stickers.catalog()) : ''
-    // 声明式记忆按 scopeId 隔离（每群每用户各自一份 MEMORY.md/USER.md）。
-    // 注意：recalledMemory / context（每轮必变的动态内容）已移入本轮 user 消息（见 run），
-    // system 保持静态前缀以最大化 prompt 缓存命中；此函数的 context/memories 参数仅保留兼容。
-    const memorySnapshot = this.memory ? this._screenUntrusted(this.memory.snapshotAll(scopeId) || '', 'declarative_memory') : ''
+    // 声明式记忆**不再进 system**（见 run 里的 dynParts 与 _memorySnapshot 注释）：
+    // 它在会话内会随 memory 工具写入而变化，留在 system 里等于每次写记忆都打穿其后全部历史前缀。
+    const memorySnapshot = ''
     const guardHardening = this.guard ? (this.guard.systemHardening() || '') : ''
     const system = buildAgentSystemPrompt({
       identity,
@@ -1299,10 +1315,11 @@ export class Agent {
       conversationTokens: this._estimateMessagesTokens(),
     }, this.estimateTokens)
     // 前缀指纹（P2 版本化）：只记 hash 不重复写 prompt 原文；与上次比对，变化即记 cacheBreakReason
+    // memoryVersion 已移除：声明式记忆快照不再参与 system（改注入 user 消息尾部），
+    // 保留该字段会让「会话内写记忆」被误报成前缀断点（实际前缀没断）。
     const fp = {
       systemHash: shortHash(identity + SERVICE_DIRECTIVE + SEARCH_VERIFICATION),
       toolHash: shortHash(toolCatalog),
-      memoryVersion: shortHash(memorySnapshot),
       stickerVersion: shortHash(stickerSection),
       guardHash: shortHash(guardHardening),
       skillsHash: shortHash(skillsSection),
@@ -1311,7 +1328,6 @@ export class Agent {
     if (this._lastPrefixFp) {
       if (fp.systemHash !== this._lastPrefixFp.systemHash) cacheBreakReason = 'system_identity'
       else if (fp.toolHash !== this._lastPrefixFp.toolHash) cacheBreakReason = 'tool_schema'
-      else if (fp.memoryVersion !== this._lastPrefixFp.memoryVersion) cacheBreakReason = 'memory_snapshot'
       else if (fp.stickerVersion !== this._lastPrefixFp.stickerVersion) cacheBreakReason = 'sticker_catalog'
       else if (fp.guardHash !== this._lastPrefixFp.guardHash) cacheBreakReason = 'guard_rules'
       else if (fp.skillsHash !== this._lastPrefixFp.skillsHash) cacheBreakReason = 'skills_catalog'
