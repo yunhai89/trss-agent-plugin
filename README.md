@@ -636,7 +636,7 @@ tts:
 | `#确认 +id` / `#拒绝 +id` / `#待确认` | 审批待执行危险动作 |
 | `#agents帮助` / `#agents状态` | 帮助图 / 运行状态 |
 | `#agents重载` | 热重载**配置**并立即重建运行时（model/tools/skills/mcp，无需重启框架）。注意：只重建运行时、不重新加载代码文件——跟着 `git pull` 更新代码后请用 `#重启`（或 `#agents更新`，有代码改动会自动重启），见文首更新说明 |
-| `#agents更新` / `#agents强制更新` | git pull 拉取最新代码（强制=reset 后 rebase），有代码改动时自动重启 Yunzai 生效 |
+| `#agents更新` / `#agents强制更新` | git pull 拉取最新代码（强制=`git reset --hard`，**会丢弃未提交的本地改动**），有代码改动时自动重启 Yunzai 生效 |
 | `#agents版本` / `#agents更新日志` | 最近提交时间 / 本次更新日志 |
 
 ### 知识库（RAG）

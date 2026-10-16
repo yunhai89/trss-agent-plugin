@@ -1232,7 +1232,11 @@ export class Agent {
    */
   _memorySnapshot(scopeId) {
     if (!this.memory) return ''
-    try { return this._screenUntrusted(this.memory.snapshotAll(scopeId) || '', 'declarative_memory') } catch { return '' }
+    try { return this._screenUntrusted(this.memory.snapshotAll(scopeId) || '', 'declarative_memory') } catch (e) {
+      // 不静默：快照读取失败会让「模型看不到记忆」，必须留痕（否则表现为「它忘了」，无从排查）
+      this.logger('warn', `[memory] 声明式记忆快照读取失败，本轮不注入：${e?.message || e}`)
+      return ''
+    }
   }
 
   _buildUserMessage(input, text) {
