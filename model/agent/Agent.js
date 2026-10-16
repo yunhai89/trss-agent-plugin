@@ -252,11 +252,20 @@ export class Agent {
     // 旧 contextPressureThreshold 已删除：从未被任何路径消费的死配置（曾与 contextWindow 两套互不生效）。
     this.contextWindow = (Number.isFinite(Number(config.contextWindow)) && Number(config.contextWindow) > 0) ? Number(config.contextWindow) : null
     // 高低水位滞回压缩（Append-Only Ledger 的分代压缩）：token 水位优先（contextWindow 的
-    // 65% 触发 → 压到 45%），无 contextWindow 用消息数水位（默认 30→18）。压缩 = 整 turn-block
-    // 丢弃 + cacheEpoch++（跨代才允许前缀重建；未超 highWater 只追加不改写——曾 window=20
-    // 每轮滑窗，DeepSeek 等整段前缀缓存逐轮全灭）
+    // contextHighRatio 触发 → 压到 contextLowRatio），无 contextWindow 用消息数水位（默认 30→18）。
+    // 压缩 = 整 turn-block 丢弃 + cacheEpoch++（跨代才允许前缀重建；未超 highWater 只追加不改写
+    // ——曾 window=20 每轮滑窗，DeepSeek 等整段前缀缓存逐轮全灭）。
+    // 比例可配（缓存经济性）：稳态 token 命中率 ≈ 1 − 2·d·H/(H²−K²)（d=每轮新增、H=高水位、K=压后
+    // 目标）。H 越大越好、K 越小越好——「窗口尽量吃满 + 压得深」比「小窗口勤压」命中率高一倍以上；
+    // 压缩是无损的（原文归档 + context_recall 可恢复），所以压深不掉信息。
     this.contextMsgHighWater = config.contextMsgHighWater ?? 30
     this.contextMsgLowWater = config.contextMsgLowWater ?? 18
+    const ratio = (v, dflt, min, max) => {
+      const n = Number(v)
+      return Number.isFinite(n) && n >= min && n <= max ? n : dflt
+    }
+    this.contextHighRatio = ratio(config.contextHighRatio, 0.65, 0.3, 0.95)
+    this.contextLowRatio = ratio(config.contextLowRatio, 0.45, 0.05, this.contextHighRatio - 0.05)
     this.cacheEpoch = 0
     // 无损压缩（Hermes ContextCompressor 可逆化）：compactArchive 注入后压缩 = 原文整块归档
     // （sha256 内容寻址）+ 窗口内结构化台账 + context_recall 恢复；未注入降级为纯台账压缩。
@@ -395,7 +404,7 @@ export class Agent {
         try {
           const fn = this.estimateTokens || ((t) => Math.ceil((t || '').length / 4))
           if (this._estimateHistory(wrapSys) > this.contextWindow) {
-            const target = Math.max(128, Math.floor(this.contextWindow * 0.45) - fn(String(wrapSys ?? '')) - this._estimateToolsTokens() - 16)
+            const target = Math.max(128, Math.floor(this.contextWindow * this.contextLowRatio) - fn(String(wrapSys ?? '')) - this._estimateToolsTokens() - 16)
             const ck = ctx ? `${ctx.scopeUserId || ctx.userId || 'u'}:${ctx.groupId || 'p'}:${ctx.conversationId || 'unknown'}` : 'unknown'
             const rr = await compactMessages(this.messages, {
               kind: 'token', value: target, archive: this.compactArchive, convKey: ck, epoch: this.cacheEpoch + 1,
@@ -1336,7 +1345,8 @@ export class Agent {
   }
 
   /**
-   * 滞回水位：token 优先（contextWindow 65%/45%），否则消息数（contextMsgHighWater/LowWater）。
+   * 滞回水位：token 优先（contextWindow × contextHighRatio/contextLowRatio，默认 65%/45%），
+   * 否则消息数（contextMsgHighWater/LowWater）。
    * 返回 null=未超 highWater（只追加）；否则执行压缩并返回摘要。
    * 压缩为无损四阶段（compact/index.js）：被移出的原文整块归档（sha256 内容寻址、
    * context_recall 可恢复）+ 窗口内留结构化台账消息；跨代（epoch++）才允许前缀重建。
@@ -1344,7 +1354,7 @@ export class Agent {
    * ——块级移动保证原子束不撕裂；messages[0]（首条意图）恒保留。
    */
   _lowWaterMetric(_system) {
-    if (this.contextWindow) return { kind: 'token', value: Math.floor(this.contextWindow * 0.45) }
+    if (this.contextWindow) return { kind: 'token', value: Math.floor(this.contextWindow * this.contextLowRatio) }
     return { kind: 'count', value: this.contextMsgLowWater }
   }
 
@@ -1357,7 +1367,7 @@ export class Agent {
     const msgTokens = this._estimateMessagesTokens()
     const total = sysTokens + msgTokens + toolsTokens + REQUEST_OVERHEAD
     const est = useToken ? total : this.messages.length
-    const high = useToken ? Math.floor(this.contextWindow * 0.65) : this.contextMsgHighWater
+    const high = useToken ? Math.floor(this.contextWindow * this.contextHighRatio) : this.contextMsgHighWater
     if (est <= high) return null
     // 滞回防抖：floor（尾部保底）+ 台账消息的极限落地可能仍高于 highWater——没有新增量
     // 就不再空转重试（防同 run 逐轮 epoch++，前缀缓存逐轮全灭）。
@@ -1366,7 +1376,7 @@ export class Agent {
       const margin = Math.max(50, Math.floor((useToken ? this.contextWindow : this.contextMsgHighWater) * 0.05))
       if (nowMsgs < this._lastCompactMsgsEst + margin) return null
     }
-    const lowTotal = useToken ? Math.floor(this.contextWindow * 0.45) : null
+    const lowTotal = useToken ? Math.floor(this.contextWindow * this.contextLowRatio) : null
     // 预留模型输出 + 下一轮工具结果 + 安全余量；低水位是「压后完整请求」的目标，不是 messages 独占
     const reserve = useToken
       ? Math.max(256, Math.floor(this.contextWindow * 0.08), Math.min(4096, Math.ceil(this.maxTokens || 0)))

@@ -251,7 +251,9 @@ agent:
 | `maxTurns` | `50` | 单次对话工具调用轮次预算 |
 | `temperature` | 空 | 采样温度 |
 | `maxTokens` | 空 | 单次回复最大 token（留空=厂商默认；Anthropic 默认 4096） |
-| `contextWindow` | 空 | 模型上下文窗口 token 数（如 `32000`）；超 80% 自动压缩历史、保留首条意图 |
+| `contextWindow` | 空 | 模型上下文窗口 token 数（如 `100000`）；配置后启用 token 高低水位压缩（超 `contextHighRatio` 压到 `contextLowRatio`、保留首条意图、`cacheEpoch` 分代），未配置按消息条数水位（30→18）。**这是提升多轮缓存命中率的头号开关**：窗口吃满后每轮几乎全量命中前缀缓存，见下方「缓存经济性」 |
+| `contextHighRatio` | `0.65` | token 压缩高水位比例（占 `contextWindow`，0.3~0.95）。想进一步提高命中率可上调（如 `0.8`），代价是单次请求更长 |
+| `contextLowRatio` | `0.45` | 压后目标比例（须小于高水位）。压得更深（如 `0.15`）能让「新增→再压」周期更长、命中率更高；压缩无损（原文归档，`context_recall` 可恢复） |
 | `maxToolResultChars` | `4000` | 单条工具结果字符上限，超长截断防上下文膨胀 |
 | `promptCacheKey` | `false` | OpenAI 官方 `prompt_cache_key` 稳定会话路由（多轮命中前缀缓存的命中率更高）。仅当当前 provider 声明支持该能力（OpenAI 官方 preset）时才下发，兼容网关/其它厂商一律不发 |
 | `keepReasoning` | `false` | 是否把推理(`reasoning_content`)回灌历史；默认 `false` 省 context。thinking 模式下带工具调用的轮次按协议必需始终回传（不受此开关影响），否则上游会报 "reasoning_content must be passed back" |
@@ -1064,6 +1066,29 @@ utils/       Config 配置读写（插件目录 + 热加载） · Log 分级日�
 > **排查要点**：`turns` 很大 / `stop=max_turns` → 多步任务卡住或工具反复失败；`usage.in` 持续偏高 → 上下文/记忆膨胀，考虑设 `contextWindow` 开压缩；`ctx` 字数 → 判断情境注入量是否过大。
 
 **MCP 连不上时先看报错措辞**：`request timeout: initialize` = 服务端进程起来了但没在超时内响应握手（npx 首次下载慢 / 网络不通 / 命令错误）；`ENOENT spawn npx` / `进程退出码-2` = 容器里压根没有 npx（精简 Docker 镜像常见）—— 解决方案见上文 `agent.mcp` 章节的 ⚠️ 说明；`进程退出码 N` + stderr = 服务端启动即崩溃（缺 API Key / 依赖 / Node 版本，看 stderr 末尾）。
+
+### 💰 缓存经济性（多轮对话的前缀缓存命中率）
+
+面板「Token 缓存 · 命中率」= `cacheRead / observedInput`（同一窗口内 run end 累计，单位是 token）。稳态下它有一个能算出来的上界：
+
+```
+命中率 ≈ 1 − 2·d·H / (H² − K²)
+```
+
+- `d` = 每轮真正新增的 token（新用户消息 + 工具结果 + 注入的情境/记忆 + 回复与推理回灌）——必然 miss 一次，之后一直命中；
+- `H` = 压缩高水位（`contextWindow × contextHighRatio`）；
+- `K` = 压后目标（`contextWindow × contextLowRatio`）。
+
+据此得到的实践结论（v1.26.3 / v1.26.4 两处修复都由此而来）：
+
+1. **一定要配 `contextWindow`**：不配则按消息条数水位 30→18 压缩，上下文长期只有 ~2 万 token，命中率被压在 60% 上下；
+2. **窗口吃满 + 压得深**：`H` 越大、`K` 越小命中率越高（`H` 大让同一段前缀被反复复用；`K` 小让「前缀重建」的代价更小）。例如 `H=0.8W, K=0.15W` 明显优于默认 `0.65/0.45`；
+3. **别让前缀变形**：system 里的工具目录必须与「本轮激活了哪些工具」无关（v1.26.3 起固定为配置静态集，此前每激活一批工具就整段重付）；
+4. **收尾/评判调用要与主请求同形**：`tool_choice:'none'` 会让服务端丢掉 tools 段、换成另一套渲染，这类调用整段 miss（v1.26.4 起不再下发，改由指令禁工具）；
+5. **`d` 越小越好**：`keepReasoning: false`（少回灌推理）、`maxToolResultChars` 适度收紧、情境注入量（日志里的 `ctx` 字数）别过大。
+
+> 压缩是**无损**的：被移出窗口的原文整块归档（sha256 内容寻址），窗口内留结构化台账，随时可用 `context_recall` 工具按 ref/关键词取回原文——所以「压得深」不等于「丢历史」。
+> 面板的 cold/warm 分层：`cold` = 该会话首个请求（必然全 miss），`warm` = 其余请求；衡量改造效果只看 warm 层。
 
 ---
 

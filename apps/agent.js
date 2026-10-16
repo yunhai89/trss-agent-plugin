@@ -1124,9 +1124,13 @@ async function _buildRuntime(scope) {
     thinkingCapable: detectCapabilities({ protocol: cfg.protocol || 'openai', model: cfg.model, caps: cfg.media?.caps }).thinking,
     protocol: cfg.protocol || 'openai',
     preset: cfg.preset || '',
-    // 上下文管理：contextWindow（token 高低水位压缩入口：65% 触发压到 45%；未配置走消息数水位）、
-    // 工具结果上限、是否回灌 reasoning。旧 contextPressureThreshold 已删除（从未被消费的死配置）。
+    // 上下文管理：contextWindow（token 高低水位压缩入口：contextHighRatio 触发压到 contextLowRatio；
+    // 未配置走消息数水位）、工具结果上限、是否回灌 reasoning。旧 contextPressureThreshold 已删除。
+    // 缓存经济性：稳态 token 命中率 ≈ 1 − 2·d·H/(H²−K²)（d=每轮新增、H=高水位、K=压后目标），
+    // 故「窗口吃满 + 压得深」优于「小窗口勤压」；压缩无损（原文归档，context_recall 可恢复）。
     contextWindow: cfg.contextWindow || null,
+    contextHighRatio: cfg.contextHighRatio ?? 0.65,
+    contextLowRatio: cfg.contextLowRatio ?? 0.45,
     compactArchive, // 无损压缩归档（null=无归档压缩；见上方装配说明）
     maxToolResultChars: cfg.maxToolResultChars ?? 4000,
     // 工具受控并发（P0-2/F10）：全局滚动池上限；未声明并发语义的工具默认独占；跨 Agent 共享同一调度器

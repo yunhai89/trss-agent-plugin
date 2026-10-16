@@ -1721,6 +1721,26 @@ await test('会话前缀：token 水位滞回（65% 触发压到 45%）优先于
   ok(hist.filter((m) => m.role === 'tool').every((m) => callIds.has(m.tool_call_id)), '压缩后 tool_call/tool_result 配对完整')
 })
 
+// ---------- P3：压缩水位比例可配（缓存经济性） ----------
+await test('压缩水位比例可配：contextHighRatio/contextLowRatio 生效且非法值回退', async () => {
+  const mk = (cfg) => new Agent({
+    provider: mockProvider([{ content: 'x', finishReason: 'stop' }]),
+    tools: new ToolRegistry(), maxTurns: 1, reflect: 'off', ...cfg,
+  })
+  const a = mk({ contextWindow: 1000, contextHighRatio: 0.8, contextLowRatio: 0.15 })
+  eq(a.contextHighRatio, 0.8, '高水位比例生效')
+  eq(a.contextLowRatio, 0.15, '低水位比例生效')
+  eq(a._lowWaterMetric().value, 150, '低水位目标 = 窗口 × contextLowRatio')
+  const b = mk({ contextWindow: 1000, contextHighRatio: 5, contextLowRatio: -1 })
+  eq(b.contextHighRatio, 0.65, '非法高水位回退 0.65')
+  eq(b.contextLowRatio, 0.45, '非法低水位回退 0.45')
+  const c = mk({ contextWindow: 1000, contextHighRatio: 0.5, contextLowRatio: 0.9 })
+  eq(c.contextLowRatio, 0.45, '低水位不得 ≥ 高水位（回退到 高水位−0.05）')
+  const d = mk({ contextWindow: 1000 })
+  eq(d.contextHighRatio, 0.65, '未配置时默认 0.65')
+  eq(d.contextLowRatio, 0.45, '未配置时默认 0.45')
+})
+
 // ---------- P1：工具 schema 追加式增长（tools 前缀稳定性） ----------
 await test('工具列表追加式：激活顺序决定 tools 顺序，旧数组是新数组前缀', async () => {
   const mkTool = (name) => ({ name, description: 'd-' + name, parameters: { type: 'object' }, async execute() { return 'x' } })

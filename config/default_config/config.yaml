@@ -91,7 +91,10 @@ agent:
   shell:
     intercept: []          # 需拦截的指令片段列表（大小写不敏感子串匹配；命中即拒绝执行，如 "rm -rf /"）
   maxTokens:              # 单次回复最大 token（留空=厂商默认；Anthropic 默认 4096）
-  contextWindow:          # 模型上下文窗口 token 数（如 32000）；配置后启用 token 高低水位压缩（超 65% 压到 45%、保留首条意图、cacheEpoch 分代），未配置按消息条数水位（30→18）压缩
+  contextWindow:          # 模型上下文窗口 token 数（如 32000）；配置后启用 token 高低水位压缩（超 contextHighRatio 压到 contextLowRatio、保留首条意图、cacheEpoch 分代），未配置按消息条数水位（30→18）压缩。
+                          # 缓存经济性：稳态 token 命中率 ≈ 1 − 2·d·H/(H²−K²)（d=每轮新增、H=高水位、K=压后目标），同一窗口下「压得深」比「勤压」命中率高得多；压缩无损（原文归档，context_recall 可恢复）
+  contextHighRatio: 0.65  # token 压缩高水位比例（占 contextWindow；0.3~0.95）。想提高缓存命中率可上调（如 0.8），代价是单次请求更长
+  contextLowRatio: 0.45   # token 压缩压后目标比例（占 contextWindow；须小于高水位）。压得更深（如 0.15）能让「新增→再压」的周期更长，命中率更高（无损压缩，历史可用 context_recall 恢复）
   compaction:               # 无损上下文压缩（Hermes 四阶段可逆化）：被移出窗口的原文整块归档（sha256 校验），
     enable: true            # 窗口内留结构化台账 + context_recall 工具按 ref/关键词恢复；false 关闭归档与恢复工具（回滚杠杆）
     archiveDir: "data/context-archive"  # 压缩原文归档目录（按会话分目录，独立于会话数据生命周期）
