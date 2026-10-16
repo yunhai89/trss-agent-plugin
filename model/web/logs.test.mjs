@@ -112,6 +112,9 @@ await test('aggregateStats：cold/warm 分层 + raw 兜底提取', async () => {
   ok(r.warmObserved >= 2 && r.warmHit >= 2, `warm 观测/命中分层（warm=${r.warmObserved}/${r.warmHit}）`)
   ok(r.coldObserved >= 1, '每文件首个 run_end 记 cold')
   ok(r.warmRequestHitRate == null || r.warmRequestHitRate <= 1, '比率不越界')
+  // warm Token 命中率：剔除 cold 条（input 500 / cached 0）后 = (400+450)/(500+500) = 85%
+  ok(r.warmTokenHitRate != null && Math.abs(r.warmTokenHitRate - 0.85) < 1e-6, `warm Token 命中率剔除冷启动（实际 ${r.warmTokenHitRate}）`)
+  ok(r.warmTokenHitRate > r.tokenHitRate, 'warm 口径高于含冷启动的整体口径')
 })
 
 await test('aggregateStats：旧日志 raw 兜底（无顶层 cache 字段时从 raw 提取并标观测）', async () => {
@@ -147,7 +150,7 @@ await test('aggregateStats：observedOutput 观测口径输出（缓存卡「输
   const payload = buildCachePayload(r)
   eq(payload.observedOutput, 150, 'buildCachePayload 透传 observedOutput')
   eq(payload.observedInput, 3000, 'buildCachePayload 透传 observedInput')
-  for (const k of ['totalCacheRead', 'totalCacheWrite', 'observedRequests', 'hitRequests', 'unobservedRequests', 'tokenHitRate', 'requestHitRate', 'warmObserved', 'warmHit', 'coldObserved', 'warmRequestHitRate', 'firstObservedAt']) {
+  for (const k of ['totalCacheRead', 'totalCacheWrite', 'observedRequests', 'hitRequests', 'unobservedRequests', 'tokenHitRate', 'requestHitRate', 'warmObserved', 'warmHit', 'coldObserved', 'warmRequestHitRate', 'warmTokenHitRate', 'firstObservedAt']) {
     ok(k in payload, `payload 含字段 ${k}（前端 cacheStats 全字段接线）`)
   }
 })

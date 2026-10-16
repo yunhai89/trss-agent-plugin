@@ -146,6 +146,10 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
   // 缓存口径：**未观测 ≠ 0 命中**。旧链路日志无缓存字段，不能进命中率分母（曾把
   // 2400/3000 的真实命中率稀释成 2400/5000）。分层聚合：
   //   observedInput/observedRequests 只统计报告了缓存字段的请求；hitRequests = 其中 read>0
+  let warmInput = 0
+  let warmCacheRead = 0
+  let coldInput = 0
+  let coldCacheRead = 0
   let totalCacheRead = 0
   let totalCacheWrite = 0
   let observedInput = 0
@@ -198,8 +202,8 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
             const oin = n.observedInput || 0
             const oout = n.observedOutput || 0
             observedRequests++
-            if (isCold) coldObserved++
-            else { warmObserved++; if (n.cacheRead > 0) warmHit++ }
+            if (isCold) { coldObserved++; coldInput += oin; coldCacheRead += n.cacheRead }
+            else { warmObserved++; if (n.cacheRead > 0) warmHit++; warmInput += oin; warmCacheRead += n.cacheRead }
             if (n.cacheRead > 0) hitRequests++
             if (oin) { observedInput += oin; dayMap[day].observedInput += oin }
             if (oout) observedOutput += oout
@@ -239,6 +243,9 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
     requestHitRate: observedRequests > 0 ? clamp01(hitRequests / observedRequests) : null,
     warmObserved, warmHit, coldObserved,
     warmRequestHitRate: warmObserved > 0 ? clamp01(warmHit / warmObserved) : null,
+    // warm 层 Token 命中率：排除每个会话首个请求（必然全 miss）后的稳态命中率——
+    // 「多轮对话」的真实缓存效果看这个数（面板的 tokenHitRate 含冷启动，会被新会话/重启/缓存过期拉低）
+    warmTokenHitRate: warmInput > 0 ? clamp01(warmCacheRead / warmInput) : null,
     firstObservedAt,
   }
 }
@@ -264,6 +271,7 @@ export function buildCachePayload(stats) {
     warmHit: stats.warmHit || 0,
     coldObserved: stats.coldObserved || 0,
     warmRequestHitRate: stats.warmRequestHitRate ?? null,
+    warmTokenHitRate: stats.warmTokenHitRate ?? null,
     firstObservedAt: stats.firstObservedAt ?? null,
   }
 }

@@ -144,6 +144,7 @@
             input: c.observedInput || 0, output: c.observedOutput || 0, cached: c.totalCacheRead || 0,
             cacheWrite: c.totalCacheWrite || 0, miss: Math.max(0, (c.observedInput || 0) - (c.totalCacheRead || 0)),
             hitRate, missRate: hitRate == null ? 0 : 100 - hitRate, requestHitRate: pct(c.requestHitRate), warmHitRate: pct(c.warmRequestHitRate),
+            warmTokenHitRate: pct(c.warmTokenHitRate),
             unobserved: c.unobservedRequests || 0, observedReq: c.observedRequests || 0,
             warmObserved: c.warmObserved || 0, warmHit: c.warmHit || 0, coldObserved: c.coldObserved || 0,
             hasData: (c.observedRequests || 0) > 0, hasRequestRate: c.requestHitRate != null,
@@ -397,7 +398,8 @@
                   <div class="row g10 wrap" style="margin-top:10px;font-size:12px">
                     <span class="pill p-honey">请求命中率 {{ cacheStats.requestHitRate != null ? cacheStats.requestHitRate.toFixed(1) + '%' : '暂无' }}</span>
                     <span class="pill p-mint">Token 命中率 {{ cacheStats.hitRate != null ? cacheStats.hitRate.toFixed(1) + '%' : '暂无' }}</span>
-                    <span v-if="cacheStats.warmHitRate != null" class="pill p-sky">warm {{ cacheStats.warmHitRate.toFixed(1) }}%（{{ cacheStats.warmHit }}/{{ cacheStats.warmObserved }}）</span>
+                    <span v-if="cacheStats.warmTokenHitRate != null" class="pill p-mint">warm Token 命中率 {{ cacheStats.warmTokenHitRate.toFixed(1) }}%（剔除每个会话首个请求，即多轮对话的稳态命中率）</span>
+                    <span v-if="cacheStats.warmHitRate != null" class="pill p-sky">warm 请求命中率 {{ cacheStats.warmHitRate.toFixed(1) }}%（{{ cacheStats.warmHit }}/{{ cacheStats.warmObserved }}）</span>
                     <span class="pill">cold {{ cacheStats.coldObserved }}</span>
                     <span v-if="cacheStats.unobserved > 0" class="pill" style="opacity:.75">未观测旧日志 {{ cacheStats.unobserved }} 条（不进分母）</span>
                   </div>

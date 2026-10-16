@@ -114,6 +114,7 @@ async function main() {
       dir, since: args.since || null,
       runs: agg.observedRequests, input: agg.observedInput, cached: agg.totalCacheRead,
       tokenHitRate: rate, requestHitRate: agg.requestHitRate, warmRequestHitRate: agg.warmRequestHitRate,
+      warmTokenHitRate: agg.warmTokenHitRate ?? null,
       cold: agg.coldObserved, warm: agg.warmObserved, target: args.target, meetTarget: ok,
       turns: tn, turnInput: ti, turnCached: tc,
       attribution: [...groups.entries()].map(([cause, g]) => ({ cause, ...g, miss: g.input - g.cached })),
@@ -129,7 +130,9 @@ async function main() {
   console.log(`  观测请求 ${num(agg.observedRequests)}（cold ${agg.coldObserved} / warm ${agg.warmObserved}）· 未观测 ${num(agg.unobservedRequests)}`)
   console.log(`  输入 ${num(agg.observedInput)} tok · 缓存读取 ${num(agg.totalCacheRead)} tok · 缓存写入 ${num(agg.totalCacheWrite)} tok`)
   console.log(`  Token 命中率 = ${pct(rate)}   请求命中率 = ${pct(agg.requestHitRate)}   warm 请求命中率 = ${pct(agg.warmRequestHitRate)}`)
-  console.log(`  目标 ≥${pct(args.target)}：${ok ? '✅ 达标' : '❌ 未达标'}${rate == null ? '（窗口内无观测数据）' : `（差 ${((args.target - rate) * 100).toFixed(2)} 个百分点）`}`)
+  console.log(`  warm Token 命中率 = ${pct(agg.warmTokenHitRate ?? null)}（剔除每个会话首个请求＝多轮对话稳态命中率；面板 tokenHitRate 含冷启动）`)
+  const okWarm = agg.warmTokenHitRate != null && agg.warmTokenHitRate >= args.target
+  console.log(`  目标 ≥${pct(args.target)}：面板口径 ${ok ? '✅ 达标' : '❌ 未达标'}${rate == null ? '（窗口内无观测数据）' : `（差 ${((args.target - rate) * 100).toFixed(2)} 个百分点）`} · warm 口径 ${okWarm ? '✅ 达标' : '❌ 未达标'}`)
   console.log('')
   console.log(`【turn 级 miss 归属】n=${tn} input=${num(ti)} 命中=${pct(ti ? tc / ti : null)}（不含收尾/评判等非 turn 调用）`)
   const rows = [...groups.entries()].sort((a, b) => (b[1].input - b[1].cached) - (a[1].input - a[1].cached))
