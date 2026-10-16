@@ -2325,6 +2325,39 @@ await test('缓存稳定性：stableList=false 保留旧的追加式增长（供
   eq(names2.includes('tool_b'), true, '下一轮追加会话内激活的工具（此模式每次激活都会打穿缓存）')
 })
 
+// ---------- 缓存：压缩断点必须可观测（否则 miss 无法归因） ----------
+await test('缓存可观测性：压缩断点写出 cache_compact 事件（epoch/est/high 齐备），水位比例可配', async () => {
+  const kv = memoryKv()
+  const session = new SessionStore({ kv })
+  await session.createConversation('u1', null, 'c1')
+  const long = '这是用于撑大 token 估算的长内容。'.repeat(60)
+  let turn = 0
+  const provider = {
+    async chat() {
+      turn++
+      if (turn % 2 === 1) return { content: '旁白' + turn, toolCalls: [{ id: 'c' + turn, name: 'tool_a', arguments: {} }], finishReason: 'tool_calls', usage: { prompt_tokens: 5, completion_tokens: 1 } }
+      return { content: '回复' + turn, finishReason: 'stop', usage: { prompt_tokens: 5, completion_tokens: 1 } }
+    },
+  }
+  const mk = (name) => ({ name, description: `${name} 的描述文本`, parameters: { type: 'object', properties: {} }, async execute() { return 'ok' } })
+  const tools = new ToolRegistry().register(mk('tool_a'))
+  const events = []
+  const agent = new Agent({
+    provider, tools, session, maxTurns: 5, reflect: 'off',
+    contextWindow: 1600, contextKeepRecent: 4,
+    estimateTokens: (t) => Math.ceil(String(t || '').length / 4),
+    devLog: (event, data) => { if (event === 'cache_compact') events.push(data) },
+  })
+  for (let i = 1; i <= 5; i++) {
+    await agent.run(`问题${i} ${long}`, { ctx: { userId: 'u1', groupId: null, scopeUserId: 'u1', conversationId: '1' }, systemPrompt: '短身份' })
+  }
+  ok(events.length >= 1, `压缩时写出 cache_compact 事件（${events.length} 次）——面板/报告据此归因「前缀被打断」`)
+  const e0 = events[0] || {}
+  eq(Number(e0.high), Math.floor(1600 * 0.65), '事件里的高水位来自可配的 contextHighRatio（默认 0.65 → 1040）')
+  ok(Number(e0.cacheEpoch) >= 1 || e0.unresolved === true, `事件明确报告结果：epoch 递增（${e0.cacheEpoch}）或 unresolved=true（压不动时不虚增 epoch，避免假断点）`)
+  ok(Number(e0.est) > Number(e0.high), `事件记录触发压力 est=${e0.est} > high=${e0.high}`)
+})
+
 // ---------- 总结 ----------
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
