@@ -24,7 +24,7 @@
 >
 > - **`master` 为唯一主分支**：新功能、底层改动与 bug 修复都直接提交到 `master`。
 > - 历史上的 `beta` 测试分支已于 **v1.21.0** 全量合并进 `master` 并停用（`git pull` 用 `master` 即可，无需再切分支）。
-> - 更新插件：#更新（或 `git pull origin master`），随后 `#agents重载`。
+> - 更新插件：`#agents更新`（或 `git pull origin master`）。**代码有改动必须重启进程**（`#重启` 或发 `#agents更新`，后者检测到代码变更会自动重启）——`#agents重载` 只按新配置重建运行时（provider/model/tools/skills/mcp），**不会重新加载已改动的代码文件**（ESM 模块缓存）；只改了配置时用它即可。
 
 ---
 
@@ -624,7 +624,7 @@ tts:
 | `#沙箱诊断` / `#沙箱诊断 预览` / `#沙箱诊断 修复` | E2B 出口网络：沙箱内实测 DNS/HTTPS 并给判定 / 只看配置实际下发什么 / 清除旧语义的全拒项 `denyOut:['0.0.0.0/0']` 并写回 |
 | `#确认 +id` / `#拒绝 +id` / `#待确认` | 审批待执行危险动作 |
 | `#agents帮助` / `#agents状态` | 帮助图 / 运行状态 |
-| `#agents重载` | 热重载配置并立即重建运行时（model/tools/skills/mcp，无需重启框架） |
+| `#agents重载` | 热重载**配置**并立即重建运行时（model/tools/skills/mcp，无需重启框架）。注意：只重建运行时、不重新加载代码文件——跟着 `git pull` 更新代码后请用 `#重启`（或 `#agents更新`，有代码改动会自动重启），见文首更新说明 |
 | `#agents更新` / `#agents强制更新` | git pull 拉取最新代码（强制=reset 后 rebase），有代码改动时自动重启 Yunzai 生效 |
 | `#agents版本` / `#agents更新日志` | 最近提交时间 / 本次更新日志 |
 
