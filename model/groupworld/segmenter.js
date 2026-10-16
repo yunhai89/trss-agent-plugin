@@ -203,7 +203,7 @@ export class ConversationSegmenter {
   async _currentOpen(groupId) {
     const row = await this.dao.get("SELECT * FROM gw_segments WHERE group_id=? AND status='open' ORDER BY id DESC LIMIT 1", [groupId])
     if (!row) return null
-    const lastMsg = await this.dao.get('SELECT sent_at FROM gw_messages WHERE group_id=? AND message_id=?', [groupId, row.end_msg_id])
+    const lastMsg = await this.dao.get('SELECT id, sent_at FROM gw_messages WHERE group_id=? AND message_id=?', [groupId, row.end_msg_id])
     // 重建近窗文本 + 片内消息 id 集（重启后漂移检测/引用链守卫仍可用）
     let recentTexts = []
     // recordedIds「确实已记入本段」：按 start/end 的**行 id 区间**取（与 pendingSegments 装载同口径），
@@ -227,6 +227,9 @@ export class ConversationSegmenter {
     return {
       ...row, isNew: false, added: [], closeReason: null, closedAt: 0, reopen: false,
       endMsgId: row.end_msg_id,
+      // 本段末尾消息的行 id：追加新消息时用它比较，保证 end_msg_id 始终是"行 id 最大"那条
+      // （装载侧按行 id 区间取数，见 _appendPlanned 注释与 2026-10-17 回归审计 high）
+      maxRowId: Number(lastMsg?.id) || 0,
       lastSentAt: Number(lastMsg?.sent_at) || Number(row.started_at) || 0,
       msgCount: Number(row.msg_count) || 0, lowValue: Number(row.low_value_count) || 0,
       recentTexts, msgIds, recordedIds,
@@ -261,6 +264,7 @@ export class ConversationSegmenter {
       id: null, isNew: true, group_id: groupId,
       idem_key: segIdemKey(groupId, firstMsg.message_id),
       start_msg_id: firstMsg.message_id, end_msg_id: firstMsg.message_id,
+      maxRowId: Number(firstMsg.id) || 0,
       started_at: firstMsg.sent_at, lastSentAt: firstMsg.sent_at,
       msgCount: 0, lowValue: 0, recentTexts: [], msgIds: new Set(),
       // recordedIds 以跨段去重集为初值：本批里已被别段记录的消息不再重复 append（崩溃重跑不重复消费）
@@ -301,11 +305,19 @@ export class ConversationSegmenter {
     open.added = open.added || []
     open.added.push(m)
     open.msgCount += 1
-    // end_msg_id 是片段末尾（pendingSegments 用它的 sent_at 作时间窗上界 + 静默闭合用 lastSentAt）：
-    // 乱序（延迟投递）消息的 sent_at 可能早于已追加的消息，直接回退会让窗口反转塌缩（装载不全）。
-    // 只保留 sent_at 更大者作末尾，保证上界单调。
+    // lastSentAt 按 sent_at 单调推进（静默闭合用它衡量"最近有多久没人说话"）；
+    // end_msg_id 则必须指向「本段已追加消息中**行 id 最大**」的那条：pendingSegments 与 _segmentMsgIds
+    // 都按 [start,end] 的**行 id 区间**装载与去重，若末尾只跟 sent_at 走，延迟投递消息（行 id 更大、
+    // sent_at 更早）会落在区间之外 —— 既不送 LLM 分析，又被 recordedIds 当成"已记录"而不再补投，
+    // 知识/记忆投影永久缺失（2026-10-17 回归审计 high：旧实现在此场景 pendingSegments 只取回 3/4 条）。
     const older = Number(m.sent_at) < Number(open.lastSentAt)
-    if (!older) { open.lastSentAt = m.sent_at; open.endMsgId = m.message_id }
+    if (!older) open.lastSentAt = m.sent_at
+    const rid = Number(m.id) || 0
+    if (rid > 0) {
+      if (rid >= (open.maxRowId || 0)) { open.endMsgId = m.message_id; open.maxRowId = rid }
+    } else if (!older) {
+      open.endMsgId = m.message_id // 无行 id 信息（异常来源）时退回旧的 sent_at 口径
+    }
     if (isLowValue(m)) open.lowValue += 1
     else {
       open.recentTexts = open.recentTexts || []
@@ -320,7 +332,7 @@ export class ConversationSegmenter {
   async _reuseExisting(seg, row) {
     const existing = await this._segmentMsgIds(row)
     const kept = (seg.added || []).filter((m) => !existing.has(String(m.message_id)))
-    const baseMsg = await this.dao.get('SELECT sent_at FROM gw_messages WHERE group_id=? AND message_id=?', [seg.group_id, row.end_msg_id]).catch(() => null)
+    const baseMsg = await this.dao.get('SELECT id, sent_at FROM gw_messages WHERE group_id=? AND message_id=?', [seg.group_id, row.end_msg_id]).catch(() => null)
     seg.isNew = false
     seg.msgIds = new Set([...existing, ...(seg.msgIds || [])].map(String))
     // 去重集 = 本段已记录 ∪ 跨段已记录（跨段集在 _openPlanned 时预置，复用后不能丢）
@@ -328,6 +340,7 @@ export class ConversationSegmenter {
     seg.msgCount = Number(row.msg_count) || 0
     seg.lowValue = Number(row.low_value_count) || 0
     seg.endMsgId = row.end_msg_id
+    seg.maxRowId = Number(baseMsg?.id) || 0
     seg.started_at = row.started_at
     seg.lastSentAt = Number(baseMsg?.sent_at) || Number(row.started_at) || 0
     seg.recentTexts = []

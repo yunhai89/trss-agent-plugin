@@ -74,7 +74,12 @@ export class ConfirmStore {
     // 曾漏返回 → 前端 `undefined.user` TypeError → 整块渲染成注释节点、审批门页面全白。
     return [...this._pending.values()].map((p) => ({
       id: p.info.id, tool: p.info.tool, args: p.info.args, createdAt: p.info.createdAt,
-      ctx: p.info.ctx ? { user: p.info.ctx.user, userId: p.info.ctx.userId, gid: p.info.ctx.gid, reason: p.info.ctx.reason } : null,
+      // 字段名必须与 ctxOf() 的真实产出对齐（userId/groupId）：曾按 user/gid 取名 → 面板对任何真实
+      // 待审都显示「申请人 未知 · 私聊」，其中「私聊」还是错的（真实来源是群消息）；
+      // mock.js 的假数据恰好用 user/gid 形态，所以只跑 mock 的冒烟看不出来（2026-10-17 回归审计 medium）。
+      ctx: p.info.ctx
+        ? { user: p.info.ctx.userId, userId: p.info.ctx.userId, gid: p.info.ctx.groupId, reason: p.info.ctx.reason }
+        : null,
     }))
   }
 

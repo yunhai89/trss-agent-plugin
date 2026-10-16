@@ -1118,7 +1118,7 @@ utils/       Config 配置读写（插件目录 + 热加载） · Log 分级日�
 | `CRAWL4AI_VENV` / `CRAWL4AI_PYSCRIPT` | 自建 crawl4ai 虚拟环境路径 / 抓取脚本路径（默认自动探测） |
 | `E2B_API_KEY` / `E2B_API_URL` / `E2B_DOMAIN` / `E2B_SANDBOX_URL` | E2B 沙箱凭据与自托管端点（优先级高于 `agent.sandbox.*`） |
 | `AGENTS_CONFIG` | 指定插件配置文件路径（真实模型冒烟/模拟器用它读实机配置） |
-| `REAL_LLM_SMOKE` / `REAL_LLM_*` | 真实模型冒烟开关与模型覆盖（`stress/real/*`；未设则打印 `SKIP_FILE:` 跳过） |
+| `REAL_LLM_API_KEY` / `REAL_LLM_BASE_URL` / `REAL_LLM_MODEL` / `REAL_LLM_PROTOCOL` / `REAL_LLM_PRESET` | 真实模型冒烟（`stress/real/*`）的凭据与模型覆盖；也可用 `AGENTS_CONFIG=<config.yaml>` 复用插件配置。**未设则打印 `SKIP_FILE:` 跳过** |
 | `KROKI_INTEGRATION` / `KROKI_ENDPOINT` | 真实 Kroki 容器集成测试开关与端点（默认跳过） |
 | `E2B_INTEGRATION` | E2B 真连接集成测试开关（默认跳过） |
 

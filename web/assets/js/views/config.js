@@ -1243,7 +1243,9 @@
               </div>
             </cfg-row>
             <cfg-row name="工具调用轮次上限" desc="单次请求最多工具往返">
-              <input type="number" class="inp" style="width:110px" min="1" max="100" v-model.number="form.maxTurns">
+              <!-- 上限必须 ≥ 默认值 200（config.yaml/锅巴/README 均为 1000）：曾写 max="100"，面板一打开
+                   就显示越界的 200、箭头被卡在 100（2026-10-17 回归审计 low） -->
+              <input type="number" class="inp" style="width:110px" min="1" max="1000" v-model.number="form.maxTurns">
             </cfg-row>
             <cfg-row name="重复动作上限" desc="同工具+相同参数连续允许次数(超出→终止,防死循环)">
               <input type="number" class="inp" style="width:90px" min="1" v-model.number="form.loop.maxSameAction">

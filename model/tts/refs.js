@@ -58,8 +58,15 @@ export class RefLibrary {
       const arr = JSON.parse(raw)
       return Array.isArray(arr) ? arr : []
     } catch (e) {
+      // 备份按**内容哈希**命名：读路径（list/get/getByName → _readSafe）也会走到这里，若按时间戳命名，
+      // 索引修好之前每次面板刷新/每次合成都新增一份副本，data/tts 无限增长（2026-10-17 回归审计 low）。
+      // 同内容只留一份，人工仍可找回。
       let bak = ''
-      try { bak = `${this.indexPath}.bad-${Date.now()}`; fs.copyFileSync(this.indexPath, bak) } catch { /* 备份失败不阻断报错 */ }
+      try {
+        const sum = crypto.createHash('sha1').update(raw).digest('hex').slice(0, 8)
+        bak = `${this.indexPath}.bad-${sum}`
+        if (!fs.existsSync(bak)) fs.copyFileSync(this.indexPath, bak)
+      } catch { /* 备份失败不阻断报错 */ }
       throw new Error(`参考音频索引损坏${bak ? `（已备份到 ${path.basename(bak)}）` : ''}：${e?.message || e}`)
     }
   }

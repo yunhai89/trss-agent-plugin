@@ -151,6 +151,30 @@ await test('切片原子性：崩溃重跑不重复 append / 半成品不撞 UNI
   ok(Number(cur3?.last_segmented_msg_id || 0) === 0, `失败后水位未推进（实际 ${cur3?.last_segmented_msg_id || 0}）`)
 })
 
+// ───────── 回归：延迟投递消息必须落在装载区间内（end_msg_id 取行 id 最大者） ─────────
+await test('切片：延迟投递消息不被漏装载（end_msg_id 取行 id 最大者）', async () => {
+  const ing = new GroupWorldIngester({ dao })
+  const seg = new ConversationSegmenter({ dao })
+  const g = 'GD'
+  const t = 1730000000000
+  // d4 的行 id 更大但 sent_at 更早（QQ 延迟投递）：end_msg_id 若只跟 sent_at 走会取 d3，
+  // 而 pendingSegments/_segmentMsgIds 按 [start,end] 的**行 id 区间**装载 → d4 永远进不了分析
+  // （2026-10-17 回归审计 high）
+  await ing.ingestMessage({ id: 'd1', groupId: g, userId: 'D', displayName: '丁', timestamp: t, text: '这个服务器配置怎么样', segments: [], replyToId: null, media: [] })
+  await ing.ingestMessage({ id: 'd2', groupId: g, userId: 'D', displayName: '丁', timestamp: t + 1000, text: '带宽够吗', segments: [], replyToId: null, media: [] })
+  await ing.ingestMessage({ id: 'd3', groupId: g, userId: 'D', displayName: '丁', timestamp: t + 2000, text: '延迟怎么样', segments: [], replyToId: null, media: [] })
+  await ing.ingestMessage({ id: 'd4', groupId: g, userId: 'D', displayName: '丁', timestamp: t + 1500, text: '价格呢', segments: [], replyToId: null, media: [] })
+  await seg.processGroup(g, { segmentIdleSeconds: 300 }, t + 2000)
+  // 静默超阈值 → 闭合（pendingSegments 只取 closed/failed 段）
+  await seg.processGroup(g, { segmentIdleSeconds: 300 }, t + 2000 + 7 * 60000)
+  const row = await dao.get('SELECT * FROM gw_segments WHERE group_id=? ORDER BY id DESC LIMIT 1', [g])
+  ok(row?.end_msg_id === 'd4', `end_msg_id = 行 id 最大者（期望 d4，实际 ${row?.end_msg_id}）`)
+  const pend = (await seg.pendingSegments(g, { minSegmentMessages: 1, retryCount: 1 }))[0]
+  const got = new Set((pend?.messages || []).map((m) => String(m.message_id)))
+  ok(got.size === 4 && got.has('d4'), `延迟投递的 d4 也被装载（实际 ${[...got].join(',')}）`)
+  ok(Number(pend?.segment?.msg_count || 0) === 4, `msg_count 与实际装载一致（期望 4，实际 ${pend?.segment?.msg_count}）`)
+})
+
 // ───────── H1 回归：切片失败不再静默（计数 + 退避 + 恢复清零） ─────────
 await test('analyzer：切片失败计数/退避、恢复后清零', async () => {
   const g = 'GH2'

@@ -150,7 +150,10 @@ async function callSTT(audioPath, cfg, signal = null) {
   let stSize = 0
   try { stSize = fs.statSync(audioPath).size } catch { /* 交给下面 readFileSync 报错 */ }
   if (stSize > STT_HOST_MAX_BYTES) {
-    return { error: `音视频过大：${(stSize / 1048576).toFixed(1)}MB（上限 ${STT_HOST_MAX_BYTES / 1048576}MB，请截短后重试）` }
+    // 必须 throw：callSTT 的契约是「成功返回字符串 / 失败抛错」，调用方直接 text.slice(...)。
+    // 旧写法 return {error} 会被当成 text ⇒ 用户看到 "text.slice is not a function"，
+    // 真正原因（文件过大）反而丢了（2026-10-17 回归审计 medium）。
+    throw new Error(`音视频过大：${(stSize / 1048576).toFixed(1)}MB（上限 ${STT_HOST_MAX_BYTES / 1048576}MB，请截短后重试）`)
   }
   const buf = fs.readFileSync(audioPath)
   const ext = path.extname(audioPath).toLowerCase()

@@ -137,7 +137,8 @@
               <div class="mut mt8" style="font-size:12px">
                 申请人 <b class="mono">{{ c.ctx?.user || '未知' }}</b> · {{ c.ctx?.gid ? '群 ' + c.ctx.gid : '私聊' }} · {{ fmt.ago(c.createdAt) }}发起
               </div>
-              <div class="mut" style="font-size:12px;margin-top:2px">事由:{{ c.ctx?.reason || '（未提供）' }}</div>
+              <!-- 事由：链路目前无生产方，有值才显示（空着比「（未提供）」更少噪音） -->
+              <div v-if="c.ctx?.reason" class="mut" style="font-size:12px;margin-top:2px">事由:{{ c.ctx.reason }}</div>
             </div>
           </div>
           <div class="mt12"><json-block :data="c.args"/></div>

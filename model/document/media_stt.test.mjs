@@ -134,6 +134,22 @@ await test('工具层：mode=e2b 但沙箱未就绪 → 拒绝转录（不在宿
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
+// ───────── 回归：超大文件必须给出「过大」原因（而非 text.slice is not a function） ─────────
+await test('宿主档：超过 100MB 直接拒绝，并给出可读原因', async () => {
+  const dir = fs.mkdtempSync(path.join(Config.path.temp, 'stt-big-'))
+  const input = path.join(dir, 'big.mp3')
+  // 稀疏文件：瞬间创建 101MB，不占实际磁盘
+  const fd = fs.openSync(input, 'w')
+  fs.ftruncateSync(fd, 101 * 1024 * 1024)
+  fs.closeSync(fd)
+  try {
+    const r = await transcribeMediaTool.execute({ path: input }, { sandbox: { mode: false } })
+    ok(!!r.error, '返回错误')
+    ok(/音视频过大/.test(r.error), `错误点明体积上限（实际：${r.error}）`)
+    ok(!/slice is not a function/.test(r.error), '不再泄漏内部 TypeError 文案')
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)

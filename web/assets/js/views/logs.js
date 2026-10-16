@@ -277,7 +277,7 @@
               <v-icon :name="t.hasError ? 'warn' : 'check'"/>
               <span>{{ fmt.time(t.time).slice(0, 8) }}</span>
               <span class="mut2" style="font-weight:400">{{ t.turns }}轮 · {{ t.totalMs ? fmt.dur(t.totalMs) : '—' }}</span>
-              <span v-if="t.usage" class="pill num" :class="activeTrace === t.traceId ? '' : 'p-pri'" style="font-size:10px">{{ fmt.num(t.usage.total) }} tok</span>
+              <span v-if="t.usage" class="pill num" :class="activeTrace === t.traceId ? '' : 'p-pri'" style="font-size:10px">{{ fmt.num(uTotal(t.usage)) }} tok</span>
             </div>
           </div>
         </div>
