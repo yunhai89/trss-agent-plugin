@@ -279,7 +279,7 @@ agent:
 | `thinking` | 空 | 思考模式（手动），如 `{ type: "enabled", budget_tokens: 16000 }` |
 | `thinkingAuto` | 关 | 思考自动决策：`{ enable, classifier, model, timeoutMs, maxBudget, budgets:{low,medium,high}, style }`。判档方式 `classifier`：`auto`=规则不确定时用小模型判（省调用）/`always`=总是小模型/`off`=纯规则/`jev`=由 Jev 判档（需开启 Jev）；小模型带超时、缓存，失败自动回退规则，不阻塞对话。档位→厂商原生字段（MiMo/Kimi/GLM/豆包→`thinking`、DeepSeek→`thinking`+`reasoning_effort`、Qwen→`enable_thinking`+`thinking_budget`、MiniMax→`adaptive`、Anthropic→`budget_tokens`、o/GPT→`reasoning_effort`、Gemini→`thinking_level`）。模型级 `thinking` 显式覆盖仍优先 |
 | `memoryLimits` | 空 | 声明式记忆字符上限，如 `{ memory: 2200, user: 1375 }` |
-| `systemPrompt` | 空 | 默认身份 system prompt（留空用富默认身份；被人设覆盖时失效） |
+| `systemPrompt` | 空 | 默认身份 system prompt（留空用富默认身份）。**优先级**：人设覆盖 > 进化产出的 agent 提示词 > 本项 > 内置默认（v1.26.30 修：此前注册表里预置的内置模板会被当成「进化产出」，导致本项写了也不生效） |
 | `chatPermission` | `master` | `#ai` 命令权限：`master`/`admin`/`owner`/`all` |
 | `privateChat` | `false` | 私聊是否触发对话；默认关（私聊不响应，仅群内 @/命令触发），设 `true` 开启 |
 | `masters` | `[]` | 接收审批通知的 master QQ 号列表 |

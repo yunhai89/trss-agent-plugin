@@ -202,6 +202,8 @@ agent:
     maxRepairAttempts: 2                          # 候选生成失败自动修复上限（文档 §13）
     runnerTimeoutMs: 5000                         # stable 工具单次调用超时（本地 fork 档与沙箱档共用）
   systemPrompt:
+    # 默认身份 system prompt。优先级：人设覆盖 > 进化产出的 agent 提示词 > 本项 > 内置默认身份。
+    # （留空＝用内置默认；v1.26.30 修：此前注册表里预置的内置模板被误当「进化产出」，本项写了不生效）
   chatPermission: master
   masterSkipConfirm: false   # 主人发起的任务免确认直执行（高危！仅主人；denylist 仍拦）。开启后主人命令不再 #确认，但会发高危提示
   masters: []
