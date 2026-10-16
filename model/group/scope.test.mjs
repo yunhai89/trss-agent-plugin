@@ -11,7 +11,8 @@
  */
 import { groupScopeError } from '../toolkit/define.js'
 import { groupKickTool, groupMuteTool } from './manage.js'
-import { listGroupFolderTool } from './files.js'
+import { listGroupFolderTool, transferGroupFileTool } from './files.js'
+import { sendGroupAiRecordTool } from './ai.js'
 
 let passed = 0
 let failed = 0
@@ -70,6 +71,47 @@ const d = mkCtx(undefined)
 d.ctx.e = { user_id: 9001, self_id: 1000 }
 const dm = await groupMuteTool.execute({ userId: '30003', duration: 60, groupId: 999 }, d.ctx)
 ok(!dm?.error || !String(dm.error).includes('不是当前会话群'), '私聊指定群号不被归属校验拦截')
+
+// ── 修 2026-10-17 审计：send_group_ai_record 漏判 needGid 的 {error} 返回值 ──
+// 原实现写 `if (!gid)`，而错误对象 `{error:'…'}` 为真值 → 被当 group_id 透传，跨群守卫静默失效。
+const e1 = mkCtx(111)
+const aiCross = await sendGroupAiRecordTool.execute({ groupId: '999', text: '你好', character: 'c1' }, e1.ctx)
+ok(aiCross?.error && String(aiCross.error).includes('999'), 'send_group_ai_record 跨群 → 返回错误（非假成功）')
+eq(e1.calls.length, 0, 'send_group_ai_record 跨群 → 协议端零调用（错误对象不再被当群号）')
+
+// ── 修 2026-10-17 审计：transfer_group_file 的 targetGroupId 原先完全不校验 ──
+// group_manage 对群管自动放行 → 任意群管可把本群文件写进任意其它群。现：目标须纯数字；跨群仅主人。
+function mkTransferCtx(gid, { isMaster = false } = {}) {
+  const calls = []
+  const bot = {
+    sendApi: async (action, params) => {
+      calls.push([action, params])
+      return { status: 'ok', retcode: 0, data: { files: [{ file_id: 'f1', file_name: '内部资料.zip' }], folders: [] } }
+    },
+  }
+  return { ctx: { bot, e: { group_id: gid, user_id: 9001, self_id: 1000 }, isGroup: true, role: 'admin', isGroupAdmin: true, isMaster }, calls }
+}
+const transfers = (r) => r.calls.filter((x) => x[0] === 'trans_group_file')
+
+const t1 = mkTransferCtx(111)
+const tCross = await transferGroupFileTool.execute({ fileId: 'f1', targetGroupId: '999' }, t1.ctx)
+ok(tCross?.error && String(tCross.error).includes('主人'), '非主人跨群转移 → 拒绝')
+eq(transfers(t1).length, 0, '非主人跨群转移 → 零 trans_group_file 调用')
+
+const t2 = mkTransferCtx(111, { isMaster: true })
+const tOk = await transferGroupFileTool.execute({ fileId: 'f1', targetGroupId: '999' }, t2.ctx)
+eq(tOk?.toGroup, '999', '主人跨群转移 → 目标群原样回传')
+eq(transfers(t2).map((x) => x[1]?.target_group_id), ['999'], '主人跨群转移 → 参数带目标群 999')
+
+const t3 = mkTransferCtx(111, { isMaster: true })
+const tBad = await transferGroupFileTool.execute({ fileId: 'f1', targetGroupId: 'not-a-gid' }, t3.ctx)
+ok(tBad?.error && String(tBad.error).includes('非法'), '目标群号非数字 → 拒绝')
+eq(transfers(t3).length, 0, '目标群号非法 → 零调用')
+
+const t4 = mkTransferCtx(111)
+const tSame = await transferGroupFileTool.execute({ fileId: 'f1', targetGroupId: '111' }, t4.ctx)
+eq(tSame?.transferred, true, '非主人同群转移（target=当前群）→ 允许')
+eq(transfers(t4).map((x) => x[1]?.target_group_id), ['111'], '同群转移参数正确')
 
 console.log('\n========================================')
 console.log(`通过 ${passed}，失败 ${failed}`)

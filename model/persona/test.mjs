@@ -93,6 +93,36 @@ await test('PersonaStore：越狱人设拒绝落盘', async () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+// 第 7 轮 M4：写入路径的长度/条数闸 + list() 缓存（写入即失效）
+await test('PersonaStore：超长/超量拒绝落盘、list 缓存写入即失效', async () => {
+  const dir = tmpDir()
+  const store = new PersonaStore({ dir })
+  const long = 'x'.repeat(8001)
+  let e1 = null
+  try { store.add({ name: '超长内容', systemPrompt: long }) } catch (e) { e1 = e }
+  ok(e1 && /过长/.test(e1.message), `超长 systemPrompt 被拒（${e1?.message}）`)
+  let e2 = null
+  try { store.add({ name: 'n'.repeat(41), systemPrompt: '正常内容' }) } catch (e) { e2 = e }
+  ok(e2 && /名称过长/.test(e2.message), `超长 name 被拒（${e2?.message}）`)
+  ok(store.list().every((p) => !/超长内容/.test(p.name)), '被拒人设未落盘')
+  let e3 = null
+  try { store.update('default', { systemPrompt: long }) } catch (e) { e3 = e }
+  ok(e3 && e3.message.includes('不可修改'), '内置先被内置闸拦下')
+  const mine = store.add({ name: '长度内', systemPrompt: 'x'.repeat(8000) })
+  ok(!!mine, '恰好在阈值内的内容允许')
+  // list() 现在带短 TTL 缓存：写入后必须立刻可见（_invalidate 生效）
+  ok(store.list().some((p) => p.id === '长度内'), 'add 后 list 立即命中（缓存已失效）')
+  ok(store.remove('长度内') && !store.list().some((p) => p.id === '长度内'), 'remove 后 list 立即消失（缓存已失效）')
+  // 条数上限：直接铺 500 个文件绕过 add，验证 store 层闸门
+  for (let i = 0; i < 500; i++) {
+    fs.writeFileSync(path.join(dir, `filler_${i}.json`), JSON.stringify({ id: `filler_${i}`, name: `填充${i}`, systemPrompt: '填充内容' }))
+  }
+  let e4 = null
+  try { store.add({ name: `第501个`, systemPrompt: '内容' }) } catch (e) { e4 = e }
+  ok(e4 && /上限/.test(e4.message), `超过 500 个自定义人设被拒（${e4?.message}）`)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 // ---------- 3. service：激活绑定 + resolve ----------
 await test('PersonaService：激活绑定 + resolve', async () => {
   const store = new PersonaStore({ dir: tmpDir() })
@@ -175,6 +205,28 @@ await test('PersonaLore：草稿 → 采纳 → 丢弃（按 id 独立）', asyn
   // 丢弃
   ok(lore.discard('raiden-ei'), 'discard 成功')
   eq(lore.get('raiden-ei'), null, '丢弃后查无')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+// 第 7 轮 L4：discard 的草稿/生效语义要可分辨（Web 面板此前只能靠"有没有草稿"猜）
+await test('PersonaLore：discardDetailed 区分「只丢草稿」与「删生效资料」', async () => {
+  const dir = tmpDir()
+  const lore = new PersonaLore({ dir })
+  const mk = { summary: '设定', facts: '- 事实一', sources: [], canonical: {}, rawNotes: '' }
+  lore.saveDraft('p1', mk)
+  lore.adopt('p1') // 先有生效资料
+  lore.saveDraft('p1', { ...mk, summary: '新草稿' }) // 再叠一份待审草稿
+  const d1 = lore.discardDetailed('p1')
+  ok(d1.removed === true && d1.removedDraft === true && d1.removedActive === false,
+    `只丢草稿：removed=${d1.removed} removedDraft=${d1.removedDraft} removedActive=${d1.removedActive}`)
+  ok(!!lore.get('p1'), '生效资料仍在（旧行为保持不变）')
+  const d2 = lore.discardDetailed('p1')
+  ok(d2.removed === true && d2.removedActive === true && d2.removedDraft === false,
+    `删生效资料：removed=${d2.removed} removedActive=${d2.removedActive}`)
+  ok(!lore.get('p1'), '生效资料已删除')
+  const d3 = lore.discardDetailed('p1')
+  ok(d3.removed === false && d3.removedDraft === false && d3.removedActive === false, '无资料时全 false')
+  ok(lore.discard('nonexistent-id') === false, 'discard 布尔语义保持（未命中为 false）')
   fs.rmSync(dir, { recursive: true, force: true })
 })
 

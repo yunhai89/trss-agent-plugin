@@ -186,12 +186,14 @@ export async function getPostDetail(postId, { gid = 2, cookie, fetcher, signal }
   return parsePostFromItem(data?.post || {}, gid)
 }
 
-/** 帖子评论（失败返回空数组，不抛错） */
+/**
+ * 帖子评论。**失败抛错**（不再吞成空数组）：cookie 过期/风控/超时/帖子被删时，
+ * 旧实现返回 [] → 工具层回「暂无评论。」，用户与模型都把故障当成「确实没有讨论」。
+ */
 export async function getPostReplies(postId, { gid = 2, isHot = true, size = 5, cookie, fetcher, signal } = {}) {
   const query = sortedQueryString({ gids: String(gid), is_hot: String(isHot), post_id: String(postId), size: String(size) })
   const url = `${MIYOUSHE_CONFIG.apiBase}/post/wapi/getPostReplies?${query}`
-  let data
-  try { data = await request(url, { fetcher, cookie, signal }) } catch { return [] }
+  const data = await request(url, { fetcher, cookie, signal })
   return (data?.list || []).map((item) => {
     const reply = item.reply || item
     const user = item.user || {}

@@ -24,6 +24,7 @@ import {
   TraceStore,
   fromTraces,
 } from './index.js'
+import { SelfReviewer } from './review.js'
 
 let passed = 0
 let failed = 0
@@ -327,6 +328,27 @@ await test('自适应温度 + 段落交叉：低多样性→高温度', async ()
   ok(receivedTemp != null && receivedTemp >= 0 && receivedTemp <= 1, `收到 temperature=${receivedTemp}`)
   // 段落交叉被调用（crossoverParagraph 存在且 useParagraphCrossover 默认 true）
   ok(typeof mut.crossoverParagraph === 'function', 'crossoverParagraph 可用')
+})
+
+// ---------- 第 7 轮 L1/L2：自评审日界与 per-scope 计数上限 ----------
+await test('审计回归：日预算按本地日界重置、_counts 有容量上限', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-review-'))
+  try {
+    const r = new SelfReviewer({ provider: { name: 'mock' }, suggestionDir: dir, dailyBudgetTokens: 100, logger: () => {} })
+    // L1：日界取本地日期（此前 toISOString 取 UTC，东八区要到北京时间 08:00 才重置当日预算）
+    const d = new Date()
+    const localKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    r._usedTokens = 999
+    ok(r._budgetExhausted() === false, '跨日即重置已用预算（本地日界）')
+    ok(r._budgetDay === localKey, `预算日界用本地日期（${r._budgetDay}）`)
+    ok(r._usedTokens === 0, '重置后已用归零')
+    r._usedTokens = 999
+    ok(r._budgetExhausted() === true, '同日超预算即闸住评审')
+    // L2：per-scope 计数 Map 不再无上限增长（此前只增不删）
+    for (let i = 0; i < 2000; i++) r._counts.set(`s${i}`, 1)
+    r.tick({ scopeId: 'brand-new-scope' })
+    ok(r._counts.size <= 2000 && r._counts.get('brand-new-scope') === 1, `_counts 触顶后清零重计（size=${r._counts.size}）`)
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
 // ---------- 总结 ----------

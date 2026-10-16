@@ -8,7 +8,7 @@
  *  - 用户明确要表情（force）时绕过上述闸门，且标记无匹配时兜底任选一张；
  *  - maxPerReply 限流。
  */
-import { StickerManager } from './manager.js'
+import { StickerManager, normalizeMaxPerReply } from './manager.js'
 import { isStickerOnly, stripMarkers } from './parser.js'
 
 let passed = 0
@@ -114,6 +114,34 @@ await test('关闭开关：enabled=false → 恒空', async () => {
   const m = makeMgr()
   m.enabled = () => false
   eq(m.decide('[sticker:开心]', CTX, { force: true }).size, 0, '未启用 → 不发')
+})
+
+// 修 2026-10-17 审计：旧实现 `Math.max(0, (c.maxPerReply | 0) || 0)` 把 0/空/null/非法一律折成 0，
+// 而 0 在 _decide 与 _fillFallback 里代表「不限」→ 显式要表情且标记无匹配时整库被塞进 acceptMap
+// （文本模式对 acceptMap 每个 value 各发一条图消息 → 刷屏）。现语义：0/空/非法回落默认 2，硬上限 5。
+await test('maxPerReply 归一：0/空/非法 → 默认 2，超硬上限 → 5', async () => {
+  const many = '[sticker:开心][sticker:无奈][sticker:摸鱼]'
+  for (const bad of [0, null, undefined, '', 'abc', -1]) {
+    const m = makeMgr({ maxPerReply: bad, antiConsecutive: false })
+    eq(m.decide(many, CTX).size, 2, `maxPerReply=${JSON.stringify(bad)} → 回落默认 2（不再 0=不限）`)
+  }
+  const hi = makeMgr({ maxPerReply: 99, antiConsecutive: false })
+  eq(hi.decide(many, CTX).size, 3, 'maxPerReply=99 → 受硬上限 5 约束（本库仅 3 条）')
+  eq(normalizeMaxPerReply(99), 5, 'normalizeMaxPerReply(99) → 5')
+  eq(normalizeMaxPerReply('3'), 3, '数字字符串 "3" → 3')
+  eq(normalizeMaxPerReply(2.9), 2, '小数向下取整 → 2')
+  eq(normalizeMaxPerReply(0), 2, '0 → 默认 2')
+})
+
+await test('force 兜底封顶：maxPerReply=0/空 时不再灌满整库', async () => {
+  const big = {}
+  for (let i = 0; i < 300; i++) big[`s${i}`] = { file: `f${i}.png` }
+  for (const bad of [0, null, undefined, '']) {
+    const m = makeMgr({ maxPerReply: bad, antiConsecutive: false, sendRate: 0 })
+    m.getIndex = () => ({ stickers: big })
+    const fb = m.decide('[sticker:编的名字]', CTX, { force: true })
+    eq(fb.size, 2, `整库 300 条 + maxPerReply=${JSON.stringify(bad)} → 兜底仍只取 2 张`)
+  }
 })
 
 console.log(`\n========================================`)

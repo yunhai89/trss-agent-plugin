@@ -74,9 +74,13 @@ export const sendForwardMsgTool = defineTool({
     if (!Array.isArray(p.messages) || !p.messages.length) return { error: 'messages 需为非空节点数组' }
     const scopeErr = groupScopeError(ctx, p.groupId)
     if (scopeErr) return { error: scopeErr }
-    const gid = groupIdOf(ctx, p.groupId)
     const uid = p.userId ? String(p.userId) : null
-    const target = gid ? 'group' : uid ? 'private' : null
+    // 目标判定「语义优先」（2026-10-17 审计 high）：显式 userId → 私聊；显式 groupId → 群；两者都缺省才回落当前群。
+    // 旧实现 gid 优先，而 groupIdOf 未传 groupId 时会回落当前会话群 → 群里说「把这段转发给 QQ20002」时，
+    // 本应只进私聊的内容被合并转发进当前群（全员可见），返回值却带着 userId，模型据此回「已私聊发送」——
+    // 错误受众 + 信息泄露 + 假成功。返回值也只按实际目标填字段。
+    const gid = uid ? null : groupIdOf(ctx, p.groupId)
+    const target = uid ? 'private' : gid ? 'group' : null
     if (!target) return { error: '需指定目标（群聊或 userId）；当前会话无法判断' }
     const action = target === 'group' ? 'send_group_forward_msg' : 'send_private_forward_msg'
     const nodes = normalizeForwardNodes(p.messages)
@@ -85,7 +89,11 @@ export const sendForwardMsgTool = defineTool({
       : { user_id: uid, messages: nodes }
     const r = await sendApi(ctx, action, params)
     if (!r.ok) return { error: r.error }
-    return { ok: true, target, groupId: gid || null, userId: uid || null, messageId: r.data?.message_id ?? null, resId: r.data?.res_id ?? r.data?.resid ?? null }
+    const messageId = r.data?.message_id ?? null
+    const resId = r.data?.res_id ?? r.data?.resid ?? null
+    return target === 'group'
+      ? { ok: true, target, groupId: gid, messageId, resId }
+      : { ok: true, target, userId: uid, messageId, resId }
   },
 })
 

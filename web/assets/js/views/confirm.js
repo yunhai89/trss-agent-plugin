@@ -18,6 +18,9 @@
       const tick = ref(0)
       const timer = setInterval(() => tick.value++, 1000)
       let pollTimer = null
+      // 第 6 轮审计：onMounted 的 await 未返回就切页时 onUnmounted 已经跑过（pollTimer 仍为 null），
+      // 续体若继续建 interval 就再没人清理 → 每 5s 永久轮询 /confirm 与 /persona-adoptions
+      let disposed = false
 
       /* 读 tick 建立依赖,倒计时环每秒刷新 */
       const remain = (c) => { void tick.value; return Math.max(0, TIMEOUT.value - (Date.now() - c.createdAt)) }
@@ -51,12 +54,13 @@
         try { await window.store.loadConfig() } catch { /* 忽略 */ }
         try { await window.store.loadConfirm() } catch (e) { toast(e.message, 'error') }
         try { await window.store.loadPersonaAdoptions() } catch { /* 兼容旧后端：无人设采纳队列 */ }
+        if (disposed) return
         pollTimer = setInterval(() => {
           window.store.loadConfirm().catch(() => {})
           window.store.loadPersonaAdoptions().catch(() => {})
         }, 5000)
       })
-      onUnmounted(() => { clearInterval(timer); if (pollTimer) clearInterval(pollTimer) })
+      onUnmounted(() => { disposed = true; clearInterval(timer); if (pollTimer) clearInterval(pollTimer) })
 
       return { items, adoptions, tick, remain, remainPct, ringOffset, decide, decideAdopt, danger, fmt, TIMEOUT }
     },

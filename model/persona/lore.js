@@ -234,16 +234,35 @@ export class PersonaLore {
     return this.save(sid, { ...cur, status: 'active', adoptedAt: Date.now() })
   }
 
-  /** 丢弃资料：有独立草稿时只丢草稿（保留生效资料）；否则删主资料并取消其定时刷新 job。 */
+  /**
+   * 丢弃资料：有独立草稿时只丢草稿（保留生效资料）；否则删主资料并取消其定时刷新 job。
+   * 返回值保持布尔（`#丢弃补齐` 只关心"有没有丢成"）。
+   * 注意：**同时存在草稿与生效资料时，本次只删草稿、生效资料仍在**——调用方需要区分这两种
+   * 结果时用 discardDetailed()（第 7 轮 L4：面板此前只能靠"有没有草稿"猜，可能报错语义）。
+   */
   discard(id) {
+    return this.discardDetailed(id).removed
+  }
+
+  /**
+   * 丢弃资料（带明细，第 7 轮 L4）。返回值形如 `{ removed, removedDraft, removedActive }`：
+   *  - removedDraft 为 true 且 removedActive 为 false → 只丢了待审草稿，生效资料仍保留；
+   *  - removedActive 为 true → 生效资料文件已删除；
+   *  - removed 是两者的或，兼容旧调用方的布尔语义。
+   */
+  discardDetailed(id) {
     const sid = String(id ?? '')
-    if (!ID_RE.test(sid)) return false
-    if (this.getDraft(sid)) { this._removeDraft(sid); return true }
-    if (!this.get(sid)) return false
+    if (!ID_RE.test(sid)) return { removed: false, removedDraft: false, removedActive: false }
+    if (this.getDraft(sid)) {
+      return { removed: this._removeDraft(sid) === true, removedDraft: true, removedActive: false }
+    }
+    if (!this.get(sid)) return { removed: false, removedDraft: false, removedActive: false }
     const j = this._jobs.get(sid)
     if (j && this.scheduler) { try { this.scheduler.cancelJob(j) } catch { /* noop */ } }
     this._jobs.delete(sid)
-    try { fs.unlinkSync(this._file(sid)); return true } catch { return false }
+    let removed = false
+    try { fs.unlinkSync(this._file(sid)); removed = true } catch { removed = false }
+    return { removed, removedDraft: false, removedActive: removed }
   }
 
   _removeDraft(id) {

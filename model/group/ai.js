@@ -72,6 +72,9 @@ export const sendGroupAiRecordTool = defineTool({
   }, ['text', 'character']),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    // 修 2026-10-17 审计：此处漏判 needGid 的跨群守卫错误对象（同文件另两个工具都判 gid?.error），
+    // 会把 {error:'目标群 X 不是当前会话群 Y…'} 当成 group_id 发给协议端 → 守卫失效、报错误导。
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     const r = await sendApi(ctx, 'send_group_ai_record', {
       group_id: gid, text: String(p.text),

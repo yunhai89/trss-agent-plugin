@@ -286,6 +286,7 @@ agent:
     dir: "skills"
     historyCount: 15
   search:
+    timeout: 0               # 搜索源超时（毫秒；0/未填=各源默认）。可给单源覆盖，如 tavily: { apiKey: "", timeout: 20000 }
     tavily:
       apiKey: ""
     exa:
@@ -308,7 +309,7 @@ agent:
     servers:
   sticker:
     enable: false            # 表情包总开关（未开 → 不注入清单、不解析，零影响）
-    maxPerReply: 2           # 单条回复最多贴纸数
+    maxPerReply: 2           # 单条回复最多贴纸数（1~5，硬上限 5；填 0/空/非法值按默认 2 处理，要关闭请用上面的 enable 开关）
     cooldown: 300            # 同会话两次带图回复最小间隔（秒）
     sendRate: 0.25           # 概率闸：门控通过后实际带图概率（防每条都带→更 AI）
     antiConsecutive: true    # 防连发：上一条带过则本条不带

@@ -45,12 +45,31 @@ export class RefLibrary {
     this.logger = logger || (() => {})
   }
 
-  /** 读取索引（损坏/缺失 → 空数组；不抛） */
+  /**
+   * 读取索引。区分「文件不存在」（真空表）与「读/解析失败」（索引损坏）：
+   * 后者**必须抛错**——旧实现一律返回空数组，于是下一次 add() 会把损坏当空表、
+   * 把整个索引覆盖成只剩新条目（refs/ 里的音频文件还在但全部失联，只能重建）。
+   * 抛错前先把损坏文件另存 .bad-<ts>，便于人工找回。
+   */
   _read() {
+    let raw
+    try { raw = fs.readFileSync(this.indexPath, 'utf8') } catch { return [] } // 不存在＝真空表
     try {
-      const arr = JSON.parse(fs.readFileSync(this.indexPath, 'utf8'))
+      const arr = JSON.parse(raw)
       return Array.isArray(arr) ? arr : []
-    } catch { return [] }
+    } catch (e) {
+      let bak = ''
+      try { bak = `${this.indexPath}.bad-${Date.now()}`; fs.copyFileSync(this.indexPath, bak) } catch { /* 备份失败不阻断报错 */ }
+      throw new Error(`参考音频索引损坏${bak ? `（已备份到 ${path.basename(bak)}）` : ''}：${e?.message || e}`)
+    }
+  }
+
+  /** 读路径专用：损坏时告警并降级为空表（不抛，保证面板/合成不整体失败；写路径仍走 _read 抛错防覆盖） */
+  _readSafe() {
+    try { return this._read() } catch (e) {
+      this.logger('warn', `[tts] ${e?.message || e}`)
+      return []
+    }
   }
 
   /** 原子写索引 */
@@ -63,16 +82,16 @@ export class RefLibrary {
 
   /** 列表（可按 kind 过滤），新→旧 */
   list(kind) {
-    const arr = this._read()
+    const arr = this._readSafe()
     const out = kind ? arr.filter((r) => r.kind === kind) : arr
     return out.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
   }
 
-  get(id) { return this._read().find((r) => r.id === id) || null }
+  get(id) { return this._readSafe().find((r) => r.id === id) || null }
 
   getByName(name, kind) {
     const n = String(name || '').trim()
-    return this._read().find((r) => r.name === n && (!kind || r.kind === kind)) || null
+    return this._readSafe().find((r) => r.name === n && (!kind || r.kind === kind)) || null
   }
 
   /** 参考音频绝对路径（条目不存在返回 null） */

@@ -57,7 +57,7 @@
     components: { CfgRow, TagEditor },
     setup() {
       const { ref, reactive, watch, computed, onMounted, onUnmounted, nextTick } = Vue
-      const { toast } = window.UI
+      const { toast, parseNum } = window.UI
       const M = window.MOCK
 
       let origSnapshot = {}
@@ -104,6 +104,9 @@
         for (const k of Object.keys(frm)) {
           const p = prefix + '.' + k, a = orig?.[k], b = frm[k]
           if (b && typeof b === 'object' && !Array.isArray(b) && a && typeof a === 'object') buildChanges(a, b, p, out)
+          // 数值归一（第 6 轮审计）：number 输入框清空时 v-model.number 给出 ''，直接提交会被后端当 0 消费
+          else if (typeof a === 'number') { const n = parseNum(b); if (n !== null && n !== a) out[p] = n }
+          else if (b === '' && typeof a !== 'string') continue
           else if (JSON.stringify(a) !== JSON.stringify(b)) out[p] = b
         }
         return out

@@ -26,6 +26,19 @@ import { hashImage, judgeAndTag, classifyJudge, pickByEmotion as pickByEmotionFr
 
 const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }
 
+/** 单条回复表情张数的默认上限与硬上限（配置 maxPerReply 的语义见 _decide）。 */
+export const DEFAULT_MAX_PER_REPLY = 2
+export const HARD_MAX_PER_REPLY = 5
+
+/** maxPerReply 归一（修 2026-10-17 审计）：
+ *  原先 `Math.max(0, (c.maxPerReply | 0) || 0)` 把 0/空串/null/非法值一律折成 0，
+ *  而 0 在 _decide 与 _fillFallback 里代表「不限」→ 用户明确要表情且标记无匹配时整库被塞进 acceptMap。
+ *  现语义：合法正整数（含数字字符串/小数）取 min(5, 向下取整)；0/空/非法一律回落默认 2。 */
+export function normalizeMaxPerReply(value) {
+  const n = Number(value)
+  return Number.isFinite(n) && n >= 1 ? Math.min(HARD_MAX_PER_REPLY, Math.floor(n)) : DEFAULT_MAX_PER_REPLY
+}
+
 /** mime → 扩展名（无匹配默认 png）。 */
 function mimeToExt(mime) {
   const m = String(mime || '').toLowerCase()
@@ -196,10 +209,11 @@ export class StickerManager {
       if (rate < 1 && Math.random() > rate) return acceptMap
     }
     const stickers = this.getIndex()?.stickers || {}
-    const max = Math.max(0, (c.maxPerReply | 0) || 0)
+    // 修 2026-10-17 审计：上限归一后恒为 1..HARD_MAX_PER_REPLY（0/空/非法 → 默认 2），不再出现 0=不限
+    const max = normalizeMaxPerReply(c.maxPerReply)
     let count = 0
     for (const mk of parseMarkers(content)) {
-      if (max > 0 && count >= max) break
+      if (count >= max) break
       let entry = stickers[mk.name]
       let usedName = mk.name
       if (!entry) {
@@ -228,11 +242,13 @@ export class StickerManager {
     return acceptMap
   }
 
-  /** 兜底选图（仅 force 且无匹配时）：先避开近 3 张，仍无则放开近期限制。 */
+  /** 兜底选图（仅 force 且无匹配时）：先避开近 3 张，仍无则放开近期限制。
+   *  封顶用与 _decide 同一套归一结果（修 2026-10-17 审计：原先 max=0 会灌满整库 → 逐条刷屏）。 */
   _fillFallback(acceptMap, stickers, max, recent) {
+    const cap = normalizeMaxPerReply(max)
     const pick = (skipRecent) => {
       for (const [name, entry] of Object.entries(stickers)) {
-        if (max > 0 && acceptMap.size >= max) return
+        if (acceptMap.size >= cap) return
         if (!entry || entry.nsfw || acceptMap.has(name)) continue
         if (skipRecent && recent.has(name)) continue
         const abs = this._absOf(entry)

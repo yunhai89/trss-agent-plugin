@@ -135,6 +135,8 @@
 
       /* 缓存统计（完整 Agent 流口径；未观测旧日志不进分母） */
       const win = Vue.ref('7d')
+      /* 第 6 轮审计：账目行文案原先写死「近 7 日」，切到 1h/24h/new/all 后与数据窗口不符 */
+      const winLabel = computed(() => ({ '1h': '近 1 小时', '24h': '近 24 小时', '7d': '近 7 日', 'new': '部署后', 'all': '全部时间' }[win.value] || '近 7 日'))
       const cacheStats = computed(() => {
         const c = M.cache || null
         if (c) {
@@ -168,12 +170,12 @@
       const books = computed(() => [
         {
           id: 'token', name: 'Token 消耗', unit: 'tokens',
-          sub: `近 7 日 · ${M.statsSource === 'kv' ? '按 Redis 日统计聚合（本地时区）' : '按 devLog 聚合（过渡，产生对话后切 Redis）'}`,
+          sub: `${winLabel.value} · ${M.statsSource === 'kv' ? '按 Redis 日统计聚合（本地时区）' : '按 devLog 聚合（过渡，产生对话后切 Redis）'}`,
           value: fmt.num(totalTokens.value),
         },
         {
           id: 'tool', name: '工具调用', unit: '次',
-          sub: `近 7 日 · 成功率 ${M.toolSuccessRate != null ? (M.toolSuccessRate * 100).toFixed(1) + '%' : '暂无'}`,
+          sub: `${winLabel.value} · 成功率 ${M.toolSuccessRate != null ? (M.toolSuccessRate * 100).toFixed(1) + '%' : '暂无'}`,
           value: fmt.num(M.totalToolCalls || 0),
         },
         {
@@ -183,7 +185,7 @@
         },
         {
           id: 'req', name: '请求', unit: '次',
-          sub: '近 7 日 · 每日对话轮次（devLog run_end 计数）',
+          sub: `${winLabel.value} · 每日对话轮次（devLog run_end 计数）`,
           value: fmt.num(M.totalRequests || 0),
         },
         {

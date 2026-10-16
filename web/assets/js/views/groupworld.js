@@ -49,7 +49,7 @@
     components: { CfgRow, TagEditor },
     setup() {
       const { ref, reactive, watch, computed, onMounted, nextTick } = Vue
-      const { toast } = window.UI
+      const { toast, parseNum } = window.UI
       const M = window.MOCK
 
       // ── 配置 ──
@@ -83,6 +83,9 @@
         for (const k of Object.keys(frm)) {
           const p = prefix + '.' + k, a = orig?.[k], b = frm[k]
           if (b && typeof b === 'object' && !Array.isArray(b) && a && typeof a === 'object') buildChanges(a, b, p, out)
+          // 数值归一（第 6 轮审计）：number 输入框清空时 v-model.number 给出 ''，直接提交会被后端当 0 消费
+          else if (typeof a === 'number') { const n = parseNum(b); if (n !== null && n !== a) out[p] = n }
+          else if (b === '' && typeof a !== 'string') continue
           else if (JSON.stringify(a) !== JSON.stringify(b)) out[p] = b
         }
         return out
@@ -279,8 +282,8 @@
           <span v-if="stats && stats.ready === false" class="pill p-rose">GroupWorld 未就绪（sqlite3 未装？）</span>
         </div>
 
-        <!-- 统计卡 -->
-        <div v-if="stats" class="row g10 wrap" style="margin-bottom:16px">
+        <!-- 统计卡（第 6 轮审计：stats={ready:false} 时后端不返回任何计数字段，渲染整排空白卡，改为不渲染） -->
+        <div v-if="stats && stats.ready !== false" class="row g10 wrap" style="margin-bottom:16px">
           <div class="card" style="flex:1;min-width:120px;padding:12px 14px"><div class="mut2" style="font-size:11px">成员</div><div class="num" style="font-size:22px;font-weight:800">{{ stats.members }}</div><div class="mut2" style="font-size:11px">hot {{ stats.hotMembers }}</div></div>
           <div class="card" style="flex:1;min-width:120px;padding:12px 14px"><div class="mut2" style="font-size:11px">特征</div><div class="num" style="font-size:22px;font-weight:800">{{ stats.traits }}</div></div>
           <div class="card" style="flex:1;min-width:120px;padding:12px 14px"><div class="mut2" style="font-size:11px">关系边</div><div class="num" style="font-size:22px;font-weight:800">{{ stats.edges }}</div></div>

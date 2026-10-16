@@ -385,6 +385,7 @@ persona:
 
 ```yaml
 search:
+  timeout: 0                 # 搜索源超时（毫秒）；0/未填=用各源默认。也可单源覆盖（tavily: { apiKey: "", timeout: 20000 }）
   tavily:    { apiKey: "" }
   exa:       { apiKey: "" }
   perplexity: { apiKey: "" }
@@ -685,9 +686,9 @@ tts:
 | 指令 | 说明 |
 | --- | --- |
 | `#审阅进化` | 查看待审阅的提示词/工具进化提案 |
-| `#采纳 +id` / `#拒绝进化 +id` | 采纳 / 拒绝提案 |
+| `#采纳 +id` / `#拒绝进化 +id` | 采纳 / 拒绝提案（prompt/memory/tool 真正落盘生效；skill 类无自动应用机制，会保留待审并提示手工编辑 skills/） |
 | `#回滚 +id` | 回滚已采纳的提示词变更 |
-| `#进化 prompt +键名` | 手动触发某提示词模板的进化 |
+| `#进化 prompt +键名` | 手动触发某提示词模板的进化（产出**待审候选**，需 `#审阅进化` → `#采纳 <id>` 才写入 prompts/ 并生效） |
 | `#LLM进化` | 让模型自主提出进化方向 |
 | `#工具进化列表` / `#采纳工具 +名` / `#淘汰工具 +名` / `#回滚工具 +名 +版本` / `#工具健康` | 工具进化（自动生成新工具）的审阅与运维 |
 
@@ -1063,7 +1064,7 @@ sticker:
   enable: false          # 总开关
   sendRate: 0.25         # 概率闸：门控通过后实际带图概率
   cooldown: 300          # 同会话两次带图最小间隔（秒）
-  maxPerReply: 2
+  maxPerReply: 2         # 单条回复最多贴纸数（1~5，硬上限 5；0/非法 → 默认 2，不是「不限」）
   antiConsecutive: true  # 防连发
   autoDiscover: false    # 自动发现总开关（需 enable + agent.vision.model）
   discoverGroups: []     # 采集群白名单（空=所有群都采集）

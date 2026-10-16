@@ -142,9 +142,25 @@ export function truncateText(buf, maxChars = 12000) {
   return `${s.slice(0, maxChars)}\n…[已截断，共 ${s.length} 字符]`
 }
 
+/** 体积超限错误：code=too_large 让上层能给「文件过大」这类可读文案，而不是笼统的「下载失败」 */
+function tooLargeError(bytes, limit) {
+  const e = new Error(`文件过大（${fmtMB(bytes)}，上限 ${fmtMB(limit)}）`)
+  e.code = 'too_large'
+  e.bytes = bytes
+  e.limit = limit
+  return e
+}
+
+function fmtMB(n) {
+  return `${(Number(n || 0) / 1024 / 1024).toFixed(1)}MB`
+}
+
 /** http(s) 取字节：带超时 + 1 次重试。CDN 抖动/慢响应时裸 fetch 会偶发失败被上层静默吞掉，
- *  导致整张图丢失；这里对超时/网络类错误重试一次，4xx 等非瞬态错误不重试。 */
-async function httpToBuffer(fetchFn, url, { timeout = 30000, retries = 1 } = {}) {
+ *  导致整张图丢失；这里对超时/网络类错误重试一次，4xx 等非瞬态错误不重试。
+ *  maxBytes>0 时：先看 content-length，分块传输则边读边计数，超限立即取消 —— 避免把
+ *  超大附件整份读进内存（本轮外部服务客户端审计第 3 条 / 既有 M-046）。 */
+async function httpToBuffer(fetchFn, url, { timeout = 30000, retries = 1, maxBytes = 0 } = {}) {
+  const cap = Number(maxBytes) > 0 ? Number(maxBytes) : 0
   let lastErr
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -154,9 +170,30 @@ async function httpToBuffer(fetchFn, url, { timeout = 30000, retries = 1 } = {})
       }
       const res = await fetchFn(url, opts)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      return Buffer.from(await res.arrayBuffer())
+      const declared = Number(res.headers?.get?.('content-length'))
+      if (cap && Number.isFinite(declared) && declared > cap) throw tooLargeError(declared, cap)
+      if (cap && res.body && typeof res.body.getReader === 'function') {
+        const reader = res.body.getReader()
+        const chunks = []
+        let total = 0
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          total += value?.length || 0
+          if (total > cap) {
+            try { await reader.cancel() } catch { /* noop */ }
+            throw tooLargeError(total, cap)
+          }
+          chunks.push(Buffer.from(value))
+        }
+        return Buffer.concat(chunks)
+      }
+      const buf = Buffer.from(await res.arrayBuffer())
+      if (cap && buf.length > cap) throw tooLargeError(buf.length, cap)
+      return buf
     } catch (err) {
       lastErr = err
+      if (err?.code === 'too_large') break // 体积类错误重试也没用
       const transient = err?.name === 'AbortError'
         || /timeout|fetch failed|ECONN|ETIMEDOUT|EAI_|socket hang up|network/i.test(err?.message || '')
       if (!transient) break
@@ -165,23 +202,57 @@ async function httpToBuffer(fetchFn, url, { timeout = 30000, retries = 1 } = {})
   throw lastErr || new Error('http fetch failed')
 }
 
-/** 从 base64://、http(s)://、file://、裸路径等多种来源取 Buffer */
-async function toBuffer(source, { bot, fetcher }) {
+/** 轻量探测 content-length（HEAD，1.5s 超时）。框架下载（Bot.download）拿不到响应头，
+ *  超大附件会在探测这一步被提前拒绝；探测失败一律返回 0，不阻断主流程。 */
+async function probeContentLength(url, { fetcher } = {}) {
+  const f = fetcher || globalThis.fetch
+  if (typeof f !== 'function') return 0
+  try {
+    const opts = { method: 'HEAD', headers: { 'User-Agent': 'Mozilla/5.0 (agents-plugin)' } }
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      opts.signal = AbortSignal.timeout(1500)
+    }
+    const res = await f(url, opts)
+    if (!res?.ok) return 0
+    const n = Number(res.headers?.get?.('content-length'))
+    return Number.isFinite(n) && n > 0 ? n : 0
+  } catch {
+    return 0
+  }
+}
+
+/** 从 base64://、http(s)://、file://、裸路径等多种来源取 Buffer。
+ *  maxBytes>0 时各来源都先估/查大小，超限抛 code=too_large（本地文件用 statSync，不整份读进内存）。 */
+async function toBuffer(source, { bot, fetcher, maxBytes = 0 } = {}) {
   if (Buffer.isBuffer(source)) return source
   if (typeof source !== 'string') return null
+  const cap = Number(maxBytes) > 0 ? Number(maxBytes) : 0
   // 框架优先：Bot.Buffer 统一处理所有形态（含临时 file:// 溢出）
   if (bot?.Buffer) {
     try { const b = await bot.Buffer(source, {}); if (Buffer.isBuffer(b)) return b } catch { /* noop */ }
   }
-  if (source.startsWith('base64://')) return Buffer.from(source.slice(9), 'base64')
+  if (source.startsWith('base64://')) {
+    const b64 = source.slice(9)
+    if (cap) {
+      const est = Math.floor(b64.length * 3 / 4) // base64 体积估算，用于提前拒绝
+      if (est > cap) throw tooLargeError(est, cap)
+    }
+    return Buffer.from(b64, 'base64')
+  }
   if (/^https?:\/\//i.test(source)) {
     const f = fetcher || globalThis.fetch
-    if (f) return await httpToBuffer(f, source)
+    if (f) return await httpToBuffer(f, source, { maxBytes: cap })
   }
   // 本地路径（get_image/get_file/get_record 返回的 NapCat 本地路径；同机部署可直接读）
   const localPath = source.startsWith('file://') ? source.slice(7) : source
   if (source.startsWith('file://') || /^([\/~]|[a-zA-Z]:[\\/])/.test(source)) {
-    try { return fs.readFileSync(localPath) } catch { /* noop */ }
+    try {
+      const st = fs.statSync(localPath)
+      if (cap && st.size > cap) throw tooLargeError(st.size, cap)
+      return fs.readFileSync(localPath)
+    } catch (err) {
+      if (err?.code === 'too_large') throw err
+    }
   }
   return null
 }
@@ -200,9 +271,10 @@ function pickField(r, ...keys) {
  * NapCat/OneBot 原生接口取字节（引用/历史/群文件场景，url 缺失或下载失败时的兜底）。
  * 需要 e.bot.sendApi；调用方无 e 时直接返回 null。
  */
-async function napcatBytes(mf, e, { bot, fetcher, log }) {
+async function napcatBytes(mf, e, { bot, fetcher, log, maxBytes = 0 }) {
   const sendApi = e?.bot?.sendApi
   if (typeof sendApi !== 'function') return null
+  const cap = Number(maxBytes) > 0 ? Number(maxBytes) : 0
   const seg = mf.segment || {}
   // 回填直链：引用/历史消息段常常本就没有 url（NapCat get_msg 取回的引用消息尤甚）。
   // 这里只要 napcat 给出了一个 http 直链，就写回 mf.url —— 哪怕最终字节仍取不到，
@@ -217,9 +289,15 @@ async function napcatBytes(mf, e, { bot, fetcher, log }) {
       const r = await sendApi('get_file', { file_id: fileId })
       rememberUrl(pickField(r, 'url'))
       const b64 = pickField(r, 'base64')
-      if (b64) return Buffer.from(b64, 'base64')
+      if (b64) {
+        if (cap) {
+          const est = Math.floor(String(b64).length * 3 / 4) // base64 体积估算，避免整份解码进内存
+          if (est > cap) throw tooLargeError(est, cap)
+        }
+        return Buffer.from(b64, 'base64')
+      }
       const url = pickField(r, 'url')
-      if (url) { const b = await toBuffer(url, { bot, fetcher }); if (b) return b }
+      if (url) { const b = await toBuffer(url, { bot, fetcher, maxBytes: cap }); if (b) return b }
     }
     // 图片/语音/视频/文件（file 标识）→ 各专用接口返回本地路径或 url。
     // NapCat 文档：图片 get_file 失败再降级 get_image；语音 get_record；**视频只用 get_file，无 get_image 降级**。
@@ -230,9 +308,10 @@ async function napcatBytes(mf, e, { bot, fetcher, log }) {
       const r = await sendApi(action, params)
       const target = pickField(r, 'url', 'file')
       rememberUrl(target)
-      if (target) { const b = await toBuffer(target, { bot, fetcher }); if (b) return b }
+      if (target) { const b = await toBuffer(target, { bot, fetcher, maxBytes: cap }); if (b) return b }
     }
   } catch (err) {
+    if (err?.code === 'too_large') throw err // 体积类错误上抛，交给 resolveMedia 标 limit_size
     log?.(`napcat 取字节失败(${mf.kind}/${mf.source}): ${err?.message || err}`)
   }
   return null
@@ -241,12 +320,31 @@ async function napcatBytes(mf, e, { bot, fetcher, log }) {
 /**
  * 解析单个 MediaFile：补全 url（群文件）→ 下载字节 → 推断 mime/ext。
  * 失败不抛错，置 resolveError，交由上层决定降级或跳过。
+ * maxBytes>0 时提前拒绝超大附件（消息段 size / content-length / 本地文件 statSync），
+ * 置 resolveError='limit_size' + __skipReason，且不留 buffer —— 旧实现要等下载完才由
+ * applyLimits 判大小，超大附件仍整份进内存（本轮外部服务客户端审计第 3 条 / 既有 M-046）。
  */
-export async function resolveMedia(mf, { bot, fetcher, e, log } = {}) {
+export async function resolveMedia(mf, { bot, fetcher, e, log, maxBytes = 0 } = {}) {
   if (!mf) return mf
+  const cap = Number(maxBytes) > 0 ? Number(maxBytes) : 0
+  const markTooLarge = (bytes) => {
+    mf.bytes = Number(bytes) || mf.bytes || 0
+    mf.resolveError = 'limit_size'
+    mf.__skipReason = `超过单文件大小上限 ${fmtMB(cap)}`
+    mf.buffer = null
+    log?.(`跳过超大附件(${mf.kind}/${mf.source} ${mf.name}): ${mf.bytes} 字节 > ${cap}`)
+  }
   if (mf.buffer) { // 已解析
     if (!mf.mime) Object.assign(mf, inferMime(mf.name, mf.buffer))
     if (mf.bytes == null) mf.bytes = mf.buffer.length
+    if (cap && mf.buffer.length > cap) markTooLarge(mf.buffer.length)
+    return mf
+  }
+
+  // 已知大小（消息段 size / 群文件 size）：连下载都不发起
+  const knownSize = Number(mf.size)
+  if (cap && Number.isFinite(knownSize) && knownSize > cap) {
+    markTooLarge(knownSize)
     return mf
   }
 
@@ -259,27 +357,46 @@ export async function resolveMedia(mf, { bot, fetcher, e, log } = {}) {
     } catch { /* noop */ }
   }
 
-  // 框架优先下载：Bot.download(url) → {buffer}
+  // 框架优先下载：Bot.download(url) → {buffer}。它拿不到响应头，故先用 HEAD 探一次
+  // content-length，能在下载前拒绝就不把超大附件整份拉进内存。
   let buffer = null
+  let tooLarge = 0
+  if (mf.url && cap && /^https?:\/\//i.test(mf.url)) {
+    const len = await probeContentLength(mf.url, { fetcher })
+    if (len > cap) {
+      markTooLarge(len)
+      return mf
+    }
+  }
   if (mf.url && bot?.download) {
     try { const r = await bot.download(mf.url); buffer = r?.buffer || null } catch { /* noop */ }
   }
-  // 兜底：自实现取字节
+  // 兜底：自实现取字节（带体积帽）
   if (!buffer && mf.url) {
-    try { buffer = await toBuffer(mf.url, { bot, fetcher }) } catch { /* noop */ }
+    try { buffer = await toBuffer(mf.url, { bot, fetcher, maxBytes: cap }) } catch (err) { if (err?.code === 'too_large') tooLarge = Number(err.bytes) || 0 }
   }
   // 段内联 base64（部分适配器 image 段的 file 字段是 base64://）
-  if (!buffer && mf.segment?.file && typeof mf.segment.file === 'string') {
-    try { buffer = await toBuffer(mf.segment.file, { bot, fetcher }) } catch { /* noop */ }
+  if (!buffer && !tooLarge && mf.segment?.file && typeof mf.segment.file === 'string') {
+    try { buffer = await toBuffer(mf.segment.file, { bot, fetcher, maxBytes: cap }) } catch (err) { if (err?.code === 'too_large') tooLarge = Number(err.bytes) || 0 }
   }
   // NapCat/OneBot 原生接口兜底：引用/历史/群文件 url 缺失或失效时，用 get_file/get_image/get_record 取字节
-  if (!buffer && e) {
-    try { buffer = await napcatBytes(mf, e, { bot, fetcher, log }) } catch { /* noop */ }
+  if (!buffer && !tooLarge && e) {
+    try { buffer = await napcatBytes(mf, e, { bot, fetcher, log, maxBytes: cap }) } catch (err) { if (err?.code === 'too_large') tooLarge = Number(err.bytes) || 0 }
   }
 
   if (!buffer) {
+    if (tooLarge) {
+      markTooLarge(tooLarge)
+      return mf
+    }
     mf.resolveError = mf.url ? 'download_failed' : 'no_url'
     log?.(`取字节失败(${mf.kind}/${mf.source} ${mf.name}): ${mf.resolveError}`)
+    return mf
+  }
+
+  // 框架下载兜底：超限不保留 buffer（read_attachment / convert 会按 resolveError 走降级）
+  if (cap && buffer.length > cap) {
+    markTooLarge(buffer.length)
     return mf
   }
 

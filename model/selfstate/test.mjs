@@ -310,6 +310,26 @@ await test('审计回归：旧行无 negative_since 时用 last_transition_at �
   ok(Number(st.negative_since) > 0, 'negative_since 已回填（后续按新标记计时）')
 })
 
+// 第 7 轮 M1：ss_reflections 保留期清理改为真删（此前只置 status='expired'，行永久滞留，
+// 且被旧代码置过 expired 的行会被 "status='active'" 条件永久排除在清理之外）
+await test('审计回归：ss_reflections 过期行真删、未过期/无期限行保留', async () => {
+  const ss = mkSvc(); await ss.init()
+  const now = Date.now(); const g = 'RRET'
+  const ins = (tag, target, expiresAt, status = 'active') => dao.run(
+    "INSERT INTO ss_reflections(bot_id,group_id,summary,scope,target_user_id,confidence,source_event_ids,expires_at,status,created_at) VALUES ('999',?,?,?,?,0.6,'[]',?,?,?)",
+    [g, `反思${tag}`, 'member', target, expiresAt, status, now - 86400000],
+  )
+  await ins('exp1', 'U1', now - 1000)
+  await ins('exp2', 'U2', now - 1000, 'expired')
+  await ins('keep1', 'U3', now + 86400000)
+  await ins('keep2', 'U4', null)
+  const r = await ss.runMaintenance(g)
+  const left = (await dao.all('SELECT summary FROM ss_reflections WHERE group_id=?', [g])).map((x) => x.summary).sort()
+  ok(!left.includes('反思exp1') && !left.includes('反思exp2'), `过期行（含旧 expired 残留）已删除（实际 ${JSON.stringify(left)}）`)
+  ok(left.includes('反思keep1') && left.includes('反思keep2'), `未过期/无 expires_at 的行保留（实际 ${JSON.stringify(left)}）`)
+  ok(Number(r?.expired || 0) >= 2, `维护计数含删除行数（expired=${r?.expired}）`)
+})
+
 // ───────── 总结 ─────────
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)

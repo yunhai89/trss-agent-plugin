@@ -129,23 +129,38 @@ export class SearchManager {
 
 /**
  * 从配置构建 SearchManager。
- * config: { tavily:{apiKey}, exa:{apiKey}, perplexity:{apiKey}, brave:{apiKey}, searxng:{url}, ddg:true, fetcher, logger }
+ * config: { tavily:{apiKey,timeout?}, exa:{apiKey,timeout?}, perplexity:{apiKey,timeout?}, brave:{apiKey,timeout?},
+ *           searxng:{url,timeout?}, ddg:true|{timeout?}, timeout?, fetcher, logger }
  * 回退链：已配置的 API key provider → SearXNG → DDG（始终兜底）
+ *
+ * timeout：各 provider 工厂都支持 timeout，但旧实现从不传 → 用户配的超时被各源默认值静默覆盖
+ * （本轮外部服务客户端审计第 4 条 / 既有 L-106，DDG 更是完全没地方配）。现在接上：
+ * 单个来源的 timeout 优先，其次全局 config.timeout；都没配就不传，保持各 provider 原默认值（向后兼容）。
  */
 export function createSearchManager(config = {}) {
   const providers = []
   const fetcher = config.fetcher
 
-  if (config.tavily?.apiKey) providers.push(createTavilyProvider({ ...config.tavily, fetcher }))
-  if (config.exa?.apiKey) providers.push(createExaProvider({ ...config.exa, fetcher }))
-  if (config.perplexity?.apiKey) providers.push(createPerplexityProvider({ ...config.perplexity, fetcher }))
-  if (config.brave?.apiKey) providers.push(createBraveProvider({ ...config.brave, fetcher }))
+  const timeoutOf = (name) => {
+    const per = (name === 'ddg' && typeof config.ddg === 'object') ? config.ddg?.timeout : config?.[name]?.timeout
+    const n = Number(per ?? config.timeout)
+    return Number.isFinite(n) && n > 0 ? n : null
+  }
+  const withTimeout = (name, opts) => {
+    const t = timeoutOf(name)
+    return t ? { ...opts, timeout: t } : opts
+  }
+
+  if (config.tavily?.apiKey) providers.push(createTavilyProvider(withTimeout('tavily', { ...config.tavily, fetcher })))
+  if (config.exa?.apiKey) providers.push(createExaProvider(withTimeout('exa', { ...config.exa, fetcher })))
+  if (config.perplexity?.apiKey) providers.push(createPerplexityProvider(withTimeout('perplexity', { ...config.perplexity, fetcher })))
+  if (config.brave?.apiKey) providers.push(createBraveProvider(withTimeout('brave', { ...config.brave, fetcher })))
 
   // SearXNG（自建，无需 key）
-  if (config.searxng?.url) providers.push(createSearXNGProvider({ ...config.searxng, fetcher }))
+  if (config.searxng?.url) providers.push(createSearXNGProvider(withTimeout('searxng', { ...config.searxng, fetcher })))
 
   // DDG 本地兜底（始终最后）
-  if (config.ddg !== false) providers.push(createDDGProvider({ fetcher }))
+  if (config.ddg !== false) providers.push(createDDGProvider(withTimeout('ddg', { fetcher })))
 
   return new SearchManager({ providers, logger: config.logger || (() => {}) })
 }

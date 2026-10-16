@@ -115,7 +115,7 @@
     components: { CfgRow, TagEditor, ModelPicker },
     setup() {
       const { ref, reactive, watch, computed, onMounted, onUnmounted, nextTick } = Vue
-      const { toast } = window.UI
+      const { toast, parseNum } = window.UI
       const M = window.MOCK
 
       /* 表单初始空,onMounted loadConfig 后填充;origSnapshot 用于 diff 与 reset */
@@ -375,7 +375,9 @@
         nextTick(() => { dirtySuppressed = false })
       }
 
-      /* 点路径 diff:全部字段明文,对象递归、数组/标量整体比较;MCP servers 整体提交(增删改不递归,避免删 server 漏掉) */
+      /* 点路径 diff:全部字段明文,对象递归、数组/标量整体比较;MCP servers 整体提交(增删改不递归,避免删 server 漏掉)
+         数值归一（第 6 轮审计）：快照里是 number 的路径，空串/不可解析值视为「未修改」不提交，
+         可解析值统一按 Number 提交；'' 只可能来自输入框被清空，故原值非字符串时跳过 ''。 */
       const buildChanges = (orig, frm, prefix = 'agent', out = {}) => {
         for (const k of Object.keys(frm)) {
           const p = prefix + '.' + k, a = orig?.[k], b = frm[k]
@@ -384,6 +386,11 @@
             continue
           }
           if (b && typeof b === 'object' && !Array.isArray(b) && a && typeof a === 'object') buildChanges(a, b, p, out)
+          else if (typeof a === 'number') {
+            const n = parseNum(b)
+            if (n === null) continue
+            if (n !== a) out[p] = n
+          } else if (b === '' && typeof a !== 'string') continue
           else if (JSON.stringify(a) !== JSON.stringify(b)) out[p] = b
         }
         return out
@@ -391,6 +398,10 @@
 
       const save = async () => {
         mcpServersFromUi()
+        if (mcpMissingUrl.value.length) {
+          toast(`MCP 服务缺 url：${mcpMissingUrl.value.join('、')}（http 型必须填 url 才能保存）`, 'error')
+          return
+        }
         const changes = buildChanges(origSnapshot, JSON.parse(JSON.stringify(form)))
         if (!Object.keys(changes).length) { toast('无改动', 'warn'); return }
         try {
@@ -401,10 +412,10 @@
         } catch (e) { toast(e.message, 'error') }
       }
       const reset = () => {
-        dirtySuppressed = true
-        Object.assign(form, JSON.parse(JSON.stringify(origSnapshot)))
-        dirty.value = false
-        nextTick(() => { dirtySuppressed = false })
+        // 第 6 轮审计：不能只做 Object.assign —— 那会丢掉 MCP 的 UI 专用键（_type/_json/_url/_headersText）
+        // 与各子对象兜底，随后保存时 mcpServersFromUi 会按缺失的 _type 走 http 分支，
+        // 把所有 stdio/http 服务的 url/headers 清空写回。改走 syncForm（含 mcpServersToUi + 兜底）。
+        syncForm(JSON.parse(JSON.stringify(origSnapshot)))
         toast('已还原为当前生效配置', 'info')
       }
 
@@ -673,9 +684,13 @@
           }
         }
       }
+      /* 第 6 轮审计：http 型服务缺 url 时不能提交 —— 后端 buildTransport 会 new HttpTransport({url:''})，
+         该 MCP 服务静默失效。收集缺 url 的服务名，由 save 阻止提交并在 toast 里点名。 */
+      const mcpMissingUrl = ref([])
       const mcpServersFromUi = () => {
-        if (!form.mcp?.servers) return
-        for (const srv of Object.values(form.mcp.servers)) {
+        const missing = []
+        if (!form.mcp?.servers) { mcpMissingUrl.value = missing; return }
+        for (const [name, srv] of Object.entries(form.mcp.servers)) {
           if (!srv || typeof srv !== 'object') continue
           if (srv._type === 'stdio') {
             try {
@@ -687,13 +702,19 @@
             delete srv.type
           } else {
             srv.type = 'http'
-            srv.url = String(srv._url || '')
+            // 第 6 轮审计：_url 缺失（如 reset 后未回填）时用对象上已有的 url 兜底，避免把 url 清空写回
+            srv.url = String(srv._url != null ? srv._url : (srv.url || ''))
+            const headerLines = srv._headersText != null
+              ? String(srv._headersText)
+              : (srv.headers && typeof srv.headers === 'object' ? Object.entries(srv.headers).map(([k, v]) => `${k}: ${v}`).join('\n') : '')
             const headers = {}
-            for (const line of String(srv._headersText || '').split('\n')) { const idx = line.indexOf(':'); if (idx > 0) headers[line.slice(0, idx).trim()] = line.slice(idx + 1).trim() }
+            for (const line of headerLines.split('\n')) { const idx = line.indexOf(':'); if (idx > 0) headers[line.slice(0, idx).trim()] = line.slice(idx + 1).trim() }
             srv.headers = Object.keys(headers).length ? headers : undefined
+            if (!srv.url.trim()) missing.push(name)
           }
           delete srv._type; delete srv._json; delete srv._url; delete srv._headersText
         }
+        mcpMissingUrl.value = missing
       }
       const delMcp = (name) => { if (form.mcp?.servers) delete form.mcp.servers[name] }
 
@@ -763,7 +784,8 @@
         set: (v) => { form.thinking = v ? { type: 'enabled', budget_tokens: 16000 } : null },
       })
 
-      const numOr = (v, def) => { const n = Number(v); return Number.isFinite(n) ? n : def }
+      // 复用 parseNum：清空输入框（''）时回落到默认值，而不是被 Number('')===0 当成 0（第 6 轮审计）
+      const numOr = (v, def) => parseNum(v) ?? def
 
       /* thinking 预算：默认配置 agent.thinking 为 null（thinkingAuto 接管时也会置 null），
        * 直接 v-model 到 form.thinking.budget_tokens 会在渲染期抛 TypeError 并把整行变成注释节点（L-116）。

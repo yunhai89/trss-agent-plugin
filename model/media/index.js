@@ -55,7 +55,9 @@ export function createMediaService({ bot = null, e = null, caps = {}, protocol =
         list = []
       }
       // 解析字节：e 透传给 resolve，使 NapCat/OneBot 原生接口兜底可用（引用/历史/群文件）
-      await resolveAll(list, { bot, fetcher, e, log: debug })
+      // maxBytes 一并下传：下载/读取阶段就按上限提前拒绝，避免超大附件整份进内存
+      // （旧实现要等下载完再由 applyLimits 判大小——本轮外部服务客户端审计第 3 条 / 既有 M-046）。
+      await resolveAll(list, { bot, fetcher, e, log: debug, maxBytes: maxFileBytes })
       // 应用上限：先保证图片在视觉模型下入参，超限/超大按 degrade 处理
       list = applyLimits(list, { maxImages, maxFileBytes, caps })
     }

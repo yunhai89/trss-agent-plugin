@@ -28,16 +28,24 @@
         } catch (e) { toast(e.message, 'error') }
       }
 
+      /* 第 6 轮审计：本视图原先不加载 config 且回落 'master'，直接打开 #/schedule 时会以假 userId='master'
+         建任务（到点 pickFriend('master') 投递失败，用户永远收不到），故取真实主人 QQ 并在取不到时禁止提交。 */
+      const ownerId = computed(() => String(window.MOCK.config?.masters?.[0] ?? '').trim())
+
       const addModal = ref({ show: false, type: 'reminder', message: '', groupId: '', inHours: 2, when: '', prompt: '' })
       const add = async () => {
         const m = addModal.value
-        const body = { userId: window.MOCK.config?.masters?.[0] || 'master', groupId: m.groupId || null }
+        if (!ownerId.value) { toast('未取到主人 QQ（配置中心 · 主人列表为空），无法创建任务', 'warn'); return }
+        const body = { userId: ownerId.value, groupId: m.groupId || null }
         if (m.type === 'task') {
           if (!m.when.trim() || !m.prompt.trim()) { toast('任务链需时间 + 任务描述', 'warn'); return }
           body.type = 'task'; body.when = m.when.trim(); body.prompt = m.prompt.trim()
         } else {
           if (!m.message.trim()) { toast('请填写提醒内容', 'warn'); return }
-          body.message = m.message.trim(); body.at = Date.now() + m.inHours * 3600e3
+          // 第 6 轮审计：v-model.number 清空时是 ''，''*3600e3===0 → at=当前时刻，提醒会被立即触发
+          const hours = Number(m.inHours)
+          if (!Number.isFinite(hours) || hours <= 0) { toast('「N 小时后触发」需填大于 0 的数字', 'warn'); return }
+          body.message = m.message.trim(); body.at = Date.now() + hours * 3600e3
         }
         try {
           await window.api.post('/schedule', body)
@@ -48,10 +56,14 @@
         } catch (e) { toast(e.message, 'error') }
       }
 
-      onMounted(async () => { try { await window.store.loadSchedule() } catch (e) { toast(e.message, 'error') } })
+      onMounted(async () => {
+        // 先取配置（主人 QQ 来源），失败也不阻塞列表：ownerId 为空时创建按钮禁用（第 6 轮审计）
+        try { await window.store.loadConfig() } catch { /* 忽略 */ }
+        try { await window.store.loadSchedule() } catch (e) { toast(e.message, 'error') }
+      })
       onUnmounted(() => clearInterval(timer))
 
-      return { jobs, tick, until, del, addModal, add, fmt }
+      return { jobs, tick, until, del, addModal, add, ownerId, fmt }
     },
     template: `
     <div>
@@ -111,9 +123,10 @@
             <input type="number" class="inp" min="1" v-model.number="addModal.inHours">
           </div>
         </template>
+        <div v-if="!ownerId" class="mut2" style="font-size:11.5px;color:var(--rose);margin-top:10px">未取到主人 QQ（配置中心 · 主人列表为空），无法创建任务</div>
         <template #foot>
           <button class="btn b-line" @click="addModal.show = false">取消</button>
-          <button class="btn b-pri" @click="add"><v-icon name="check"/>创建</button>
+          <button class="btn b-pri" :disabled="!ownerId" @click="add"><v-icon name="check"/>创建</button>
         </template>
       </v-modal>
     </div>`,

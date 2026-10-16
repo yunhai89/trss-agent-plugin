@@ -84,11 +84,13 @@ export function quickCheck({ report, findings, brief }) {
   if (reportLength > 500 && citationCount < 2) {
     issues.push({ severity: 'warn', message: '报告较长但引用稀少——可能缺少来源支撑' })
   }
-  // 子问题覆盖
+  // 子问题覆盖（元素类型不保证是字符串：模型可能给 [{question}]，直接 .match 会抛 TypeError）
   if (brief?.subquestions?.length) {
     const findingsText = (findings || []).map((f) => f.result).join(' ')
     const uncovered = brief.subquestions.filter((sq) => {
-      const kw = sq.match(/[一-鿿]{2,}|[a-zA-Z]{3,}/g) || []
+      const s = typeof sq === 'string' ? sq : String(sq?.question ?? sq?.task ?? sq?.text ?? '')
+      if (!s.trim()) return false
+      const kw = s.match(/[一-鿿]{2,}|[a-zA-Z]{3,}/g) || []
       return kw.length > 0 && !kw.some((k) => findingsText.includes(k))
     })
     if (uncovered.length > 0) {

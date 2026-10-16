@@ -13,7 +13,12 @@ import { buildHtml, mdToHtml } from '../model/render/index.js'
 import { buildChatHtml } from '../model/render/theme.js'
 import { inlineImages } from '../model/render/inline-images.js'
 
-let _shotSeq = 0
+/** 同一 name 的临时模板保留窗口：只清理早于该时长的旧文件。
+ *  （修 2026-10-17 审计：原先无条件删除同名模板，并发同名截图会互删对方刚写入的 tplFile
+ *   → 一方 puppeteer.screenshot 取不到模板、失败降级为文本。） */
+const SHOT_KEEP_MS = 10 * 60 * 1000
+/** PDF / 高清长图的总超时下限（毫秒）：排版比卡片截图慢，低于 puppeteer 默认 30s 会误杀。 */
+const HEAVY_TIMEOUT_FLOOR_MS = 30000
 
 /** 渲染总超时（毫秒）：防弱服务器上 puppeteer 卡死导致指令永不返回（超时→调用方降级文本）。 */
 function renderTimeoutMs() {
@@ -42,7 +47,7 @@ function withTimeout(promise, ms, tag) {
  * 本插件生成的 HTML 是自包含的纯 HTML（无 art-template 的 {{}} 语法），art-template 对其原样输出（已验证）。
  * 故：把完整 HTML 写入临时文件作为 tplFile 传入，复用 Yunzai 已启动的 Chromium（Docker 等环境依赖此路径）。
  *
- * 用「name + 自增序号」做唯一 tplFile：保证每次都重新读取最新 HTML，避开渲染器的模板缓存
+ * 用「name + 时间戳 + 随机串」做唯一 tplFile：保证每次都重新读取最新 HTML，避开渲染器的模板缓存
  * （聊天列表 / 人设列表等内容会变化）。失败返回 null，调用方据此降级为文本。
  */
 export const screenshot = async (name, html) => {
@@ -54,15 +59,18 @@ export const screenshot = async (name, html) => {
     const safe = String(name || 'agents').replace(/[\\/]/g, '_')
     const dir = Config.path.temp
     await fs.promises.mkdir(dir, { recursive: true }).catch(() => {})
-    // 清理同 name 的旧临时模板，避免磁盘无限堆积
+    const tplFile = path.join(dir, `${safe}__${Date.now()}_${Math.random().toString(36).slice(2, 8)}.html`)
+    // 清理同 name 的过期临时模板，避免磁盘无限堆积：只删超过 SHOT_KEEP_MS 的旧文件，
+    // 不再无条件删除（修 2026-10-17 审计：并发同名截图互删文件导致渲染失败）。
     try {
+      const now = Date.now()
       for (const f of fs.readdirSync(dir)) {
-        if (f.startsWith(`${safe}__`)) fs.unlinkSync(path.join(dir, f))
+        if (!f.startsWith(`${safe}__`)) continue
+        const fp = path.join(dir, f)
+        if (fp === tplFile) continue
+        try { if (now - fs.statSync(fp).mtimeMs > SHOT_KEEP_MS) fs.unlinkSync(fp) } catch { /* noop */ }
       }
     } catch { /* noop */ }
-    // 唯一文件名 → 渲染器每次缓存未命中 → 始终读取最新 HTML
-    _shotSeq = (_shotSeq + 1) % 100000
-    const tplFile = path.join(dir, `${safe}__${_shotSeq}.html`)
     await fs.promises.writeFile(tplFile, String(html ?? ''))
 
     return await puppeteer.screenshot(name, { tplFile, saveId: safe })
@@ -242,6 +250,9 @@ export const renderPdf = async (html, { path: outPath, format = 'A4' } = {}) => 
       printBackground: true,
       margin: { top: '16mm', bottom: '16mm', left: '14mm', right: '14mm' },
       preferCSSPageSize: false,
+      // 修 2026-10-17 审计：page.pdf 原先无 timeout，卡住时 Promise 永不 resolve → #研究 既不回复也不降级。
+      // 超时由 puppeteer 抛错 → withPage catch 返回 null，调用方按 PDF→高清图→文本 降级。
+      timeout: Math.max(renderTimeoutMs(), HEAVY_TIMEOUT_FLOOR_MS),
     }),
   )
   if (!buff) return null
@@ -273,8 +284,10 @@ export const renderCardImage = async (html, { scale = 3, name = 'agents-plugin/c
     if (img) return img
     Log.debug('[render] 卡片图独立浏览器渲染失败，降级 Yunzai 渲染器…')
     img = await screenshot(name, html)
-    if (img) return img
-    return screenshot(name, html)
+    // 修 2026-10-17 审计：原先失败后用完全相同的参数再截一次 —— 同因必失败，只是让用户白等一个超时
+    // （Chromium 卡住时是 2×15s）。失败直接交给调用方降级为文本。
+    if (!img) Log.warn('[render] 卡片图 Yunzai 渲染器失败，降级文本')
+    return img
   })(), ms, 'card-image')
 }
 
@@ -283,6 +296,8 @@ export const renderHd = async (name, html, { scale = 2, imgType = 'png', width =
     await page.setViewport({ width, height: 1200, deviceScaleFactor: scale })
     const opt = { type: imgType, fullPage: true }
     if (imgType === 'jpeg') opt.quality = 92
+    // 修 2026-10-17 审计：page.screenshot 原先无 timeout，长图卡住时永不返回 → 命令既不回复也不降级
+    opt.timeout = Math.max(renderTimeoutMs(), HEAVY_TIMEOUT_FLOOR_MS)
     return page.screenshot(opt)
   })
   return buff && Buffer.isBuffer(buff) ? buff : null

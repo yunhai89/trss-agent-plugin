@@ -33,6 +33,24 @@ import {
 } from './state.js'
 import { evaluateReport, quickCheck } from './evaluation.js'
 
+/**
+ * 归一化子问题数组：模型（Scope 阶段）可能返回 `[{question:"…"}]`、`[{task:"…"}]`、数字或 null，
+ * 只判 `Array.isArray` 会让后续 `sq.match(...)` 抛未捕获 TypeError → 整次研究作废（用户等完 scope 什么都没有）。
+ * 这里统一成「非空字符串数组」：对象取 question/task/text/title，其余丢弃。
+ */
+export function normSubquestions(list) {
+  if (!Array.isArray(list)) return []
+  const out = []
+  for (const it of list) {
+    const s = typeof it === 'string'
+      ? it
+      : (it && typeof it === 'object' ? (it.question ?? it.task ?? it.text ?? it.title ?? '') : '')
+    const t = String(s ?? '').trim()
+    if (t) out.push(t)
+  }
+  return out
+}
+
 export class DeepResearch {
   constructor({
     provider,
@@ -180,7 +198,7 @@ export class DeepResearch {
   /** Plan：生成本轮子任务（§3.1 委派模板 + §3.3 按策略路由） */
   _makePlan(state, strategy) {
     // 如果有缺口（上轮未覆盖），优先研究缺口
-    const subs = state.brief._gaps?.length ? state.brief._gaps : state.brief.subquestions || []
+    const subs = normSubquestions(state.brief._gaps?.length ? state.brief._gaps : state.brief.subquestions || [])
     // 过滤掉已有充分发现的子问题（简单判断：findings 中已有 result 含子问题关键词）
     // 只用 f.result：f.task 就是子问题原文，一旦拼进去，任何被派过的子问题都会「自证已覆盖」，
     // 缺口列表（state.brief._gaps ← coverage.gaps）会在下一轮被自己过滤光 → 外层重规划永不发生。
@@ -348,7 +366,7 @@ export class DeepResearch {
         const p = JSON.parse(match[0])
         return {
           intent: p.intent || '',
-          subquestions: Array.isArray(p.subquestions) ? p.subquestions : [],
+          subquestions: normSubquestions(p.subquestions),
           type: p.type || 'open',
           effort: EFFORT_CONFIG[p.effort] ? p.effort : 'medium',
         }

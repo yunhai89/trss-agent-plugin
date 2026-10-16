@@ -34,6 +34,8 @@ export class WorldAnalyzer {
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.trace = trace
     this.botId = botId != null ? String(botId) : null
+    // 切片连续失败状态（H1）：Map<groupId, {count,nextAt,lastErr}>，退避期内跳过切片
+    this._segFail = new Map()
   }
 
   /** 一轮小时分析。返回统计。 */
@@ -57,7 +59,33 @@ export class WorldAnalyzer {
     const c = this._cfgFn()
     const now = Date.now()
     // 1. 切片（折叠新消息 + 闭合静默片段）
-    try { await this.segmenter.processGroup(groupId, c.ingestion || {}, now) } catch (e) { Log.warn('[groupworld] 切片失败', groupId, e?.message || e) }
+    // 修 H1：切片异常此前只打一行 Log.warn 就被吞掉——该群水位长期不动、消息不再进世界模型，
+    // 而面板/调用方看不到任何异常（切片器撞 UNIQUE 时就是这种"永久静默失效"）。
+    // 现在：连续失败升级 error + 计数 + 指数退避（退避期内跳过切片，成功即清零）。
+    const segFail = this._segFail.get(groupId)
+    if (segFail && segFail.nextAt > now) {
+      this.trace?.record?.('gw_analyze', { groupId, skipped: 'segment_backoff', fails: segFail.count, nextAt: segFail.nextAt })
+    } else {
+      try {
+        await this.segmenter.processGroup(groupId, c.ingestion || {}, now)
+        if (segFail) {
+          this._segFail.delete(groupId)
+          Log.mark('[groupworld]', `${ANSI.c}切片恢复${ANSI.R} 群${groupId}（连续失败 ${segFail.count} 次后成功）`)
+          this.trace?.record?.('gw_analyze', { groupId, segmentRecovered: true, fails: segFail.count })
+        }
+      } catch (e) {
+        const count = (segFail?.count || 0) + 1
+        // 退避 1min → 2 → 4 → 8 → 16 → 30min 封顶；只影响切片，已有 closed 片段照常分析
+        const backoffMs = Math.min(30 * 60 * 1000, 60 * 1000 * (2 ** Math.min(count - 1, 5)))
+        this._segFail.set(groupId, { count, nextAt: now + backoffMs, lastErr: String(e?.message || e).slice(0, 200) })
+        if (this._segFail.size > 500) { // 容量控制：清掉已过退避期的键，防活跃群数增长导致 Map 无界
+          for (const [k, v] of this._segFail) { if (v.nextAt <= now) this._segFail.delete(k) }
+        }
+        const msg = `[groupworld] 切片失败（连续第 ${count} 次，${Math.round(backoffMs / 1000)}s 后重试）群 ${groupId}：${e?.message || e}`
+        if (count >= 3) Log.error(msg); else Log.warn(msg)
+        this.trace?.record?.('gw_analyze', { groupId, segmentFailed: true, fails: count, backoffMs, err: String(e?.message || e).slice(0, 120) })
+      }
+    }
 
     // 2. 预算
     const budget = await this._checkBudget(groupId, budgetOf(c.analysis))

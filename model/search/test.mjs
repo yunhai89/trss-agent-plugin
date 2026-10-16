@@ -198,7 +198,36 @@ await test('createSearchManager：无 key → SearXNG → DDG', async () => {
   eq(mgr3.availableProviders, ['tavily', 'ddg'], 'Tavily + DDG')
 })
 
-// ---------- 9. formatResults + formatExtract ----------
+// ---------- 9. 超时接上（本轮外部服务客户端审计第 4 条 / 既有 L-106）----------
+await test('createSearchManager：timeout 真正传到各源', async () => {
+  // fetcher 一直挂着，只在 abort 信号触发时 reject —— 用它观察 provider 实际生效的超时
+  const hangFetcher = (rec) => (url, opts) => new Promise((_resolve, reject) => {
+    if (!rec.t0) rec.t0 = Date.now()
+    opts.signal.addEventListener('abort', () => { rec.ms = Date.now() - rec.t0; reject(Object.assign(new Error('aborted'), { name: 'AbortError' })) })
+  })
+
+  const rec1 = {}
+  // Promise.race 里的 setTimeout 是 ref 计时器：AbortSignal.timeout 是 unref 的，
+  // 单靠它进程会因事件循环空转提前退出（unsettled top-level await），故用 race 撑住事件循环。
+  const waitMs = (ms) => new Promise((r) => setTimeout(r, ms))
+  const mgr1 = createSearchManager({ searxng: { url: 'http://s', timeout: 80 }, fetcher: hangFetcher(rec1) })
+  await Promise.race([mgr1.search('q').catch(() => {}), waitMs(1500)])
+  ok(rec1.ms >= 50 && rec1.ms < 1200, `单源 timeout 生效（配 80ms，实测 ${rec1.ms}ms）`)
+
+  const rec2 = {}
+  const mgr2 = createSearchManager({ timeout: 80, fetcher: hangFetcher(rec2) })
+  await Promise.race([mgr2.search('q').catch(() => {}), waitMs(3000)])
+  ok(rec2.ms >= 50 && rec2.ms < 2000, `全局 timeout 对 DDG 兜底生效（实测 ${rec2.ms}ms）`)
+
+  // 都没配 → 不传 timeout，保持各源原默认（DDG 15s：200ms 内不该被 abort）
+  const rec3 = {}
+  const mgr3 = createSearchManager({ fetcher: hangFetcher(rec3) })
+  mgr3.search('q').catch(() => {}) // 挂着的 promise 自带 catch，不 await
+  await waitMs(200)
+  ok(rec3.ms === undefined, '未配 timeout → 沿用 provider 默认值')
+})
+
+// ---------- 10. formatResults + formatExtract ----------
 await test('formatResults / formatExtract', async () => {
   const text = formatResults({ answer: '42', results: [{ title: 'A', url: 'https://a.com', content: '内容', score: 0.9 }], citations: ['https://c.com'] })
   ok(text.includes('42') && text.includes('A') && text.includes('https://a.com') && text.includes('引用'), 'formatResults')

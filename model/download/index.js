@@ -56,8 +56,12 @@ export function buildYtDlpArgs(url, { outTmpl, format = 'best[ext=mp4]/best', au
 }
 
 /**
- * 用 yt-dlp 下载（宿主档）。返回 { ok, files:[abs], stderr, durationMs, timedOut? }。
+ * 用 yt-dlp 下载（宿主档）。返回 { ok, files:[abs], stderr, durationMs, timedOut?, aborted? }。
  * files 为输出目录里本次产出的文件（按 mtime 排序）。
+ *
+ * signal：外部取消信号（Agent 取消 / 时间预算到点）。旧实现只有沙箱档接了 signal，宿主档没有，
+ * 取消后子进程仍要跑到 timeoutSec（默认 600s）才被 SIGKILL，且下完还会把文件发进会话
+ * （本轮外部服务客户端审计第 2 条）。现在 abort 立即 SIGKILL，并 resolve { ok:false, aborted:true }。
  */
 export async function runYtDlp(url, opts = {}) {
   const {
@@ -69,6 +73,7 @@ export async function runYtDlp(url, opts = {}) {
     extraArgs = [],
     ytDlpBin = 'yt-dlp',
     mergeFormat = 'mp4',
+    signal = null,
   } = opts
 
   fs.mkdirSync(dir, { recursive: true })
@@ -80,7 +85,18 @@ export async function runYtDlp(url, opts = {}) {
   return new Promise((resolve) => {
     let stderr = ''
     let proc
+    let timedOut = false
+    let aborted = false
+    let fallback
+    let timer
+    // 收尾：停表 + 摘掉 abort 监听（signal 是整轮会话级的，不摘会随每次下载累积监听器）
+    const cleanup = () => {
+      clearTimeout(timer)
+      clearTimeout(fallback)
+      if (signal) signal.removeEventListener('abort', onAbort)
+    }
     const done = (r) => {
+      cleanup()
       try {
         const files = fs.readdirSync(dir).map((n) => path.join(dir, n)).filter((p) => fs.statSync(p).isFile())
         files.sort((a, b) => fs.statSync(a).mtimeMs - fs.statSync(b).mtimeMs)
@@ -89,25 +105,27 @@ export async function runYtDlp(url, opts = {}) {
         resolve({ ...r, files: [], stderr: trunc(stderr + '\n' + (e?.message || ''), 4000), durationMs: Date.now() - t0 })
       }
     }
+    function onAbort() {
+      aborted = true
+      try { proc?.kill('SIGKILL') } catch { /* noop */ }
+    }
+    if (signal?.aborted) return done({ ok: false, error: '已取消', aborted: true })
     try {
       proc = spawn(ytDlpBin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
     } catch (e) {
       return done({ ok: false, error: String(e?.message || e) })
     }
+    if (signal) signal.addEventListener('abort', onAbort, { once: true })
     // 超时标志：killer 与 close 共享，否则 SIGKILL 触发的 close 会把超时误报成「下载失败」
     // （消费点第 230 行按 res.timedOut 区分「下载超时」与「下载失败」）。
-    let timedOut = false
-    let fallback
-    const timer = setTimeout(() => { timedOut = true; try { proc.kill('SIGKILL') } catch { /* noop */ } }, ms)
+    timer = setTimeout(() => { timedOut = true; try { proc.kill('SIGKILL') } catch { /* noop */ } }, ms)
     proc.stdout?.on('data', () => {}) // 进度行不累积（省内存）
     proc.stderr?.on('data', (d) => { stderr += d.toString() })
-    proc.on('error', (e) => { clearTimeout(timer); clearTimeout(fallback); done({ ok: false, error: String(e?.message || e) }) })
+    proc.on('error', (e) => { done({ ok: false, error: String(e?.message || e) }) })
     proc.on('close', (code) => {
-      clearTimeout(timer)
-      clearTimeout(fallback)
-      done({ ok: !timedOut && code === 0, exitCode: code, timedOut })
+      done({ ok: !timedOut && !aborted && code === 0, exitCode: code, timedOut, aborted })
     })
-    // 超时分支：close 未按时到达时的兜底收尾
+    // 超时/取消分支：close 未按时到达时的兜底收尾
     fallback = setTimeout(() => { timedOut = true; try { if (!proc.killed) proc.kill('SIGKILL') } catch { /* noop */ } ; done({ ok: false, timedOut: true }) }, ms + 500)
   })
 }
@@ -231,6 +249,7 @@ export function makeDownloadTool({ ytDlpBin } = {}) {
           format: params.format || undefined,
           audioOnly: params.audioOnly === true,
           maxBytes, timeoutSec,
+          signal: ctx?.signal || null,
         }).catch((e) => ({ ok: false, error: String(e?.message || e), files: [], durationMs: 0 }))
       }
 
@@ -240,7 +259,7 @@ export function makeDownloadTool({ ytDlpBin } = {}) {
       if (!res.ok || !file) {
         try { fs.rmSync(callDir, { recursive: true, force: true }) } catch { /* noop */ }
         return {
-          error: res.timedOut ? `下载超时（${timeoutSec}s）` : (res.error || '下载失败'),
+          error: res.aborted ? '已取消（下载已中止）' : (res.timedOut ? `下载超时（${timeoutSec}s）` : (res.error || '下载失败')),
           stderr: (res.stderr || '').split('\n').slice(-6).join('\n'),
           durationMs: res.durationMs,
         }
@@ -257,6 +276,15 @@ export function makeDownloadTool({ ytDlpBin } = {}) {
       }
 
       // ④ 发送到会话 + 清理
+      // 取消/超预算后再下载完的产物不再发进会话（本轮外部服务客户端审计第 2 条）：保留文件供 SFTP 取。
+      if (ctx?.signal?.aborted || res.aborted) {
+        return {
+          ok: true, sent: false,
+          file: path.basename(file.p), path: file.p, size: file.size,
+          note: `任务已取消，下载产物未发送。可用 SFTP(sftpadmin) 取：${file.p}`,
+          durationMs: res.durationMs,
+        }
+      }
       try {
         const seg = toFileSegment(file.p, path.basename(file.p))
         const e = ctx?.e

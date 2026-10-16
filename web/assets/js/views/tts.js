@@ -35,7 +35,7 @@
     components: { CfgRow },
     setup() {
       const { ref, reactive, computed, onMounted } = Vue
-      const { toast } = window.UI
+      const { toast, parseNum } = window.UI
 
       const loading = ref(false)
       const error = ref('')
@@ -91,10 +91,20 @@
       const toggleEnable = (v) => put({ enable: !!v }, v ? '已启用 TTS' : '已关闭 TTS')
       const setProvider = (v) => put({ provider: v }, '已切换默认服务商')
       const toggleAutoReply = (v) => put({ autoReply: !!v }, v ? '已开启自动语音回复' : '已关闭自动语音回复')
-      const saveReplyMaxChars = (v) => put({ replyMaxChars: Math.max(0, Math.min(5000, Number(v) || 0)) }, '已保存自动语音字数上限')
+      const saveReplyMaxChars = (v) => {
+        // 第 6 轮审计：清空输入框时旧代码用 Number('')||0 静默写成 0（0=不限），误清上限；空值应视为无效输入
+        const n = parseNum(v)
+        if (n === null) { toast('字数上限需填 0-5000 的数字（0=不限）', 'warn'); return }
+        put({ replyMaxChars: Math.max(0, Math.min(5000, n)) }, '已保存自动语音字数上限')
+      }
       const toggleHdVoice = (v) => put({ hdVoice: !!v }, v ? '已开启高清语音' : '已关闭高清语音')
       const saveJudgeModel = (v) => put({ judgeModel: String(v || '').trim() }, '已保存情绪判定模型')
-      const saveJudgeTimeout = (v) => put({ judgeTimeoutMs: Math.max(1000, Math.min(600000, Number(v) || 300000)) }, '已保存情绪判定超时')
+      const saveJudgeTimeout = (v) => {
+        // 同上：空值不再静默回落 300000
+        const n = parseNum(v)
+        if (n === null) { toast('情绪判定超时需填 1000-600000 的数字', 'warn'); return }
+        put({ judgeTimeoutMs: Math.max(1000, Math.min(600000, n)) }, '已保存情绪判定超时')
+      }
 
       /* ── 服务卡片 → 弹窗 ── */
       const openService = (p) => {
@@ -109,6 +119,12 @@
           const p = prefix + '.' + k
           const x = a?.[k], y = b[k]
           if (y && typeof y === 'object' && !Array.isArray(y) && x && typeof x === 'object' && !Array.isArray(x)) buildChanges(x, y, p, out)
+          else if (typeof x === 'number') {
+            // 数值归一（第 6 轮审计，与配置中心同一层）：清空/不可解析视为未修改，可解析统一按 Number 提交
+            const n = parseNum(y)
+            if (n === null) continue
+            if (n !== x) out[p] = n
+          } else if (y === '' && typeof x !== 'string') continue
           else if (JSON.stringify(x) !== JSON.stringify(y)) out[p] = y
         }
         return out

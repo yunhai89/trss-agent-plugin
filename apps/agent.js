@@ -83,7 +83,7 @@ import { SkillRegistry, loadSkillPack, makeSkillTool } from '../model/skill/inde
 import { makeInstallSkillTool } from '../model/skill/install.js'
 import { PromptRegistry, PromptTemplate, evolveTemplate, regressionGate, TEMPLATES } from '../model/prompt/index.js'
 import { TraceStore } from '../model/evolution/trace.js'
-import { SelfReviewer, listPendingSuggestions, removeSuggestion } from '../model/evolution/review.js'
+import { SelfReviewer, listPendingSuggestions, removeSuggestion, applySuggestion, persistSuggestion } from '../model/evolution/review.js'
 import { buildSituationalContext } from '../model/perception.js'
 import { makeTerminalTool } from '../model/terminal/index.js'
 import { createJevClient, makeJevTool, JEV_MODEL_DEFAULT, resolveThresholds } from '../model/agent/jev/index.js'
@@ -2740,31 +2740,20 @@ export class Chat extends plugin {
     const list = listPendingSuggestions(rt.suggestionDir, ctx.scopeId)
     const s = list.find((x) => x.id === id)
     if (!s) { await this.e.reply(`未找到待审 suggestion：${id}`); return true }
-    if (s.kind === 'prompt') {
-      const key = s.target || 'agent'
-      const tpl = rt.promptRegistry.get(key)
-      if (!tpl) { await this.e.reply(`未找到 prompt 模板：${key}`); return true }
-      const oldSystem = tpl.system
-      const payload = String(s.payload || '')
-      const nextVersion = `${tpl.version || '1.0.0'}-evolved`
-      const changeText = `自评审采纳：${String(s.rationale || '').slice(0, 50)}`
-      // 先落盘、成功后再改内存并移出待审：写失败不再丢 suggestion、也不谎报「已采纳」
-      const next = {
-        ...tpl.toJSON(),
-        system: payload,
-        version: nextVersion,
-        changelog: [{ version: nextVersion, date: new Date().toISOString().slice(0, 10), change: changeText, evalRun: '' }, ...(tpl.changelog || [])],
-      }
-      try { fs.mkdirSync(rt.promptDir, { recursive: true }); fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(next, null, 2)) }
-      catch (e) { Log.warn('[evolution] prompt 落盘失败', e?.message || e); await this.e.reply(`⚠️ 采纳失败（落盘错误，suggestion 保留，可稍后重试）：${e?.message || e}`); return true }
-      tpl.system = payload
-      tpl.addChange(nextVersion, changeText)
-      removeSuggestion(rt.suggestionDir, ctx.scopeId, s.id)
-      await this.e.reply(`✅ 已采纳 prompt suggestion（${key}），下轮对话生效。可用 #回滚 ${key} 恢复。\n旧版首句：${oldSystem.slice(0, 50)}…`)
+    // skill 无自动应用机制：不再「回一句已采纳 + 删掉建议文件」（那会把内容彻底丢掉），保留待审等人处理
+    if (s.kind === 'skill') {
+      await this.e.reply(`[skill] suggestion 需手工编辑 skills/ 对应文件，本条**保留在待审列表**：\n${String(s.payload || '').slice(0, 200)}\n\n处理完可用 #拒绝进化 ${s.id} 丢弃这条记录。`)
       return true
     }
-    await this.e.reply(`[${s.kind}] suggestion 需手工处理（skill 请编辑 skills/ 对应文件）：\n${String(s.payload || '').slice(0, 200)}\n\n已记录采纳并移出待审列表。`)
-    removeSuggestion(rt.suggestionDir, ctx.scopeId, s.id)
+    // 其余类型统一复用 Web 面板那条路径（prompt/memory/tool）：命令与面板行为一致，
+    // 失败时 applySuggestion 会保留 suggestion（不再出现「已采纳但什么都没写、建议文件已删」的静默丢失）。
+    try {
+      const r = await applySuggestion(rt, s)
+      await this.e.reply(`✅ ${r?.note || '已采纳'}`)
+    } catch (e) {
+      Log.warn('[evolution] 采纳失败', e?.message || e)
+      await this.e.reply(`⚠️ 采纳失败（suggestion 保留，可稍后重试）：${e?.message || e}`)
+    }
     return true
   }
 
@@ -2832,12 +2821,29 @@ export class Chat extends plugin {
       }
       const tpl = rt.promptRegistry.get(key)
       const base = tpl ? tpl.toJSON() : { id: key, system: TEMPLATES[key]?.system || '' }
-      const evolved = { ...base, system: result.best.text, version: `${base.version || '1.0.0'}-evolved-${Date.now().toString(36)}` }
-      let writeErr = null
-      try { fs.mkdirSync(rt.promptDir, { recursive: true }); fs.writeFileSync(path.join(rt.promptDir, `${key}.json`), JSON.stringify(evolved, null, 2)) }
-      catch (e) { writeErr = e; Log.warn('[evolution] 落盘失败', e?.message || e) }
-      if (writeErr) { await this.e.reply(`⚠️ 进化完成但落盘失败（未写入 prompts/，请检查目录权限）：${writeErr?.message || writeErr}`); return true }
-      await this.e.reply(`✅ 进化完成：best=${(result.best.score || 0).toFixed(3)}（baseline=${(result.baseline?.score || 0).toFixed(3)}，${result.improved ? '✨已提升' : '未提升'}）\n已写入 data/evolution/prompts/${key}.json（待审）。\n#审阅进化 → #采纳 <id> 应用，#回滚 ${key} 恢复。`)
+      // 审批闸门（2026-10-17 审计 medium）：旧实现直接写 data/evolution/prompts/<key>.json，
+      // 而 getRuntime 会无条件注册该目录下所有 *.json → 下次重载即静默替换线上 system 提示词；
+      // 同时 #审阅进化/#采纳 只读 suggestions/，永远找不到这条产出 —— 所谓「待审」是假的。
+      // 现在只产出 pending suggestion，采纳（applySuggestion）后才落盘 prompts/ 并热生效。
+      const ectx = ctxOf(this.e)
+      const sug = {
+        kind: 'prompt',
+        action: 'replace',
+        target: key,
+        payload: String(result.best.text),
+        rationale: `离线进化 best=${Number(result.best.score ?? 0).toFixed(3)} / baseline=${Number(result.baseline?.score ?? 0).toFixed(3)}（基线版本 ${base.version || '1.0.0'}）`,
+        confidence: Number(result.best.score) || 0,
+        status: 'pending',
+        scope: ectx.scopeUserId,
+        scopeId: ectx.scopeId,
+        ts: Date.now(),
+        id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      }
+      if (!persistSuggestion(rt.suggestionDir, sug)) {
+        await this.e.reply('⚠️ 进化完成但候选落盘失败（未写入 suggestions/，请检查 data/evolution/suggestions/ 权限）。')
+        return true
+      }
+      await this.e.reply(`✅ 进化完成：best=${(result.best.score || 0).toFixed(3)}（baseline=${(result.baseline?.score || 0).toFixed(3)}，${result.improved ? '✨已提升' : '未提升'}）\n已生成待审候选：${sug.id}\n#审阅进化 → #采纳 ${sug.id} 应用（采纳后才写入 prompts/ 并下轮生效）；#拒绝进化 ${sug.id} 丢弃。#回滚 ${key} 可恢复内置默认。`)
     } catch (e) { await this.e.reply(`进化失败：${e?.message || e}`) }
     return true
   }
@@ -3735,8 +3741,15 @@ export class Chat extends plugin {
     const name = rest.slice(0, sp).trim()
     const systemPrompt = rest.slice(sp + 1).trim()
     if (!name || systemPrompt.length < 2) return this.e.reply('名称或人设内容过短'), true
+    // 配额（2026-10-17 审计 M4）：命令无 permission（README 就这么写的：任何人可建自己的人设），
+    // 但 add() 原先只查重不设上限 —— 单用户可无限刷盘，且 list()/resolve() 每轮全目录解析会被拖慢。
+    const MAX_NAME = 40, MAX_PROMPT = 8000, MAX_PER_USER = 20
+    if (name.length > MAX_NAME) return this.e.reply(`人设名称过长（${name.length} > ${MAX_NAME} 字）`), true
+    if (systemPrompt.length > MAX_PROMPT) return this.e.reply(`人设内容过长（${systemPrompt.length} > ${MAX_PROMPT} 字），请精简后重试`), true
     const rt = await getRuntime()
     const ctx = ctxOf(this.e)
+    const mine = rt.personaStore.list().filter((p) => !p.builtin && p.creator === ctx.userId)
+    if (mine.length >= MAX_PER_USER) return this.e.reply(`你创建的人设已达上限（${MAX_PER_USER} 个），先 #删除人设 再建新的`), true
     try {
       const p = rt.personaStore.add({ name, systemPrompt }, { creator: ctx.userId })
       await rt.persona.setActive(ctx.userId, p.id)

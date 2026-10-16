@@ -171,6 +171,10 @@ export class GroupWorldIngester {
     if (!groupId || !userId) return false
     try {
       await this.dao.txn(async () => {
+        // 昵称要在删 gw_member_profiles **之前**取：圈子 summary 里可能写着该成员昵称（第 7 轮 L3），
+        // 下面重写 summary 时用它判断是否需要重写。
+        const prof = await this.dao.get('SELECT current_nickname FROM gw_member_profiles WHERE group_id=? AND user_id=?', [groupId, userId]).catch(() => null)
+        const nickname = String(prof?.current_nickname || '').trim()
         await this.dao.run('DELETE FROM gw_member_profiles WHERE group_id=? AND user_id=?', [groupId, userId])
         // 证据先删（trait 子查询须在 traits 删除**之前**执行；曾因顺序颠倒致证据恒残留），
         // 双路径兜底：subject_user_id 直接定位 + trait 子查询覆盖未回填的存量行
@@ -189,6 +193,9 @@ export class GroupWorldIngester {
         await this.dao.run('DELETE FROM ss_emotions WHERE group_id=? AND target_user_id=?', [groupId, userId])
         await this.dao.run('DELETE FROM ss_concerns WHERE group_id=? AND target_user_id=?', [groupId, userId])
         await this.dao.run('DELETE FROM ss_expectations WHERE group_id=? AND target_user_id=?', [groupId, userId])
+        // ss_reflections 也带 target_user_id（针对该成员的反思摘要）：此前漏删，用户在
+        // #删除我的群聊画像 / 关闭建模 之后，反思行仍留在库里并能被 activeAll 读出（第 7 轮 M1）
+        await this.dao.run('DELETE FROM ss_reflections WHERE group_id=? AND target_user_id=?', [groupId, userId])
         // 事件为群级数据不整行删，但参与者列表必须移除该用户（可恢复画像的关联）
         const eps = await this.dao.all('SELECT id, participant_ids FROM gw_episodes WHERE group_id=?', [groupId]).catch(() => [])
         for (const ep of eps) {
@@ -198,13 +205,25 @@ export class GroupWorldIngester {
           }
         }
         // 圈子（阶段统计）：成员表移除该用户；若因此空心化则整行删除（下周聚类自然重建）
-        const cms = await this.dao.all('SELECT id, member_ids, core_member_ids FROM gw_communities WHERE group_id=?', [groupId]).catch(() => [])
+        // 第 7 轮 L3：summary 里写着核心成员昵称（community.js 生成，retriever 会把它注入 LLM 现场），
+        // 只改 member_ids 会让昵称残留到下周重聚类；这里把该昵称从 summary 里剥离并按剩余核心成员重写。
+        const cms = await this.dao.all('SELECT id, member_ids, core_member_ids, summary FROM gw_communities WHERE group_id=?', [groupId]).catch(() => [])
         for (const cm of cms) {
           const strip = (s) => { let a = []; try { a = JSON.parse(s || '[]') } catch { /* noop */ } return a.map(String).filter((p) => p !== String(userId)) }
           const members = strip(cm.member_ids)
           const cores = strip(cm.core_member_ids)
+          let summary = cm.summary
+          if (nickname && String(summary || '').includes(nickname)) {
+            const names = []
+            for (const uid of cores) {
+              const p = await this.dao.get('SELECT current_nickname FROM gw_member_profiles WHERE group_id=? AND user_id=?', [groupId, uid]).catch(() => null)
+              const n = String(p?.current_nickname || '').trim()
+              if (n) names.push(n)
+            }
+            summary = names.length ? `${members.length}人活跃互动圈（核心：${names.join('、')}）` : `${members.length}人活跃互动圈`
+          }
           if (members.length === 0) await this.dao.run('DELETE FROM gw_communities WHERE id=?', [cm.id])
-          else await this.dao.run('UPDATE gw_communities SET member_ids=?, core_member_ids=? WHERE id=?', [JSON.stringify(members), JSON.stringify(cores), cm.id])
+          else await this.dao.run('UPDATE gw_communities SET member_ids=?, core_member_ids=?, summary=? WHERE id=?', [JSON.stringify(members), JSON.stringify(cores), summary, cm.id])
         }
       })
       Log.mark('[groupworld]', `${ANSI.y}清理成员${ANSI.R} 群${groupId} 用户${userId}`)
@@ -234,7 +253,7 @@ export class GroupWorldIngester {
     // ss_* 与 gw_* 同库：整群清理必须一并删掉 SelfState 的情绪/心事/期待/迁移/群心境，
     // 否则「已有画像已清除」的承诺不成立（情绪投影与心事面板仍带着旧群的残留）
     const tables = ['gw_segments', 'gw_member_profiles', 'gw_traits', 'gw_evidence', 'gw_edges', 'gw_bot_rel', 'gw_episodes', 'gw_communities', 'gw_cursor', 'gw_optout',
-      'ss_events', 'ss_emotions', 'ss_concerns', 'ss_expectations', 'ss_transitions', 'ss_group_state']
+      'ss_events', 'ss_emotions', 'ss_concerns', 'ss_expectations', 'ss_transitions', 'ss_group_state', 'ss_reflections']
     if (!keepMessages) tables.unshift('gw_messages')
     try {
       await this.dao.txn(async () => {

@@ -380,8 +380,18 @@
     }
   }
 
+  /* 数值解析：''/null/NaN 一律返回 null（表示「无有效输入」）。
+     第 6 轮审计：type="number" 输入框清空时 v-model.number 给出 ''，旧逻辑把 '' 原样提交，
+     后端把空串当 0 消费（recall.cap 清空后 slice(0,0) 会裁空全体用户的长期记忆）。
+     各面板的提交路径统一用本函数归一，勿再各写一份。 */
+  const parseNum = (v) => {
+    if (v === '' || v == null) return null
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+
   window.UI = {
-    fmt, toast, toastState,
+    fmt, toast, toastState, parseNum,
     makeCfgRow,
     register(app) {
       app.component('VIcon', VIcon)

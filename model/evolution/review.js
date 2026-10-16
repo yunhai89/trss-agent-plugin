@@ -19,6 +19,12 @@ import path from 'node:path'
 
 const DEFAULT_EVERY = 20
 const DEFAULT_BUDGET = 200000
+const MAX_COUNT_SCOPES = 2000 // per-scope 计数 Map 的容量上限（第 7 轮 L2：此前只增不删）
+
+/** 本地日期键（第 7 轮 L1）：日预算按本地日界重置，与 groupworld/analyzer.js 的 dateKey 同口径 */
+function localDateKey(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
 
 /** 自批判评审 prompt（强负面约束是核心，防自我设限） */
 function buildReviewPrompt({ recent, memSnap, skillList, botName }) {
@@ -103,7 +109,9 @@ export class SelfReviewer {
 
   /** 预算闸：日 token 预算耗尽则降级（不评审） */
   _budgetExhausted() {
-    const today = new Date().toISOString().slice(0, 10)
+    // 日界用**本地日期**（第 7 轮 L1）：此前用 toISOString()（UTC），东八区要等到北京时间 08:00
+    // 才重置当日预算，与 groupworld/analyzer.js 的本地 dateKey 口径不一致。
+    const today = localDateKey()
     if (this._budgetDay !== today) { this._budgetDay = today; this._usedTokens = 0 }
     return this.dailyBudgetTokens > 0 && this._usedTokens >= this.dailyBudgetTokens
   }
@@ -112,6 +120,9 @@ export class SelfReviewer {
   tick(ctx, runResult = {}) {
     if (!this.enable) return
     const scope = ctx?.scopeId || ctx?.scopeUserId || '__global__'
+    // 容量上限（第 7 轮 L2）：_counts 此前只增不删，群/用户越多越吃内存；满了整体清零，
+    // 代价只是各 scope 重新攒满 every 轮才触发评审（阈值语义不受影响）。
+    if (!this._counts.has(scope) && this._counts.size >= MAX_COUNT_SCOPES) this._counts.clear()
     const n = (this._counts.get(scope) || 0) + 1
     if (n < this.every) { this._counts.set(scope, n); return }
     this._counts.set(scope, 0) // 重置，开始下一轮计数周期

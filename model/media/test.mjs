@@ -18,6 +18,9 @@ import {
   getGroupFileTool,
   readAttachmentTool,
 } from './index.js'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 let passed = 0
 let failed = 0
@@ -344,6 +347,62 @@ await test('resolveMedia：图片仍走 get_image', async () => {
   const fetcher = async () => ({ ok: true, arrayBuffer: async () => Uint8Array.from(PNG).buffer })
   await resolveMedia({ id: 'i1', source: 'message', kind: 'image', name: 'a.png', url: null, fid: null, segment: { file: 'img_code' } }, { e, fetcher, log: () => {} })
   ok(calls.includes('get_image'), '图片调用 get_image')
+})
+
+// ---------- 15. 超大附件：解析阶段提前拒绝（本轮外部服务客户端审计第 3 条 / 既有 M-046） ----------
+await test('resolveMedia：超限提前拒绝（已知 size / content-length / 流式计数 / statSync）', async () => {
+  const cap = 1024
+
+  // ① 消息段已带 size → 连下载都不发起
+  let dl1 = 0
+  const mf1 = { id: 'b1', source: 'message', kind: 'file', name: 'big.bin', url: 'http://x/big.bin', size: 2048, segment: {} }
+  await resolveMedia(mf1, { bot: { download: async () => { dl1++; return { buffer: Buffer.alloc(2048) } } }, maxBytes: cap, log: () => {} })
+  eq(dl1, 0, '已知 size 超限 → Bot.download 不调用')
+  eq(mf1.resolveError, 'limit_size', '标记 limit_size')
+  ok(/超过单文件大小上限/.test(mf1.__skipReason || ''), '带可读 __skipReason')
+  ok(!mf1.buffer, '不保留 buffer')
+
+  // ② content-length 超限 → 下载前拒绝
+  let dl2 = 0
+  const mf2 = { id: 'b2', source: 'message', kind: 'image', name: 'big.png', url: 'http://x/big.png', segment: {} }
+  const f2 = async (url, opts) => (opts?.method === 'HEAD'
+    ? { ok: true, headers: { get: () => '4096' } }
+    : { ok: true, headers: { get: () => '4096' }, arrayBuffer: async () => new ArrayBuffer(4096) })
+  await resolveMedia(mf2, { bot: { download: async () => { dl2++; return { buffer: Buffer.alloc(4096) } } }, fetcher: f2, maxBytes: cap, log: () => {} })
+  eq(dl2, 0, 'content-length 超限 → Bot.download 不调用')
+  eq(mf2.resolveError, 'limit_size', '标记 limit_size')
+
+  // ③ 分块传输（无 content-length）：边读边计数，超限即取消
+  const mf3 = { id: 'b3', source: 'message', kind: 'file', name: 'c.bin', url: 'http://x/c.bin', segment: {} }
+  const chunk = new Uint8Array(700)
+  const reader = { i: 0, cancelled: false, async read() { return this.i++ < 3 ? { done: false, value: chunk } : { done: true } }, async cancel() { this.cancelled = true } }
+  const f3 = async (url, opts) => (opts?.method === 'HEAD'
+    ? { ok: true, headers: { get: () => null } }
+    : { ok: true, headers: { get: () => null }, body: { getReader: () => reader } })
+  await resolveMedia(mf3, { fetcher: f3, maxBytes: cap, log: () => {} })
+  eq(mf3.resolveError, 'limit_size', '无 content-length 也被流式计数拦下')
+  ok(reader.cancelled, '超限后取消读取')
+  ok(!mf3.buffer, '不保留半截 buffer')
+
+  // ④ 本地文件：statSync 提前拒绝，不整份读进内存
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'media-cap-'))
+  const bigPath = path.join(tmp, 'big.bin')
+  fs.writeFileSync(bigPath, Buffer.alloc(4096))
+  const mf4 = { id: 'b4', source: 'message', kind: 'file', name: 'big.bin', url: `file://${bigPath}`, segment: {} }
+  await resolveMedia(mf4, { maxBytes: cap, log: () => {} })
+  eq(mf4.resolveError, 'limit_size', '本地文件超限 → limit_size')
+  ok(!mf4.buffer, '本地文件未读进内存')
+  fs.rmSync(tmp, { recursive: true, force: true })
+
+  // ⑤ 未超限不受影响
+  const mf5 = { id: 'b5', source: 'message', kind: 'file', name: 'ok.bin', url: null, fid: null, segment: { file: `base64://${Buffer.from('hi').toString('base64')}` } }
+  await resolveMedia(mf5, { maxBytes: cap, log: () => {} })
+  ok(mf5.buffer && mf5.buffer.length === 2 && !mf5.resolveError, '正常大小照常解析')
+
+  // ⑥ 超限文案：convert 的降级说明优先显示 __skipReason（而不是 limit_size）
+  const content = buildUserContent('看附件', [{ name: 'big.bin', kind: 'file', mime: 'application/octet-stream', bytes: 2048, resolveError: 'limit_size', __skipReason: '超过单文件大小上限 1.0KB' }], { protocol: 'openai', caps: { vision: true }, degrade: 'note' })
+  const txt = Array.isArray(content) ? content.map((b) => b.text || '').join('') : String(content)
+  ok(txt.includes('超过单文件大小上限') && !txt.includes('limit_size'), `降级文案可读：${txt}`)
 })
 
 // ---------- 总结 ----------

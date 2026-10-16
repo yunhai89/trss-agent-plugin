@@ -329,11 +329,21 @@ export const transferGroupFileTool = defineTool({
     if (fs._error) return { error: '解析文件失败：' + fs._error }
     const file = findFile(fs, p)
     if (!file?.fileId) return { error: `未找到文件：${p.fileName || p.fileId}`, available: fs.files.map((x) => x.name) }
+    // 修 2026-10-17 审计：targetGroupId 原先不做任何校验（needGid 只校验源群），
+    // 而 group_manage 对群管自动放行 → 任意群管可把本群文件写进任意其它群。
+    // 现要求：目标群必须是纯数字群号；与本群不同则仅主人（ctx.isMaster）可操作。
+    const target = String(p.targetGroupId ?? '').trim()
+    if (!/^\d{1,20}$/.test(target)) {
+      return { error: `目标群号非法：${p.targetGroupId}（应为纯数字群号）` }
+    }
+    if (target !== String(gid) && ctx?.isMaster !== true) {
+      return { error: `跨群转移文件需要主人操作：当前群 ${gid} → 目标群 ${target}（非主人只能在本群内转移）` }
+    }
     const r = await sendApi(ctx, 'trans_group_file', {
-      group_id: gid, file_id: String(file.fileId), target_group_id: String(p.targetGroupId),
+      group_id: gid, file_id: String(file.fileId), target_group_id: target,
     })
     if (!r.ok) return { error: r.error }
-    return { ok: true, fromGroup: gid, toGroup: p.targetGroupId, file: file.name || file.fileId, transferred: true }
+    return { ok: true, fromGroup: gid, toGroup: target, file: file.name || file.fileId, transferred: true }
   },
 })
 

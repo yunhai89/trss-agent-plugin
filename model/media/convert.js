@@ -157,7 +157,8 @@ function degradeNote(mf, degrade, errored) {
   const size = mf.bytes ? `${(mf.bytes / 1024).toFixed(1)}KB` : '未知大小'
   // 图片只要有直链就附带，保证即便走到降级占位，主模型/MCP 仍能拿到地址去识别（不再"没有图片"）
   const urlHint = (mf.kind === 'image' && mf.url) ? `；图片直链可供视觉类工具/MCP 使用：${mf.url}` : ''
-  if (errored) return `[附件 ${mf.name}（${size}）获取失败：${mf.resolveError || '未知'}${urlHint}]`
+  // 超限（limit_size）等场景 resolve.js 会带上人类可读的 __skipReason，优先显示它
+  if (errored) return `[附件 ${mf.name}（${size}）获取失败：${mf.__skipReason || mf.resolveError || '未知'}${urlHint}]`
   // 图片降级区分两种原因：格式不受端点支持（AVIF/HEIC 等）vs 模型无视觉能力
   const why = mf.kind === 'image'
     ? (SENDABLE_IMAGE.test(mf.mime || '') ? '当前模型不支持视觉' : `图片格式 ${mf.mime} 不受支持，请转为 PNG/JPEG`)

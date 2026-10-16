@@ -16,7 +16,7 @@
     components: { CfgRow },
     setup() {
       const { ref, reactive, onMounted } = Vue
-      const { toast } = window.UI // 提示统一走 window.UI.toast（window.toast 从未定义，可选链会静默吞掉提示）
+      const { toast, parseNum } = window.UI // 提示统一走 window.UI.toast（window.toast 从未定义，可选链会静默吞掉提示）
       const packs = ref([])
       const state = reactive({}) // 包名 → 当前表单值
       const active = ref(null) // 当前打开配置的包
@@ -42,10 +42,23 @@
       const reset = (p) => { state[p.name] = defaultsOf(p); toast('已还原', 'info') }
       const save = async (p) => {
         const changes = {}
-        for (const f of p.config || []) changes[`agent.tools.${p.name}.${f.key}`] = state[p.name][f.key]
+        const skipped = []
+        for (const f of p.config || []) {
+          const v = state[p.name][f.key]
+          // 数值归一（第 6 轮审计）：number 输入框清空时 v-model.number 给出 ''，
+          // 提交空串会被后端当 0 消费；此处跳过该键并还原为当前生效值，避免写坏配置
+          if (f.type === 'number') {
+            const n = parseNum(v)
+            if (n === null) { skipped.push(f.label || f.key); state[p.name][f.key] = defaultsOf(p)[f.key]; continue }
+            changes[`agent.tools.${p.name}.${f.key}`] = n
+            continue
+          }
+          changes[`agent.tools.${p.name}.${f.key}`] = v
+        }
         try {
           await window.api.put('/config', { changes })
           await load()
+          if (skipped.length) toast(`数值项未填写，已保留原值：${skipped.join('、')}`, 'warn')
           toast('已保存（已热加载）', 'success')
           closeCfg()
         } catch (e) { toast(e?.message || '保存失败', 'error') }

@@ -102,10 +102,17 @@ await test('getPostDetail / getPostReplies：mock', async () => {
   eq(rs.length, 1, '1 条评论')
   eq(rs[0].content, '好', '评论纯文本')
 
-  // 评论失败不抛错
+  // 评论失败要抛错，不能吞成空数组（否则工具层与用户都会把故障当成「暂无评论」）
   const fErr = async () => ({ ok: true, json: async () => ({ retcode: 1001, message: 'err' }) })
-  const rs2 = await getPostReplies('p9', { fetcher: fErr })
-  eq(rs2, [], '失败→空数组')
+  let threw = null
+  try { await getPostReplies('p9', { fetcher: fErr }) } catch (e) { threw = e }
+  ok(threw && /1001/.test(threw.message), '失败→抛错且带上游 retcode')
+
+  // 网络层异常同样要抛
+  const fNet = async () => { throw new Error('socket hang up') }
+  let threw2 = null
+  try { await getPostReplies('p9', { fetcher: fNet }) } catch (e) { threw2 = e }
+  ok(threw2 && /socket hang up/.test(threw2.message), '网络异常→抛错')
 })
 
 // ---------- 7. 格式化 ----------
@@ -134,6 +141,12 @@ await test('miyoushe_replies 工具：mock', async () => {
   const f = mockFetch({ retcode: 0, data: { list: [{ reply: { content: '赞', like_num: 9 }, user: { nickname: 'N' } }] } })
   const out = await miyousheRepliesTool.execute({ postId: 'p1' }, { fetcher: f })
   ok(out.includes('赞'), '工具返回评论')
+
+  // 拉取失败：工具不抛错，而是回可读的「评论获取失败：<原因>」
+  const fErr = async () => ({ ok: true, json: async () => ({ retcode: -100, message: '登录已过期' }) })
+  const out2 = await miyousheRepliesTool.execute({ postId: 'p1' }, { fetcher: fErr })
+  ok(out2.startsWith('评论获取失败：') && out2.includes('-100'), `失败→可读文案：${out2}`)
+  ok(!out2.includes('暂无评论'), '失败不再伪装成「暂无评论」')
 })
 
 // ---------- 总结 ----------

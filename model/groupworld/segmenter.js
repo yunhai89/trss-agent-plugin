@@ -82,7 +82,21 @@ export class ConversationSegmenter {
     if (!msgs.length) return { processed: 0, closed: await this._closeIdleOpen(groupId, idleMs, now) }
     msgs.sort((a, b) => (Number(a.sent_at) || 0) - (Number(b.sent_at) || 0) || (Number(a.id) || 0) - (Number(b.id) || 0))
 
+    // ── 阶段 1：纯内存决策（embedding 复核可能走网络，故不放进事务；见 db.js txn 的约定）──
+    // 此前「_open 落库 + _append + 水位 UPDATE」三处分散执行：循环中途抛错、进程被杀、或水位
+    // UPDATE 自身失败 → 段已落库但水位没推进；重跑时把同一批消息**重复 append**（msg_count 翻倍），
+    // 或撞上 gw_segments 的 UNIQUE(group_id,idem_key) 直接抛错（该群切片长期失败，仅日志可见）。
+    // 现在改成「内存计划 + 单事务落库」，新建段/追加计数/水位推进同生共死（修 H1）。
+    const touched = [] // 本批涉及的片段（既有 open + 本批新建），按出现顺序
+    // 跨段去重集：本批消息里"已被某个既有片段记录"的集合（见 _batchRecordedIds）。
+    // 崩溃那一轮建出来的片段，其 start_msg_id 必落在同一批消息内，故这个集合有界且够用。
+    const batchRecorded = await this._batchRecordedIds(groupId, msgs)
     let open = await this._currentOpen(groupId)
+    if (open) {
+      // 既有 open 段：自己的区间集 ∪ 跨段集（重跑时已被别段记录的消息不再吸进来）
+      open.recordedIds = new Set([...open.recordedIds, ...batchRecorded])
+      touched.push(open)
+    }
     let closed = 0; let topicSplits = 0
     for (const m of msgs) {
       const gap = open && open.lastSentAt ? m.sent_at - open.lastSentAt : 0
@@ -102,17 +116,57 @@ export class ConversationSegmenter {
         }
       }
       if (needNew) {
-        if (open && open.id) { await this._close(open, now, open.msgCount >= maxMsg ? 'full' : (gap >= idleMs ? 'idle' : 'topic_shift')); closed++ }
-        open = await this._open(groupId, m) // _open 不预记首条，由下方 _append 统一计数（修首条双计）
+        if (open) {
+          // 只标计划态，真正的 UPDATE（与 trace）在事务里执行：
+          // 新段此时还没落库、拿不到 id，trace 挪到阶段 2 才能带上真实 segId。
+          open.closeReason = open.msgCount >= maxMsg ? 'full' : (gap >= idleMs ? 'idle' : 'topic_shift')
+          open.closedAt = now
+          closed++
+        }
+        open = this._openPlanned(groupId, m, batchRecorded) // 不预记首条，由 _appendPlanned 统一计数（修首条双计）
+        touched.push(open)
       }
-      await this._append(open, m)
+      this._appendPlanned(open, m)
     }
     // 推进水位到本批 MAX(id)（不能取 sent_at 序最后一条的 id：QQ 事件延迟投递/并发 INSERT 会让
     // 「sent_at 更早、id 更大」的消息排在前面，水位回退 → 下轮重复消费同一条消息）
     const maxId = msgs.reduce((mx, m) => Math.max(mx, Number(m.id) || 0), watermark)
-    await this.dao.run('UPDATE gw_cursor SET last_segmented_msg_id=? WHERE group_id=?', [maxId, groupId])
-    // 顺带闭合已静默的 open（分析任务期望 closed 才处理）
-    closed += await this._closeIdleOpen(groupId, idleMs, now)
+
+    // ── 阶段 2：单事务落库（建段/复用段 + 追加计数 + 水位推进），任一失败整体回滚（修 H1）──
+    await this.dao.txn(async () => {
+      for (const seg of touched) {
+        if (seg.isNew) {
+          // ON CONFLICT DO NOTHING：旧版本遗留的「段已落库、水位未推进」半成品不再抛 UNIQUE → 不再永久卡死
+          const ins = await this.dao.run(
+            `INSERT INTO gw_segments(group_id,idem_key,start_msg_id,end_msg_id,msg_count,low_value_count,started_at,status,created_at)
+             VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(group_id,idem_key) DO NOTHING`,
+            [groupId, seg.idem_key, seg.start_msg_id, seg.end_msg_id, 0, 0, seg.started_at, 'open', Date.now()],
+          )
+          const row = await this.dao.get('SELECT * FROM gw_segments WHERE group_id=? AND idem_key=?', [groupId, seg.idem_key])
+          if (!row) throw new Error(`[groupworld] 建段失败：${seg.idem_key}`)
+          seg.id = row.id
+          // changes=0 → 同 idem_key 的段已存在（旧版半成品）：以库中内容为基线，只补未记录的消息
+          if (!(Number(ins?.changes) > 0)) await this._reuseExisting(seg, row)
+        }
+        if (seg.added.length) {
+          await this.dao.run(
+            'UPDATE gw_segments SET end_msg_id=?, msg_count=?, low_value_count=? WHERE id=?',
+            [seg.endMsgId, seg.msgCount, seg.lowValue, seg.id],
+          )
+        }
+        if (seg.closeReason) {
+          const r = await this.dao.run("UPDATE gw_segments SET status='closed', closed_at=? WHERE id=? AND status='open'", [seg.closedAt || now, seg.id])
+          if (Number(r?.changes) > 0 || seg.isNew) {
+            this.trace?.record?.('gw_segment', { groupId, segId: seg.id, closed: true, msgCount: seg.msgCount, reason: seg.closeReason })
+          }
+        } else if (seg.reopen) {
+          await this.dao.run("UPDATE gw_segments SET status='open', closed_at=NULL WHERE id=?", [seg.id])
+        }
+      }
+      await this.dao.run('UPDATE gw_cursor SET last_segmented_msg_id=? WHERE group_id=?', [maxId, groupId])
+      // 顺带闭合已静默的 open（分析任务期望 closed 才处理）
+      closed += await this._closeIdleOpen(groupId, idleMs, now)
+    })
     this.trace?.record?.('gw_segment', { groupId, processed: msgs.length, closed, topicSplits })
     return { processed: msgs.length, closed, topicSplits }
   }
@@ -123,8 +177,10 @@ export class ConversationSegmenter {
    *  失败/null 不落缓存：下次漂移检测可重试（曾把 null 永久缓存，一次瞬时失败污染整个片段）。 */
   async _sameTopicByEmbed(open, winText, msgText) {
     try {
-      if (!open?.id) return false
-      const key = `${open.id}:${createHash('sha1').update(String(winText)).digest('hex').slice(0, 12)}`
+      // 计划态新段还没落库（无 id），用 idem_key 作缓存键——同一片段键稳定，等价于旧行为
+      const segKey = open?.id != null ? String(open.id) : String(open?.idem_key || '')
+      if (!segKey) return false
+      const key = `${segKey}:${createHash('sha1').update(String(winText)).digest('hex').slice(0, 12)}`
       let winEmb = this._winEmbCache.get(key)
       if (winEmb === undefined) {
         const v = await this.embedder.embed(winText)
@@ -132,7 +188,7 @@ export class ConversationSegmenter {
         winEmb = v
         this._winEmbCache.set(key, v)
         if (this._winEmbCache.size > 100) { // 容量控制：清掉其它片段的旧键
-          for (const k of this._winEmbCache.keys()) { if (!k.startsWith(`${open.id}:`)) this._winEmbCache.delete(k) }
+          for (const k of this._winEmbCache.keys()) { if (!k.startsWith(`${segKey}:`)) this._winEmbCache.delete(k) }
         }
       }
       if (!winEmb) return false
@@ -149,7 +205,12 @@ export class ConversationSegmenter {
     if (!row) return null
     const lastMsg = await this.dao.get('SELECT sent_at FROM gw_messages WHERE group_id=? AND message_id=?', [groupId, row.end_msg_id])
     // 重建近窗文本 + 片内消息 id 集（重启后漂移检测/引用链守卫仍可用）
-    let recentTexts = []; const msgIds = new Set()
+    let recentTexts = []
+    // recordedIds「确实已记入本段」：按 start/end 的**行 id 区间**取（与 pendingSegments 装载同口径），
+    // 再并入时间窗集合；只用于追加去重——水位回退/崩溃重跑时同一条消息不再重复计数（修 H1 的重复 append）。
+    // msgIds 沿用旧口径（区间 ∪ 时间窗），引用链守卫要的是"本段可能看过"的集合。
+    const recordedIds = await this._segmentMsgIds(row)
+    const msgIds = new Set(recordedIds)
     try {
       const endAt = Number(lastMsg?.sent_at) || Number(row.started_at) || 0
       const rows = await this.dao.all(
@@ -158,45 +219,122 @@ export class ConversationSegmenter {
       )
       for (const r of rows) {
         msgIds.add(String(r.message_id))
+        recordedIds.add(String(r.message_id))
         if (!isLowValue(r)) recentTexts.push(String(r.plain_text || ''))
       }
       recentTexts = recentTexts.slice(-12)
     } catch { /* noop */ }
-    return { ...row, lastSentAt: Number(lastMsg?.sent_at) || Number(row.started_at) || 0, msgCount: Number(row.msg_count) || 0, lowValue: Number(row.low_value_count) || 0, recentTexts, msgIds }
+    return {
+      ...row, isNew: false, added: [], closeReason: null, closedAt: 0, reopen: false,
+      endMsgId: row.end_msg_id,
+      lastSentAt: Number(lastMsg?.sent_at) || Number(row.started_at) || 0,
+      msgCount: Number(row.msg_count) || 0, lowValue: Number(row.low_value_count) || 0,
+      recentTexts, msgIds, recordedIds,
+    }
   }
 
-  /** 开新片段（不预记首条；由 _append 统一计数，避免首条双计）。 */
-  async _open(groupId, firstMsg) {
-    const now = Date.now()
-    const idemKey = segIdemKey(groupId, firstMsg.message_id)
-    const res = await this.dao.run(
-      `INSERT INTO gw_segments(group_id,idem_key,start_msg_id,end_msg_id,msg_count,low_value_count,started_at,status,created_at)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
-      [groupId, idemKey, firstMsg.message_id, firstMsg.message_id, 0, 0, firstMsg.sent_at, 'open', now],
-    )
-    return { id: res?.lastID ?? null, group_id: groupId, idem_key: idemKey, start_msg_id: firstMsg.message_id, end_msg_id: firstMsg.message_id, msgCount: 0, lowValue: 0, lastSentAt: firstMsg.sent_at, started_at: firstMsg.sent_at, recentTexts: [], msgIds: new Set() }
+  /** 片段已记录的消息 id 集：按 start/end 消息的行 id 区间精确取（H3 同款口径，避免秒级 sent_at
+   *  把相邻片段的消息算进来）；边界消息被保留期清理/定位不到时，退回首条消息兜底。 */
+  async _segmentMsgIds(row) {
+    const set = new Set()
+    try {
+      const bounds = await this.dao.get(
+        `SELECT (SELECT id FROM gw_messages WHERE group_id=? AND message_id=?) AS lo,
+                (SELECT id FROM gw_messages WHERE group_id=? AND message_id=?) AS hi`,
+        [row.group_id, row.start_msg_id, row.group_id, row.end_msg_id],
+      )
+      if (bounds?.lo != null && bounds?.hi != null) {
+        const rows = await this.dao.all(
+          'SELECT message_id FROM gw_messages WHERE group_id=? AND id>=? AND id<=?',
+          [row.group_id, bounds.lo, bounds.hi],
+        )
+        for (const r of rows) set.add(String(r.message_id))
+      }
+    } catch { /* noop */ }
+    if (row.start_msg_id) set.add(String(row.start_msg_id))
+    return set
   }
 
-  /** 追加一条消息到 open 片段（维护近窗文本 + 片内消息 id 集）。 */
-  async _append(open, m) {
-    open.msgCount += 1
+  /** 计划态开新片段（阶段 1 不落库；不预记首条，由 _appendPlanned 统一计数，避免首条双计）。 */
+  _openPlanned(groupId, firstMsg, batchRecorded = null) {
+    return {
+      id: null, isNew: true, group_id: groupId,
+      idem_key: segIdemKey(groupId, firstMsg.message_id),
+      start_msg_id: firstMsg.message_id, end_msg_id: firstMsg.message_id,
+      started_at: firstMsg.sent_at, lastSentAt: firstMsg.sent_at,
+      msgCount: 0, lowValue: 0, recentTexts: [], msgIds: new Set(),
+      // recordedIds 以跨段去重集为初值：本批里已被别段记录的消息不再重复 append（崩溃重跑不重复消费）
+      recordedIds: new Set(batchRecorded || []), batchIds: batchRecorded || null,
+      added: [], closeReason: null, closedAt: 0, reopen: false,
+    }
+  }
+
+  /** 本批消息中「已被某个既有片段记录」的 id 集（崩溃重跑的跨段去重，修 H1 的重复消费面）。
+   *  只查 start_msg_id 落在本批内的片段：崩溃那一轮建出来的段都满足这一点，规模有界（≤批大小 ×
+   *  片段数）；更早开启的 open 段由 _currentOpen 的区间集负责，不会漏。 */
+  async _batchRecordedIds(groupId, msgs) {
+    const set = new Set()
+    try {
+      const ids = [...new Set(msgs.map((m) => String(m.message_id)))]
+      if (!ids.length) return set
+      const rows = await this.dao.all(
+        `SELECT * FROM gw_segments WHERE group_id=? AND start_msg_id IN (${ids.map(() => '?').join(',')})`,
+        [groupId, ...ids],
+      )
+      for (const s of rows) {
+        const got = await this._segmentMsgIds(s)
+        for (const id of got) set.add(id)
+      }
+    } catch { /* noop */ }
+    return set
+  }
+
+  /** 追加一条消息到计划态片段（纯内存；维护近窗文本 + 两个 id 集）。
+   *  recordedIds 命中即跳过 → 崩溃重跑/水位回退时同一条消息不重复计数（修 H1）。 */
+  _appendPlanned(open, m) {
+    open.recordedIds = open.recordedIds || new Set()
+    const mid = String(m.message_id)
+    if (open.recordedIds.has(mid)) return false
+    open.recordedIds.add(mid)
     open.msgIds = open.msgIds || new Set()
-    open.msgIds.add(String(m.message_id))
+    open.msgIds.add(mid)
+    open.added = open.added || []
+    open.added.push(m)
+    open.msgCount += 1
     // end_msg_id 是片段末尾（pendingSegments 用它的 sent_at 作时间窗上界 + 静默闭合用 lastSentAt）：
     // 乱序（延迟投递）消息的 sent_at 可能早于已追加的消息，直接回退会让窗口反转塌缩（装载不全）。
     // 只保留 sent_at 更大者作末尾，保证上界单调。
     const older = Number(m.sent_at) < Number(open.lastSentAt)
-    if (!older) open.lastSentAt = m.sent_at
+    if (!older) { open.lastSentAt = m.sent_at; open.endMsgId = m.message_id }
     if (isLowValue(m)) open.lowValue += 1
     else {
       open.recentTexts = open.recentTexts || []
       open.recentTexts.push(String(m.plain_text || ''))
       if (open.recentTexts.length > 12) open.recentTexts.splice(0, open.recentTexts.length - 12)
     }
-    await this.dao.run(
-      'UPDATE gw_segments SET end_msg_id=?, msg_count=?, low_value_count=? WHERE id=?',
-      [older ? open.end_msg_id : m.message_id, open.msgCount, open.lowValue, open.id],
-    )
+    return true
+  }
+
+  /** 复用同 idem_key 的既有片段（旧版本遗留「段已落库、水位未推进」半成品时的补救路径）：
+   *  以库中计数为基线，只补记尚未入库的消息 —— 既不抛 UNIQUE 卡死，也不重复计数（修 H1）。 */
+  async _reuseExisting(seg, row) {
+    const existing = await this._segmentMsgIds(row)
+    const kept = (seg.added || []).filter((m) => !existing.has(String(m.message_id)))
+    const baseMsg = await this.dao.get('SELECT sent_at FROM gw_messages WHERE group_id=? AND message_id=?', [seg.group_id, row.end_msg_id]).catch(() => null)
+    seg.isNew = false
+    seg.msgIds = new Set([...existing, ...(seg.msgIds || [])].map(String))
+    // 去重集 = 本段已记录 ∪ 跨段已记录（跨段集在 _openPlanned 时预置，复用后不能丢）
+    seg.recordedIds = new Set([...existing, ...(seg.batchIds || [])])
+    seg.msgCount = Number(row.msg_count) || 0
+    seg.lowValue = Number(row.low_value_count) || 0
+    seg.endMsgId = row.end_msg_id
+    seg.started_at = row.started_at
+    seg.lastSentAt = Number(baseMsg?.sent_at) || Number(row.started_at) || 0
+    seg.recentTexts = []
+    seg.added = []
+    for (const m of kept) this._appendPlanned(seg, m)
+    // 库中段已闭合/已分析但本次确有新消息 → 重新打开，避免补记的消息被当作"已分析"永久漏掉
+    seg.reopen = kept.length > 0 && String(row.status || '') !== 'open'
   }
 
   /** 闭合片段。 */

@@ -248,10 +248,12 @@ export class TtsService {
     const fail = (msg) => { this.logger('warn', `[tts] 合成未执行：${msg}`); return { ok: false, error: msg } }
     const rawText = String(p.text || '').trim()
     if (!rawText) return fail('合成文本为空')
-    if (rawText.length > TTS_TEXT_MAX) return fail(`文本过长（${rawText.length} 字，上限 ${TTS_TEXT_MAX}）；请分段调用或多轮发送`)
     // 讲稿清洗统一在合成入口做（自动回复与 tts_speak 点播同一条链路）：剥 md/代码/链接/emoji、破折号转停顿；
     // maxChars（自动回复传入）时按句截断，0/缺省不截断（点播原文由调用方决定长度）。
     const text = stripForSpeech(rawText, { maxChars: Number(p.maxChars) || 0 })
+    // 长度闸必须判「截断后」的文本：自动语音把整段回复（apps/agent.js 传 replyMaxChars）传进来，
+    // 旧顺序先按原文长度拒绝 → 开了自动语音的群，长回复永远没有语音（本应截到几百字朗读）。
+    if (text.length > TTS_TEXT_MAX) return fail(`文本过长（${text.length} 字，上限 ${TTS_TEXT_MAX}）；请分段调用或多轮发送`)
     if (!text) return fail('文本清洗后无可朗读内容（仅符号/代码/链接？）')
 
     if (this.provider !== 'indextts') return this._synthesizeCloud(text, p, { fail, notes })

@@ -850,10 +850,13 @@ router.delete('/persona-lore/:id', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
   if (!r.personaLore) return fail(res, CODE.BAD, '人设资料库未启用')
   try {
-    const removed = r.personaLore.discard(req.params.id)
+    // 第 7 轮 L4：返回明细，前端不必再靠"当前有没有草稿"猜发生了什么（removed 语义保持不变）
+    const d = typeof r.personaLore.discardDetailed === 'function'
+      ? r.personaLore.discardDetailed(req.params.id)
+      : { removed: r.personaLore.discard(req.params.id) }
     // 草稿丢弃同步撤销其待审采纳项，避免审批门残留已无法采纳的条目
-    if (removed) { try { r.personaAdoptionQueue?.cancelByPersona?.(req.params.id) } catch { /* noop */ } }
-    return ok(res, { removed })
+    if (d.removed) { try { r.personaAdoptionQueue?.cancelByPersona?.(req.params.id) } catch { /* noop */ } }
+    return ok(res, { removed: !!d.removed, removedDraft: !!d.removedDraft, removedActive: !!d.removedActive })
   } catch (e) { return fail(res, CODE.BAD, e.message || String(e)) }
 }))
 

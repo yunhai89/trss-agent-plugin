@@ -48,7 +48,7 @@
     components: { CfgRow, TagEditor },
     setup() {
       const { ref, reactive, watch, computed, onMounted, onUnmounted, nextTick } = Vue
-      const { toast } = window.UI
+      const { toast, parseNum } = window.UI
       const M = window.MOCK
 
       const form = reactive({})
@@ -97,6 +97,9 @@
         for (const k of Object.keys(frm)) {
           const p = prefix + '.' + k, a = orig?.[k], b = frm[k]
           if (b && typeof b === 'object' && !Array.isArray(b) && a && typeof a === 'object') buildChanges(a, b, p, out)
+          // 数值归一（第 6 轮审计）：number 输入框清空时 v-model.number 给出 ''，直接提交会被后端当 0 消费
+          else if (typeof a === 'number') { const n = parseNum(b); if (n !== null && n !== a) out[p] = n }
+          else if (b === '' && typeof a !== 'string') continue
           else if (JSON.stringify(a) !== JSON.stringify(b)) out[p] = b
         }
         return out
@@ -204,8 +207,8 @@
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.send"><div class="cf-grid">
-            <cfg-row name="单条最多贴图数" desc="单条回复最多贴的贴纸数（maxPerReply）">
-              <input type="number" class="inp" style="width:90px" min="0" max="5" v-model.number="form.maxPerReply">
+            <cfg-row name="单条最多贴图数" desc="单条回复最多贴几张（1~5，默认 2；要关闭请用上面的启用开关）">
+              <input type="number" class="inp" style="width:90px" min="1" max="5" v-model.number="form.maxPerReply">
             </cfg-row>
             <cfg-row name="带图冷却(秒)" desc="同会话两次带图回复最小间隔（cooldown）">
               <input type="number" class="inp" style="width:110px" min="0" max="3600" v-model.number="form.cooldown">

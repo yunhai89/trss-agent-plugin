@@ -51,7 +51,10 @@ export class StateMaintenance {
       r.expired += await this._expire('ss_expectations', "status IN ('pending','uncertain') AND expires_at<?", [now - (rt.resolvedExpectationDays ?? 7) * 86400000], now)
       r.expired += await this._expire('ss_emotions', "status='resolved' AND resolved_at<?", [now - (rt.resolvedEmotionDays ?? 7) * 86400000], now)
       r.expired += await this._expireConcerns({ botId, groupId, now })
-      r.expired += await this._expire('ss_reflections', "status='active' AND expires_at<?", [now], now)
+      // ss_reflections 此前只置 status='expired'、从不删行（表只增不减）；且被旧代码置过 expired 的行
+      // 会被 "status='active'" 条件永久排除在清理之外（第 7 轮 M1）→ 改成按 expires_at 直接删除。
+      // 读取侧 activeAll 本来就只认"active 且未过期"，删除不影响投影；expires_at 为 NULL 的行不匹配、保留。
+      r.expired += await this._expire('ss_reflections', 'expires_at<?', [now], now, 'delete')
       // 3. 负残留衰减（§20.4：无新证据支持 → 缓慢归零）
       const staleCutoff = now - 3 * 86400000
       const res = await this.dao.run(
@@ -74,7 +77,8 @@ export class StateMaintenance {
   }
 
   // 各表可写的审计列不同（修复：此前通用 SET 带 updated_at，但 ss_expectations 只有 resolved_at、
-  // ss_reflections 两者皆无 → "no such column" 被 catch 吞掉 → 期待/反思过期清理永远静默失败）
+  // ss_reflections 两者皆无 → "no such column" 被 catch 吞掉 → 期待/反思过期清理永远静默失败）。
+  // ss_reflections 现在走 mode='delete' 的保留期清理（第 7 轮 M1），保留表项是防止误用 expire 模式再报 no such column。
   static EXPIRE_COLS = {
     ss_emotions: ['resolved_at', 'updated_at'],
     ss_concerns: ['resolved_at', 'updated_at'],

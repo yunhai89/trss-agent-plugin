@@ -8,13 +8,14 @@
  *   - fail-closed：mode=e2b 但沙箱未就绪 → 拒绝，不在宿主跑
  *   - 模板缺 yt-dlp（exit 127）→ 可读失败
  *   - 产物流式下载的字节上限（超限即失败并清理半成品）
+ *   - 宿主档取消：abort 立刻 SIGKILL、不等 timeoutSec，且不再把产物发进会话
  */
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 
-import { makeDownloadTool, buildYtDlpArgs, runYtDlpInSandbox } from './index.js'
+import { makeDownloadTool, buildYtDlpArgs, runYtDlpInSandbox, runYtDlp } from './index.js'
 import { SandboxManager } from '../sandbox/manager.js'
 import { makeCommandCounter } from '../sandbox/index.js'
 
@@ -134,6 +135,48 @@ await test('web_download：拉回中途中断 → 结构化失败 + 清理半成
     const walk = (d) => (fs.existsSync(d) ? fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)])) : [])
     eq(walk(dir).length, 0, '半成品文件已清理')
   } finally { await box.shutdown(); fs.rmSync(dir, { recursive: true, force: true }) }
+})
+
+// ---------- 6. 宿主档取消（本轮外部服务客户端审计第 2 条） ----------
+await test('runYtDlp（宿主档）：abort → 立刻 SIGKILL 并返回 aborted', async () => {
+  const dir = tmpDir()
+  const binDir = tmpDir()
+  const bin = path.join(binDir, 'fake-yt-dlp.mjs')
+  fs.writeFileSync(bin, '#!/usr/bin/env node\nsetTimeout(() => {}, 30000)\n', { mode: 0o755 })
+  try {
+    const ac = new AbortController()
+    const t0 = Date.now()
+    const p = runYtDlp('https://example.com/v/1', { dir, ytDlpBin: bin, timeoutSec: 600, signal: ac.signal })
+    setTimeout(() => ac.abort(), 150)
+    const r = await p
+    const ms = Date.now() - t0
+    ok(r.ok === false && r.aborted === true, `取消 → ok:false + aborted:true（${JSON.stringify({ ok: r.ok, aborted: r.aborted, error: r.error })}）`)
+    ok(ms < 5000, `不等满 timeoutSec=600s（实测 ${ms}ms）`)
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(binDir, { recursive: true, force: true }) }
+})
+
+// ---------- 7. 宿主档取消：产物不发进会话 ----------
+await test('web_download：下载中被取消 → 不发消息 + 清理下载目录', async () => {
+  const dir = tmpDir()
+  const binDir = tmpDir()
+  const bin = path.join(binDir, 'fake-yt-dlp.mjs')
+  fs.writeFileSync(bin, '#!/usr/bin/env node\nsetTimeout(() => {}, 30000)\n', { mode: 0o755 })
+  const sent = []
+  const ac = new AbortController()
+  try {
+    const tool = makeDownloadTool()
+    const ctx = {
+      download: { dir, ytDlpBin: bin, allowPrivateHosts: true, maxTimeoutSec: 600 },
+      signal: ac.signal,
+      groupId: 'g1',
+      e: { reply: async (seg) => { sent.push(seg) } },
+    }
+    setTimeout(() => ac.abort(), 200)
+    const r = await tool.execute({ url: 'https://example.com/v/1' }, ctx)
+    ok(/取消/.test(r.error || ''), `报错说明已取消（${r.error}）`)
+    eq(sent.length, 0, '取消后不发消息到会话')
+    eq(fs.readdirSync(dir).length, 0, '未发送的下载目录已清理')
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(binDir, { recursive: true, force: true }) }
 })
 
 console.log(`\n========================================`)

@@ -211,7 +211,11 @@ await test('维护：懒衰减兜底/过期清理/负残留衰减/负心境24h�
   const oldExp = await dao.get("SELECT status FROM ss_expectations WHERE bot_id='999' AND group_id='M3'")
   ok(oldExp?.status === 'expired' || oldExp?.status === 'naturally_expired', `过期 pending 期待被清（status=${oldExp?.status}）——若 pending：maintenance._expire 通用 SET 引用 ss_expectations 不存在的 updated_at 列，静默失败（maintenance.js:42→72）`)
   const oldRef = await dao.get("SELECT status FROM ss_reflections WHERE bot_id='999' AND group_id='M3'")
-  ok(oldRef?.status === 'expired', `过期 ss_reflections 被清（status=${oldRef?.status}）——同因：ss_reflections 亦无 updated_at 列（maintenance.js:45→72）`)
+  // 第 7 轮 M1：ss_reflections 改走 mode='delete' 的保留期清理（此前只置 expired，行永久滞留；
+  // 且被置过 expired 的行会被旧 WHERE 的 status='active' 永久排除）→ 过期行应整行消失
+  ok(oldRef == null, `过期 ss_reflections 整行删除（row=${JSON.stringify(oldRef)}）`)
+  const keptRef = await dao.get("SELECT COUNT(*) c FROM ss_reflections WHERE bot_id='999' AND group_id='M3'")
+  ok(Number(keptRef?.c) === 0, `ss_reflections 过期行不再残留（count=${keptRef?.c}）`)
 })
 
 // ══════════════ 6. 投影红线 ══════════════

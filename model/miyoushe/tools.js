@@ -163,8 +163,16 @@ export const miyousheRepliesTool = {
   async execute(params, ctx) {
     const m = ctx?.miyoushe || {}
     const gid = params.game ? getGameGid(params.game) : m.defaultGid || 2
-    const replies = await getPostReplies(params.postId, { gid, size: Math.min(20, Math.max(1, params.size || 5)), ...opt(ctx) })
-    return formatReplies(replies)
+    // client.getPostReplies 已改为失败抛错（cookie 过期/风控/超时/帖子被删），这里兜住并回可读文案：
+    // 旧实现把失败吞成空数组 → 工具层回「暂无评论。」，用户与模型都把故障当成「确实没有讨论」。
+    // 直接抛错则会让整轮工具调用以异常结束，故降级为错误文案（本轮外部服务客户端审计第 1 条）。
+    try {
+      const replies = await getPostReplies(params.postId, { gid, size: Math.min(20, Math.max(1, params.size || 5)), ...opt(ctx) })
+      return formatReplies(replies)
+    } catch (e) {
+      Log.warn(`[miyoushe] 评论获取失败（post ${params.postId}）：${e?.message || e}`)
+      return `评论获取失败：${e?.message || e}`
+    }
   },
 }
 

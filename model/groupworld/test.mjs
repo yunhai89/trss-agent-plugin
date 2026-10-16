@@ -94,6 +94,88 @@ await test('segmenter：闭合静默片段 + 低价值判定', async () => {
   ok(closed.length >= 1, '静默超阈值 → 片段闭合')
 })
 
+// ───────── H1 回归：切片落库与水位同事务（崩溃重跑不重复消费、不撞 UNIQUE、失败整体回滚） ─────────
+await test('切片原子性：崩溃重跑不重复 append / 半成品不撞 UNIQUE / 失败整体回滚', async () => {
+  const ing = new GroupWorldIngester({ dao })
+  const seg = new ConversationSegmenter({ dao })
+  const t0 = 1730000000000
+  const idle = { segmentIdleSeconds: 300, topicShiftEnabled: false }
+  const add = async (g, id, ts) => ing.ingestMessage({ id, groupId: g, userId: 'U1', displayName: '甲', timestamp: ts, text: `第${id}条正文内容够长`, segments: [], replyToId: null, media: [] })
+
+  // ① 崩溃点：段已落库、水位 UPDATE 未执行 → 重跑不得重复 append
+  const g1 = 'GH1A'
+  for (let i = 1; i <= 6; i++) await add(g1, `h${i}`, t0 + i * 1000)
+  await seg.processGroup(g1, idle, t0 + 6000)
+  await dao.run('UPDATE gw_cursor SET last_segmented_msg_id=0 WHERE group_id=?', [g1])
+  const r2 = await seg.processGroup(g1, idle, t0 + 6000)
+  const segs1 = await dao.all('SELECT * FROM gw_segments WHERE group_id=? ORDER BY id', [g1])
+  ok(r2.processed === 6, `重跑仍处理本批（processed=${r2.processed}）`)
+  ok(segs1.length === 1 && Number(segs1[0].msg_count) === 6, `重跑未重复 append（段数=${segs1.length}，msg_count=${segs1[0]?.msg_count}）`)
+  const cur1 = await dao.get('SELECT last_segmented_msg_id FROM gw_cursor WHERE group_id=?', [g1])
+  const mx1 = await dao.get('SELECT MAX(id) AS m FROM gw_messages WHERE group_id=?', [g1])
+  ok(Number(cur1.last_segmented_msg_id) === Number(mx1.m), `水位推进到本批 MAX(id)（实际 ${cur1.last_segmented_msg_id}，期望 ${mx1.m}）`)
+
+  // ② 旧版遗留半成品（段已闭合、水位未推进）：同 idem_key 复用而非裸 INSERT → 不抛 UNIQUE、不重复计数
+  const g2 = 'GH1B'
+  for (let i = 1; i <= 3; i++) await add(g2, `b${i}`, t0 + i * 1000)
+  await seg.processGroup(g2, idle, t0 + 3000)
+  await dao.run("UPDATE gw_segments SET status='closed', closed_at=? WHERE group_id=?", [t0 + 3000, g2])
+  await dao.run('UPDATE gw_cursor SET last_segmented_msg_id=0 WHERE group_id=?', [g2])
+  let threw = null
+  try { await seg.processGroup(g2, idle, t0 + 3000) } catch (e) { threw = e }
+  let segs2 = await dao.all('SELECT * FROM gw_segments WHERE group_id=? ORDER BY id', [g2])
+  ok(!threw, `半成品重跑不抛 UNIQUE（${threw?.message || 'ok'}）`)
+  ok(segs2.length === 1 && Number(segs2[0].msg_count) === 3, `半成品重跑不重复计数（段数=${segs2.length}，msg_count=${segs2[0]?.msg_count}）`)
+
+  // ②b 半成品之后确有新消息：补记到复用段并重新打开（不能被当成"已分析"永久漏掉）
+  await dao.run('UPDATE gw_cursor SET last_segmented_msg_id=0 WHERE group_id=?', [g2])
+  await add(g2, 'b4', t0 + 4000)
+  await seg.processGroup(g2, idle, t0 + 4000)
+  segs2 = await dao.all('SELECT * FROM gw_segments WHERE group_id=? ORDER BY id', [g2])
+  ok(segs2.length === 1 && Number(segs2[0].msg_count) === 4 && segs2[0].status === 'open', `复用段补记新消息并重开（msg_count=${segs2[0]?.msg_count}，status=${segs2[0]?.status}）`)
+
+  // ③ 事务原子性：水位 UPDATE 失败 → 新建段/计数一并回滚，不留半成品
+  const g3 = 'GH1C'
+  for (let i = 1; i <= 3; i++) await add(g3, `c${i}`, t0 + i * 1000)
+  const origRun = dao.run
+  dao.run = function (sql, params) {
+    if (String(sql).includes('UPDATE gw_cursor SET last_segmented_msg_id')) throw new Error('模拟水位写入失败')
+    return origRun.call(dao, sql, params)
+  }
+  let err = null
+  try { await seg.processGroup(g3, idle, t0 + 3000) } catch (e) { err = e } finally { dao.run = origRun }
+  ok(!!err && /模拟水位写入失败/.test(err.message), '水位写入失败异常向上抛出（不再静默）')
+  const segs3 = await dao.all('SELECT * FROM gw_segments WHERE group_id=?', [g3])
+  ok(segs3.length === 0, `失败后无残留片段（实际 ${segs3.length} 段）`)
+  const cur3 = await dao.get('SELECT last_segmented_msg_id FROM gw_cursor WHERE group_id=?', [g3])
+  ok(Number(cur3?.last_segmented_msg_id || 0) === 0, `失败后水位未推进（实际 ${cur3?.last_segmented_msg_id || 0}）`)
+})
+
+// ───────── H1 回归：切片失败不再静默（计数 + 退避 + 恢复清零） ─────────
+await test('analyzer：切片失败计数/退避、恢复后清零', async () => {
+  const g = 'GH2'
+  let calls = 0
+  const fakeSeg = {
+    async processGroup() { calls++; throw new Error('模拟切片失败') },
+    async pendingSegments() { return [] },
+  }
+  const az = new WorldAnalyzer({ provider: { chat: async () => ({ content: '{}' }) }, dao, segmenter: fakeSeg, resolver: new EvidenceResolver({ dao }), cfg: cfgFn })
+  const r1 = await az.runHourly(g)
+  ok(r1 && r1.analyzed === 0, '切片抛错不影响 runHourly 返回（错误不再冒泡打断整轮）')
+  ok(calls === 1 && az._segFail.get(g)?.count === 1, `首次失败被计数（calls=${calls}，count=${az._segFail.get(g)?.count}）`)
+  const st1 = az._segFail.get(g)
+  ok(st1.nextAt > Date.now() - 1000, `失败后进入退避（nextAt=${st1.nextAt}）`)
+  await az.runHourly(g)
+  ok(calls === 1, `退避期内跳过切片（calls=${calls}）`)
+  az._segFail.get(g).nextAt = 0 // 退避到期
+  await az.runHourly(g)
+  ok(calls === 2 && az._segFail.get(g)?.count === 2, `退避到期后重试并累加（calls=${calls}，count=${az._segFail.get(g)?.count}）`)
+  fakeSeg.processGroup = async () => { calls++ } // 恢复
+  az._segFail.get(g).nextAt = 0
+  await az.runHourly(g)
+  ok(calls === 3 && !az._segFail.has(g), `切片恢复后清零（calls=${calls}，has=${az._segFail.has(g)}）`)
+})
+
 // ───────── analyzer 端到端（fake provider） ─────────
 await test('analyzer：端到端抽取 + 置信重算 + 敏感丢弃', async () => {
   const ing = new GroupWorldIngester({ dao })
@@ -502,6 +584,15 @@ await test('审计回归：purgeUser 清除 gw_* 与 ss_*（#删除我的画像 
   await seedRow('ss_emotions', { bot_id: '999', group_id: gid, emotion_type: 'annoyance', target_user_id: uid, status: 'active', started_at: now, created_at: now, updated_at: now })
   await seedRow('ss_concerns', { bot_id: '999', group_id: gid, target_user_id: uid, concern_type: 'unresolved', status: 'open', created_at: now, updated_at: now })
   await seedRow('ss_expectations', { bot_id: '999', group_id: gid, source_message_id: 'pm1', target_user_id: uid, expectation_type: 'reply_expected', status: 'pending', created_at: now })
+  // 第 7 轮 M1/L3 回归：针对性反思 + 含昵称的圈子 summary
+  await seedRow('ss_reflections', { bot_id: '999', group_id: gid, summary: '该成员总爱深夜冒泡', scope: 'member', target_user_id: uid, confidence: 0.7, source_event_ids: '[]', expires_at: now + 86400000, status: 'active', created_at: now })
+  await seedRow('gw_member_profiles', { group_id: gid, user_id: 'KEEP_U', current_nickname: '留下者', activity_tier: 'warm', created_at: now, updated_at: now })
+  await seedRow('gw_communities', {
+    group_id: gid, algorithm: 'lpa', algorithm_ver: 1,
+    member_ids: JSON.stringify([uid, 'KEEP_U']), core_member_ids: JSON.stringify([uid, 'KEEP_U']),
+    topic_tags: '[]', summary: '2人活跃互动圈（核心：被删者、留下者）', confidence: 0.6,
+    valid_from: now, valid_until: now + 7 * 86400000, created_at: now,
+  })
   const okDel = await ing.purgeUser(gid, uid)
   ok(okDel === true, 'purgeUser 返回成功')
   const cnt = async (sql) => Number((await dao.get(sql, [gid, uid]))?.c || 0)
@@ -511,6 +602,14 @@ await test('审计回归：purgeUser 清除 gw_* 与 ss_*（#删除我的画像 
   ok(await cnt('SELECT COUNT(*) c FROM ss_emotions WHERE group_id=? AND target_user_id=?') === 0, 'ss_emotions 已清')
   ok(await cnt('SELECT COUNT(*) c FROM ss_concerns WHERE group_id=? AND target_user_id=?') === 0, 'ss_concerns 已清')
   ok(await cnt('SELECT COUNT(*) c FROM ss_expectations WHERE group_id=? AND target_user_id=?') === 0, 'ss_expectations 已清')
+  ok(await cnt('SELECT COUNT(*) c FROM ss_reflections WHERE group_id=? AND target_user_id=?') === 0, 'ss_reflections 已清（第 7 轮 M1：此前漏删，反思残留可被 activeAll 读出）')
+  const cmAfter = await dao.get('SELECT summary FROM gw_communities WHERE group_id=?', [gid])
+  ok(!String(cmAfter?.summary || '').includes('被删者') && String(cmAfter?.summary || '').includes('留下者'),
+    `圈子 summary 剥离被删者昵称、保留他人（实际 ${cmAfter?.summary}）`)
+  // purgeGroup 也要清 ss_reflections（整群清理承诺）
+  await seedRow('ss_reflections', { bot_id: '999', group_id: gid, summary: '群级反思', scope: 'group', target_user_id: 'OTHER', confidence: 0.5, source_event_ids: '[]', expires_at: now + 86400000, status: 'active', created_at: now })
+  ok(await ing.purgeGroup(gid) === true, 'purgeGroup 返回成功')
+  ok(Number((await dao.get('SELECT COUNT(*) c FROM ss_reflections WHERE group_id=?', [gid]))?.c || 0) === 0, 'purgeGroup 清 ss_reflections（第 7 轮 M1）')
 })
 
 // ───────── 总结 ─────────

@@ -13,6 +13,14 @@ import path from 'node:path'
 import { BUILTIN_PERSONAS } from './defaults.js'
 import { assessPersonaPrompt } from '../agent/guard.js'
 
+// 第 7 轮 M4：人设原本无任何条数/长度上限 —— 单用户可无限刷盘，list()/resolve() 每轮全目录解析
+// 也会被越拖越慢。这里在 store 层补纵深防御（命令层另有每次创建的配额检查）。
+const MAX_CUSTOM_PERSONAS = 500
+const MAX_NAME_LEN = 40
+const MAX_PROMPT_LEN = 8000
+const MAX_TEXT_LEN = 500
+const LIST_TTL_MS = 5000 // list() 缓存窗口（写入即失效）
+
 /** 人设内容安全闸：拒绝把用于解除限制 / 抑制拒答 / 绕过审批的指令写进身份层 */
 export function assertSafePersonaPrompt(systemPrompt) {
   const { allowed, score, hits } = assessPersonaPrompt(systemPrompt)
@@ -23,6 +31,18 @@ export function assertSafePersonaPrompt(systemPrompt) {
   err.score = score
   err.categories = cats
   throw err
+}
+
+/**
+ * 写入前的长度闸（第 7 轮 M4）。只作用于 add/update 写路径：
+ * 读取路径（_readFile）保持宽容，否则历史遗留的超长文件会被判非法而"从列表里消失"。
+ */
+export function assertPersonaSize(p) {
+  if (String(p.name || '').length > MAX_NAME_LEN) throw new Error(`人设名称过长（${String(p.name).length} > ${MAX_NAME_LEN} 字）`)
+  if (String(p.systemPrompt || '').length > MAX_PROMPT_LEN) throw new Error(`人设内容过长（${String(p.systemPrompt).length} > ${MAX_PROMPT_LEN} 字），请精简后重试`)
+  if (String(p.description || '').length > MAX_TEXT_LEN) throw new Error(`人设简介过长（> ${MAX_TEXT_LEN} 字）`)
+  if (String(p.greeting || '').length > MAX_TEXT_LEN) throw new Error(`人设问候语过长（> ${MAX_TEXT_LEN} 字）`)
+  if (String(p.avatar || '').length > MAX_TEXT_LEN) throw new Error(`人设头像地址过长（> ${MAX_TEXT_LEN} 字）`)
 }
 
 /** 名称 → slug id */
@@ -63,7 +83,13 @@ export class PersonaStore {
   constructor({ dir } = {}) {
     if (!dir) throw new Error('PersonaStore 需要 dir')
     this.dir = dir
+    this._listCache = null // { at, items }：短 TTL 缓存，写路径立即失效（第 7 轮 M4）
     try { fs.mkdirSync(dir, { recursive: true }) } catch { /* noop */ }
+  }
+
+  /** 缓存失效（add/update/remove 落盘后调用） */
+  _invalidate() {
+    this._listCache = null
   }
 
   /** 所有内置 id 集合 */
@@ -90,16 +116,25 @@ export class PersonaStore {
 
   /** 全部人设（内置 + 自定义），可按 tag 过滤 */
   list({ tag } = {}) {
-    const customs = this._customFiles().map((f) => this._readFile(path.join(this.dir, f))).filter(Boolean)
-    const all = [...this._builtins(), ...customs]
-    const seen = new Set()
-    const dedup = []
-    for (const p of all) {
-      if (seen.has(p.id)) continue
-      seen.add(p.id)
-      dedup.push(p)
+    // 第 7 轮 M4：此前每次调用都 readdir + 逐个 JSON.parse（每轮对话 resolve()/面板轮询都会走），
+    // 人设一多就是纯浪费；改为短 TTL 缓存 + 写路径失效。缓存的是合并去重后的全量列表。
+    let all = this._listCache && Date.now() - this._listCache.at < LIST_TTL_MS ? this._listCache.items : null
+    if (!all) {
+      const customs = this._customFiles().map((f) => this._readFile(path.join(this.dir, f))).filter(Boolean)
+      const merged = [...this._builtins(), ...customs]
+      const seen = new Set()
+      const dedup = []
+      for (const p of merged) {
+        if (seen.has(p.id)) continue
+        seen.add(p.id)
+        dedup.push(p)
+      }
+      all = dedup
+      this._listCache = { at: Date.now(), items: all }
     }
-    return tag ? dedup.filter((p) => p.tags?.includes(tag)) : dedup
+    // 返回副本：调用方（面板/命令）改字段不至于污染缓存
+    const items = all.map((p) => ({ ...p }))
+    return tag ? items.filter((p) => p.tags?.includes(tag)) : items
   }
 
   /** 按 id 或名称（模糊）取人设 */
@@ -140,11 +175,16 @@ export class PersonaStore {
   add(input, { creator } = {}) {
     const p = normalizePersona(input, { builtin: false, creator })
     assertSafePersonaPrompt(p.systemPrompt)
+    assertPersonaSize(p)
+    if (this._customFiles().length >= MAX_CUSTOM_PERSONAS) {
+      throw new Error(`自定义人设数量已达上限（${MAX_CUSTOM_PERSONAS} 个），请先 #删除人设 再新建`)
+    }
     if (this.builtinIds().has(p.id)) throw new Error(`人设 id「${p.id}」与内置冲突，请换个名称`)
     // 精确判重（id + 名称）：模糊匹配会把"名字包含我"的既有人设误判为重名
     if (this.getExact(p.id)) throw new Error(`人设 id「${p.id}」已存在`)
     if (this.getExact(p.name)) throw new Error(`人设「${p.name}」已存在`)
     fs.writeFileSync(this._fileOf(p.id), JSON.stringify(p, null, 2))
+    this._invalidate()
     return p
   }
 
@@ -155,7 +195,9 @@ export class PersonaStore {
     if (existing.builtin) throw new Error(`内置人设「${existing.name}」不可修改`)
     const merged = normalizePersona({ ...existing, ...patch, id: existing.id, createdAt: existing.createdAt }, { builtin: false })
     assertSafePersonaPrompt(merged.systemPrompt)
+    assertPersonaSize(merged)
     fs.writeFileSync(this._fileOf(existing.id), JSON.stringify(merged, null, 2))
+    this._invalidate()
     return merged
   }
 
@@ -166,6 +208,7 @@ export class PersonaStore {
     if (!existing) return false
     if (existing.builtin) throw new Error(`内置人设「${existing.name}」不可删除`)
     try { fs.unlinkSync(this._fileOf(existing.id)) } catch { /* noop */ }
+    this._invalidate()
     return true
   }
 }

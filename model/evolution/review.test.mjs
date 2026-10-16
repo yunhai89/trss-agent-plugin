@@ -161,6 +161,20 @@ await test('applySuggestion 落盘失败：抛错、不改内存 registry、sugg
   fs.rmSync(base, { recursive: true, force: true })
 })
 
+await test('applySuggestion：memory suggestion 真正写入并移出待审（2026-10-17 审计：命令路径原先把非 prompt 类型直接丢弃）', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'rev-mem-'))
+  const suggestionDir = path.join(base, 'sugg')
+  fs.mkdirSync(path.join(suggestionDir, 'u1'), { recursive: true })
+  fs.writeFileSync(path.join(suggestionDir, 'u1', 'm1.json'), JSON.stringify({ id: 'm1', scopeId: 'u1', kind: 'memory', action: 'add', target: 'memory', status: 'pending' }))
+  const mem = mockMemory()
+  const rt = { promptRegistry: null, memory: mem, promptDir: path.join(base, 'prompts'), suggestionDir }
+  const r = await applySuggestion(rt, { id: 'm1', scopeId: 'u1', kind: 'memory', action: 'add', target: 'memory', payload: '用户喜欢猫' })
+  ok(r?.ok === true, '返回 ok')
+  ok(mem._calls.some((c) => c.op === 'add' && c.text === '用户喜欢猫'), '记忆真的写入了（不再「已采纳」却什么都没写）')
+  ok(!fs.existsSync(path.join(suggestionDir, 'u1', 'm1.json')), '应用后移出待审')
+  fs.rmSync(base, { recursive: true, force: true })
+})
+
 console.log(`\n========================================`)
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)
