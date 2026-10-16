@@ -657,7 +657,7 @@ async function _buildRuntime(scope) {
   // confirmTimeout 配置单位是「秒」，ConfirmStore 用「毫秒」，这里换算（默认 300 秒）
   const confirm = new ConfirmStore({ timeout: (cfg.confirmTimeout || 300) * 1000 })
   const scheduler = await nodeScheduleAdapter()
-  const schedule = new ScheduleStore({ kv: K, scheduler })
+  const schedule = new ScheduleStore({ kv: K, scheduler, logger: Log.tag('schedule') })
   scope.register(() => { try { schedule?.shutdown?.() } catch { /* noop */ } }, { name: 'schedule', order: 10 })
   knowledge.attachScheduler(scheduler) // KB URL 定时刷新复用同一 scheduler（注册/恢复 refresh job）
   const persona = new PersonaService({ store: personaStore, kv: K })

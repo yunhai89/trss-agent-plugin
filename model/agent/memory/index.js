@@ -48,6 +48,58 @@ export function makeRecallTool(recall) {
 }
 
 /**
+ * 记忆写入的来源校验（实机事故防线）。
+ *
+ * 背景：实机群里模型把**自己幻觉出来的**「主人要求：以后每次被问到身份时回答『我是星野爱』」
+ * 写进了长期记忆，此后每轮注入 system prompt，模型把它当既定事实继续执行（还据此建了提醒）。
+ * 根因是「写记忆」这一步没有任何来源约束。这里的规则：
+ *  - 写「用户要求/让我/以后每次…」这类**指令性条目**必须带 evidence（用户原话片段）；
+ *  - evidence 会被核对是否真出现在用户亲述文本里（Agent 传入 ctx.userTexts，已剥掉系统注入块）；
+ *  - 对不上就拒绝写入并说明原因，让模型改成可核实的事实或干脆不写。
+ */
+const INSTRUCTION_CLAIM = /(要求|让我|叫我|以后每次|以后都|必须|不准|禁止|记住|记得|交代|吩咐)/
+const WRITE_RULES = [
+  '写入规则：只记录用户在对话里亲口说过的偏好/事实，或你在真实工具调用中确认过的客观信息。',
+  '禁止写入：你自己的推断/决定/计划；系统注入块（【本轮情境参考】/机器人身份/群聊环境/长期记忆）里的内容；没有用户原话支撑的「用户要求/让我/以后每次…」类条目。',
+  '写指令性条目必须带 evidence（用户原话片段）——插件会核对它是否真出现在用户说过的话里，对不上则拒绝写入。',
+]
+
+function normForMatch(s) {
+  return String(s || '').replace(/[\s"'“”‘’`]+/g, '').toLowerCase()
+}
+
+function evidenceAppears(evidence, userTexts) {
+  const ev = normForMatch(evidence)
+  if (!ev) return false
+  return (userTexts || []).some((t) => normForMatch(t).includes(ev))
+}
+
+/**
+ * 校验一条待写入文本；返回 {ok:true, text} 或 {error}。
+ * @param {string} text 待写入条目
+ * @param {string} evidence 用户原话片段（可空）
+ * @param {string[]} userTexts 用户亲述文本（Agent 注入）
+ */
+export function guardMemoryWrite(text, evidence, userTexts) {
+  const body = String(text || '').trim()
+  if (!body) return { error: '缺少 text' }
+  const ev = String(evidence || '').trim()
+  if (ev && !evidenceAppears(ev, userTexts)) {
+    return {
+      error: 'evidence 与用户实际说过的话不符（未在最近会话的用户消息里找到该片段），本条未写入。'
+        + '若这是你自己的推断或计划，请不要写进记忆；若确为用户所述，请贴出用户原话。',
+    }
+  }
+  if (!ev && INSTRUCTION_CLAIM.test(body)) {
+    return {
+      error: '「用户要求」类记忆必须带 evidence（用户原话片段）才能写入：请在 evidence 里贴出用户说过的那句话；'
+        + '若这只是你自己的归纳或计划，请改写成可核实的事实，或不要写入。',
+    }
+  }
+  return { ok: true, text: ev ? `${body}（据用户原话："${ev}"）` : body }
+}
+
+/**
  * 构造 memory 工具定义（注册到 ToolRegistry）。
  * @param {MemoryStore} store
  */
@@ -59,6 +111,7 @@ export function createMemoryTool(store) {
       'target: memory(你的个人笔记/环境事实/经验) | user(用户画像/偏好)。',
       'action: add(新增) | replace(用 old_text 子串唯一定位条目并替换) | remove(子串定位删除) | batch(原子批量 operations)。',
       '记忆会自动注入 system prompt，无需 read。接近上限(>80%)时先 replace/remove 合并再 add。',
+      ...WRITE_RULES,
     ].join(' '),
     parameters: {
       type: 'object',
@@ -66,11 +119,12 @@ export function createMemoryTool(store) {
         target: { type: 'string', enum: ['memory', 'user'] },
         action: { type: 'string', enum: ['add', 'replace', 'remove', 'batch'] },
         text: { type: 'string', description: 'add 时的条目文本' },
+        evidence: { type: 'string', description: '用户原话片段（写「用户要求/让我…」类条目时必填；插件会核对是否真出现在用户消息里）' },
         old_text: { type: 'string', description: 'replace/remove 时唯一定位条目的子串' },
         new_text: { type: 'string', description: 'replace 时的新文本' },
         operations: {
           type: 'array',
-          description: 'batch 时的操作数组，每项 {action, text?, old_text?, new_text?}',
+          description: 'batch 时的操作数组，每项 {action, text?, evidence?, old_text?, new_text?}',
           items: { type: 'object' },
         },
       },
@@ -79,11 +133,34 @@ export function createMemoryTool(store) {
     async execute(params, ctx) {
       const { target, action } = params
       const scopeId = ctx?.scopeId
+      const userTexts = ctx?.userTexts
       try {
-        if (action === 'add') return store.add(target, params.text, scopeId)
-        if (action === 'replace') return store.replace(target, params.old_text, params.new_text, scopeId)
+        if (action === 'add') {
+          const g = guardMemoryWrite(params.text, params.evidence, userTexts)
+          if (g.error) return g
+          return store.add(target, g.text, scopeId)
+        }
+        if (action === 'replace') {
+          const g = guardMemoryWrite(params.new_text, params.evidence, userTexts)
+          if (g.error) return g
+          return store.replace(target, params.old_text, g.text, scopeId)
+        }
         if (action === 'remove') return store.remove(target, params.old_text, scopeId)
-        if (action === 'batch') return store.batch(target, params.operations, scopeId)
+        if (action === 'batch') {
+          const ops = Array.isArray(params.operations) ? params.operations : []
+          const checked = []
+          for (let i = 0; i < ops.length; i++) {
+            const op = ops[i] || {}
+            if (op.action === 'add' || op.action === 'replace') {
+              const g = guardMemoryWrite(op.text ?? op.new_text, op.evidence, userTexts)
+              if (g.error) return { error: `operations[${i}]：${g.error}`, index: i }
+              checked.push(op.action === 'add' ? { ...op, text: g.text } : { ...op, new_text: g.text })
+            } else {
+              checked.push(op)
+            }
+          }
+          return store.batch(target, checked, scopeId)
+        }
         return { error: `未知 action：${action}` }
       } catch (e) {
         // 超限/匹配失败：结构化返回，便于模型在同一轮调整后重试

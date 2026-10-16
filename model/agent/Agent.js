@@ -24,6 +24,7 @@ import { ToolScheduler, resolveToolConcurrency } from './tool-scheduler.js'
 import { resolveExecutionMeta } from './tool-effects.js'
 import { validateToolArgs } from './tool-schema.js'
 import { isToolErrorContent } from './tool-result.js'
+import { tagUntrusted } from './guard.js'
 import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, SEARCH_VERIFICATION, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 import { detectScheduleIntent } from './schedule.js'
@@ -220,8 +221,8 @@ function reflectHintText(feedback) {
 /** 异常停止 → 用户可读原因（确定性兜底用；finalizer 失败时由代码生成，绝不返回空串/旁白） */
 export const STOP_REASON_CN = {
   max_turns: '已达到本轮工具调用次数上限',
-  token_budget: '本次任务的 token 预算已用完',
-  time_budget: '本次任务的时间预算已用完',
+  token_budget: '本轮的 token 预算已用完',
+  time_budget: '本轮的时间预算已用完',
   duplicate_action: '检测到工具在重复执行相同操作，已停止以避免空转',
   no_progress: '连续多步工具调用没有产生新结果，已停止',
   consecutive_failures: '工具连续失败多次，已停止重试',
@@ -252,6 +253,8 @@ export class Agent {
     this.jev = config.jev || null
     this._jevSelectedNames = new Set() // 本轮由 Jev 激活的工具（默认不跨轮持久化，防工具集膨胀）
     this._ranTools = new Set() // 本轮实际执行过的工具（持久化时保留，保证历史 tool_use 仍有对应 schema）
+    this._ranToolCalls = 0 // 本轮工具调用**次数**（确定性兜底文案只报本轮，见 _deterministicWrapUp）
+    this._lastToolLine = '' // 本轮最近一次工具结果的短摘要（同上；在工具执行处就地记录，避免再解析消息内容）
     this.shellIntercept = Array.isArray(config.shellIntercept) ? config.shellIntercept : [] // 自定义拦截指令（子串匹配）
     this._lastUserText = '' // 本轮用户原始文本（反思 Jev 判定用）
     this.providerProtocol = config.protocol || 'openai'
@@ -359,36 +362,25 @@ export class Agent {
 
   /**
    * 确定性收尾兜底（finalizer 失败/空输出时由代码生成）：
-   * 已完成步骤 + 最近一次工具结果 + 停止原因 + 用户如何继续。绝不引用中间旁白。
+   * 本轮实际执行的工具 + 最近一次工具结果 + 停止原因 + 用户如何继续。绝不引用中间旁白。
+   * ⚠ 只统计**本轮**（run）的工具调用：曾把整段会话历史的工具都数进来，用户没下过任务时会看到
+   * 「已完成：共 31 次工具调用（…bilibili__download…reminder_set）」这种假任务报告（实机 2026-10-16）。
+   * 且只有确实存在可恢复任务账本时才引导「继续」，否则不制造"有个任务在跑"的错觉。
    */
   _deterministicWrapUp(stopReason) {
-    const toolNames = []
-    let toolCallCount = 0
-    let lastTool = null
-    for (const m of this.messages) {
-      if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
-        for (const tc of m.tool_calls) {
-          toolCallCount++
-          const n = tc?.function?.name || tc?.name
-          if (n && !toolNames.includes(n)) toolNames.push(n)
-        }
-      }
-      if (m.role === 'tool') lastTool = m
-    }
-    let lastResult = '（无）'
-    if (lastTool) {
-      try {
-        const o = JSON.parse(lastTool.content)
-        lastResult = o?.error ? `失败：${String(o.error).slice(0, 120)}` : String(lastTool.content).slice(0, 120)
-      } catch { lastResult = String(lastTool.content || '').slice(0, 120) }
-    }
+    const toolNames = this._ranTools ? [...this._ranTools] : []
+    const toolCallCount = this._ranToolCalls || 0
+    const lastResult = this._lastToolLine || '（无）'
     const reason = STOP_REASON_CN[stopReason] || '任务异常终止'
-    return [
-      `⏸️ 这轮任务先停一下：${reason}。`,
-      `已完成：共 ${toolCallCount} 次工具调用${toolNames.length ? `（${toolNames.join('、')}）` : ''}。`,
-      `最近一次工具结果：${lastResult}`,
-      '如需继续，请直接回复「继续」，我会接着当前进度往下做；也可以告诉我换个方向。',
-    ].join('\n')
+    const lines = [`⏸️ 这轮先停一下：${reason}。`]
+    if (toolCallCount > 0) {
+      lines.push(`本轮执行了 ${toolCallCount} 次工具调用${toolNames.length ? `（${toolNames.join('、')}）` : ''}。`)
+    }
+    if (this._lastToolLine) lines.push(`最近一次工具结果：${lastResult}`)
+    lines.push(this.taskStore && this._curTaskId
+      ? '如需继续，请直接回复「继续」，我会接着当前进度往下做；也可以告诉我换个方向。'
+      : '这轮没能给出完整回复；你可以接着告诉我下一步要做什么，或换个说法再问一次。')
+    return lines.join('\n')
   }
 
   /**
@@ -678,9 +670,19 @@ export class Agent {
     // 追加 user 消息（保留多模态对象形态，仅替换文本内容）
     this.messages.push(this._buildUserMessage(input, userText))
 
+    // 用户亲述文本（剥掉系统注入块）→ 供工具做「来源校验」：memory 写「用户要求」类条目时
+    // 必须能在这些文本里找到原话，否则拒绝写入（实机事故：模型把幻觉出的「主人要求」写进长期记忆）。
+    this._userTexts = this.messages
+      .filter((m) => m.role === 'user')
+      .slice(-20)
+      .map((m) => this._stripInjectedFromUserText(m.content))
+      .filter(Boolean)
+
     this._pendingReflect = null // 每 run 重置反思反馈（防跨 run 串）
     this._jevSelectedNames = new Set() // 每 run 重置：Jev 激活集默认不跨轮持久化
     this._ranTools = new Set() // 每 run 重置：本轮实际执行过的工具名
+    this._ranToolCalls = 0 // 每 run 重置：本轮工具调用次数
+    this._lastToolLine = '' // 每 run 重置：本轮最近一次工具结果摘要
     this.governor?.reset()
     // 任务账本：接受任务后、首次调用模型前登记（P0-3 必须落盘边界）
     if (this.taskStore && ctx) {
@@ -1183,23 +1185,33 @@ export class Agent {
   }
 
   /**
-   * 间接注入防御：扫描外部不可信内容（工具结果/网页/MCP/记忆/情境）。
-   * 命中注入特征时加 <untrusted_data source="..."> 边界标注（绝不阻断，避免打断工具链/记忆加载）。
-   * 无 guard 或未提供 screenUntrusted 时原样返回（向后兼容最小 guard 注入）。
+   * 间接注入防御 + 不可信边界标注。
+   * - 默认**始终**加 <untrusted_data source="..."> 边界（不只命中特征时）：情境/召回记忆/画像/技能目录/
+   *   声明记忆都是「系统口吻的数据」却混在 user 消息或 system 里，模型极易当成指令执行。实机事故
+   *   （2026-10-16 群 1042538189）：模型把注入块里的【机器人身份】当成"主人的吩咐"，自行写长期记忆、
+   *   设提醒、发视频；随后又在自指提示下编造出"英文注入钩子"（护栏条款被当成刚发生的攻击）。
+   * - 工具结果（role:'tool'）保持"命中特征才标注"：插件内部要 JSON.parse 工具结果做错误判定与兜底，
+   *   统一加壳会破坏这些解析；且 role:'tool' 在结构上已能区分，护栏提示词也已把工具结果列为数据。
+   * - 命中注入特征时额外告警（绝不阻断，避免打断工具链/记忆加载）。
+   * - 无 guard 时仍加边界（边界是核心行为）；untrustedGuard=false 时整体关闭（保留回滚开关）。
    */
-  _screenUntrusted(text, source) {
+  _screenUntrusted(text, source, { always = true } = {}) {
     const raw = String(text ?? '')
     if (!raw || !this.untrustedGuard) return raw
-    if (!this.guard || typeof this.guard.screenUntrusted !== 'function') return raw
-    try {
-      const r = this.guard.screenUntrusted(raw, { source, sensitivity: this.guardSensitivity, action: 'label' })
-      if (r.flagged) {
-        const cats = r.hits.map((h) => h.cat).join(',')
-        this.logger('warn', `外部内容疑似注入：source=${source} score=${r.score} cats=${cats}`)
-        this.devLog?.('untrusted_guard', { source, score: r.score, cats }, this._curTaskId, this._curDevScope)
-      }
-      return r.text
-    } catch { return raw }
+    let body = raw
+    if (this.guard && typeof this.guard.screenUntrusted === 'function') {
+      try {
+        const r = this.guard.screenUntrusted(raw, { source, sensitivity: this.guardSensitivity, action: 'label' })
+        if (r.flagged) {
+          const cats = r.hits.map((h) => h.cat).join(',')
+          this.logger('warn', `外部内容疑似注入：source=${source} score=${r.score} cats=${cats}`)
+          this.devLog?.('untrusted_guard', { source, score: r.score, cats }, this._curTaskId, this._curDevScope)
+        }
+        body = r.text
+      } catch { body = raw }
+    }
+    if (!always) return body
+    return tagUntrusted(body, source) // 幂等：tagUntrusted 内部先剥掉自带的 untrusted_data 标签再包
   }
 
   _buildUserMessage(input, text) {
@@ -1214,6 +1226,23 @@ export class Agent {
       return { role: input.role || 'user', ...input, content: text }
     }
     return { role: 'user', content: text }
+  }
+
+  /**
+   * 从一条 user 消息里取回「用户亲述」部分：剥掉系统注入块（【本轮情境参考…】到【用户消息】之间）。
+   * 用于 memory 工具的来源校验——注入块里的内容（机器人身份/群聊环境/长期记忆）不是用户说的话，
+   * 不能当作「用户要求」的依据。
+   * @param {string|Array} content
+   * @returns {string}
+   */
+  _stripInjectedFromUserText(content) {
+    let text = ''
+    if (typeof content === 'string') text = content
+    else if (Array.isArray(content)) text = content.filter((b) => b && b.type === 'text').map((b) => b.text || '').join('\n')
+    if (!text) return ''
+    const marker = '【用户消息】'
+    const i = text.lastIndexOf(marker)
+    return (i >= 0 ? text.slice(i + marker.length) : text).trim()
   }
 
   _assembleSystem(memories, systemPromptOverride, context, scopeId) {
@@ -1987,10 +2016,12 @@ export class Agent {
         // 合并上下文（长任务稳定性审计 P0-4）：生产路径 ctx 存在时曾把 ExecutionContext 整个替换掉，
         // 工具永远拿不到 run 级取消信号。改为在原 ctx 基础上合并 execCtx 的 signal/taskId，
         // 旧字段（e/bot/userId/terminal/...）原样保留，abort 时协作工具可主动中止。
+        if (!ctx) execCtx.userTexts = this._userTexts // 无 ctx 路径（子代理/直连调用）同样带上用户亲述文本
         const toolCtx = ctx
-          ? Object.assign({}, ctx, { signal: execCtx.signal, taskId: execCtx.taskId, executionContext: execCtx })
+          ? Object.assign({}, ctx, { signal: execCtx.signal, taskId: execCtx.taskId, executionContext: execCtx, userTexts: this._userTexts })
           : execCtx
         this._ranTools?.add(tc.name) // 记录实际执行过的工具（持久化时保留其 schema）
+        this._ranToolCalls = (this._ranToolCalls || 0) + 1 // 本轮调用次数（兜底文案只报本轮）
         try {
           const raw = await tool.execute(tc.arguments ?? {}, toolCtx)
           content = typeof raw === 'string' ? raw : stringifyArgs(raw)
@@ -2000,6 +2031,11 @@ export class Agent {
           content = stringifyArgs({ error: e?.message || String(e) })
           if (tool?.meta?.shell === true) this._logSandbox(tc, content, Date.now() - __t)
         }
+        // 就地记录结果摘要（此处 content 还是**未加不可信边界**的原文，避免兜底文案再解析消息内容）
+        try {
+          const o = JSON.parse(content)
+          this._lastToolLine = o?.error ? `失败：${String(o.error).slice(0, 120)}` : String(content).replace(/\s+/g, ' ').slice(0, 120)
+        } catch { this._lastToolLine = String(content || '').replace(/\s+/g, ' ').slice(0, 120) }
       }
       }
     } catch (e) {
@@ -2023,8 +2059,10 @@ export class Agent {
     this._safeCb(cb.onToolEnd, tc, content)
     // 工具结果封顶后再做注入扫描：工具结果/网页/MCP 返回是典型间接注入载体，
     // 命中即加 <untrusted_data> 边界标注（保持文本、不阻断工具链）。
+    // always:false —— 工具结果只在命中注入特征时加壳：插件内部要 JSON.parse 工具结果做错误判定/兜底，
+    // 统一加壳会破坏这些解析（见 _screenUntrusted 注释）。
     const capped = this._capToolResult(content, tool)
-    return { role: 'tool', tool_call_id: tc.id, name: tc.name, content: this._screenUntrusted(capped, `tool:${tool?.name || tc.name || 'unknown'}`) }
+    return { role: 'tool', tool_call_id: tc.id, name: tc.name, content: this._screenUntrusted(capped, `tool:${tool?.name || tc.name || 'unknown'}`, { always: false }) }
   }
 
   /**

@@ -8,12 +8,13 @@
 import { createKeyedLock } from './store/lock.js'
 
 export class ScheduleStore {
-  constructor({ kv, prefix = 'Yz:agent:rem:', scheduler } = {}) {
+  constructor({ kv, prefix = 'Yz:agent:rem:', scheduler, logger = null } = {}) {
     if (!kv) throw new Error('ScheduleStore 需要 kv')
     if (!scheduler) throw new Error('ScheduleStore 需要 scheduler（{ scheduleJob(date, fn), cancelJob(job) }）')
     this.kv = kv
     this.prefix = prefix
     this.scheduler = scheduler
+    this.logger = logger // 可选：记录「记录已删除，跳过触发」等异常路径
     this._jobs = new Map()
     this._seq = 0
     this._lock = createKeyedLock() // 提醒列表是单键 RMW：并发 add/cancel 会丢记录
@@ -71,6 +72,16 @@ export class ScheduleStore {
     const isCron = !!rec.cron
     const spec = isCron ? rec.cron : new Date(rec.at)
     const job = this.scheduler.scheduleJob(spec, async () => {
+      // 触发前回查持久层：记录若已被删除（面板/命令取消、外部清理、另一实例已触发过），
+      // 本进程内残留的定时器不得再发一次——否则「删掉的提醒照发」「多实例重复发」无解。
+      try {
+        const alive = (await this._load()).some((r) => String(r.id) === String(rec.id))
+        if (!alive) {
+          this._jobs.delete(String(rec.id))
+          this.logger?.('warn', `[schedule] 记录 ${rec.id} 已不在存储中，跳过本次触发`)
+          return
+        }
+      } catch { /* 读取失败时按原语义继续触发，避免因存储抖动丢提醒 */ }
       try { await fire?.(rec) } catch { /* noop */ }
       if (!isCron) { try { await this.cancel(rec.id) } catch { /* noop */ } }
     })

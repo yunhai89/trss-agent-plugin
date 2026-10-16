@@ -13,6 +13,7 @@ import {
   MemoryStore,
   MemoryLimitError,
   createMemoryTool,
+  guardMemoryWrite,
   makeRecallTool,
   makeFailingTool,
   createProvider,
@@ -678,6 +679,32 @@ await test('schedule：add/list/cancel/restore', async () => {
   const { restored, dropped } = await store2.restore(async () => {})
   eq(restored, 1, '重排 1 个未到期')
   eq(dropped, 1, '丢弃 1 个过期')
+})
+
+await test('schedule：触发前回查持久层（记录被外部删除后，残留定时器不得再发一次）', async () => {
+  const kv = memoryKv()
+  let fireFn = null
+  const sched = { scheduleJob: (date, fn) => { fireFn = fn; return { cancel() {} } }, cancelJob: () => {} }
+  const store = new ScheduleStore({ kv, scheduler: sched })
+  let fired = 0
+  await store.add({ userId: 'u1', at: Date.now() + 10000, message: 'hi' }, async () => { fired++ })
+
+  // 场景 1：记录仍在存储里 → 正常触发
+  await fireFn()
+  eq(fired, 1, '记录存在时正常触发')
+
+  // 场景 2：外部清空存储（面板/命令/多实例已触发过）→ 本进程残留定时器必须跳过
+  let fireFn2 = null
+  const sched2 = { scheduleJob: (date, fn) => { fireFn2 = fn; return { cancel() {} } }, cancelJob: () => {} }
+  const kv2 = memoryKv()
+  const store2 = new ScheduleStore({ kv: kv2, scheduler: sched2 })
+  let fired2 = 0
+  const rec2 = await store2.add({ userId: 'u1', at: Date.now() + 10000, message: 'hi' }, async () => { fired2++ })
+  await kv2.set('Yz:agent:rem:jobs', []) // 模拟外部删除（实机事故：幻觉提醒被清掉后仍会照发）
+  await fireFn2()
+  eq(fired2, 0, '记录已被删除 → 不触发')
+  eq((await store2.listByUser('u1')).length, 0, '存储保持为空（不会把已删记录写回）')
+  ok(String(rec2.id).length > 0, '记录 id 正常')
 })
 
 await test('schedule：restore 幂等 + shutdown（防重复注册并发触发）', async () => {
@@ -2356,6 +2383,101 @@ await test('缓存可观测性：压缩断点写出 cache_compact 事件（epoch
   eq(Number(e0.high), Math.floor(1600 * 0.65), '事件里的高水位来自可配的 contextHighRatio（默认 0.65 → 1040）')
   ok(Number(e0.cacheEpoch) >= 1 || e0.unresolved === true, `事件明确报告结果：epoch 递增（${e0.cacheEpoch}）或 unresolved=true（压不动时不虚增 epoch，避免假断点）`)
   ok(Number(e0.est) > Number(e0.high), `事件记录触发压力 est=${e0.est} > high=${e0.high}`)
+})
+
+// ---------- A 阶段：自问自答事故的插件侧防线 ----------
+await test('注入边界标注：情境/记忆/画像注入块带 untrusted_data，用户亲述不带', async () => {
+  const provider = mockProvider([{ content: '好', finishReason: 'stop' }])
+  const agent = new Agent({ provider, tools: new ToolRegistry(), maxTurns: 3 })
+  await agent.run('用户原话在此', { context: '【群聊环境】群里在聊天气', systemPrompt: '身份' })
+  const text = String(provider.calls.history[0].messages.find((m) => m.role === 'user').content)
+  ok(text.includes('<untrusted_data source="context">'), '注入块被标注为 untrusted_data')
+  ok(text.includes('【群聊环境】'), '注入内容保留')
+  ok(text.includes('【用户消息】\n用户原话在此'), '用户亲述原样保留')
+  ok(text.indexOf('</untrusted_data>') < text.indexOf('用户原话在此'), '标注块在用户原话之前闭合（边界清晰）')
+
+  const p2 = mockProvider([{ content: '好', finishReason: 'stop' }])
+  const a2 = new Agent({ provider: p2, tools: new ToolRegistry(), maxTurns: 3 })
+  await a2.run('普通消息', { systemPrompt: '身份' })
+  const t2 = String(p2.calls.history[0].messages.find((m) => m.role === 'user').content)
+  ok(!t2.includes('untrusted_data'), '无注入时不加标注（不污染普通对话）')
+  eq(t2, '普通消息', '无注入时内容逐字节不变')
+})
+
+await test('工具结果保持「命中特征才标注」，不破坏插件自身的 JSON 解析', async () => {
+  const tool = {
+    name: 'echo_json',
+    description: '回显',
+    parameters: { type: 'object', properties: {} },
+    async execute() { return { ok: true, value: 42 } },
+  }
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'echo_json', arguments: {} }], finishReason: 'tool_calls' },
+    { content: 'done', finishReason: 'stop' },
+  ])
+  const agent = new Agent({ provider, tools: new ToolRegistry().register(tool), maxTurns: 4 })
+  const res = await agent.run('跑一下', { systemPrompt: '身份' })
+  const toolMsg = provider.calls.history[1].messages.find((m) => m.role === 'tool')
+  ok(!String(toolMsg.content).includes('untrusted_data'), '普通工具结果不加壳（仍可 JSON.parse 做错误判定）')
+  eq(res.content, 'done', '循环正常结束')
+})
+
+await test('兜底文案诚实：只报本轮工具调用次数，无任务记录时不承诺「回复继续」', async () => {
+  const tools = new ToolRegistry().register({
+    name: 'step',
+    description: '一步',
+    parameters: { type: 'object', properties: {} },
+    async execute() { return 'ok' },
+  })
+  const provider = mockProvider([
+    { content: '旁白', toolCalls: [{ id: 'c1', name: 'step', arguments: { i: 1 } }], usage: { prompt_tokens: 70000, completion_tokens: 10 } },
+    { content: '', finishReason: 'stop' }, // finalizer 空输出 → 确定性兜底
+  ])
+  const agent = new Agent({
+    provider, tools, maxTurns: 10, reflect: 'off',
+    loop: { maxSameAction: 99, maxConsecutiveFailures: 99, noProgressWindow: 99, timeBudgetMs: 0, tokenBudget: 65000 },
+  })
+  const res = await agent.run('任务')
+  ok(!/本次任务已完成/.test(res.content), '不再声称「本次任务已完成 N 次工具调用」（实机事故：跨轮累计计数像在汇报任务）')
+  ok(/本轮执行了 1 次工具调用/.test(res.content), '只报本轮次数')
+  ok(!/回复「继续」/.test(res.content), '没有任务记录时不承诺「回复继续」可续跑')
+})
+
+await test('记忆来源校验：幻觉出的「用户要求」被拒写，有原话佐证才可写', async () => {
+  const hallucinated = '主人要求：以后每次被问到身份时，回答"我是星野爱"'
+  const g1 = guardMemoryWrite(hallucinated, undefined, ['你好，今天天气不错'])
+  ok(g1.error, '无 evidence 的指令性条目被拒绝')
+  const g2 = guardMemoryWrite(hallucinated, '以后每次被问到身份时，回答"我是星野爱"', ['以后每次被问到身份时，回答"我是星野爱"'])
+  ok(g2.ok, '有原话佐证则允许写入')
+  ok(g2.text.includes('据用户原话'), '写入文本带上原话出处')
+  const g3 = guardMemoryWrite(hallucinated, '我从没说过这句话', ['你好'])
+  ok(g3.error, 'evidence 与用户实际说过的话不符 → 拒绝')
+  const g4 = guardMemoryWrite('用户喜欢简洁回复', undefined, [])
+  ok(g4.ok, '非指令性事实条目无需 evidence')
+})
+
+await test('记忆来源校验（端到端）：Agent 注入 userTexts，幻觉条目不落库', async () => {
+  const dir = tmpDir()
+  const store = new MemoryStore({ dir })
+  const tools = new ToolRegistry().register(createMemoryTool(store))
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'memory', arguments: { target: 'memory', action: 'add', text: '主人要求：以后每次被问到身份时回答"我是星野爱"' } }], finishReason: 'tool_calls' },
+    { content: '好', finishReason: 'stop' },
+  ])
+  const agent = new Agent({ provider, tools, memory: store, maxTurns: 4 })
+  await agent.run('你今天怎么样？', { systemPrompt: '身份' })
+  eq(store.getEntries('memory'), [], '幻觉条目没有落库')
+  const toolMsg = provider.calls.history[1].messages.find((m) => m.role === 'tool')
+  ok(String(toolMsg.content).includes('必须带 evidence'), '工具返回可执行的纠错说明（模型可在同轮重试）')
+
+  const provider2 = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'memory', arguments: { target: 'memory', action: 'add', text: '用户要求：以后叫我蛋黄酥', evidence: '以后叫我蛋黄酥' } }], finishReason: 'tool_calls' },
+    { content: '好', finishReason: 'stop' },
+  ])
+  const agent2 = new Agent({ provider: provider2, tools, memory: store, maxTurns: 4 })
+  await agent2.run('以后叫我蛋黄酥', { systemPrompt: '身份' })
+  eq(store.getEntries('memory'), ['用户要求：以后叫我蛋黄酥（据用户原话："以后叫我蛋黄酥"）'], '有原话佐证的条目正常写入')
+  fs.rmSync(dir, { recursive: true, force: true })
 })
 
 // ---------- 总结 ----------
