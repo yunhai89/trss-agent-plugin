@@ -194,7 +194,7 @@ async function recentHistory({ ctx, e, kv, bot, historyCount }) {
 }
 
 /**
- * 构建情境感知文本（每轮注入 system prompt）。
+ * 构建情境感知文本（每轮注入 user 消息尾部，避免打穿前缀缓存）。
  * @returns {Promise<string|null>}
  */
 export async function buildSituationalContext({ ctx, runtime, e, kv, cfg, bot, historyCount = 15, sessionLen } = {}) {

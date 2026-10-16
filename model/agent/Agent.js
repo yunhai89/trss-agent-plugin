@@ -6,7 +6,7 @@
  * opt-in 运营层（传实例 + ctx 才启用，否则保持现行为）：
  *   - guard：入口注入防御（block/flag/sanitize）+ system 硬化
  *   - session：跨会话历史（group:user 键、KV 持久化）
- *   - recall：向量召回记忆（注入 system + 轮后异步抽取）
+ *   - recall：向量召回记忆（注入本轮上下文 + 轮后异步抽取）
  *   - policy + confirm：工具分发前的 RBAC + 审批门
  *   - clarify 短路：指定工具的结果作为最终回复直接退出
  * 库零依赖插件；ctx / kv / logger / key 由上层注入。

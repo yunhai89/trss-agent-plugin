@@ -7,7 +7,7 @@
  *    apps/agent.js 按「群+用户」(isolation 开)或「群」(关) 计算 scopeId 传入，实现多用户完全隔离。
  *  - **持久化为 Markdown**：人可读、可编辑、可 diff。每条 = 一行 `- ` bullet。
  *  - 旧 memory.json/user.json 自动迁移为 .md（一次性、幂等，按 scope）。
- *  - snapshot 渲染为「LABEL [用量] + bullets」注入 system prompt。
+ *  - snapshot 渲染为「LABEL [用量] + bullets」注入本轮上下文（user 消息尾部）。
  *  - 不自动合并：写超限 → 抛 MemoryLimitError，由 Agent 自行 replace/remove 后重试。
  *  - 重复预防：完全重复条目 → no-op。
  *  - 库解耦：只接收 dir，不依赖插件 Config；由 apps/ 注入路径与 scopeId。
@@ -39,7 +39,7 @@ export class MemoryLimitError extends Error {
   }
 }
 
-/** 记忆写入威胁拦截：内容命中提示词注入特征（声明式记忆会注入 system，必须先拦）。 */
+/** 记忆写入威胁拦截：内容命中提示词注入特征（声明式记忆会注入上下文，必须先拦）。 */
 export class MemoryThreatError extends Error {
   constructor({ target, text, score, hits }) {
     const cats = (hits || []).map((h) => h.cat).filter(Boolean).join(',')
@@ -93,7 +93,7 @@ export class MemoryStore {
     this.dir = dir
     this.limits = { ...DEFAULT_LIMITS, ...limits }
     this.enabled = { memory: true, user: true, ...enabled }
-    // 写入威胁扫描（可选）：scan(text) → { flagged, score, hits }。声明式记忆注入 system，
+    // 写入威胁扫描（可选）：scan(text) → { flagged, score, hits }。声明式记忆注入上下文，
     // 命中即拒写，防止把指令注入持久化进每轮 system。库解耦：由 apps 注入 guard.checkInput。
     this.scan = typeof scan === 'function' ? scan : null
     /** @type {Map<string, {state:{memory:string[],user:string[]}}>} 按 scopeId 懒加载缓存 */
@@ -309,7 +309,7 @@ export class MemoryStore {
     return { ...this._commit(target, scopeId, arr), operations: summary }
   }
 
-  /** 渲染注入 system prompt 的快照（LABEL 用量头 + bullets，模型可读） */
+  /** 渲染注入本轮上下文的快照（LABEL 用量头 + bullets，模型可读） */
   snapshot(target, scopeId) {
     if (!this.enabled[target]) return ''
     return this._renderMd(target, this._getScope(scopeId).state[target] || []).trim()

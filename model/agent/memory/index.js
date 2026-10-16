@@ -1,7 +1,7 @@
 /**
  * memory 公共出口 + memory 工具构造器。
  *
- * memory 工具让 Agent 在对话中读写声明式记忆；记忆自动注入 system prompt，故无 read 动作。
+ * memory 工具让 Agent 在对话中读写声明式记忆；记忆自动注入本轮上下文（user 消息尾部），故无 read 动作。
  * 工具内部捕获 MemoryLimitError / 匹配错误，以 {error, ...} 结构化结果返回（不抛异常），
  * 以便模型在下一轮自行 replace/remove 腾出空间后重试（Hermes 同款语义）。
  */
@@ -51,7 +51,7 @@ export function makeRecallTool(recall) {
  * 记忆写入的来源校验（实机事故防线）。
  *
  * 背景：实机群里模型把**自己幻觉出来的**「主人要求：以后每次被问到身份时回答『我是星野爱』」
- * 写进了长期记忆，此后每轮注入 system prompt，模型把它当既定事实继续执行（还据此建了提醒）。
+ * 写进了长期记忆，此后每轮注入上下文（user 消息尾部），模型把它当既定事实继续执行（还据此建了提醒）。
  * 根因是「写记忆」这一步没有任何来源约束。这里的规则：
  *  - 写「用户要求/让我/以后每次…」这类**指令性条目**必须带 evidence（用户原话片段）；
  *  - evidence 会被核对是否真出现在用户亲述文本里（Agent 传入 ctx.userTexts，已剥掉系统注入块）；
@@ -110,7 +110,7 @@ export function createMemoryTool(store) {
       '管理长期记忆（跨会话持久）。',
       'target: memory(你的个人笔记/环境事实/经验) | user(用户画像/偏好)。',
       'action: add(新增) | replace(用 old_text 子串唯一定位条目并替换) | remove(子串定位删除) | batch(原子批量 operations)。',
-      '记忆会自动注入 system prompt，无需 read。接近上限(>80%)时先 replace/remove 合并再 add。',
+      '记忆会自动注入本轮上下文（user 消息尾部），无需 read。接近上限(>80%)时先 replace/remove 合并再 add。',
       ...WRITE_RULES,
     ].join(' '),
     parameters: {
