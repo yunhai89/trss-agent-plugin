@@ -286,7 +286,7 @@ export async function nodeScheduleAdapter() {
  */
 export const reminderSetTool = {
   name: 'reminder_set',
-  description: '设置【一次性】提醒（只触发一次，不是周期任务）：N分钟后/3点/明天X点。① 只填 message → 到点发静态提醒；② 填 prompt → 到点跑一次 Agent 任务并把结果发回。若用户要“每天/每周/每N小时”这类【周期重复】需求，不要用本工具——先用 tool_search 找到 schedule_task 并用它创建 cron 任务。at 是未来时间、ISO 8601 带时区（如 2026-08-06T15:05:00+08:00），由你根据用户措辞 + 当前时间（见【运行能力盘点】）推算。',
+  description: '设置【一次性】提醒（只触发一次，不是周期任务）：N分钟后/3点/明天X点。只按【用户明确说出】的时间与意图设置；不要给自己写「自留提醒」，也不要把你的推断/计划/记忆当成用户交代的事（实机事故：模型把系统注入块里的身份描述当成「主人要求」，自行设了 8:00 提醒并写进长期记忆）。① 只填 message → 到点发静态提醒；② 填 prompt → 到点跑一次 Agent 任务并把结果发回。若用户要“每天/每周/每N小时”这类【周期重复】需求，不要用本工具——先用 tool_search 找到 schedule_task 并用它创建 cron 任务。at 是未来时间、ISO 8601 带时区（如 2026-08-06T15:05:00+08:00），由你根据用户措辞 + 当前时间（见【运行能力盘点】）推算。',
   category: 'personal',
   parameters: {
     type: 'object',
@@ -330,7 +330,7 @@ export const reminderSetTool = {
  */
 export const scheduleTaskTool = {
   name: 'schedule_task',
-  description: '创建 cron 重复定时任务链（到点自动跑 Agent 任务 + 把结果发到当前会话）。用户说"每天X点做YY/每N小时ZZ/工作日X点"等重复需求时用。时间用自然语言，到点由 Agent 自主调工具完成任务并发送结果。',
+  description: '创建 cron 重复定时任务链（到点自动跑 Agent 任务 + 把结果发到当前会话）。用户说"每天X点做YY/每N小时ZZ/工作日X点"等重复需求时用。只按【用户明确说出】的重复需求创建；不要凭自己的推断或计划替用户排期（若要为自己安排后续动作，请在回复里说明并征得同意）。时间用自然语言，到点由 Agent 自主调工具完成任务并发送结果。',
   category: 'system',
   meta: { summary: '创建定时任务链', alwaysConfirm: true },
   parameters: {
