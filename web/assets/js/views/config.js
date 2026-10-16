@@ -819,8 +819,25 @@
         o[parts[parts.length - 1]] = v
       }
 
+      // 沙箱出口自检（与插件侧 auditEgress 同一判定口径，见 model/sandbox/index.js）：
+      // «允许互联网 + denyOut 里写 0.0.0.0/0» 是自相矛盾的组合——E2B 的 allow 规则优先于 deny，
+      // 没有白名单时 deny-all 就是唯一规则 → 沙箱拒绝一切出口（含 DNS），表现为网络与解析都不通。
+      const sandboxEgressWarn = computed(() => {
+        const net = form.sandbox?.network || {}
+        const deny = (Array.isArray(net.denyOut) ? net.denyOut : []).map((s) => String(s).trim().toLowerCase())
+        const allow = (Array.isArray(net.allowOut) ? net.allowOut : []).filter(Boolean)
+        const denyAll = deny.some((s) => s === '0.0.0.0/0' || s === '::/0' || s === '0/0')
+        if (!denyAll || allow.length || net.allowInternet === false) return null
+        const legacy = deny.length === 1
+        return `⚠ 出口配置自相矛盾：denyOut 含 0.0.0.0/0 且白名单为空 → 沙箱会**拒绝一切出口（含 DNS）**，网络与域名解析都不通。`
+          + (legacy
+            ? '这是 v1.24.0 之前的默认值（旧版是「兜底拒绝」），插件启动时会自动清理并写回；也可现在清空该字段保存。'
+            : '请从「额外拒绝网段」删掉 0.0.0.0/0；只想封禁个别网段请写具体 CIDR。')
+          + ' 要完全断网请用「允许互联网」开关（allowInternet:false）。'
+      })
+
       return {
-        form, dirty, save, reset, sections, open, activeSec, jump, OPT, updateJson, adv, loadError, formReady,
+        form, dirty, save, reset, sections, open, activeSec, jump, OPT, updateJson, adv, loadError, formReady, sandboxEgressWarn,
         addFallback, delFallback, masterInput, addMaster, delMaster,
         mcpServersToUi, delMcp, mcpModal, openNewMcp, confirmNewMcp,
         thinkingOn, tempPct, thinkingBudget, memoryLimitMemory, memoryLimitUser,
@@ -1992,6 +2009,9 @@
             <cfg-row class="full" name="出口白名单（可选收紧）" desc="allowOut：留空=默认放通全部出口；填了只放行这些域名/CIDR，其余一律拒绝">
               <tag-editor v-model="form.sandbox.network.allowOut" mono placeholder="回车添加域名/CIDR"/>
             </cfg-row>
+            <div v-if="sandboxEgressWarn" class="full" style="font-size:12px;line-height:1.6;color:var(--danger,#d33);background:rgba(221,51,51,.08);border:1px solid rgba(221,51,51,.35);border-radius:8px;padding:8px 10px">
+              {{ sandboxEgressWarn }}
+            </div>
             <cfg-row class="full" name="命令审计日志" desc="每条命令记录会话键/退出码/命令前 200 字符（不含密钥）">
               <v-switch v-model="form.sandbox.audit"/>
             </cfg-row>
@@ -2007,7 +2027,7 @@
               <cfg-row name="公开 URL 需鉴权" desc="false=沙箱公开 URL 也要 token"><v-switch v-model="form.sandbox.allowPublicTraffic"/></cfg-row>
               <cfg-row name="允许互联网" desc="network.allowInternet：true=放通全部出口（默认）；false=断网（配了白名单时白名单仍放行）"><v-switch v-model="form.sandbox.network.allowInternet"/></cfg-row>
               <cfg-row name="候选验证超时(ms)"><input type="number" class="inp" style="width:120px" min="100" step="500" v-model.number="form.sandbox.toolEvoVerifyTimeoutMs"></cfg-row>
-              <cfg-row class="full" name="额外拒绝网段" desc="network.denyOut（可选，仅 CIDR/IP）：在默认放通基础上额外封禁（如 169.254.169.254/32 防云元数据）">
+              <cfg-row class="full" name="额外拒绝网段" desc="network.denyOut（可选，仅 CIDR/IP）：在默认放通基础上额外封禁（如 169.254.169.254/32 防云元数据）。★不要写 0.0.0.0/0——它=拒绝一切出口（含 DNS）">
                 <tag-editor v-model="form.sandbox.network.denyOut" mono placeholder="如 169.254.169.254/32"/>
               </cfg-row>
             </div></div>

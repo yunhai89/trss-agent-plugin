@@ -137,6 +137,8 @@
 > **升级注意**：旧配置 `agent.terminal.*`（`enable`/`maxTimeout`/`blocklist`/`skipConfirm`）已废弃。Config 的自愈机制只增不删，所以旧键会留在你的 `config/config.yaml` 里但**不再被读取**；启动时会打印一条迁移警告，请手工删除该段并改配 `agent.sandbox`。
 >
 > **升级注意（沙箱网络默认变更）**：`agent.sandbox.network` 的默认值改为**全放通**（与 E2B 自身默认一致，白名单只是可选的收紧手段）。你配置里**显式写过**的 `allowInternet`/`allowOut`/`denyOut` 仍然照旧生效、不会被覆盖；要让沙箱联网请在面板把「允许互联网」打开并清空「出口白名单」。
+>
+> **⚠ 老配置的 `denyOut: ['0.0.0.0/0']` 会让沙箱完全断网**（v1.26.1 起自动清理）：v1.24.0 之前的默认值是 `allowInternet:false` + `denyOut:['0.0.0.0/0']` + 域名白名单，那条 `denyOut` 是「兜底拒绝」。新版默认全放通后它变成**唯一的规则 = 拒绝一切出口（含 DNS）**，表现为沙箱里 `curl` 卡满超时后失败、域名解析也失败。启动时若检测到这个**逐字一致的旧默认值**，插件会清除该条并写回 `config.yaml`（只认这一种形状，不会动你手写的其它网段）；其它「denyOut 里含 0.0.0.0/0」的写法只会告警。排查与实测用主人命令 **`#沙箱诊断`**（`预览`=只看实际下发什么；`修复`=清除旧值并写回），或 `node scripts/sandbox-net-diag.mjs`。
 
 ---
 
@@ -617,6 +619,7 @@ tts:
 | `#启用mcp +名` / `#停止mcp +名` | MCP 服务端启停 |
 | `#添加mcp +JSON` | 按标准 `mcpServers` JSON 添加 MCP（连接验证+持久化）。**私聊**发 `#添加mcp`（不带 JSON）进入交互式添加：直接粘贴 JSON 即自动测试并应用。如 `{ "mcpServers": { "zai": { "type":"stdio", "command":"npx", "args":[...], "env":{...} } } }` |
 | `#mcp` | MCP 连接状态 |
+| `#沙箱诊断` / `#沙箱诊断 预览` / `#沙箱诊断 修复` | E2B 出口网络：沙箱内实测 DNS/HTTPS 并给判定 / 只看配置实际下发什么 / 清除旧语义的全拒项 `denyOut:['0.0.0.0/0']` 并写回 |
 | `#确认 +id` / `#拒绝 +id` / `#待确认` | 审批待执行危险动作 |
 | `#agents帮助` / `#agents状态` | 帮助图 / 运行状态 |
 | `#agents重载` | 热重载配置并立即重建运行时（model/tools/skills/mcp，无需重启框架） |
@@ -798,10 +801,12 @@ E2B_INTEGRATION=1 node model/sandbox/e2b.integration.test.mjs
 | `idleMs` / `sandboxTtlMs` | `300000` / `600000` | 闲置回收阈值 / 沙箱 TTL（毫秒，命中时自动续期） |
 | `maxSandboxes` / `concurrencyWaitMs` | `4` / `15000` | 全局并发上限 / 等名额超时（超时按配额失败） |
 | `maxCommandsPerSession` | `50` | 单会话命令数上限（0=不限） |
-| `network.allowOut` / `denyOut` | 空 / 空 | **默认全放通**（E2B 原生默认）；配了 `allowOut` 白名单 → 只放行白名单、其余全拒；`allowInternet:false`（无白名单）→ 完全断网；`denyOut` 可在放通基础上额外封禁网段（如防云元数据 `169.254.169.254/32`） |
+| `network.allowOut` / `denyOut` | 空 / 空 | **默认全放通**（E2B 原生默认）；配了 `allowOut` 白名单 → 只放行白名单、其余全拒；`allowInternet:false`（无白名单）→ 完全断网；`denyOut` 可在放通基础上额外封禁网段（如防云元数据 `169.254.169.254/32`）。**别写 `0.0.0.0/0`**：它是「拒绝一切（含 DNS）」，旧版本默认值会在启动时被自动清理 |
 | `audit` | `true` | 每条命令写审计日志（会话键/退出码/命令前 200 字符，不含密钥） |
 
 > 沙箱会话按「群 + 用户 + 会话」绑定：同一会话内文件与进程状态连续（可先装依赖再跑脚本）。群共享模式（`isolation: false`）下同群共用一个沙箱。
+>
+> **出口排查**：启动日志会打印一行「`[sandbox] 出口网络：…`」（实际下发的 `network` 与放通范围），创建沙箱时也带该摘要；主人可用 **`#沙箱诊断`** 在沙箱内实测 DNS/HTTPS 并给出判定，`#沙箱诊断 预览` 只看配置实际下发什么。白名单只写 IP/CIDR 时 E2B 不会自动放行 DNS(8.8.8.8:53)，此时沙箱内域名解析会失败（`allowOut` 里请写域名）。
 
 ### 🔍 SearXNG（自建免费搜索后端）安装
 

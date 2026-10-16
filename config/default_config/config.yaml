@@ -466,7 +466,11 @@ agent:
       allowInternet: true     # true=默认放通全部出口（与 E2B 自身默认一致，包管理器/下载/API 开箱可用）；
                               # false=拒绝全部（显式断网；配了 allowOut 白名单时白名单仍放行）
       allowOut: []            # 出口白名单（可选：opt-in 收紧）：留空=不限；填了只放行这些域名/CIDR，其余全部拒绝
+                              # 注意：只写 IP/CIDR 时 E2B 不会自动放行 DNS(8.8.8.8:53)——白名单里请写域名
       denyOut: []             # 额外拒绝网段（可选；如 169.254.169.254/32 防云元数据）；留空=不加额外拒绝
+                              # ★不要在这里写 0.0.0.0/0：E2B 的 allow 规则优先于 deny，没有白名单时它=
+                              #   拒绝一切出口（含 DNS），沙箱会完全无法联网。要断网请用 allowInternet:false。
+                              #   旧版默认值 ['0.0.0.0/0'] 会被自动清理并写回（见 #沙箱诊断）
     audit: true          # 每条命令写审计日志（会话键/退出码/命令前 200 字符，不含密钥）
     toolEvoVerifyTimeoutMs: 5000  # toolEvo 候选行为验证：单用例超时（沙箱模式）
   stagehand:

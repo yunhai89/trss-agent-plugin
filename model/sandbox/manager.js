@@ -30,6 +30,7 @@ export class SandboxManager {
     sweepIntervalMs = DEFAULTS.sweepIntervalMs,
     network = null,
     allowInternetAccess = false,
+    networkSummary = null,
     envs = null,
     now = Date.now,
     logger = null,
@@ -43,6 +44,7 @@ export class SandboxManager {
     this.concurrencyWaitMs = Math.max(0, Number(concurrencyWaitMs) || 0)
     this.network = network
     this.allowInternetAccess = !!allowInternetAccess
+    this.networkSummary = networkSummary ? String(networkSummary) : null
     this.envs = envs || null
     this._now = typeof now === 'function' ? now : Date.now
     this._log = logger
@@ -116,7 +118,7 @@ export class SandboxManager {
       }
       const t = this._now()
       this._leases.set(k, { handle, lastUsed: t, lastRenew: t, purpose })
-      this._info(`[sandbox] 已创建沙箱 ${handle.id}（key=${k} · ${purpose} · 占用 ${this._active}/${this.maxSandboxes}）`)
+      this._info(`[sandbox] 已创建沙箱 ${handle.id}（key=${k} · ${purpose} · 占用 ${this._active}/${this.maxSandboxes}${this.networkSummary ? ` · 出口：${this.networkSummary}` : ''}）`)
       return handle
     } catch (e) {
       this._releaseSlot() // 创建失败必须归还名额，否则并发额度被永久吃掉

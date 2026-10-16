@@ -83,7 +83,8 @@ import { SelfReviewer, listPendingSuggestions, removeSuggestion } from '../model
 import { buildSituationalContext } from '../model/perception.js'
 import { makeTerminalTool } from '../model/terminal/index.js'
 import { createJevClient, makeJevTool, JEV_MODEL_DEFAULT, resolveThresholds } from '../model/agent/jev/index.js'
-import { createSandboxRuntime, sessionKeyOf } from '../model/sandbox/index.js'
+import { createSandboxRuntime, sessionKeyOf, legacyEgressFix } from '../model/sandbox/index.js'
+import { diagnoseSandbox, egressPlan, formatPlan, formatReport } from '../model/sandbox/net-diag.js'
 import { makeStagehand } from '../model/stagehand/index.js'
 import { makeDownloadTool } from '../model/download/index.js'
 import { makeSpawnSubagentTools, Semaphore, Orchestrator, SubagentSpec, buildWorkerTools, normalizeSubagentResult } from '../model/multiagent/index.js'
@@ -389,6 +390,7 @@ export const makeDeltaStreamer = (safeReply, { enabled = false, minIntervalMs = 
  *   #模型切换 <id>（master）                    切换模型
  *   #启用mcp <名> / #停止mcp <名>（master）     MCP 服务端启停
  *   #mcp（master）                             MCP 状态
+ *   #沙箱诊断 [预览|修复]（master）              E2B 出口网络自检 + 沙箱内实测
  * 主人判定：主人指令用 Yunzai 原生 permission:'master'（即 e.isMaster / cfg.master）。
  * 例外：terminal 工具已全员开放（无身份门槛，隔离靠 E2B microVM），不再有独立认领。
  */
@@ -705,6 +707,21 @@ async function _buildRuntime(scope) {
 
   // ── E2B 沙箱运行时（terminal 的唯一执行面 + toolEvo 的隔离面）──
   // 装配失败不抛穿：mode=off 或初始化失败都返回 manager:null，由工具层给 fail-closed 结果
+  //
+  // 出口配置迁移（v1.24.0 前默认 = allowInternet:false + denyOut:['0.0.0.0/0'] + 域名白名单）：
+  // 新版默认改成「全放通 + 可选白名单」，但旧配置的**显式值不被覆盖** —— 老配置里那条
+  // denyOut 在新语义（没有白名单）下等于「拒绝一切出口，含 DNS」：沙箱里 curl 会卡满超时后失败，
+  // 且旧版既无告警也不进日志（线上真实事故）。这里只在「逐字一致的旧默认」形状上就地清理并写回。
+  const legacyEgress = legacyEgressFix(cfg.sandbox)
+  if (legacyEgress) {
+    cfg.sandbox.network = { ...(cfg.sandbox.network || {}), denyOut: [] }
+    // 注意：save() 要的是**根配置**（_data），cfg 是它的 agent 子树；这里改的正是 _data 上的活引用，
+    // 所以无参调用即可（写成 Config.save(cfg) 会把整份配置覆盖成 agent 子树）。
+    try { Config.save() } catch (e) { Log.warn('[sandbox] 出口配置迁移写盘失败（本次会话已生效）', e?.message || e) }
+    Log.warn(`[sandbox] 检测到 v1.24.0 之前的默认出口配置 network.denyOut:["${legacyEgress.from}"]——`
+      + '在当前语义（默认全放通、无白名单）下它等于**拒绝一切出口，含 DNS**，沙箱会完全无法联网；'
+      + '已自动清理并写回 config.yaml（旧版的「兜底拒绝」现在由 allowInternet:false 或 allowOut 白名单承担）')
+  }
   const sandbox = await createSandboxRuntime(cfg.sandbox, { logger: Log.tag('sandbox') })
   scope.register(async () => { try { await sandbox?.shutdown?.() } catch { /* noop */ } }, { name: 'sandbox', order: 100 })
   if (cfg.terminal?.enable === true && !sandbox.enabled) {
@@ -1731,6 +1748,7 @@ export class Chat extends plugin {
         { reg: '^#拒绝\\s*(\\d+)', fnc: 'reject' },
         { reg: '^#待确认$', fnc: 'pending' },
         { reg: '^#mcp$', fnc: 'mcpStatus', permission: 'master' },
+        { reg: '^#沙箱诊断(?:\\s+(\\S+))?$', fnc: 'sandboxDiag', permission: 'master' },
         { reg: '^#添加[Mm][Cc][Pp]', fnc: 'addMcp', permission: 'master' },
         { reg: '^#agents重载$', fnc: 'agentsReload', permission: 'master' },
         { reg: '^#进化工具\\s+([\\s\\S]+)', fnc: 'toolEvoEvolve', permission: 'master' },
@@ -3054,6 +3072,41 @@ export class Chat extends plugin {
       return `${s.status === 'connected' ? '✅' : s.status === 'error' ? '❌' : '⏳'} ${n}：${s.tools} 工具${s.error ? `（${s.error}）` : ''}`
     })
     await this.e.reply(lines.join('\n'))
+    return true
+  }
+
+  // —— 沙箱出口网络诊断（master）——
+  // 「沙箱连不上网/DNS 也不通」有四种成因：配置关/收窄了出口、旧语义遗留的 denyOut 全拒、
+  // 跑在有意断网的验证/进化档位、自托管没做 NAT。前两类静态可判，后两类必须看沙箱内实测。
+  async sandboxDiag() {
+    const cfg = Config.get().agent || {}
+    const sb = cfg.sandbox || {}
+    const arg = String(this.e.msg.match(/^#沙箱诊断(?:\s+(\S+))?$/)?.[1] || '').trim()
+    if (arg === '修复' || arg === 'fix') {
+      const plan = egressPlan(sb)
+      if (!plan.legacy) { await this.e.reply(`✅ 当前出口配置没有需要迁移的旧值。\n\n${formatPlan(plan, { cfg: sb })}`); return true }
+      sb.network = { ...(sb.network || {}), denyOut: [] }
+      try { Config.save() } catch (e) { await this.e.reply(`⚠️ 已就地清除（本次会话生效）但写盘失败：${e?.message || e}`); return true }
+      await this.e.reply(`✅ 已清除旧语义的全拒出口项 denyOut:["${plan.legacy.from}"] 并写回 config.yaml。\n\n${formatPlan(egressPlan(sb), { cfg: sb })}`)
+      return true
+    }
+    if (arg === '预览' || arg === 'plan') { await this.e.reply(formatPlan(egressPlan(sb), { cfg: sb })); return true }
+    if (arg && arg !== '实测') { await this.e.reply('用法：#沙箱诊断（沙箱内实测）· #沙箱诊断 预览（只看配置实际下发什么）· #沙箱诊断 修复（清理旧语义的全拒项并写回）'); return true }
+    const rt = await getRuntime()
+    await this.e.reply('🔎 正在沙箱内实测出口网络（最长约 60 秒）…')
+    try {
+      const report = await diagnoseSandbox({
+        manager: rt?.sandbox?.manager,
+        key: `net-diag:${String(this.e.user_id || 'master')}`,
+        cfg: sb,
+        mode: sb.mode,
+        selfHosted: !!(sb.apiUrl || sb.domain),
+        logger: Log.tag('sandbox'),
+      })
+      await this.e.reply(formatReport(report, { cfg: sb }))
+    } catch (e) {
+      await this.e.reply(`沙箱诊断失败：${e?.message || e}`)
+    }
     return true
   }
 
