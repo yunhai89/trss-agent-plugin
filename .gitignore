@@ -19,6 +19,12 @@ CLAUDE.md
 CODEBUDDY.md
 # AI 编码助手的本地技能路由/技能目录（与 .claude/ 同理，不入库）
 .codebuddy/
+# 其它 AI 编码助手的本地技能/钩子（impeccable 等，含 20MB 平台二进制，绝不入库）
+.opencode/
+.github/skills/
+.github/hooks/
+# impeccable 设计工作区（本地设计稿/截图/决策记录，不入库）
+.impeccable/
 
 # 临时检查脚本（下划线开头为 dev 专用，不入库；离线测试 test.mjs 入库以支持 CI，审计 §10）
 **/_*.mjs
