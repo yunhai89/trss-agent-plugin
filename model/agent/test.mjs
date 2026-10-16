@@ -1772,12 +1772,12 @@ await test('token 估算 CJK 感知：中文 1 token/字、ASCII 1 token/4 字�
 })
 
 // ---------- P1：工具 schema 追加式增长（tools 前缀稳定性） ----------
-await test('工具列表追加式：激活顺序决定 tools 顺序，旧数组是新数组前缀', async () => {
+await test('工具列表追加式：stableList=false 时激活顺序决定 tools 顺序，旧数组是新数组前缀', async () => {
   const mkTool = (name) => ({ name, description: 'd-' + name, parameters: { type: 'object' }, async execute() { return 'x' } })
   // registry 注册顺序 a,b,c——与激活顺序刻意相反
   const tools = new ToolRegistry().register(mkTool('a'), mkTool('b'), mkTool('c'))
   const provider = mockProvider([{ content: '好', finishReason: 'stop' }])
-  const agent = new Agent({ provider, tools, maxTurns: 2, reflect: 'off', toolDiscovery: { enable: true, alwaysOn: [] } })
+  const agent = new Agent({ provider, tools, maxTurns: 2, reflect: 'off', toolDiscovery: { enable: true, alwaysOn: [], stableList: false } })
   // 初始只激活 c（tool_search 元工具置顶；_metaTools 由 run() 初始化，这里手动对齐）
   agent.activeTools = new Set(['c'])
   agent._metaTools = { tool_search: { name: 'tool_search', description: 'd', parameters: { type: 'object' }, async execute() { return '' } } }
@@ -2263,7 +2263,7 @@ await test('F06：continueFrom 用检查点重建历史并续跑', async () => {
 })
 
 // ---------- 缓存：工具目录不随会话内激活变化（前缀缓存稳定性） ----------
-await test('缓存稳定性：system 工具目录不随 activeTools 增长而变，tools 数组仍追加', async () => {
+await test('缓存稳定性：system 工具目录静态 + tools 数组跨轮恒定（stableList 默认开）', async () => {
   let agent = null
   const mk = (name, execute) => ({
     name,
@@ -2293,9 +2293,36 @@ await test('缓存稳定性：system 工具目录不随 activeTools 增长而变
 
   eq(c1.system === c2.system, true, '两轮 system 逐字节相同（目录不随激活变化，前缀缓存不被打断）')
   eq(String(c1.system).includes('tool_b：'), false, '工具目录不列出会话内激活的工具')
-  eq(names1.includes('tool_a') && !names1.includes('tool_b'), true, '首轮只下发配置的常驻工具')
-  eq(names2.includes('tool_b'), true, '会话内激活的工具下一轮仍下发（能力无损）')
-  eq(agent.activeTools.has('tool_b'), true, '激活集在 run 内保留')
+  eq(names1.join(',') === names2.join(','), true, `两轮 tools 数组逐项相同（tools 变化会让整段前缀缓存归零）：${names1} vs ${names2}`)
+  eq(names1.includes('tool_a') && names1.includes('tool_b'), true, '稳定模式下发全量工具（能力无损）')
+  eq(agent.activeTools.has('tool_b'), true, '激活集在 run 内保留（目录/发现能力不受影响）')
+})
+
+await test('缓存稳定性：stableList=false 保留旧的追加式增长（供对比，会打穿缓存）', async () => {
+  let agent = null
+  const mk = (name, execute) => ({
+    name,
+    description: `${name} 的描述文本`,
+    parameters: { type: 'object', properties: {} },
+    async execute(p) { return execute ? execute(p) : 'ok' },
+  })
+  const tools = new ToolRegistry()
+    .register(mk('tool_a', () => { agent.activeTools.add('tool_b'); return 'activated' }))
+    .register(mk('tool_b'))
+  const provider = mockProvider([
+    { toolCalls: [{ id: 'c1', name: 'tool_a', arguments: {} }], finishReason: 'tool_calls' },
+    { content: '完成', finishReason: 'stop' },
+  ])
+  agent = new Agent({
+    provider, tools, maxTurns: 4, reflect: 'off',
+    toolDiscovery: { enable: true, alwaysOn: ['tool_a'], stableList: false },
+  })
+  await agent.run('跑一次工具')
+
+  const names1 = (provider.calls.history[0].tools || []).map((t) => t.name)
+  const names2 = (provider.calls.history[1].tools || []).map((t) => t.name)
+  eq(names1.includes('tool_b'), false, '首轮只下发配置的常驻工具')
+  eq(names2.includes('tool_b'), true, '下一轮追加会话内激活的工具（此模式每次激活都会打穿缓存）')
 })
 
 // ---------- 总结 ----------

@@ -258,7 +258,7 @@ await test('Agent 集成：Jev 判档失败 → 回退规则；工具选择写�
     },
     decisions: { toolSelection: true }, thresholds: {}, toolSelectionMaxTools: 10,
   }
-  const agent = new Agent({ provider: provider2, tools, maxTurns: 1, reflect: 'off', toolDiscovery: { enable: true, alwaysOn: ['tool_search'] }, jev: jevSel })
+  const agent = new Agent({ provider: provider2, tools, maxTurns: 1, reflect: 'off', toolDiscovery: { enable: true, alwaysOn: ['tool_search'], stableList: false }, jev: jevSel })
   await agent.run('帮我搜一下今天的新闻', { ctx: { userId: 'u1', groupId: 'g1' } })
   const sent = (hist2[0].tools || []).map((t) => t.name)
   ok(sent.includes('web_search'), 'Jev 选中的 web_search 进入 tools')

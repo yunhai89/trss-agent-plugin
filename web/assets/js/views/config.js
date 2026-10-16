@@ -290,6 +290,7 @@
         if (!Array.isArray(form.shell.intercept)) form.shell.intercept = []
         // 工具选择方法 / 反思模式 / 判档方式：缺失时补默认（jev 由对应卡片选择器派生，无需单独 decisions）
         if (form.toolDiscovery && form.toolDiscovery.method == null) form.toolDiscovery.method = 'llm'
+        if (form.toolDiscovery && form.toolDiscovery.stableList == null) form.toolDiscovery.stableList = true // 缓存关键：tools 数组跨轮恒定
         if (form.reflect == null) form.reflect = 'auto'
         // Jev 未启用/未配齐时，退出 jev 选项，避免下拉无匹配项显示空白
         const _jevReady = !!(form.jev.enable && form.jev.providerId && (form.jev.modelId || form.jev.model))
@@ -1589,6 +1590,9 @@
                 <option value="llm">llm 自主发现和选择</option>
                 <option value="jev">jev 决策</option>
               </select>
+            </cfg-row>
+            <cfg-row name="工具数组跨轮恒定" desc="★缓存关键:tools 数组只要变化一个条目(哪怕只追加一个工具),整段 prompt 前缀缓存立即归零。开=每轮下发全量工具定义(首轮多付约 1 万 token,之后全部命中);关=旧的追加式增长,每次激活工具都会打穿缓存">
+              <v-switch v-model="form.toolDiscovery.stableList"/>
             </cfg-row>
 
             <template v-if="!(jevReady && form.toolDiscovery.method === 'jev')">

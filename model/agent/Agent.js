@@ -342,6 +342,12 @@ export class Agent {
 
     // 工具按需发现（Tool Discovery）：null=全量模式；Set=按需模式（常驻核心工具 + 命中后扩充）
     this.toolDiscovery = config.toolDiscovery || null
+    // 工具数组跨轮恒定（缓存关键，默认开）：实机+受控探针实测——tools 数组只要变化一个条目，哪怕只在尾部
+    // 追加一个工具，整个 prompt 的前缀缓存立即归零（完全重复 97.6% → 追加 1 个工具 0.0%）：tools 渲染在
+    // 请求最前缀，追加会让其后全部 token 位置偏移。按需模式下 activeTools 随 tool_search 命中增长，每激活
+    // 一次就打穿一次缓存（实机一次 run 内 12→33→43 个工具，四轮命中率跌到 25%~34%）。开=每轮下发 registry
+    // 全量（首轮多付约 1 万 token，之后全部命中）；关=旧行为（tools 追加式增长）。
+    this.stableToolList = config.toolDiscovery?.stableList !== false
     this.activeTools = null
     this._metaTools = {} // per-instance 元工具（tool_search 闭包绑 this，并发安全）
     this._curTaskId = null // run() 内暂存，供元工具 devLog
@@ -1293,6 +1299,8 @@ export class Agent {
    */
   _buildToolList() {
     if (!this.tools) return []
+    // 稳定模式：跨轮固定下发全量（tools 一变，整段前缀缓存归零——见构造函数的实测数据）
+    if (this.stableToolList) return this.tools.list()
     if (!this.activeTools) return this.tools.list()
     const out = []
     const seen = new Set()

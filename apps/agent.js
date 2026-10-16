@@ -1146,6 +1146,7 @@ async function _buildRuntime(scope) {
       alwaysOn: Array.isArray(cfg.toolDiscovery?.alwaysOn) ? cfg.toolDiscovery.alwaysOn : undefined,
       topK: cfg.toolDiscovery?.topK ?? 8,
       minScore: cfg.toolDiscovery?.minScore ?? 0.3,
+      stableList: cfg.toolDiscovery?.stableList !== false, // 工具数组跨轮恒定（缓存关键；false=旧的追加式增长）
     },
     shellIntercept: Array.isArray(cfg.shell?.intercept) ? cfg.shell.intercept : [],
     reflect: cfg.reflect ?? 'auto',

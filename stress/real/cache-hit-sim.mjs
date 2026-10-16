@@ -21,6 +21,7 @@
  *   SIM_TAG                      场景标签（避免不同场景共享前缀，默认取配置指纹）
  *   SIM_TOOL_CHARS               每次工具结果字符数（默认 3800）
  *   SIM_CTX_CHARS                每轮情境注入字符数（默认 3200）
+ *   SIM_STABLE=0                 关闭 toolDiscovery.stableList（复现「tools 数组追加式增长打穿缓存」的旧行为）
  *   说明：两者共同决定「每轮新增 token 量」（d）。实机日志（339 轮）实测 d≈3900 token/轮，
  *   这里默认值模拟出的 d 与之同量级——d 是命中率公式里唯一的不可缓存部分，必须贴近实机。
  *   CACHE_ASSERT=1               断言 warm 命中率 ≥ CACHE_MIN_RATE（默认 0.95），否则退出码 1
@@ -179,7 +180,7 @@ async function runConversation(conv) {
     contextWindow: WINDOW, contextHighRatio: HIGH, contextLowRatio: LOW,
     maxToolResultChars: pc.maxToolResultChars ?? 4000,
     keepReasoning: pc.keepReasoning !== false,
-    toolDiscovery: { enable: true, alwaysOn: ['get_chat_history', 'clarify', 'memory_search'], topK: 8, minScore: 0.3 },
+    toolDiscovery: { enable: true, alwaysOn: ['get_chat_history', 'clarify', 'memory_search'], topK: 8, minScore: 0.3, stableList: process.env.SIM_STABLE !== '0' },
   })
   const ctxText = (i, run) => {
     const lines = Array.from({ length: Math.max(1, Math.ceil(CTX_CHARS / 200)) },

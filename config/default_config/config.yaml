@@ -258,6 +258,7 @@ agent:
       - list_group_files
     topK: 8                   # tool_search 默认返回数
     minScore: 0.3             # 最低相似度（query 覆盖率/cosine；0.3=至少 30% 命中，平衡召回与精度）
+    stableList: true          # ★工具数组跨轮恒定（缓存关键，默认开）：实测 tools 数组哪怕只追加一个工具，整段 prompt 前缀缓存立即归零（命中率 97.6%→0%）。开=每轮下发全量工具定义（首轮多付约 1 万 token，之后全部命中）；false=旧的追加式增长
   miyoushe:
     cookie: ""
     defaultGid: 2

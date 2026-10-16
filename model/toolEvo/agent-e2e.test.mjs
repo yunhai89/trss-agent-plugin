@@ -66,7 +66,7 @@ try {
 
   const agent = new Agent({
     provider: new OpenAIProvider({ client }), model: 'fixture', tools,
-    toolDiscovery: { enable: true, minScore: 0.1 }, reflect: 'off', governor: false, maxTurns: 5,
+    toolDiscovery: { enable: true, minScore: 0.1, stableList: false }, reflect: 'off', governor: false, maxTurns: 5,
   })
   const result = await agent.run('请把 21 加倍')
 
