@@ -693,6 +693,8 @@ tts:
 | `web_crawl` | 宿主 python crawl4ai（**默认恒走这里**：本地引擎，与 sandbox.mode 无关，同 diagram 的本机 Kroki） | 仅当 `agent.kb.crawl.execution: sandbox` 时在沙箱内 crawl4ai（脚本+请求文件上传，模板需预装 crawl4ai）；沙箱缺 crawl4ai → 降级纯 HTTP fetch |
 | `install_skill` | 宿主 `skillhub`（固定 argv） | 沙箱内 `skillhub`，只回传 `.md` 产物，校验后进宿主 skills/ |
 
+**`web_download` 的地址门禁（v1.26.23 起）**：与 `web_crawl` 同一套 `checkTargetAllowed`——默认拒绝本机/内网/云元数据地址（`127.0.0.1`、`169.254.169.254`、`::1`、`10/172.16/192.168` 段，含混淆写法与域名解析结果），命中直接结构化失败并附提示。确需下载本地媒体服务器（NAS 等）时设 `agent.download.allowPrivateHosts: true`。原因是 yt-dlp 以**宿主身份**按通用 URL 抓取，内网响应体还会被回发到群里，也可被抓取内容里的提示注入诱导。
+
 > 沙箱不可用（E2B 连不上/初始化失败）时这些工具一律 **fail-closed** 结构化失败，**绝不回落宿主执行**；沙箱模板缺依赖（`python3`/`yt-dlp`/`ffmpeg`/`soffice`/`crawl4ai`/`skillhub`）会返回可读提示，请把它们装进 `agent.sandbox.template` 指向的模板。命令同样计入 `maxCommandsPerSession`（与 terminal 共用会话预算），输入/产物的文件传输走流式（大文件不整块进内存）。
 >
 > `web_crawl` 例外说明：crawl4ai 是**本机引擎**（宿主 venv，`scripts/install-crawl4ai.sh` 装的就是它；与 diagram 的本机 Kroki 同类），默认**不随** `sandbox.mode` 进沙箱——否则沙箱模板没预装 crawl4ai 时整条抓取链路会恒降级 fetch，反倒丢掉宿主已装好的浏览器。想让网页渲染在沙箱内发生时，显式配 `agent.kb.crawl.execution: sandbox`（需 `mode: e2b` + 模板预装 crawl4ai；该档沙箱未就绪时降级纯 HTTP fetch，不改跑宿主 crawl4ai）。

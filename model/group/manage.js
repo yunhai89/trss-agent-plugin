@@ -5,11 +5,13 @@
  * 安全：禁止对 bot 自身与操作者本人执行踢出/禁言。
  */
 
-import { defineTool, param, getGroup } from '../toolkit/index.js'
+import { defineTool, param, getGroup, groupScopeError } from '../toolkit/index.js'
 
 const MAX_MUTE = 30 * 24 * 3600 // 禁言上限 30 天
 
 function needGroup(ctx, gid) {
+  const scopeErr = groupScopeError(ctx, gid)
+  if (scopeErr) return { error: scopeErr }
   const g = getGroup(ctx, gid)
   if (!g) return { error: '当前会话非群聊或协议端不支持群管理操作' }
   return g

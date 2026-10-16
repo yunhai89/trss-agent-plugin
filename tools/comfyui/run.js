@@ -226,7 +226,8 @@ export async function executeGraph({ api, graph, timeout = 300, interval = 1.5, 
     return { ok: false, status: 'submit', error: e?.message || String(e), nodeErrors: e?.node_errors }
   }
 
-  const wait = Math.min(Number(timeout) || (isVideo ? 900 : 300), 1800)
+  // 夹到 [1,1800]：负数/0 会让轮询 deadline 立刻过期 → 刚提交的 prompt 马上被判超时并 /interrupt
+  const wait = Math.max(1, Math.min(Number(timeout) || (isVideo ? 900 : 300), 1800))
   const result = await api.pollStatus(promptId, { timeout: wait, interval, maxInterval, onProgress })
   if (result.status === 'error') return { ok: false, status: 'error', promptId, error: result.message || 'execution_error', nodeId: result.nodeId }
   if (result.status === 'cancelled') return { ok: false, status: 'cancelled', promptId, error: '任务被取消' }

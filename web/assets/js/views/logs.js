@@ -147,13 +147,13 @@
             const u = e.usage || {}
             const b = e.breakdown
             const dist = b ? ` · 分布 身份${b.identity}/工具${b.tools}/记忆${b.memory}/技能${b.skills}/对话${b.conversation}` : ''
-            return `第 ${e.turn} 轮 · finish=${e.finish} · ${(u.prompt_tokens||0)}+${(u.completion_tokens||0)} tok${dist} · ${e.ms}ms`
+            return `第 ${e.turn} 轮 · finish=${e.finish} · ${uIn(u)}+${uOut(u)} tok${dist} · ${e.ms}ms`
           }
           case 'tool': return `${e.name} · ${e.success ? '✓' : '✗'}${e.errorClass ? ' ' + e.errorClass : ''} · ${e.duration ?? e.ms}ms${e.summary ? ' · ' + e.summary : ''}`
           case 'tool_discovery': return `检索「${e.query}」· 命中 ${e.availableCount ?? (e.hits?.length || 0)} · 激活 [${(e.activated||[]).join(', ')}]${e.rejected?.length ? ' · 淘汰 ' + e.rejected.length : ''}`
           case 'reflect': return e.revise ? `需修正:${e.feedback}` : `通过:${e.feedback}`
           case 'recall_extract': return `scopeUser=${e.scopeUserId} · LLM=${e.hasLlm} · ${e.ms}ms`
-          case 'run_end': return `${e.turns} 轮 · stop=${e.stopReason} · 总 ${e.usage.total} tok · ${fmt.dur(e.totalMs)}`
+          case 'run_end': return `${e.turns} 轮 · stop=${e.stopReason} · 总 ${uTotal(e.usage)} tok · ${fmt.dur(e.totalMs)}`
           case 'reply': return `${e.mode === 'image' ? '图片' : '文本'}模式 · ${e.delivered ? '已送达' : '未送达'} · ${e.replyLen || e.body?.length || 0}字`
           case 'error': return `${e.error}`
           case 'skill': return `技能匹配 ${e.matched?.length || 0} 个 · 输入「${(e.input || '').slice(0, 20)}」`
@@ -209,7 +209,14 @@
       }
 
       /* turn 事件的缓存命中占比 */
-      const cachePct = (u) => fmt.pct(u.prompt_cache_hit_tokens, u.prompt_tokens)
+      /* usage 归一：各协议字段名不同，且 usage 可能整体为 null（网关忽略 stream_options.include_usage）——
+         DeepSeek: prompt_tokens/prompt_cache_hit_tokens；OpenAI: prompt_tokens_details.cached_tokens；
+         Anthropic: input_tokens/cache_read_input_tokens；聚合层已归一形态: input/cacheRead。 */
+      const uIn = (u) => Number(u?.input ?? u?.prompt_tokens ?? u?.input_tokens ?? 0) || 0
+      const uCached = (u) => Number(u?.cacheRead ?? u?.prompt_cache_hit_tokens ?? u?.prompt_tokens_details?.cached_tokens ?? u?.cache_read_input_tokens ?? 0) || 0
+      const uOut = (u) => Number(u?.output ?? u?.completion_tokens ?? u?.output_tokens ?? 0) || 0
+      const uTotal = (u) => Number(u?.total ?? u?.total_tokens ?? 0) || (uIn(u) + uOut(u))
+      const cachePct = (u) => (uIn(u) > 0 ? Math.min(100, Math.round((uCached(u) / uIn(u)) * 100)) : 0)
 
       /* 惰性加载:文件列表 → 自动取首个文件事件流 */
       onMounted(async () => {
@@ -222,7 +229,7 @@
         } catch { /* 忽略 */ }
       })
 
-      return { files, fileIdx, pickFile, traces, activeTrace, events, expanded, toggle, EV, evMeta, summary, cachePct, fmt, filter, hitTotal, runFilter, resetFilter }
+      return { files, fileIdx, pickFile, traces, activeTrace, events, expanded, toggle, EV, evMeta, summary, cachePct, uIn, uCached, uOut, uTotal, fmt, filter, hitTotal, runFilter, resetFilter }
     },
     template: `
     <div class="grid cols-300" style="align-items:start">
@@ -289,10 +296,10 @@
               </div>
               <Transition name="expand">
                 <div v-if="expanded[i]" class="tl-b">
-                  <div v-if="e.event === 'turn'" class="mb12">
+                  <div v-if="e.event === 'turn' && e.usage" class="mb12">
                     <div class="row-b" style="font-size:11.5px;margin-bottom:4px">
                       <span class="mut">prompt 缓存命中</span>
-                      <span class="num mut">{{ e.usage.prompt_cache_hit_tokens }}/{{ e.usage.prompt_tokens }} ({{ cachePct(e.usage) }}%)</span>
+                      <span class="num mut">{{ uCached(e.usage) }}/{{ uIn(e.usage) }} ({{ cachePct(e.usage) }}%)</span>
                     </div>
                     <div class="meter m-mint"><i :style="{width: cachePct(e.usage) + '%'}"></i></div>
                   </div>

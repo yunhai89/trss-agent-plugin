@@ -91,9 +91,21 @@ export class ProfileStore {
     return m
   }
 
+  /**
+   * 读取画像。
+   * 注意：读失败（KV 抖动）与「还没有画像」是两件事。旧实现把读失败也当成 null → `_normalize(null)` 得空模型，
+   * 随后 ingest 末尾无条件 `_save` 会把整份画像覆盖成空（实测：一次读失败后 facets.fact 从 [杭州] 变 []，无提示）。
+   * 这里让读失败抛出，由调用方决定是否跳过写回；只有「确实没有该键」才返回空模型。
+   */
   async load(userId) {
-    let raw = null
-    try { raw = await this.kv.get(this._key(userId)) } catch { raw = null }
+    let raw
+    try {
+      raw = await this.kv.get(this._key(userId))
+    } catch (e) {
+      const err = new Error(`画像读取失败（已跳过本次写回，避免清空）：${e?.message || e}`)
+      err.code = 'profile_read_failed'
+      throw err
+    }
     return this._normalize(raw)
   }
 

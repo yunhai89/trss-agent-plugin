@@ -131,9 +131,9 @@
                 <span class="pill p-line mono">#{{ c.id }}</span>
               </div>
               <div class="mut mt8" style="font-size:12px">
-                申请人 <b class="mono">{{ c.ctx.user }}</b> · {{ c.ctx.gid ? '群 ' + c.ctx.gid : '私聊' }} · {{ fmt.ago(c.createdAt) }}发起
+                申请人 <b class="mono">{{ c.ctx?.user || '未知' }}</b> · {{ c.ctx?.gid ? '群 ' + c.ctx.gid : '私聊' }} · {{ fmt.ago(c.createdAt) }}发起
               </div>
-              <div class="mut" style="font-size:12px;margin-top:2px">事由:{{ c.ctx.reason }}</div>
+              <div class="mut" style="font-size:12px;margin-top:2px">事由:{{ c.ctx?.reason || '（未提供）' }}</div>
             </div>
           </div>
           <div class="mt12"><json-block :data="c.args"/></div>

@@ -8,9 +8,11 @@
  * 注：QQ 的 AI 语音能力受账号/地区限制，部分账号可能不可用（调用会返回错误）。
  */
 
-import { defineTool, param, groupIdOf, sendApi } from '../toolkit/index.js'
+import { defineTool, param, groupIdOf, groupScopeError, sendApi } from '../toolkit/index.js'
 
 function needGid(ctx, groupId) {
+  const scopeErr = groupScopeError(ctx, groupId)
+  if (scopeErr) return { error: scopeErr }
   return groupIdOf(ctx, groupId) || null
 }
 
@@ -25,6 +27,7 @@ export const getAiCharactersTool = defineTool({
   }),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     const r = await sendApi(ctx, 'get_ai_characters', gid ? { group_id: gid } : {})
     if (!r.ok) return { error: r.error }
     const list = Array.isArray(r.data) ? r.data : []
@@ -45,6 +48,7 @@ export const aiTtsTool = defineTool({
   }, ['text', 'character']),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId（AI 语音需群上下文）' }
     const r = await sendApi(ctx, 'get_ai_record', {
       group_id: gid, text: String(p.text),

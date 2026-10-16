@@ -105,6 +105,9 @@ export class McpManager {
     } catch (e) {
       entry.status = 'error'
       entry.error = this._formatConnectError(e, cfg)
+      // 握手失败也必须关闭 transport：stdio 服务端此时已 spawn（起得来但握手失败：鉴权错/协议不兼容/
+      // 挂起超时），不 close 会留下常驻僵尸子进程，直到 #停止mcp / 配置重载 / 进程退出才回收。
+      try { await client.close() } catch { /* noop */ }
       this.logger('error', `${name} 连接失败：${entry.error}`)
     }
     return entry

@@ -113,7 +113,8 @@ export class SandboxManager {
       // 遍历之后才登记），必须在这里就地回收，否则容器/进程永久泄漏。
       if (this._closed) {
         try { await this.transport.kill(handle) } catch { /* best-effort */ }
-        this._releaseSlot()
+        // 名额交给下面的 catch 统一归还：这里再 release 一次会让同一次创建扣两次额度
+        // （_active 少记 → 并发上限被永久放大）
         throw new SandboxError('killed', '沙箱管理器已关闭（创建完成时已展开 shutdown）')
       }
       const t = this._now()

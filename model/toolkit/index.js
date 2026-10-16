@@ -26,7 +26,7 @@
 
 import {
   defineTool, defineToolPack, getBot, getEvent, getGroup, getFriend, getMember,
-  sendApi, groupIdOf, botGroupRole, param, ok, fail, markdown, roleRank, VALID_CATEGORIES,
+  sendApi, groupIdOf, groupScopeError, botGroupRole, param, ok, fail, markdown, roleRank, VALID_CATEGORIES,
 } from './define.js'
 import { loadToolPacks, asPack } from './loader.js'
 import {
@@ -38,7 +38,7 @@ import {
 export {
   defineTool, defineToolPack,
   getBot, getEvent, getGroup, getFriend, getMember,
-  sendApi, groupIdOf, botGroupRole, param, ok, fail, markdown, roleRank, VALID_CATEGORIES,
+  sendApi, groupIdOf, groupScopeError, botGroupRole, param, ok, fail, markdown, roleRank, VALID_CATEGORIES,
   loadToolPacks, asPack,
   // 外置工具配置约定（tool.config.js）
   getToolConfig, saveToolConfig, discoverToolPacks, loadPackConfigDir,

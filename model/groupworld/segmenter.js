@@ -72,12 +72,15 @@ export class ConversationSegmenter {
     const cur = await this.dao.get('SELECT last_segmented_msg_id FROM gw_cursor WHERE group_id=?', [groupId])
     const watermark = Number(cur?.last_segmented_msg_id) || 0
 
-    // 新增消息（正序）
+    // 新增消息：**按 id 取最低的 500 条**（不能按 sent_at 排序后 LIMIT：QQ 延迟投递会让
+    // 「sent_at 更早、id 更大」的消息挤进本批，被 LIMIT 截掉的那条 id 又小于水位 → 永久跳过、
+    // 静默不进世界模型）。取回后再按 sent_at 排序处理，兼顾「不丢消息」与「按时间切片段」。
     const msgs = await this.dao.all(
-      'SELECT id,message_id,sender_id,plain_text,message_type,sent_at,reply_to_msg_id FROM gw_messages WHERE group_id=? AND id>? ORDER BY sent_at ASC, id ASC LIMIT 500',
+      'SELECT id,message_id,sender_id,plain_text,message_type,sent_at,reply_to_msg_id FROM gw_messages WHERE group_id=? AND id>? ORDER BY id ASC LIMIT 500',
       [groupId, watermark],
     )
     if (!msgs.length) return { processed: 0, closed: await this._closeIdleOpen(groupId, idleMs, now) }
+    msgs.sort((a, b) => (Number(a.sent_at) || 0) - (Number(b.sent_at) || 0) || (Number(a.id) || 0) - (Number(b.id) || 0))
 
     let open = await this._currentOpen(groupId)
     let closed = 0; let topicSplits = 0

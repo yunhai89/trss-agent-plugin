@@ -188,7 +188,24 @@ export class RecallStore {
   }
 
   _key(userId) { return `${this.prefix}${userId}` }
-  async _all(userId) { const v = await this.kv.get(this._key(userId)); return Array.isArray(v) ? v : [] }
+  /**
+   * 读取某用户的召回记忆。
+   * 返回 null = 坏值（非空但不是数组）：调用方必须拒绝写回，否则一次坏值就把整份记忆抹掉
+   * （与 session.append 同型；空/缺键仍返回 []）。
+   */
+  async _all(userId) {
+    const v = await this.kv.get(this._key(userId))
+    if (v == null || v === '') return []
+    if (Array.isArray(v)) return v
+    return null
+  }
+  /** 写路径专用：坏值时抛错拒绝写回（否则一次坏值就把整份记忆覆盖掉） */
+  async _allForWrite(userId) {
+    const all = await this._all(userId)
+    if (all === null) throw new Error('召回记忆数据损坏（不是数组），已拒绝写入以免清空；请先备份或清空该键')
+    return all
+  }
+
   async _save(userId, arr) {
     if (arr.length > this.cap) {
       // 容量智能淘汰：按综合价值排序后保留前 cap 条（保护高 confidence/高 level/近期 事实，替代 FIFO 丢最旧）
@@ -230,7 +247,7 @@ export class RecallStore {
 
   /** 召回 topK：相似度 × 时间衰减 × 置信度加权；_score <= minScore 的不返回（防零相关记忆污染上下文） */
   async retrieve(query, userId, topK = 5) {
-    const all = await this._all(userId)
+    const all = (await this._all(userId)) || []
     if (!all.length) return []
     const qEmbed = this.embedFn ? await safe(this.embedFn(query)) : null
     const now = Date.now()
@@ -303,7 +320,7 @@ export class RecallStore {
   /** 去重感知写入（相似超阈值 → 高置信度覆盖，旧内容进 prev[]）。每用户加锁，防并发丢更新。 */
   async writeMemory(candidate, userId) {
     return this._lock.withLock(this._key(userId), async () => {
-      const all = await this._all(userId)
+      const all = await this._allForWrite(userId)
       const r = await this._writeLocked(candidate, all)
       await this._save(userId, all)
       return r
@@ -364,7 +381,7 @@ export class RecallStore {
    */
   async correct(userId, { matchText, newContent, matchThreshold = 0.5, type, level, confidence = 0.9 } = {}) {
     return this._lock.withLock(this._key(userId), async () => {
-      const all = await this._all(userId)
+      const all = await this._allForWrite(userId)
       const now = Date.now()
       let corrected = 0
       const ids = []
@@ -410,7 +427,7 @@ export class RecallStore {
     const ids = new Set((injectedIds || []).filter(Boolean))
     if (!ids.size) return { updated: 0 }
     return this._lock.withLock(this._key(userId), async () => {
-      const all = await this._all(userId)
+      const all = await this._allForWrite(userId)
       const text = String(replyText || '')
       const now = Date.now()
       let updated = 0
@@ -457,7 +474,7 @@ export class RecallStore {
 
   async forget(userId, keyword) {
     return this._lock.withLock(this._key(userId), async () => {
-      const all = await this._all(userId)
+      const all = await this._allForWrite(userId)
       const next = all.filter((m) => !(m.content || '').includes(keyword))
       await this._save(userId, next)
       return all.length - next.length
@@ -467,7 +484,7 @@ export class RecallStore {
   /** 按 id 精确删除单条（Web 面板用；forget 只能按 keyword 模糊删） */
   async removeById(userId, entryId) {
     return this._lock.withLock(this._key(userId), async () => {
-      const all = await this._all(userId)
+      const all = await this._allForWrite(userId)
       const next = all.filter((m) => m.id !== entryId)
       if (next.length === all.length) return 0
       await this._save(userId, next)

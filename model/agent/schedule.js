@@ -21,7 +21,20 @@ export class ScheduleStore {
   }
 
   _key() { return `${this.prefix}jobs` }
-  async _load() { const v = await this.kv.get(this._key()); return Array.isArray(v) ? v : [] }
+  /** 读取任务列表。null = 坏值（非空但非数组）：调用方必须拒绝写回，否则整份提醒列表会被覆盖掉。 */
+  async _load() {
+    const v = await this.kv.get(this._key())
+    if (v == null || v === '') return []
+    if (Array.isArray(v)) return v
+    return null
+  }
+  /** 写路径专用：坏值时抛错拒绝写回（否则一次坏值就把整份提醒列表覆盖掉） */
+  async _loadForWrite() {
+    const arr = await this._load()
+    if (arr === null) throw new Error('提醒列表数据损坏（不是数组），已拒绝写入以免清空；请先备份或清空该键')
+    return arr
+  }
+
   async _save(arr) { await this.kv.set(this._key(), arr) }
 
   /**
@@ -40,7 +53,7 @@ export class ScheduleStore {
 
   async add(info, fire) {
     return this._lock.withLock(this._key(), async () => {
-      const arr = await this._load()
+      const arr = await this._loadForWrite()
       const id = info.id || this._nextId(arr)
       const atNum = info.at instanceof Date ? info.at.getTime() : Number(info.at)
       // type: 'reminder'(发静态 message) | 'task'(跑 Agent 任务链 + 发结果)
@@ -75,7 +88,7 @@ export class ScheduleStore {
       // 触发前回查持久层：记录若已被删除（面板/命令取消、外部清理、另一实例已触发过），
       // 本进程内残留的定时器不得再发一次——否则「删掉的提醒照发」「多实例重复发」无解。
       try {
-        const alive = (await this._load()).some((r) => String(r.id) === String(rec.id))
+        const alive = ((await this._load()) || []).some((r) => String(r.id) === String(rec.id))
         if (!alive) {
           this._jobs.delete(String(rec.id))
           this.logger?.('warn', `[schedule] 记录 ${rec.id} 已不在存储中，跳过本次触发`)
@@ -106,7 +119,7 @@ export class ScheduleStore {
       const j = this._jobs.get(key)
       if (j?.job) { try { this.scheduler.cancelJob(j.job) } catch { /* noop */ } }
       this._jobs.delete(key)
-      const arr = await this._load()
+      const arr = await this._loadForWrite()
       const next = arr.filter((r) => String(r.id) !== key)
       const removed = arr.length - next.length
       if (removed) await this._save(next)
@@ -114,14 +127,14 @@ export class ScheduleStore {
     })
   }
 
-  async listByUser(userId) { return (await this._load()).filter((r) => r.userId === userId).sort(_sortRec) }
-  async listAll() { return (await this._load()).sort(_sortRec) }
+  async listByUser(userId) { return ((await this._load()) || []).filter((r) => r.userId === userId).sort(_sortRec) }
+  async listAll() { return ((await this._load()) || []).sort(_sortRec) }
 
   /** 重启恢复：cron 任务始终重排（不过期）；一次性仅 at>now 重排，过期丢弃。
    *  幂等：先取消本实例已排全部 job 再重排，重复调用不会叠加触发。 */
   async restore(fire) {
     this.shutdown()
-    const arr = await this._load()
+    const arr = (await this._load()) || [] // 坏值时按空恢复（记录保留在 KV 里，交由用户/面板处置）
     const now = Date.now()
     const live = []
     for (const rec of arr) {

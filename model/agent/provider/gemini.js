@@ -19,7 +19,13 @@ import { toGeminiContent } from './content-blocks.js'
 export function toGeminiSteps(messages) {
   const steps = []
   for (const m of messages || []) {
-    if (m.role === 'system') continue // system 经 system_instruction 单独传，不进 input
+    if (m.role === 'system') {
+      // 首部 system 由 system_instruction 承载；**尾部** system 是本轮自检反馈（Agent 在 messages 末尾追加），
+      // 直接 continue 会静默丢掉反馈 → 草稿已 pop、重生成却没有任何修正指令（实测 Gemini 上自检=白跑）。
+      // Interactions 无 per-message system 角色，故转成 user 输入（文案本身已标明「系统自检，非用户输入」）。
+      if (steps.length) steps.push({ type: 'user_input', content: toContentBlocks(m.content) })
+      continue
+    }
     if (m.role === 'user') {
       steps.push({ type: 'user_input', content: toContentBlocks(m.content) })
     } else if (m.role === 'assistant') {

@@ -309,6 +309,7 @@
           if (!form.selfState[k] || typeof form.selfState[k] !== 'object') form.selfState[k] = {}
         }
         if (!form.download) form.download = {}
+        if (form.download.allowPrivateHosts == null) form.download.allowPrivateHosts = false
         if (!form.multiagent) form.multiagent = {}
         if (!form.multiagent.topology) form.multiagent.topology = 'spawn'
         if (!form.stt) form.stt = {}
@@ -813,7 +814,9 @@
       const updateJson = (path, str) => {
         const s = String(str || '').trim()
         let v = null
-        if (s) { try { v = JSON.parse(s) } catch { return } }
+        // 解析失败必须提示：曾静默 return → 用户以为改了、保存请求里没有该 diff（甚至提示「无改动」），
+        // 随后 syncForm 把编辑框还原成旧值，改动静默失效。
+        if (s) { try { v = JSON.parse(s) } catch (e) { toast(`JSON 解析失败（${path}）：${e.message}`, 'error'); return } }
         const parts = String(path).split('.')
         let o = form
         for (let i = 0; i < parts.length - 1; i++) { o[parts[i]] = o[parts[i]] || {}; o = o[parts[i]] }
@@ -1753,6 +1756,9 @@
                 </cfg-row>
                 <cfg-row name="输出目录" desc="空=插件 data/temp/downloads">
                   <input class="inp mono" style="width:180px" v-model="form.download.dir" placeholder="留空=默认">
+                </cfg-row>
+                <cfg-row name="允许内网地址" desc="默认关：拒绝本机/内网/云元数据地址（防 SSRF，与 web_crawl 同口径）。仅本地媒体服务器（NAS 等）调试时打开">
+                  <v-switch v-model="form.download.allowPrivateHosts"/>
                 </cfg-row>
               </div>
             </div>

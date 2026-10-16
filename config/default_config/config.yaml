@@ -513,6 +513,7 @@ agent:
     maxTimeoutSec: 600      # 单次下载超时上限（秒）
     bin: ""                 # yt-dlp 可执行路径（空=PATH 中的 yt-dlp）
     dir: ""                 # 输出目录（空=插件 data/temp/downloads）
+    allowPrivateHosts: false # 允许下载本机/内网/元数据地址（默认 false：防 SSRF；仅本地媒体服务器调试时打开）
   multiagent:
     # 子代理编排：主 Agent 可自主创建子代理委派任务。LLM 自己判断何时需要拆分。
     # 子代理是隔离 Agent（看不到主对话历史），只做被委派的任务，返回结果文本。

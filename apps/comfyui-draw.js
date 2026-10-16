@@ -94,6 +94,11 @@ export class ComfyDraw extends plugin {
     const cd = Number(cmdCfg().cooldown ?? 30)
     if (!(cd > 0)) return false
     const key = `${kind}:${this.e.group_id || 'private'}:${this.e.user_id}`
+    // 冷却表清理：键按「用途:群:用户」增长且永不过期，长期运行会无界膨胀
+    if (lastRun.size > 500) {
+      const cutoff = Date.now() - Math.max(cd, 3600) * 1000
+      for (const [k, t] of lastRun) { if (t < cutoff) lastRun.delete(k) }
+    }
     const last = lastRun.get(key) || 0
     const left = cd - Math.floor((Date.now() - last) / 1000)
     if (left > 0) {

@@ -178,7 +178,13 @@ export class MemoryStore {
           state[target] = this._parseMd(fs.readFileSync(mdFile, 'utf8'))
           continue
         }
-      } catch { /* 解析失败保持空 */ }
+      } catch (e) {
+        // 读失败 ≠ 空记忆：静默当成空，下一次 _save 就会把整份记忆覆写掉
+        // （实测：一次读故障后 add 一条新记忆，旧的「深色主题/杭州」全丢且无异常）
+        if (e?.code !== 'ENOENT') {
+          throw new Error(`记忆文件读取失败（已中止本次操作，避免整份覆写）：${mdFile}：${e?.message || e}`)
+        }
+      }
       // 迁移旧 .json（本 scope 目录内）
       const jsonFile = this._legacyFile(target, id)
       try {

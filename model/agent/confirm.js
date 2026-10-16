@@ -70,7 +70,12 @@ export class ConfirmStore {
   }
 
   list() {
-    return [...this._pending.values()].map((p) => ({ id: p.info.id, tool: p.info.tool, args: p.info.args, createdAt: p.info.createdAt }))
+    // ctx 必须一并返回：面板「审批门」要显示申请人/群/事由（views/confirm.js 读 c.ctx.user 等）。
+    // 曾漏返回 → 前端 `undefined.user` TypeError → 整块渲染成注释节点、审批门页面全白。
+    return [...this._pending.values()].map((p) => ({
+      id: p.info.id, tool: p.info.tool, args: p.info.args, createdAt: p.info.createdAt,
+      ctx: p.info.ctx ? { user: p.info.ctx.user, userId: p.info.ctx.userId, gid: p.info.ctx.gid, reason: p.info.ctx.reason } : null,
+    }))
   }
 
   get size() { return this._pending.size }

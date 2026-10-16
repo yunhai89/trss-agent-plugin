@@ -1628,7 +1628,17 @@ function ctxFromInfo(info) {
   return {
     userId, groupId, isGroup, isMaster, role: isMaster ? 'owner' : 'member', isolation, scopeUserId, scopeId,
     bot: (typeof Bot !== 'undefined' && Bot) || null, selfId: info.selfId || '',
-    notify: () => {}, fetcher: (typeof fetch !== 'undefined' && fetch) || null,
+    // 定时任务路径同样要能投递审批请求：旧实现是空函数 → 需要审批的工具卡到超时后静默拒绝，
+    // 且没有任何人收到「待审批 #id」（唯一可批通道只剩 Web 面板）。这里复用私信主人的逻辑，
+    // 同时把提示发到任务创建者所在会话（群任务发群、私聊任务发私聊）。
+    notify: (id, nInfo) => {
+      // 私信主人（复用交互路径的通知逻辑）+ 把提示发回任务创建者所在会话
+      notifyMaster({ isGroup, reply: () => {} }, id, nInfo) // reply 给空实现：未配 masters 时不因 e.reply 缺失而报错
+      const text = `待审批 #${id}：${nInfo?.tool || ''}\n回复「#确认 ${id}」或「#拒绝 ${id}」`
+      Promise.resolve(sendByInfo({ groupId, userId, selfId: info.selfId }, text))
+        .catch((err) => Log.warn('定时任务审批通知发送失败', err?.message || err))
+    },
+    fetcher: (typeof fetch !== 'undefined' && fetch) || null,
     conversationId: null,
   }
 }
@@ -2024,6 +2034,7 @@ export class Chat extends plugin {
       sendLimitBytes: cfg.download?.sendLimitMB ? cfg.download.sendLimitMB * 1024 * 1024 : undefined,
       maxTimeoutSec: cfg.download?.maxTimeoutSec || undefined,
       ytDlpBin: cfg.download?.bin || undefined,
+      allowPrivateHosts: cfg.download?.allowPrivateHosts === true,
     }
     // media.enable=false：关闭多模态（不收集/不注入附件/不转视觉），纯文本处理
     const mediaEnabled = cfg.media?.enable !== false

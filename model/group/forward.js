@@ -11,7 +11,7 @@
  * }
  */
 
-import { defineTool, param, groupIdOf, sendApi } from '../toolkit/index.js'
+import { defineTool, param, groupIdOf, groupScopeError, sendApi } from '../toolkit/index.js'
 import { fetchForwardNodes, flattenForwardNodes, formatTranscript, analyzeMessages, resolveForwardId } from './chat-record.js'
 
 /** 单个消息段归一为 OneBot 段 {type, data}（LLM 可能给扁平 {type,...} 或已是 {type,data}） */
@@ -72,6 +72,8 @@ export const sendForwardMsgTool = defineTool({
   }, ['messages']),
   async execute(p, ctx) {
     if (!Array.isArray(p.messages) || !p.messages.length) return { error: 'messages 需为非空节点数组' }
+    const scopeErr = groupScopeError(ctx, p.groupId)
+    if (scopeErr) return { error: scopeErr }
     const gid = groupIdOf(ctx, p.groupId)
     const uid = p.userId ? String(p.userId) : null
     const target = gid ? 'group' : uid ? 'private' : null

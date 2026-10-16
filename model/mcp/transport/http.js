@@ -179,23 +179,29 @@ export class HttpTransport extends BaseTransport {
   async startListen() {
     if (this._listening || this._closed) return
     this._listening = true
+    // 代际号：stop→start 时旧循环可能仍卡在 await 里，回到循环顶部时 _listening 已被重新置真，
+    // 于是旧循环「复活」成第二条常驻 SSE 流（两条流同时投递消息）。用代际号让旧循环彻底退出。
+    this._listenGen = (this._listenGen || 0) + 1
+    const gen = this._listenGen
     this._listenCtl = new AbortController()
-    this._listenLoop().catch((e) => this._onError(e))
+    this._listenLoop(gen).catch((e) => this._onError(e))
   }
 
   async stopListen() {
     this._listening = false
+    this._listenGen = (this._listenGen || 0) + 1 // 使在途循环失效（即使随后又 startListen）
     // 仅置标志位不够：常驻 GET SSE 流仍在读、连接不释放，停止后还会继续投递消息
     try { this._listenCtl?.abort(new Error('listen stopped')) } catch { /* noop */ }
     this._listenCtl = null
   }
 
-  async _listenLoop() {
-    while (this._listening) {
+  async _listenLoop(gen = 0) {
+    while (this._listening && gen === this._listenGen) {
       try {
         const headers = { Accept: 'text/event-stream', ...this.headers }
         if (this.sessionId) headers['Mcp-Session-Id'] = this.sessionId
         const res = await this.fetcher(this.url, { method: 'GET', headers, ...(this._listenCtl ? { signal: this._listenCtl.signal } : {}) })
+        if (gen !== this._listenGen) return // 已被 stop/重启取代：不要再读这条流的响应
         const sid = res.headers?.get ? res.headers.get('mcp-session-id') : null
         if (sid) this.sessionId = sid
         const ct = (res.headers?.get ? res.headers.get('content-type') : '') || ''
@@ -210,7 +216,7 @@ export class HttpTransport extends BaseTransport {
       } catch (e) {
         this._onError(e)
       }
-      if (this._listening) await sleep(this.listenRetry)
+      if (this._listening && gen === this._listenGen) await sleep(this.listenRetry)
     }
   }
 

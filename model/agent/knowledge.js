@@ -71,9 +71,24 @@ export class KnowledgeStore {
   /** 注入 scheduler（供定时刷新注册 job）。knowledge 构造早于 scheduler 创建，故延后注入。 */
   attachScheduler(scheduler) { this.scheduler = scheduler }
 
+  /**
+   * 读取知识库。
+   * 关键：**读失败/值损坏绝不能当成「空库」**——所有变更方法都是 `_load → 改 → _save` 整份写回，
+   * 一次 Redis 抖动或坏值就会把整库抹掉（实测：读故障后 ingest 返回成功、落盘只剩新文档，无任何告警）。
+   * 因此这里把「没有这个键」（null/undefined）视为空库，其余异常一律抛出中止本次写入。
+   */
   async _load() {
-    const v = await this.kv.get(this.key).catch(() => null)
-    return (v && Array.isArray(v.docs) && Array.isArray(v.chunks)) ? v : { docs: [], chunks: [] }
+    let v
+    try {
+      v = await this.kv.get(this.key)
+    } catch (e) {
+      throw new Error(`知识库读取失败，已中止本次写入（避免整库被覆盖）：${e?.message || e}`)
+    }
+    if (v == null) return { docs: [], chunks: [] }
+    if (typeof v !== 'object' || !Array.isArray(v.docs) || !Array.isArray(v.chunks)) {
+      throw new Error('知识库数据损坏（结构不是 {docs,chunks}），已中止本次写入；请先备份/清空该键后重试')
+    }
+    return v
   }
 
   async _save(data) { await this.kv.set(this.key, data) }

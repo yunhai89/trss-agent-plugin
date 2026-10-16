@@ -30,6 +30,13 @@ export function toAnthropicMessages(messages, system) {
   const raw = []
   for (const m of messages) {
     if (m.role === 'system') {
+      // 首部 system 走 system 参数；**尾部** system（本轮自检反馈）若也并进 system，
+      // 会让 system 前缀逐字节变化 → 该轮及后续历史全部失去前缀复用（实测代价极高）。
+      // 因此尾部 system 转成 user 消息（内容自带「系统自检，非用户输入」标记），保持 system 恒定。
+      if (raw.length && typeof m.content === 'string' && m.content) {
+        raw.push({ role: 'user', content: toAnthropicContent(m.content) })
+        continue
+      }
       if (typeof m.content === 'string' && m.content) sysParts.push(m.content)
       continue
     }

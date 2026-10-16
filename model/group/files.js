@@ -13,9 +13,12 @@
  *      删文件/删文件夹 system（master，destructive）。删除/上传标 interactive 确保顺序确认。
  */
 
-import { defineTool, param, groupIdOf, sendApi } from '../toolkit/index.js'
+import { defineTool, param, groupIdOf, groupScopeError, sendApi } from '../toolkit/index.js'
 
 function needGid(ctx, groupId) {
+  // 群号归属：在群里只能操作本群（防跨群删文件/改文件名）
+  const scopeErr = groupScopeError(ctx, groupId)
+  if (scopeErr) return { error: scopeErr }
   return groupIdOf(ctx, groupId) || null
 }
 
@@ -81,6 +84,7 @@ export const uploadGroupFileTool = defineTool({
   }, ['file', 'name']),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     let folder = p.folder || null
     if (!folder && p.folderName) {
@@ -113,6 +117,7 @@ export const deleteGroupFileTool = defineTool({
   }),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     if (!p.fileId && !p.fileName) return { error: '需提供 fileId 或 fileName' }
     const fs = await fetchRoot(ctx, gid)
@@ -141,6 +146,7 @@ export const createGroupFolderTool = defineTool({
   }, ['name']),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     const r = await sendApi(ctx, 'create_group_file_folder', { group_id: gid, name: String(p.name) })
     if (!r.ok) return { error: r.error }
@@ -161,6 +167,7 @@ export const deleteGroupFolderTool = defineTool({
   }),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     if (!p.folderId && !p.folderName) return { error: '需提供 folderId 或 folderName' }
     const fs = await fetchRoot(ctx, gid)
@@ -185,6 +192,7 @@ export const listGroupFolderTool = defineTool({
   }),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     const action = p.folderId ? 'get_group_files_by_folder' : 'get_group_root_files'
     const r = await sendApi(ctx, action, p.folderId ? { group_id: gid, folder_id: String(p.folderId) } : { group_id: gid })
@@ -208,6 +216,7 @@ export const getGroupFileUrlTool = defineTool({
   }),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     if (!p.fileId && !p.fileName) return { error: '需提供 fileId 或 fileName' }
     const fs = await fetchRoot(ctx, gid)
@@ -239,6 +248,7 @@ export const moveGroupFileTool = defineTool({
   }),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     if (!p.fileId && !p.fileName) return { error: '需提供 fileId 或 fileName（要移动哪个文件）' }
     const fs = await fetchRoot(ctx, gid)
@@ -281,6 +291,7 @@ export const renameGroupFileTool = defineTool({
   }, ['newName']),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     if (!p.fileId && !p.fileName) return { error: '需提供 fileId 或 fileName' }
     const fs = await fetchRoot(ctx, gid)
@@ -311,6 +322,7 @@ export const transferGroupFileTool = defineTool({
   }, ['targetGroupId']),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     if (!p.fileId && !p.fileName) return { error: '需提供 fileId 或 fileName' }
     const fs = await fetchRoot(ctx, gid)

@@ -118,10 +118,19 @@ router.get('/logs', asyncHandler(async (req, res) => {
 
 // ───────────────── runtime 型（依赖 getRuntime） ─────────────────
 
+/**
+ * scopeId 白名单校验：合法形态只有 u_<uid> / g<gid> / g<gid>_u<uid>（与 /scopes 的反解正则一致）。
+ * store._scopeDir() 直接 path.join(dir, scopeId)，不校验就能用 `../../x` 越目录读写 MEMORY.md/USER.md。
+ */
+const SCOPE_ID_RE = /^(?:u_\d+|g\d+(?:_u\d+)?)$/
+const scopeIdError = (scopeId) => (SCOPE_ID_RE.test(String(scopeId || '')) ? null : `scopeId 非法：${scopeId}`)
+
 // GET /api/memories?scopeId= —— 声明式记忆双文件
 router.get('/memories', asyncHandler(async (req, res) => {
   const scopeId = String(req.query.scopeId || '')
   if (!scopeId) return fail(res, CODE.BAD, '缺少 scopeId')
+  const badScope = scopeIdError(scopeId)
+  if (badScope) return fail(res, CODE.BAD, badScope)
   const r = await getRt(res); if (!r) return
   const mem = r.memory
   const wrap = (target) => (!mem ? { usedChars: 0, limitChars: 0, entries: [] } : {
@@ -670,6 +679,8 @@ router.put('/config', asyncHandler(async (req, res) => {
 router.put('/memories/:scopeId/:target', asyncHandler(async (req, res) => {
   const { scopeId, target } = req.params
   if (target !== 'memory' && target !== 'user') return fail(res, CODE.BAD, 'target 必须是 memory|user')
+  const badScope = scopeIdError(scopeId)
+  if (badScope) return fail(res, CODE.BAD, badScope)
   const entries = req.body?.entries
   if (!Array.isArray(entries)) return fail(res, CODE.BAD, 'entries 必须是字符串数组')
   const r = await getRt(res); if (!r) return
@@ -951,8 +962,12 @@ router.post('/schedule', asyncHandler(async (req, res) => {
 // DELETE /api/schedule/:id —— 取消
 router.delete('/schedule/:id', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
+  // cancel() 现返回 {ok,removed,code}（151 条修复时改的契约）：对象恒真，不能再 `ret ? 1 : 0`
   const ret = await r.schedule.cancel(req.params.id)
-  return ok(res, { removed: ret ? 1 : 0 })
+  if (ret && typeof ret === 'object') {
+    return ret.ok ? ok(res, { removed: ret.removed ?? 1 }) : fail(res, CODE.NOTFOUND, '任务不存在')
+  }
+  return ret ? ok(res, { removed: 1 }) : fail(res, CODE.NOTFOUND, '任务不存在')
 }))
 
 // POST /api/confirm/:id/decide —— 审批决策（不存在/超时 4004）

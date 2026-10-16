@@ -172,12 +172,17 @@ export async function fetchQuotedContext(e, { bot, log } = {}) {
   return { nick: String(nick || ''), text, forwardResid, raw: reply }
 }
 
-/** 按 url||name 去重（保留首个来源） */
+/**
+ * 去重（保留首个来源）。
+ * 键的优先级：url → fid/busid（QQ 文件标识）→ id（本条描述符的唯一 id）→ name+size。
+ * 只用 name 会把「同名但不同文件」合并掉（例如两张都叫 image.jpg 的图，实测 3 个媒体只剩 2 个）。
+ */
 export function dedupMedia(list) {
   const seen = new Set()
   const out = []
   for (const m of list) {
-    const key = (m.url || m.name || m.id)
+    const fileKey = m.fid ? `fid:${m.fid}:${m.busid ?? ''}` : null
+    const key = m.url || fileKey || m.id || `name:${m.name || ''}|${m.size || 0}|${m.kind || ''}`
     if (seen.has(key)) continue
     seen.add(key)
     out.push(m)

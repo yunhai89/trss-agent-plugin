@@ -218,7 +218,7 @@ const generateTool = defineTool({
       description: '显式覆盖节点字段（自动映射不适用时）：[{node:"6", field:"seed", value:123}]；node 为 inspect_workflow 里的节点 id',
       items: { type: 'object', properties: { node: { type: 'string' }, field: { type: 'string' }, value: {} }, required: ['node', 'field'] },
     },
-    timeout: param.int('单次最长等待秒数（默认走配置；视频工作流自动放宽到 900）'),
+    timeout: param.int('单次最长等待秒数（默认走配置；视频工作流自动放宽到 900）', { min: 1 }),
     send_images: param.bool('是否发送产物到聊天（默认 true）'),
     all_steps: param.bool('是否连中间步骤图一起发（默认 false=只发最终成品；用户明确要看底图/修脸/修手等中间步骤时设 true）'),
   }, ['workflow']),
@@ -266,7 +266,9 @@ const generateTool = defineTool({
     logger('info', `生成开始：${prep.entry.name}（prompt ${String(p.prompt || '').length} 字，尺寸 ${p.width || '-'}x${p.height || '-'}）`)
     const exec = await executeGraph({
       api, graph,
-      timeout: Math.min(Number(p.timeout) || (isVideo ? 900 : c.timeout || 300), 1800),
+      // 必须夹到 [1,1800]：负数/0 会让 deadline 立刻过期 → 刚提交的 prompt 马上被 /interrupt
+      // （打断的可能是队列里别人的任务），用户只看到「超时（-1s）」。
+      timeout: Math.max(1, Math.min(Number(p.timeout) || (isVideo ? 900 : c.timeout || 300), 1800)),
       interval: c.pollInterval || 1.5,
       maxInterval: c.pollMaxInterval || 8,
       isVideo,

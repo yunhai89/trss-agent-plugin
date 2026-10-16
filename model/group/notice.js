@@ -6,9 +6,11 @@
  * 经 toolkit.sendApi 走 e.bot.sendApi(action, params)。
  */
 
-import { defineTool, param, groupIdOf, sendApi, botGroupRole } from '../toolkit/index.js'
+import { defineTool, param, groupIdOf, groupScopeError, sendApi, botGroupRole } from '../toolkit/index.js'
 
 function needGid(ctx, groupId) {
+  const scopeErr = groupScopeError(ctx, groupId)
+  if (scopeErr) return { error: scopeErr }
   const gid = groupIdOf(ctx, groupId)
   return gid || null
 }
@@ -37,6 +39,7 @@ export const sendGroupNoticeTool = defineTool({
   }, ['content']),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     const noPerm = await botRoleGuard(ctx, gid)
     if (noPerm) return { error: noPerm }
@@ -63,6 +66,7 @@ export const getGroupNoticeTool = defineTool({
   }),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     const r = await sendApi(ctx, '_get_group_notice', { group_id: gid })
     if (!r.ok) return { error: r.error }
@@ -89,6 +93,7 @@ export const deleteGroupNoticeTool = defineTool({
   }, ['noticeId']),
   async execute(p, ctx) {
     const gid = needGid(ctx, p.groupId)
+    if (gid?.error) return gid
     if (!gid) return { error: '当前非群聊且未指定 groupId' }
     const noPerm = await botRoleGuard(ctx, gid)
     if (noPerm) return { error: noPerm }

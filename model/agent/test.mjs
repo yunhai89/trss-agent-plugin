@@ -878,6 +878,82 @@ await test('knowledge 并发：并发 ingest 不丢文档', async () => {
   eq((await kb.listDocs()).length, 8, '8 篇并发入库全部保留')
 })
 
+// ---------- 数据丢失防线：读失败/坏值绝不写成「空」 ----------
+await test('防线：knowledge 读失败或坏值时不写回（不抹库）', async () => {
+  // 读失败：kv.get 抛错
+  const boom = memoryKv()
+  const origGet = boom.get.bind(boom)
+  let fail = true
+  boom.get = async (k) => { if (fail) throw new Error('READONLY'); return origGet(k) }
+  const kb1 = new KnowledgeStore({ kv: boom })
+  fail = false
+  await kb1.ingest('重要文档一 apple banana', { title: 'd1' })
+  await kb1.ingest('重要文档二 dog elephant', { title: 'd2' })
+  eq((await kb1.listDocs()).length, 2, '前置：两篇入库')
+  fail = true
+  let err = null
+  try { await kb1.ingest('新文档 frog giraffe', { title: 'd3' }) } catch (e) { err = e }
+  ok(err && /读取失败/.test(err.message), '读失败时 ingest 抛错中止')
+  fail = false
+  eq((await kb1.listDocs()).length, 2, '读失败未写回：原库完好')
+  // 坏值：结构不符
+  const bad = memoryKv()
+  const kb2 = new KnowledgeStore({ kv: bad })
+  await bad.set(kb2.key, { foo: 1 }) // 坏值：结构不符
+  let err2 = null
+  try { await kb2.ingest('新文档 frog giraffe', { title: 'd4' }) } catch (e) { err2 = e }
+  ok(err2 && /损坏/.test(err2.message), '坏值时 ingest 抛错中止')
+  eq((await bad.get(kb2.key)).foo, 1, '坏值未被覆盖')
+})
+
+await test('防线：SessionStore 坏值拒绝写回（不抹历史）', async () => {
+  const kv = memoryKv()
+  const sess = new SessionStore({ kv })
+  await sess.append('k1', [{ role: 'user', content: '第一轮' }])
+  eq((await sess.get('k1')).length, 1, '前置：写入一条')
+  await kv.set('k1', '{"messages":[{"role":"user"') // 截断 JSON → 解析失败返回原串
+  const sess2 = new SessionStore({ kv }) // 新实例：绕过内存缓存，必然走 KV 读
+  eq(await sess2.get('k1'), null, '坏值 get 返回 null（不伪装成空会话）')
+  let err = null
+  try { await sess2.append('k1', [{ role: 'user', content: '第二轮' }]) } catch (e) { err = e }
+  ok(err && /损坏/.test(err.message), '坏值时 append 抛错拒绝写回')
+  eq(await kv.get('k1'), '{"messages":[{"role":"user"', '坏值保持原样未被覆盖')
+})
+
+await test('防线：MemoryStore 读失败时不覆写整份记忆', async () => {
+  const dir = tmpDir()
+  const store = new MemoryStore({ dir })
+  ok(store.add('memory', '用户偏好深色主题').ok, '写入一条记忆')
+  const file = path.join(dir, '__global__', 'MEMORY.md')
+  // 把 MEMORY.md 换成目录：readFileSync 抛 EISDIR（模拟 EACCES/EIO 一类读失败）
+  fs.rmSync(file, { force: true })
+  fs.mkdirSync(file)
+  const fresh = new MemoryStore({ dir }) // 新实例：缓存为空，必然走磁盘读
+  let err = null
+  try { fresh.add('memory', '新记忆') } catch (e) { err = e }
+  ok(err && /读取失败/.test(err.message), '读失败时 add 抛错中止')
+  ok(fs.statSync(file).isDirectory(), '未把目录当空记忆覆写掉')
+  fs.rmSync(file, { recursive: true, force: true })
+})
+
+await test('防线：ProfileStore 读失败时不写回（不清空画像）', async () => {
+  const { ProfileStore } = await import('./memory/profile.js')
+  const kv = memoryKv()
+  let fail = false
+  const origGet = kv.get.bind(kv)
+  kv.get = async (k) => { if (fail) throw new Error('KV down'); return origGet(k) }
+  const p = new ProfileStore({ kv })
+  await p.ingest('10001', { userText: '', memories: [{ id: 'm1', content: '用户所在城市是杭州', type: 'fact', confidence: 0.9 }] })
+  const before = await p.load('10001')
+  ok(JSON.stringify(before).includes('杭州'), '前置：画像已写入')
+  fail = true
+  let err = null
+  try { await p.ingest('10001', { userText: '今天天气不错' }) } catch (e) { err = e }
+  ok(err && /画像读取失败/.test(err.message), '读失败时 ingest 抛错（不静默清空）')
+  fail = false
+  ok(JSON.stringify(await p.load('10001')).includes('杭州'), '画像未被清空')
+})
+
 // ---------- 18. 工具：web/notes/clarify ----------
 await test('tools：ddgSearch 解析 + notes + clarify', async () => {
   const html = '<a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com">Example</a><td class="result-snippet">an example <b>site</b></td>'

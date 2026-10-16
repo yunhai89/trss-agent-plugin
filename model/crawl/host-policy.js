@@ -46,15 +46,24 @@ export function createHostGate({
     return s
   }
   const pump = (s) => {
-    while (s.waiters.length && s.active < conc) s.waiters.shift()()
+    // 先占槽再唤醒：`active` 若留到被唤醒者的微任务里才自增，while 判断时 active 还没涨，
+    // 会一次性把**全部**排队者放行（实测 concurrency=1 时 maxActive=3、间隔也被绕过）。
+    while (s.waiters.length && s.active < conc) {
+      s.active++
+      s.waiters.shift()()
+    }
   }
 
   return {
     async acquire(host) {
       const s = stOf(host)
       // 已有等待者时也排队：保持 FIFO，避免后来的请求插队（否则限速形同虚设）
-      if (s.active >= conc || s.waiters.length) await new Promise((resolve) => { s.waiters.push(resolve) })
-      s.active++
+      if (s.active >= conc || s.waiters.length) {
+        // 槽位由 release()/pump() 在唤醒前记入 active，这里不再自增（否则重复计数）
+        await new Promise((resolve) => { s.waiters.push(resolve) })
+      } else {
+        s.active++
+      }
       if (interval > 0 && s.lastStart != null) {
         const gap = interval + (jit > 0 ? Math.floor(jitter() * jit) : 0)
         const wait = s.lastStart + gap - now()

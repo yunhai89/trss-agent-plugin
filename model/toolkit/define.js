@@ -134,6 +134,23 @@ export function groupIdOf(ctx, groupId) {
 }
 
 /**
+ * 群号归属校验：**在群里调用时，目标群必须就是当前会话群**。
+ * 否则「本群管理员」可以借 groupId 参数对别的群踢人/禁言/改名/删文件（跨群越权），
+ * 普通成员也能把消息/合并转发投到别的群。私聊（无群上下文）放行——这些工具类别
+ * （system/group_manage）本来就只对主人开放，主人需要跨群操作时可私聊机器人。
+ * @returns {string|null} 可读错误信息；null=通过
+ */
+export function groupScopeError(ctx, groupId) {
+  const cur = ctx?.e?.group_id ?? ctx?.groupId
+  if (!cur) return null
+  const target = groupId ?? cur
+  if (String(target) !== String(cur)) {
+    return `目标群 ${target} 不是当前会话群 ${cur}：为防止越权，群操作只能作用于当前群（需要管理其它群时，请在那个群里对我说）`
+  }
+  return null
+}
+
+/**
  * 查询**机器人自身**在某群的角色（admin/owner/member）。best-effort：失败返回 null。
  * 群公告/群管类工具据此预检"机器人是否有权限"，给出可读原因（而不是把协议端原始报错抛给用户）。
  */

@@ -183,7 +183,7 @@ const analyzeTool = defineTool({
             try {
               const a = await downloadAudio({ bvid: v.bvid, cid: v.cid, title: v.title }, opts)
               audioPath = a.path
-              transcript = await transcribeAudio(audioPath, stt, { fetchImpl: ctx?.fetcher })
+              transcript = await transcribeAudio(audioPath, stt, { fetchImpl: ctx?.fetcher, signal: ctx?.signal || null })
               bundle.transcriptSource = 'STT 语音转录（看视频不可用的回退）'
             } catch (e) { notes.push(`STT 转录失败：${e?.message || e}${/401|403|Invalid|apiKey/i.test(e?.message || '') ? '（检查 agent.stt.apiKey/apiBase）' : ''}`) }
             finally { if (audioPath) { try { fs.unlinkSync(audioPath) } catch { /* noop */ } } }

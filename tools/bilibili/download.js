@@ -12,6 +12,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { execFile, spawnSync } from 'node:child_process'
 import Config from '../../utils/Config.js'
+import Log from '../../utils/Log.js'
 import { getPlayInfo, pickBestAudio, pickBestDurl, BiliError } from './api.js'
 import { defaultHeaders, pickClosestQuality } from './util.js'
 
@@ -22,9 +23,32 @@ function safeName(s) {
   return String(s || 'bilibili').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 60)
 }
 
+let _lastPrune = 0
+/**
+ * 产物目录清理（与 model/tts 的 _pruneOut 同策略）：保留最近 200 个文件、7 天内，
+ * 其余删除。此前只写不删，长期运行会把 data/temp/bilibili 堆满。
+ * 每次下载会多次调用 outDir，故按 5 分钟节流。
+ */
+function pruneOut(dir) {
+  const now = Date.now()
+  if (now - _lastPrune < 300000) return
+  _lastPrune = now
+  try {
+    const files = fs.readdirSync(dir)
+      .map((name) => ({ p: path.join(dir, name) }))
+      .filter((x) => { try { return fs.statSync(x.p).isFile() } catch { return false } })
+      .map((x) => ({ ...x, m: fs.statSync(x.p).mtimeMs }))
+      .sort((a, b) => b.m - a.m)
+    for (let i = 0; i < files.length; i++) {
+      if (i >= 200 || now - files[i].m > 7 * 86400000) { try { fs.unlinkSync(files[i].p) } catch { /* noop */ } }
+    }
+  } catch { /* noop */ }
+}
+
 function outDir(cfg = {}) {
   const dir = cfg.dir || path.join(Config.path.temp, 'bilibili')
   fs.mkdirSync(dir, { recursive: true })
+  pruneOut(dir)
   return dir
 }
 
@@ -128,6 +152,12 @@ export async function downloadVideo({ bvid, cid, title }, opts = {}) {
           path: dest, size, kind: 'video', ext, via: 'dash',
           quality: got, requestedQuality: requested, downgraded: requested > 0 && got < requested,
         }
+      } catch (e) {
+        // dash 失败（任一轨下载失败/ffmpeg 合并失败）不能把异常直接抛出去：
+        // ① dest 已被 `-y` 创建，失败会留下不可播放的半成品（可能被后续 send_file 取走）；
+        // ② 下面还有 durl 回退（无需 ffmpeg、往往同样可用），抛错会让用户拿不到能用的 MP4。
+        try { fs.rmSync(dest, { force: true }) } catch { /* noop */ }
+        Log.warn('[bilibili] dash 下载/合并失败，回退 durl：', e?.message || e)
       } finally {
         try { fs.rmSync(vtmp, { force: true }) } catch { /* noop */ }
         try { fs.rmSync(atmp, { force: true }) } catch { /* noop */ }

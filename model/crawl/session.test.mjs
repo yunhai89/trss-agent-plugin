@@ -144,6 +144,29 @@ await test('host-gate：同 host 串行 + 最小间隔，不同 host 不受影�
   eq(gate.stats('a.com').active, 0, '全部释放后无占用')
 })
 
+await test('host-gate：并发排队只放行 concurrency 个（防一次性全放行）', async () => {
+  // 回归：pump 曾在 active 尚未自增时循环放行全部等待者（实测 concurrency=1 时 maxActive=3、间隔被绕过），
+  // 使「同站串行 + 最小间隔」的反爬节奏保护形同虚设。
+  let t = 0
+  const gate = createHostGate({ intervalMs: 100, concurrency: 1, jitterMs: 0, now: () => t, sleep: async (ms) => { t += ms } })
+  let active = 0
+  let maxActive = 0
+  const starts = []
+  await Promise.all([1, 2, 3, 4].map(async () => {
+    const rel = await gate.acquire('x.com')
+    active += 1
+    maxActive = Math.max(maxActive, active)
+    starts.push(t)
+    await new Promise((r) => setImmediate(r))
+    active -= 1
+    rel()
+  }))
+  eq(maxActive, 1, '并发上限恒为 1（曾一次性放行全部排队者）')
+  ok(starts[1] - starts[0] >= 100, `第二个开始时间受限速间隔约束（+${starts[1] - starts[0]}ms）`)
+  ok(starts[2] - starts[1] >= 100, `第三个同样受限速间隔约束（+${starts[2] - starts[1]}ms）`)
+  eq(gate.stats('x.com').active, 0, '全部释放后无占用')
+})
+
 await test('site-memory：有效档位记忆与 TTL', () => {
   const dir = fs.mkdtempSync(path.join(TMP, 'mem-'))
   let t = 1_700_000_000_000

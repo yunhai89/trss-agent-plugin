@@ -51,7 +51,10 @@ export class SessionStore {
   async get(k) {
     if (!this._cache.has(k)) {
       const val = await this.kv.get(k)
-      this._cacheSet(k, unpack(val))
+      const arr = unpack(val)
+      // 坏值返回 null（不缓存、不伪装成空会话）：读路径按空处理，写路径必须拒绝写回
+      if (arr === null) return null
+      this._cacheSet(k, arr)
     } else {
       // 命中即移到队尾（LRU）
       const v = this._cache.get(k)
@@ -74,9 +77,11 @@ export class SessionStore {
     const uid = scopeUserId != null && scopeUserId !== '' ? scopeUserId : userId
     try {
       if (conversationId != null && typeof this.getConversation === 'function') {
-        return (await this.getConversation(uid, groupId, conversationId)).length
+        const c = await this.getConversation(uid, groupId, conversationId)
+        return Array.isArray(c) ? c.length : 0
       }
-      return (await this.get(this.key(groupId, uid))).length
+      const arr = await this.get(this.key(groupId, uid))
+      return Array.isArray(arr) ? arr.length : 0
     } catch { return 0 }
   }
 
@@ -84,6 +89,11 @@ export class SessionStore {
     if (!msgs || !msgs.length) return this.get(k)
     return this._withLock(k, async () => {
       const cur = await this.get(k)
+      if (cur === null) {
+        // 坏值：写回会用「本轮消息」覆盖整段历史（实测截断 JSON/{foo:1} 都会走到这里）
+        this.logger?.('warn', `[session] 会话数据损坏，已拒绝写回以免抹掉历史：${k}`)
+        throw new Error('会话数据损坏（不是可识别的会话结构），已拒绝写入以免清空历史')
+      }
       const next = [...cur, ...msgs]
       // Append-Only Ledger：不再每条滑窗（曾 window=20 每轮删最旧块 → messages 前缀逐轮变化，
       // DeepSeek 等按整段前缀缓存全灭）。压缩职责移交 Agent 的高低水位滞回（cacheEpoch 分代）；
@@ -117,7 +127,7 @@ export class SessionStore {
     for (const k of keys) {
       if (k.includes(':conv:')) continue // 跳过 conversation 键
       const val = await this.kv.get(k)
-      const msgs = unpack(val)
+      const msgs = unpack(val) || []
       const rest = k.slice(this.prefix.length)
       const [group, user] = rest.split(':')
       out.push({ key: k, group, user, count: msgs.length, updatedAt: val?.updatedAt || null, preview: preview(msgs) })
@@ -295,11 +305,17 @@ export class SessionStore {
   }
 }
 
+/**
+ * 解包会话值。
+ * 返回 `null` 表示**坏值**（非空但不是可识别的会话结构）：调用方必须拒绝写回，
+ * 否则一次坏值（写截断/版本迁移/手工改键）就会被当成「空会话」，append 时把整段历史抹掉。
+ * 返回 `[]` 表示确实没有历史（键不存在/空串/空数组）。
+ */
 function unpack(val) {
-  if (!val) return []
+  if (val == null || val === '') return []
   if (Array.isArray(val)) return val
-  if (Array.isArray(val.messages)) return val.messages
-  return []
+  if (val && typeof val === 'object' && Array.isArray(val.messages)) return val.messages
+  return null
 }
 
 /**

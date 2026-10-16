@@ -3,9 +3,11 @@
  * 全部经 toolkit.getGroup/getFriend 访问 pickGroup/pickFriend，特征检测方法存在性。
  */
 
-import { defineTool, param, getGroup, getFriend } from '../toolkit/index.js'
+import { defineTool, param, getGroup, getFriend, groupScopeError } from '../toolkit/index.js'
 
 function needGroup(ctx, gid) {
+  const scopeErr = groupScopeError(ctx, gid)
+  if (scopeErr) return { error: scopeErr }
   const g = getGroup(ctx, gid)
   if (!g) return { error: '当前会话非群聊或协议端不支持群信息查询' }
   return g

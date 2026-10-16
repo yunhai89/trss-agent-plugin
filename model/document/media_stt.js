@@ -94,7 +94,7 @@ export const transcribeMediaTool = {
     }
 
     try {
-      const text = await callSTT(audioPath, cfg)
+      const text = await callSTT(audioPath, cfg, ctx?.signal || null)
       return {
         ok: true, format: isVideo ? 'video→audio→text' : 'audio→text', text: text.slice(0, 8000),
         ...(sandboxed ? { sandboxed: true } : {}),
@@ -138,7 +138,7 @@ export async function extractAudioInSandbox(box, hostPath, { signal = null, host
 }
 
 /** 调用 Whisper 兼容 STT API */
-async function callSTT(audioPath, cfg) {
+async function callSTT(audioPath, cfg, signal = null) {
   const buf = fs.readFileSync(audioPath)
   const ext = path.extname(audioPath).toLowerCase()
   const mime = MIME[ext] || 'audio/mpeg'
@@ -149,10 +149,13 @@ async function callSTT(audioPath, cfg) {
   if (cfg.language) form.append('language', cfg.language)
 
   const apiBase = cfg.apiBase || 'https://api.openai.com/v1/audio/transcriptions'
+  // 与 bilibili STT 同理：无超时/无 signal 时取消与时间预算都失效（详见 tools/bilibili/api.js 注释）
+  const to = AbortSignal.timeout(Math.max(1000, Number(cfg.timeoutMs) || 120000))
   const res = await fetch(apiBase, {
     method: 'POST',
     headers: { Authorization: `Bearer ${cfg.apiKey}` },
     body: form,
+    signal: signal ? AbortSignal.any([to, signal]) : to,
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`)
   const data = await res.json()

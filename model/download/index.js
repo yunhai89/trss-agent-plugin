@@ -25,6 +25,7 @@ import Config from '../../utils/Config.js'
 import { toFileSegment } from '../../utils/SendFile.js'
 import Log from '../../utils/Log.js'
 import { toolSandbox, sandboxSelected, sandboxUnavailableError, openToolSession, runToolCommand, missingCommand, sandboxTmp, shellQuote } from '../sandbox/bridge.js'
+import { checkTargetAllowed } from '../crawl/index.js'
 
 const MB = 1024 * 1024
 
@@ -192,9 +193,13 @@ export function makeDownloadTool({ ytDlpBin } = {}) {
     async execute(params = {}, ctx = {}) {
       const cfg = ctx?.download || {}
       const url = String(params.url || '').trim()
-      // ① URL 校验：仅 http(s)
+      // ① URL 校验：仅 http(s) + SSRF/私网门禁（yt-dlp 以宿主身份按通用 URL 抓取：
+      // http://127.0.0.1:xxx、http://169.254.169.254/… 等内网/云元数据地址会被读回并可能发到群里；
+      // 也可能被抓取内容里的提示注入诱导。复用 crawl 的 checkTargetAllowed（含混淆 IP/IPv6/域名解析）。
       if (!/^https?:\/\//i.test(url)) return { error: '仅支持 http/https URL' }
       if (/\s|--|\bsource=|\bexec\b/i.test(url)) return { error: 'URL 含可疑字符' }
+      const gate = await checkTargetAllowed(url, { allowPrivateHosts: cfg.allowPrivateHosts === true })
+      if (!gate.ok) return { error: gate.error, code: gate.code, ...(gate.hint ? { hint: gate.hint } : {}) }
 
       const bin = ytDlpBin || cfg.ytDlpBin || 'yt-dlp'
       const baseDir = cfg.dir || path.join(Config.path.temp, 'downloads')

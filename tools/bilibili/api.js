@@ -333,7 +333,7 @@ export function pickBestDurl(durl) {
 }
 
 /** 调用 Whisper 兼容 STT 转录音频文件 */
-export async function transcribeAudio(audioPath, sttCfg = {}, { fetchImpl } = {}) {
+export async function transcribeAudio(audioPath, sttCfg = {}, { fetchImpl, signal = null, timeoutMs = 120000 } = {}) {
   if (!sttCfg?.apiKey) throw new BiliError('未配置 STT（agent.stt.apiKey 为空）', { kind: 'http' })
   const fs = await import('node:fs')
   const path = await import('node:path')
@@ -345,10 +345,14 @@ export async function transcribeAudio(audioPath, sttCfg = {}, { fetchImpl } = {}
   form.append('model', sttCfg.model || 'whisper-1')
   if (sttCfg.language) form.append('language', sttCfg.language)
   const f = fetchImpl || globalThis.fetch
+  // 必须带超时与取消信号：STT 端半开不返回/极慢滴流时，仅靠 undici 默认 300s headers timeout
+  // 会让 bilibili__analyze 长时间卡住且 #取消 无效（本轮对话直接卡死）。
+  const to = AbortSignal.timeout(Math.max(1000, Number(timeoutMs) || 120000))
   const res = await f(sttCfg.apiBase || 'https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${sttCfg.apiKey}` },
     body: form,
+    signal: signal ? AbortSignal.any([to, signal]) : to,
   })
   if (!res.ok) throw new BiliError(`STT HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`, { kind: 'http' })
   const data = await res.json()

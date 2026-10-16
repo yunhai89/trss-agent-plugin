@@ -59,6 +59,10 @@ export function resolveUrl(base, p, cloud) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+/** 产物下载大小上限（与输入侧 20MB 上限对称；无上限时一个超大文件即可吃光宿主内存） */
+const MB = 1024 * 1024
+const MAX_OUTPUT_BYTES = 128 * MB
+
 /** 下载产物时按扩展名分类（决定发图还是发文件） */
 export function classifyKind(filename) {
   const ext = String(filename || '').toLowerCase().split('.').pop()
@@ -266,7 +270,26 @@ export function newClient({ host, apiKey, cloud, fetcher, timeoutMs = 30000 } = 
           hops++
         }
         if (!res.ok) throw new Error(`/view HTTP ${res.status}`)
+        // 产物大小上限：无上限时一个超大文件就能把宿主内存吃光（输入侧已有 20MB 上限，产物侧此前没有）
+        const declared = Number(res.headers.get('content-length') || 0)
+        if (declared > MAX_OUTPUT_BYTES) {
+          throw new Error(`产物过大：${(declared / MB).toFixed(1)}MB（上限 ${MAX_OUTPUT_BYTES / MB}MB）`)
+        }
+        if (res.body && typeof res.body[Symbol.asyncIterator] === 'function') {
+          const chunks = []
+          let total = 0
+          for await (const c of res.body) {
+            total += c.length
+            if (total > MAX_OUTPUT_BYTES) {
+              try { ctrl.abort() } catch { /* ignore */ }
+              throw new Error(`产物过大：超过上限 ${MAX_OUTPUT_BYTES / MB}MB（已中止下载）`)
+            }
+            chunks.push(c)
+          }
+          return Buffer.concat(chunks)
+        }
         const ab = await res.arrayBuffer()
+        if (ab.byteLength > MAX_OUTPUT_BYTES) throw new Error(`产物过大：${(ab.byteLength / MB).toFixed(1)}MB（上限 ${MAX_OUTPUT_BYTES / MB}MB）`)
         return Buffer.from(ab)
       } finally {
         clearTimeout(timer)

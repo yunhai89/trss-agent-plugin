@@ -124,11 +124,8 @@ export class DiagramService {
     const spec = v.spec
     if (this.cfg.enabled === false) return fail('renderer_unavailable', '示意图工具已被配置禁用')
 
-    // 2) 组合取消信号：Agent signal ∨ service 总预算
-    let combined = signal
-    if (this.cfg.timeoutMs > 0) {
-      combined = signal ? AbortSignal.any([signal, AbortSignal.timeout(this.cfg.timeoutMs)]) : AbortSignal.timeout(this.cfg.timeoutMs)
-    }
+    // 2) 取消信号在「5) singleflight」处处理：共享的在途渲染只带 service 总预算，
+    //    调用者的 signal 只在等待侧竞速（见下方注释），故这里不再预组合。
 
     // 3) 引擎与主题解析
     const wantsSvgFile = spec.output === 'svg'
@@ -163,8 +160,23 @@ export class DiagramService {
     }
 
     // 5) singleflight 渲染
+    //    合并的是「同一份规格的渲染工作」，因此共享的在途 promise 不能绑定某一个调用者的 signal：
+    //    否则先到者一取消，后到者也会收到「渲染被取消」（复现：并发两次、取消第一次 → 第二次失败）。
+    //    做法：在途任务只带 service 自己的总预算超时；调用者的 signal 只在等待侧竞速。
     this.#emit({ event: 'diagram_render_start', ...baseEvt })
-    const result = await this.cache.run(key, () => this.#renderWithEngines({ spec, themeRes, format, limits, combined, baseEvt }))
+    const serviceSignal = this.cfg.timeoutMs > 0 ? AbortSignal.timeout(this.cfg.timeoutMs) : undefined
+    const shared = this.cache.run(key, () => this.#renderWithEngines({ spec, themeRes, format, limits, combined: serviceSignal, baseEvt }))
+    const result = await (signal
+      ? Promise.race([
+        shared,
+        new Promise((resolve) => {
+          const onAbort = () => resolve({ ok: false, errorClass: 'cancelled', error: '渲染已取消' })
+          if (signal.aborted) return onAbort()
+          signal.addEventListener('abort', onAbort, { once: true })
+          shared.finally(() => signal.removeEventListener('abort', onAbort))
+        }),
+      ])
+      : shared)
     if (!result.ok) {
       this.#emit({
         event: result.errorClass === 'cancelled' ? 'diagram_cancelled' : 'diagram_render_error',
