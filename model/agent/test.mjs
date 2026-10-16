@@ -1318,13 +1318,25 @@ await test('缓存前缀对齐：reflect 复用主请求 system+tools，自检�
     { content: '{"revise":false}', finishReason: 'stop' }, // reflect 评判通过
   ])
   const tools = new ToolRegistry().register({ name: 'ping', description: 'd', parameters: { type: 'object' }, async execute() { return { ok: true } } })
-  const agent = new Agent({ provider, tools, maxTurns: 5, reflect: 'always', reflectMaxIterations: 1 })
-  await agent.run('任务')
+  // 思考档位必须与主请求同档：切 off 会换掉服务端渲染模板，前缀缓存从 94.9% 掉到 91.2%/0%
+  // （实机探针，见 model/agent/Agent.js:_finalizeReasoningOpts 注释）
+  const agent = new Agent({
+    provider, tools, maxTurns: 5, reflect: 'always', reflectMaxIterations: 1,
+    thinkingAuto: { enable: true, classifier: 'always', budgets: { low: 4096, medium: 8192, high: 16384 }, style: '' },
+    thinkingCapable: true, protocol: 'openai', preset: 'deepseek',
+  })
+  // 足够长的复杂输入 → 主请求思考开启（否则 thinking 恒 off，测不出档位对齐）
+  const complexAsk = '请分析并给出结论：' + '这是一段用于触发深度思考的长文本。'.repeat(45)
+  await agent.run(complexAsk)
   const main = provider.calls.history[1] // 触发 reflect 的主请求
   const judge = provider.calls.history[2] // reflect 评判请求
   eq(judge.system, main.system, 'reflect system 与主请求逐字节一致（前缀命中）')
   eq(judge.tools?.map((t) => t.name), main.tools?.map((t) => t.name), 'reflect tools 与主请求一致（前缀命中）')
-  eq(judge.tool_choice, 'none', 'reflect 用 tool_choice:none 禁止真调用')
+  eq(judge.tool_choice, undefined, 'reflect 不下发 tool_choice:none（实测服务端会丢掉 tools 段、破坏缓存复用）')
+  ok(String(judge.messages[judge.messages.length - 1].content).includes('不要调用任何工具'), 'reflect 指令叮嘱不调用工具（取代 tool_choice:none）')
+  eq(judge.thinking, main.thinking, 'reflect thinking 与主请求同档（同模板才同前缀）')
+  eq(judge.reasoning_effort, main.reasoning_effort, 'reflect reasoning_effort 与主请求一致')
+  ok(judge.thinking?.type === 'enabled', 'reflect 不把思考切成 disabled（换模板＝整段前缀失效）')
   ok(!judge.system.includes('交付前自检'), '自检指令不进 system（稳定前缀不被改写）')
   ok(String(judge.messages[judge.messages.length - 1].content).includes('交付前自检'), '自检指令作为末尾 user 消息')
 })
@@ -1336,14 +1348,21 @@ await test('缓存前缀对齐：finalizer 复用主请求 system+tools（异常
     { content: '收尾总结', finishReason: 'stop' }, // finalizer（maxTurns 触发）
   ])
   const tools = new ToolRegistry().register({ name: 'ping', description: 'd', parameters: { type: 'object' }, async execute() { return { ok: true } } })
-  const agent = new Agent({ provider, tools, maxTurns: 2, reflect: 'off' })
-  const res = await agent.run('任务')
+  const agent = new Agent({
+    provider, tools, maxTurns: 2, reflect: 'off',
+    thinkingAuto: { enable: true, classifier: 'always', budgets: { low: 4096, medium: 8192, high: 16384 }, style: '' },
+    thinkingCapable: true, protocol: 'openai', preset: 'deepseek',
+  })
+  // 足够长的复杂输入 → 主请求思考开启（否则 thinking 恒 off，测不出档位对齐）
+  const complexAsk = '请分析并给出结论：' + '这是一段用于触发深度思考的长文本。'.repeat(45)
+  const res = await agent.run(complexAsk)
   eq(res.stopReason, 'max_turns', 'maxTurns 异常停止')
   const main = provider.calls.history[1]
   const fin = provider.calls.history[2]
   eq(fin.system, main.system, 'finalizer system 复用主请求（逐字节一致）')
   eq(fin.tools?.map((t) => t.name), main.tools?.map((t) => t.name), 'finalizer tools 与主请求一致（前缀命中）')
-  eq(fin.tool_choice, 'none', 'finalizer tool_choice:none 禁止新调用')
+  eq(fin.tool_choice, undefined, 'finalizer 不下发 tool_choice:none（与主请求同形才复用缓存，靠指令禁工具）')
+  eq(fin.thinking, main.thinking, 'finalizer thinking 与主请求同档（同模板才同前缀）')
 })
 
 // ---------- 审计 P0 第二批A：LoopGovernor 循环智能终止 ----------

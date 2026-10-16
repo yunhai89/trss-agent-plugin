@@ -26,7 +26,7 @@ import { isToolErrorContent } from './tool-result.js'
 import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, SEARCH_VERIFICATION, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 import { detectScheduleIntent } from './schedule.js'
-import { decideThinkingSmart, encodeThinking, classifyComplexity } from '../llm/thinking.js'
+import { decideThinkingSmart, classifyComplexity } from '../llm/thinking.js'
 import { decideThinkingWithJev, selectToolsWithJev, assessShellRiskWithJev, decideReflectWithJev, evaluateShellRisk } from './jev/index.js'
 
 const DEFAULT_IDENTITY = TEMPLATES.agent.system
@@ -366,7 +366,9 @@ export class Agent {
   /**
    * 禁工具 finalizer：异常停止（预算/停滞/max_turns）后的一次收尾调用。
    * - 复用主请求的 system + tools（前缀逐字节对齐 → 全量命中 warm 缓存），
-   *   tool_choice:'none' 禁止执行新工具；返回 tool_calls 直接判失败走确定性兜底；
+   *   且与主请求**同形**（不下发 tool_choice:'none'：实机探针显示它会让服务端丢掉 tools 段，
+   *   请求形状一变就不复用同一段缓存，见 _reflect 注释），改由指令禁止调用工具；
+   *   仍有防御：真返回 tool_calls 直接判失败走确定性兜底；
    * - 独立宽限窗（finalizeGraceMs）：只受用户取消约束，不受工作预算/时间预算约束；
    * - 输出追加为最终 assistant 消息后返回（调用方随后才持久化 session → run().content === 历史末条 assistant）；
    * - 失败/空输出 → _deterministicWrapUp 代码兜底（同样入历史），绝不返回空串或中间旁白。
@@ -416,8 +418,7 @@ export class Agent {
         model: this.model,
         messages: [...this.messages, { role: 'user', content: GOVERNOR_WRAP_DIRECTIVE }],
         system: wrapSys,
-        tools: toolList.length ? toolList : undefined, // 同前缀 tools；tool_choice:'none' 保证不调用
-        tool_choice: 'none',
+        tools: toolList.length ? toolList : undefined, // 同前缀 tools（与主请求同形；下发 tools 由指令约束不调用）
         ...(this._cacheControlFor(this.provider) ? { cacheControl: true } : {}),
         ...(this._promptCacheKeyFor(this.provider, this.model)),
         temperature: this.temperature,
@@ -1616,13 +1617,19 @@ export class Agent {
   }
 
   /** 收尾/自反思等短任务：自动模式下强制关思考（省 token 提速）；否则沿用静态配置 */
+  /**
+   * 收尾 / 评判调用的思考参数 —— **必须与主请求同档**（前缀缓存对齐）。
+   *
+   * 这里曾返回 `encodeThinking({ depth: 'off' })`（想给收尾调用省推理 token）。但思考开关会改变
+   * 服务端渲染出的对话模板：实机三连探针（opencode-go + deepseek-v4.1-flash，同一段约 6K token
+   * 前缀 + 完全相同的 system/tools/messages）显示——主请求（thinking 开）第二次同参数命中
+   * **94.9%**；仅把 thinking 改成 disabled，同一前缀命中掉到 **91.2%**（模板少 ~25 token，分叉点
+   * 之后全部重算），上游缓存冷时实测 **0%**。而评判/收尾 prompt 与主请求同量级（实机单 run
+   * 评判调用 ~49K token、只命中 4K），省下的少量推理 token 远抵不过一次全价重读。
+   * 故统一沿用主请求档位（`_reasoningOpts()` 就是主请求第 804 行实际下发的那份），保证逐字节同前缀。
+   */
   _finalizeReasoningOpts() {
-    if (this.thinkingAuto?.enable && this.thinkingCapable) {
-      try {
-        return encodeThinking({ depth: 'off', protocol: this.providerProtocol, preset: this.providerPreset, model: this.model, style: this.thinkingAuto.style })
-      } catch { return {} }
-    }
-    return this.thinking ? { thinking: this.thinking } : {}
+    return this._reasoningOpts()
   }
 
   _extraRunOpts(opts) {
@@ -2019,10 +2026,14 @@ export class Agent {
    */
   async _reflect({ system, signal } = {}) {
     // 前缀缓存对齐（关键）：评判调用必须复用主请求的 system 与 tools，指令只追加为末尾
-    // user 消息（tool_choice:'none' 禁止真调用）。此前把 REFLECTION_DIRECTIVE 拼进 system
-    // 且不带 tools——请求从首字节就与主请求分叉，整段持续增长的会话历史在评判里 100% cache
-    // miss；评判 prompt 与主请求同量级，等于每个工具任务额外白付一遍全价输入（命中率被腰斩）。
-    // 对齐后 tools/system/历史与主请求逐字节一致 → 全量命中 warm 缓存，仅草稿+自检指令是小段新增。
+    // user 消息。此前把 REFLECTION_DIRECTIVE 拼进 system 且不带 tools——请求从首字节就与主请求
+    // 分叉，整段持续增长的会话历史在评判里 100% cache miss；评判 prompt 与主请求同量级，等于
+    // 每个工具任务额外白付一遍全价输入（命中率被腰斩）。
+    // 也不要下发 tool_choice:'none'：实机探针（/tmp/probe-tc-unique.mjs）证明它会让服务端把
+    // tools 段整段丢掉（prompt 4378→3799），评判请求因此变成另一种「形状」，与主请求不复用同一
+    // 段缓存（首次跨形状调用只命中 67.4%，同形状重复才 97.7%）。改为与主请求**完全同形**，
+    // 由 REFLECTION_DIRECTIVE 的「不要调用任何工具」约束；即使真返回 tool_calls 也只用正文解析，
+    // 不执行任何工具（下面只读 res.content）。
     const toolList = this._buildToolList()
     const messages = [...this.messages, {
       role: 'user',
@@ -2033,7 +2044,6 @@ export class Agent {
       messages,
       system,
       tools: toolList.length ? toolList : undefined,
-      tool_choice: toolList.length ? 'none' : undefined,
       ...(this._cacheControlFor(this.provider) ? { cacheControl: true } : {}),
       ...this._promptCacheKeyFor(this.provider, this.model),
       temperature: this.temperature,

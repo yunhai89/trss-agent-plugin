@@ -114,7 +114,7 @@ await test('旁白+tool_calls+token_budget：旁白不得成为最终答案（�
   eq(last.role, 'assistant', '消息历史最后一条是 assistant（不是 tool）')
   eq(last.content, FINAL, '历史末条 assistant 即最终答案')
   ok(Array.isArray(provider.calls[1].tools) && provider.calls[1].tools.some((t) => t.name === 'step'), 'finalizer 携带主请求同款 tools（前缀缓存对齐）')
-  eq(provider.calls[1].tool_choice, 'none', 'finalizer 用 tool_choice:"none" 禁止新调用')
+  eq(provider.calls[1].tool_choice, undefined, 'finalizer 不下发 tool_choice:"none"（与主请求同形才复用前缀缓存，改由指令禁工具）')
   ok(!res.content.includes('我先处理'), '旁白文本不出现在最终回复')
 })
 
@@ -143,7 +143,7 @@ await test('反思否决草稿：revise 后的旧草稿不可能再次出现（�
 })
 
 // ============================================================
-// 3. 六种异常停止必进 finalizer（同前缀 tools + tool_choice none + 入历史）
+// 3. 六种异常停止必进 finalizer（同前缀 tools、不下发 tool_choice + 入历史）
 // ============================================================
 const abnormalCases = [
   {
@@ -207,7 +207,7 @@ for (const c of abnormalCases) {
     eq(last.content, FINAL, 'finalizer 输出已追加为最终 assistant 消息')
     const finCall = provider.calls[provider.calls.length - 1]
     ok(Array.isArray(finCall.tools) && finCall.tools.length > 0, 'finalizer 携带主请求同款 tools（前缀缓存对齐）')
-    eq(finCall.tool_choice, 'none', 'finalizer 请求 tool_choice:"none" 禁止新调用')
+    eq(finCall.tool_choice, undefined, 'finalizer 请求不下发 tool_choice:"none"（同形复用缓存；指令禁工具+tool_calls 兜底）')
   })
 }
 await test('异常停止[time_budget（注入时钟）] → 禁工具 finalizer', async () => {
@@ -606,7 +606,9 @@ await test('预算不足的长任务：交付真总结而非"我接下来会…"
   let toolTurn = 0
   const provider = {
     async chat(opts) {
-      if (opts.tool_choice === 'none') return { content: FINAL, toolCalls: [], finishReason: 'stop', usage: { prompt_tokens: 100, completion_tokens: 60 } }
+      // finalizer 识别改为「末尾是收尾指令」：不再依赖 tool_choice:'none'（它会让服务端丢掉 tools 段、破坏前缀缓存复用）
+      const lastMsg = opts.messages?.[opts.messages.length - 1]
+      if (typeof lastMsg?.content === 'string' && lastMsg.content.includes('任务尚未完成')) return { content: FINAL, toolCalls: [], finishReason: 'stop', usage: { prompt_tokens: 100, completion_tokens: 60 } }
       toolTurn++
       return { content: `第${toolTurn}步旁白：我接下来继续处理`, toolCalls: [{ id: 'c' + toolTurn, name: 'step', arguments: { i: toolTurn } }], finishReason: 'tool_calls', usage: { prompt_tokens: 15000, completion_tokens: 200 } }
     },
