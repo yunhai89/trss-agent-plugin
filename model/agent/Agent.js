@@ -1225,8 +1225,10 @@ export class Agent {
     // ⚠ 缓存关键（KV 前缀）：目录只能由**配置决定的静态常驻集**拼出，绝不并入运行中增长的 this.activeTools。
     // 目录位于 system 中部（身份→准则→取向→**目录**→技能→记忆→安全），一旦随会话内激活的工具改名，
     // 目录之后的全部段落逐轮失效（实机归因：45 次 tool_search 断点吃掉 35% 的 cache miss，断点轮命中率仅 9.6%）。
-    // 工具定义走独立的 tools 数组，不经此路径；实测「数组尾部追加」不打断前缀缓存（探针见 commit 说明），
-    // 故会话内新激活的工具仍照常下发可用，能力无损。
+    // 工具定义走独立的 tools 数组，不经此路径。⚠ 早先曾误判「数组尾部追加不打断缓存」——v1.26.12 的受控探针
+    // （真实 relay）证明：tools 从 6 个追加到 7 个，命中率 97.6% → 0.0%（退回 6 个又恢复），因为 tools 也渲染在
+    // 请求最前缀。故工具定义必须跨轮恒定（toolDiscovery.stableList，默认开＝下发 registry 全量），
+    // 会话内新激活的工具本就在全量里，能力无损。
     let toolCatalog = ''
     if (this.toolDiscovery?.enable && this.tools) {
       const staticNames = this.toolDiscovery.alwaysOn?.length ? this.toolDiscovery.alwaysOn : DEFAULT_ALWAYS_ON
@@ -1289,13 +1291,13 @@ export class Agent {
   }
 
   /**
-   * 合成本轮下发的工具列表：全量模式→全部；按需模式→ per-instance 元工具 ∪ registry.match(activeTools)。
+   * 合成本轮下发的工具列表。**缓存关键**：tools 渲染在请求最前缀，任何变化（哪怕只追加一个工具）都会让整段
+   * prompt 缓存归零（真实 relay 探针：6 → 7 个工具，命中率 97.6% → 0.0%，退回 6 个又恢复 97.6%）。
+   * - 稳定模式（`toolDiscovery.stableList`，默认开）：跨轮固定下发 registry 全量——首轮多付约 1 万 token，
+   *   之后全部命中；会话内激活的工具本就在全量里，能力无损。
+   * - 按需模式（`stableList: false`）：元工具固定置顶 + 严格按 activeTools 的 Set 插入序逐个 get（后激活的追加
+   *   在尾，乱序会把前缀打得更碎），但每次激活仍会打穿一次缓存。
    * 每轮调用（tool_search 可能在上一轮扩充 activeTools）。
-   */
-  /**
-   * 合成本轮下发的工具列表：**追加式增长**（tools 是请求最前缀，乱序 = 缓存全灭）。
-   * 元工具固定置顶 + 严格按 activeTools 的 Set 插入序逐个 get（后激活的追加在尾）+ name 去重。
-   * 曾用 registry.match 按注册序输出——后激活的工具插到旧工具之前，tools 前缀每变一次全断。
    */
   _buildToolList() {
     if (!this.tools) return []
