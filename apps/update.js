@@ -177,14 +177,36 @@ export class AgentsUpdate extends plugin {
     return error.match(/'(.+?)'/g)?.[0]?.replace(/'(.+?)'/, '$1') || ''
   }
 
+  /**
+   * 从 git 报错里提取「会被合并覆盖」的本地改动文件（最多 10 个，够用户判断）。
+   * 形如：`error: Your local changes to the following files would be overwritten by merge:\n\tapp/a.js\n\tb.js\nPlease commit...`
+   */
+  overwriteFiles(stdout, error) {
+    const text = `${stdout || ''}\n${error || ''}`
+    const m = text.match(/would be overwritten[^\n]*\n([\s\S]*?)(?:\n\s*(?:Please|Aborting|error:)|$)/)
+    if (!m) return []
+    return m[1].split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 10)
+  }
+
   async gitErr(stdout, error) {
     const errStr = String(error || '')
     if (/unable to access|无法访问|Could not read from remote|Connection|timed out/.test(errStr)) {
       await this.reply(`远程仓库连接错误：${this.gitErrUrl(errStr)}`)
     } else if (/not found|未找到|does not (exist|appear)|不存在|Authentication failed|鉴权失败|repository/.test(errStr)) {
       await this.reply(`远程仓库地址/鉴权错误：${this.gitErrUrl(errStr)}`)
-    } else if (/be overwritten by merge|被合并操作覆盖/.test(errStr) || /Merge conflict|合并冲突/.test(stdout)) {
-      await this.reply(`${errStr}\n${stdout}\n若修改过文件请手动更新，否则发送 #agents强制更新`)
+    } else if (/be overwritten by merge|被合并操作覆盖/.test(errStr)) {
+      // 工作区有未提交改动、且这些文件正好被本次更新改动：git 会中止（不会丢数据）。
+      // 必须显式警告 #agents强制更新 会 git reset --hard 丢改动，否则用户容易顺手强更导致代码丢失。
+      const files = this.overwriteFiles(stdout, errStr)
+      const list = files.length ? `\n会被覆盖的本地改动：\n${files.map((f) => `· ${f}`).join('\n')}` : ''
+      await this.reply(
+        `更新已中止：工作区有未提交改动，且这些文件本次更新也会改动。${list}\n`
+        + '已中止，未改动任何文件。两种处理方式：\n'
+        + '· 保留改动：在插件目录执行 git stash push -m "本地改动"，再发送 #agents更新，之后 git stash pop\n'
+        + '· 放弃改动：#agents强制更新（会执行 git reset --hard，未提交的改动将永久丢失）',
+      )
+    } else if (/Merge conflict|合并冲突/.test(stdout)) {
+      await this.reply(`${errStr}\n${stdout}\n合并冲突：请在插件目录手动解决后重新 #agents更新`)
     } else if (/divergent branches|偏离的分支|not possible to fast-forward|fast-forward/.test(errStr)) {
       const ret = await this.exec('git pull --rebase')
       if (!ret.error && /Successfully rebased|成功变基/.test(ret.stdout + ret.stderr)) return true

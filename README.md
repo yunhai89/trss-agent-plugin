@@ -24,7 +24,7 @@
 >
 > - **`master` 为唯一主分支**：新功能、底层改动与 bug 修复都直接提交到 `master`。
 > - 历史上的 `beta` 测试分支已于 **v1.21.0** 全量合并进 `master` 并停用（`git pull` 用 `master` 即可，无需再切分支）。
-> - 更新插件：`#agents更新`（或 `git pull origin master`）。**代码有改动必须重启进程**（`#重启` 或发 `#agents更新`，后者检测到代码变更会自动重启）——`#agents重载` 只按新配置重建运行时（provider/model/tools/skills/mcp），**不会重新加载已改动的代码文件**（ESM 模块缓存）；只改了配置时用它即可。
+> - 更新插件：`#agents更新`（或 `git pull origin master`）。若插件目录有**未提交的本地改动**、且这些文件本次更新也会改动，git 会中止更新并列出文件名（不会丢改动）：想保留就先 `git stash push -m "本地改动"` 再更新、之后 `git stash pop`；`#agents强制更新` 会 `git reset --hard`，**未提交的改动将永久丢失**。**代码有改动必须重启进程**（`#重启` 或发 `#agents更新`，后者检测到代码变更会自动重启）——`#agents重载` 只按新配置重建运行时（provider/model/tools/skills/mcp），**不会重新加载已改动的代码文件**（ESM 模块缓存）；只改了配置时用它即可。
 
 ---
 

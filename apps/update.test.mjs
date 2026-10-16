@@ -68,6 +68,24 @@ await test('getLogEntries：解析提交 / 遇 oldCommitId 停止 / 跳过 Merge
   eq(entries, ['c提交', 'a提交'], '取 old 之前、跳过 Merge')
 })
 
+await test('overwriteFiles：从 git 报错里提取会被覆盖的本地改动文件', async () => {
+  const o = inst()
+  const err = "error: Your local changes to the following files would be overwritten by merge:\n\tapps/comfyui-draw.js\n\ttools/comfyui/index.js\nPlease commit your changes or stash them before you merge.\nAborting"
+  eq(o.overwriteFiles('Updating a..b', err), ['apps/comfyui-draw.js', 'tools/comfyui/index.js'], '解析出文件列表')
+  eq(o.overwriteFiles('', 'fatal: 别的错误'), [], '无关错误返回空数组')
+})
+
+await test('gitErr：本地改动会被覆盖时，给出文件清单 + 暂存指引 + 强更丢数据警告', async () => {
+  const o = inst()
+  const err = "error: Your local changes to the following files would be overwritten by merge:\n\tapps/comfyui-draw.js\nPlease commit your changes or stash them before you merge.\nAborting"
+  await o.gitErr('Updating b41f4a6..0fd7c9a', err)
+  const msg = o._replies.join('\n')
+  ok(msg.includes('apps/comfyui-draw.js'), '列出会被覆盖的文件')
+  ok(msg.includes('git stash push'), '给出保留改动的暂存指引')
+  ok(msg.includes('永久丢失'), '警告强制更新会丢改动')
+  ok(!/否则发送 #agents强制更新$/.test(msg.trim()), '不再无警告地引导强更')
+})
+
 console.log('\n========================================')
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log('========================================')
