@@ -221,13 +221,35 @@ export class AgentsUpdate extends plugin {
    * 返回相对路径数组——这些文件会让 `git merge --ff-only` 直接 Aborting，
    * 且 `git stash push`（无 -u）救不了（未跟踪文件不进 stash）。
    */
+  /**
+   * git 对非 ASCII/含特殊字符的路径会输出带引号的 C 风格转义（`"\345\267\245/x.js"`）。
+   * 两侧必须同法还原，否则非 ASCII 路径的未跟踪文件与上游新增文件「永不相等」→ 预检漏报、
+   * 强更也不备份（第 10 轮审计 low：正是本函数想防的静默覆盖）。
+   */
+  unquoteGitPath(p) {
+    const t = String(p || '').trim()
+    if (!/^".*"$/.test(t)) return t
+    // git 的 C 风格转义：`\345` 是**八进制字节**（UTF-8 的一个字节），不是 JSON 的 \uXXXX，
+    // 所以只能用 Buffer 逐字节还原（JSON.parse 在这里会抛错/留反斜杠）。
+    const inner = t.slice(1, -1)
+    const bytes = []
+    for (let i = 0; i < inner.length; i++) {
+      const c = inner[i]
+      if (c === '\\' && /[0-7]/.test(inner[i + 1] || '')) { bytes.push(parseInt(inner.slice(i + 1, i + 4), 8)); i += 3 }
+      else if (c === '\\' && inner[i + 1] === '\\') { bytes.push(92); i++ }
+      else if (c === '\\' && inner[i + 1] === '"') { bytes.push(34); i++ }
+      else for (const b of Buffer.from(c, 'utf8')) bytes.push(b)
+    }
+    return Buffer.from(bytes).toString('utf8')
+  }
+
   async untrackedCollisions(target) {
-    const untracked = (await this.exec('git ls-files --others --exclude-standard')).stdout || ''
-    const added = (await this.exec(`git diff --name-only --diff-filter=A HEAD ${target}`)).stdout || ''
-    const addSet = new Set(added.split('\n').map((s) => s.trim().replace(/^"|"$/g, '')).filter(Boolean))
+    const untracked = (await this.exec('git -c core.quotePath=false ls-files --others --exclude-standard')).stdout || ''
+    const added = (await this.exec(`git -c core.quotePath=false diff --name-only --diff-filter=A HEAD ${target}`)).stdout || ''
+    const addSet = new Set(added.split('\n').map((s) => this.unquoteGitPath(s)).filter(Boolean))
     return untracked
       .split('\n')
-      .map((s) => s.trim())
+      .map((s) => this.unquoteGitPath(s))
       .filter((f) => f && addSet.has(f))
   }
 

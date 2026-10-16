@@ -229,6 +229,10 @@ export const STOP_REASON_CN = {
   provider_incomplete: '模型未产出可用正文（可能达到输出上限或被截断），已停止',
 }
 
+// 引用消息块的首尾标记（apps/agent.js 组装；_stripInjectedFromUserText 依赖它剥离「别人说的话」）
+const QUOTE_PREFIX = '【引用消息】'
+const QUOTE_SUFFIX = '【引用消息结束】'
+
 export class Agent {
   constructor(config = {}) {
     if (!config.provider) throw new Error('Agent 需要 provider')
@@ -676,9 +680,15 @@ export class Agent {
     // **对象引用**——compactMessages 只做 slice/flat 不改引用，写回时按身份定位存活段起点。
     let presetNewRefs = null
     let presetFirstMsg = null
+    // 压缩前的「本轮新增」快照（任何模式都记）：压缩会把这些消息从 this.messages 里丢掉，
+    // 之后 slice(sessStart) 为空 ⇒ 并发兜底「改追加」会追加 0 条、本轮问答静默丢失
+    // （第 10 轮审计 medium：存库条数有变化但既不含本轮问题也不含本轮回答）。
+    let newSegBeforeCompact = null
     const notePresetNew = () => {
-      if (!presetHistory || presetNewRefs) return // 只记第一次（此刻尚未压缩，下标与引用都有效）
-      presetNewRefs = new Set(this.messages.slice(sessStart))
+      if (newSegBeforeCompact) return // 只记第一次（此刻尚未压缩，下标与引用都有效）
+      newSegBeforeCompact = this.messages.slice(sessStart)
+      if (!presetHistory) return
+      presetNewRefs = new Set(newSegBeforeCompact)
       presetFirstMsg = this.messages[sessStart] || null
     }
 
@@ -760,9 +770,11 @@ export class Agent {
     // 合成文本只要照着注入块写，就能自我佐证写入长期记忆。这里只收真实用户发言：
     // presetHistory 时跳过本轮开始前的历史（全是合成续跑上下文），并显式滤掉续跑提示文案。
     const SYNTHETIC_USER_RE = /^(?:【恢复续跑】|请继续完成原任务|请接着完成剩余步骤)/
+    // ⚠ 第 10 轮审计 low：此前先 filter(role==='user') 再 slice(sessStart)，而 sessStart 是**未过滤**
+    // 数组的下标 —— 续跑时按 N 切一个只剩 1 条的数组必然为空（当前被默认续跑文案恰好被滤掉所掩盖）。
     this._userTexts = this.messages
+      .slice(presetHistory ? sessStart : 0)
       .filter((m) => m.role === 'user')
-      .slice(presetHistory ? sessStart : -20)
       .map((m) => this._stripInjectedFromUserText(m.content))
       .filter((t) => t && !SYNTHETIC_USER_RE.test(t))
       .slice(-20)
@@ -1201,7 +1213,15 @@ export class Agent {
           } catch { /* 读失败按原逻辑覆写 */ }
           if (concurrent) {
             this.logger('warn', '[session] 检测到同一会话存在并发写入，本次改追加以免覆盖他人消息（压缩视图未落盘）')
-            await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, appendMsgs, extra)
+            // 追加内容优先用「压缩前快照」：压缩后 slice(sessStart) 可能为空，直接用 appendMsgs
+            // 会追加 0 条（第 10 轮审计 medium：本轮问答静默不落盘却仍标记已持久化）。
+            const base = newSegBeforeCompact && newSegBeforeCompact.length ? newSegBeforeCompact : appendMsgs
+            // 快照之后的收尾消息（通常是本轮最终回答）也一并追加：压缩发生在收尾之前，
+            // 只追加快照会留下「本轮问题在、回答不在」（第 10 轮审计 medium 的残留形态）。
+            const last = base[base.length - 1]
+            const at = last ? this.messages.lastIndexOf(last) : -1
+            const toAppend = at >= 0 ? [...base, ...this.messages.slice(at + 1)] : base
+            await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, toAppend, extra)
           } else {
             await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
           }
@@ -1392,11 +1412,19 @@ export class Agent {
     if (!text) return ''
     const marker = '【用户消息】'
     const i = text.lastIndexOf(marker)
-    let body = i >= 0 ? text.slice(i + marker.length) : text
-    // 【引用消息】块是被引用的**别人**说的话（apps/agent.js 拼在用户消息之后），
-    // 不能算作「用户亲述」（2026-10-17 审计 S1：引用块里的指令性语句曾被当作来源佐证）。
-    const quoted = body.indexOf('【引用消息】')
-    if (quoted >= 0) body = body.slice(0, quoted)
+    let body = (i >= 0 ? text.slice(i + marker.length) : text).trim()
+    // 【引用消息】块是被引用的**别人**说的话：apps/agent.js 把它拼在用户真话**之前**
+    // （`quotedBlock ? `${quotedBlock}\n\n${text}` : text`），所以只能剥「开头」的引用块。
+    // ⚠ 第 10 轮审计 high：此前写成「取第一个【引用消息】之前的内容」，引用消息时截断点 = 0 ⇒
+    // 整条亲述变空串 ⇒ _userTexts=[] ⇒ memory/提醒的来源校验把用户原话判成「没有原话」直接拒写。
+    if (body.startsWith(QUOTE_PREFIX)) {
+      const end = body.indexOf(QUOTE_SUFFIX)
+      if (end >= 0) body = body.slice(end + QUOTE_SUFFIX.length)
+      else {
+        const sep = body.indexOf('\n\n') // 旧格式（无结束标记）：引用块与正文之间必有一个空行
+        body = sep >= 0 ? body.slice(sep + 2) : ''
+      }
+    }
     return body.trim()
   }
 

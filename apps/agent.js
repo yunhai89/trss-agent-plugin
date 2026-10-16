@@ -2077,7 +2077,9 @@ export class Chat extends plugin {
           const parts = []
           if (q.nick || q.text) parts.push(`${q.nick ? q.nick + ': ' : ''}${q.text || '(无文本)'}`)
           if (q.forwardResid) parts.push('[这是一条合并聊天记录卡片，可用 analyze_chat_record 工具分析其内容]')
-          if (parts.length) quotedBlock = `【引用消息】\n${parts.join('\n')}`
+          // 结束标记供 Agent._stripInjectedFromUserText 精确剥离（第 10 轮审计 high：
+          // 引用块在用户真话之前，没有结束标记就只能靠空行猜，引用内容里含空行时会切错）
+          if (parts.length) quotedBlock = `【引用消息】\n${parts.join('\n')}\n【引用消息结束】`
         } else {
           Log.debug('[reply] 未能取到被引用消息（getReply/get_msg/历史均失败）')
         }

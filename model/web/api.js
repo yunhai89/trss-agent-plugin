@@ -988,7 +988,10 @@ router.post('/suggestions/:id/apply', asyncHandler(async (req, res) => {
   const s = listAllSuggestions(r.suggestionDir).find((x) => x.id === req.params.id)
   if (!s) return fail(res, CODE.NOTFOUND, 'suggestion 不存在')
   try {
-    const applyResult = await applySuggestion(r, s)
+    // 指令性记忆必须带操作者提供的用户原话（第 10 轮审计 medium：面板此前不传 →
+    // 带 evidence 的 memory 建议在面板上必然失败，而 #采纳 命令路径已接上）
+    const userTexts = [String(req.body?.userText || '').trim()].filter(Boolean)
+    const applyResult = await applySuggestion(r, s, { userTexts })
     return ok(res, { ...s, status: 'applied', applyResult })
   } catch (e) {
     s.status = 'apply_failed'
