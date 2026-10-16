@@ -94,11 +94,18 @@ export function splitInlineThink(content, reasoning = '') {
   // 成对的 <think>…</think>（DOTALL；容忍 <think> 上可能的属性/空白、</think > 的尾空格）
   const paired = /<think\b[^>]*>([\s\S]*?)<\/think\s*>/g
   let cleaned = content.replace(paired, (_m, t) => { thoughts.push(String(t).trim()); return '' })
-  // 容错：只剩开标签、未闭合 —— 开标签之后的全部视为思考
+  // 容错：只剩开标签、未闭合。
+  // 2026-10-17 审计 B3：原实现无条件把 `<think` 之后的一切当作思考丢弃 —— 模型正文里若出现字面量
+  // `<think`（讲 HTML/XML、复述提示词、举例说明标签），余下正文会被静默吞掉，用户只看到半句。
+  // 现在只在「开标签位于正文开头」或「其后没有可见正文」时按残缺思考处理，否则保留原文（不丢正文）。
   const openIdx = cleaned.indexOf('<think')
   if (openIdx >= 0) {
-    thoughts.push(cleaned.slice(openIdx).replace(/^<think\b[^>]*>/, '').replace(/<\/think\s*>$/, '').trim())
-    cleaned = cleaned.slice(0, openIdx)
+    const before = cleaned.slice(0, openIdx)
+    const after = cleaned.slice(openIdx).replace(/^<think\b[^>]*>/, '').replace(/<\/think\s*>$/, '')
+    if (before.trim() === '' || after.trim() === '') {
+      thoughts.push(after.trim())
+      cleaned = before
+    }
   }
   // 去掉 think 块剥离后留下的首尾空白/空行
   cleaned = cleaned.replace(/^\s+|\s+$/g, '')

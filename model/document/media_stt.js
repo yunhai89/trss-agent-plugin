@@ -14,6 +14,7 @@ import path from 'node:path'
 import { execFile } from 'node:child_process'
 import Config from '../../utils/Config.js'
 import { toolSandbox, sandboxSelected, sandboxUnavailableError, openToolSession, runToolCommand, missingCommand, sandboxTmp, shellQuote } from '../sandbox/bridge.js'
+import { hostPathError } from './path-guard.js'
 
 /** 沙箱档：输入文件上传上限（超大视频可先自行裁剪；避免无上限上传打爆沙箱磁盘） */
 const SANDBOX_UPLOAD_MAX = 512 * 1024 * 1024
@@ -42,6 +43,8 @@ export function runFfmpeg(args, { timeout = 180, maxOutput = 8000 } = {}) {
 const VIDEO_EXTS = new Set(['.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.m4v', '.wmv'])
 const AUDIO_EXTS = new Set(['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.wma', '.opus'])
 const MIME = { '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg', '.flac': 'audio/flac', '.aac': 'audio/aac' }
+/** 宿主档 STT 上传上限（审计 A5）：超过则直接给出可读提示，不再整段读进内存 */
+const STT_HOST_MAX_BYTES = 100 * 1024 * 1024
 
 export const transcribeMediaTool = {
   name: 'transcribe_media',
@@ -59,6 +62,9 @@ export const transcribeMediaTool = {
     const p = String(params?.path || '').trim()
     if (!p) return { error: '请提供文件路径' }
     if (p.includes('\0')) return { error: '非法路径（含空字符）' }
+    // 越界路径（config.yaml/.env/data/logs 等）必须先拒：category=query 对任意群成员免审批
+    const guard = hostPathError(p, { label: '音视频文件' })
+    if (guard) return { error: guard }
     const abs = path.resolve(p)
     let st = null
     try { st = fs.statSync(abs) } catch { return { error: `文件不存在：${p}` } }
@@ -139,6 +145,13 @@ export async function extractAudioInSandbox(box, hostPath, { signal = null, host
 
 /** 调用 Whisper 兼容 STT API */
 async function callSTT(audioPath, cfg, signal = null) {
+  // 大小闸（审计 A5）：宿主档此前无任何上限，长视频抽出的整段 mp3 会被 readFileSync 全量读进内存，
+  // 随后上传必然被 STT 端拒绝、且用户只看到超时/报错。上限与沙箱档 SANDBOX_UPLOAD_MAX 同量级。
+  let stSize = 0
+  try { stSize = fs.statSync(audioPath).size } catch { /* 交给下面 readFileSync 报错 */ }
+  if (stSize > STT_HOST_MAX_BYTES) {
+    return { error: `音视频过大：${(stSize / 1048576).toFixed(1)}MB（上限 ${STT_HOST_MAX_BYTES / 1048576}MB，请截短后重试）` }
+  }
   const buf = fs.readFileSync(audioPath)
   const ext = path.extname(audioPath).toLowerCase()
   const mime = MIME[ext] || 'audio/mpeg'

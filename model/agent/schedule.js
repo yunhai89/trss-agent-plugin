@@ -43,13 +43,22 @@ export class ScheduleStore {
    * 重启后从 0 开始会与 KV 里已有 id 撞号（导致 cancel 错任务）。
    */
   _nextId(arr = []) {
+    const used = new Set(arr.map((r) => String(r?.id ?? '')))
     let max = this._seq
     for (const r of arr) {
       const n = parseInt(r?.id, 10)
       if (Number.isFinite(n) && n > max) max = n
     }
-    this._seq = (Math.max(this._seq + 1, max + 1)) % 100000
-    return String(this._seq).padStart(5, '0')
+    // 取模回绕会撞号（2026-10-17 审计 L3）：第 10 万条后 `_seq` 被 max 钉住，连续两次 add 都得到
+    // `00000`，此后任一方 cancel 会按 id 全量过滤、把两条一起删掉（提醒不响 / 周期任务静默停摆）。
+    // 这里在 0..99999 里找第一个未被占用的 id；极端全满时退回时间戳 id。
+    for (let step = 1; step <= 100000; step++) {
+      const n = (max + step) % 100000
+      const id = String(n).padStart(5, '0')
+      if (!used.has(id)) { this._seq = n; return id }
+    }
+    this.logger?.('warn', '[schedule] 定时任务 id 空间已满，回退时间戳 id')
+    return `t${Date.now().toString(36)}`
   }
 
   async add(info, fire) {
@@ -69,8 +78,13 @@ export class ScheduleStore {
         createdAt: info.createdAt || Date.now(),
       }
       arr.push(rec)
+      // 先注册成功再落盘（2026-10-17 审计 L1）：node-schedule 对无法解析的 cron / 无效 Date 返回 null
+      // 而非抛错，原实现照样写进 KV 并回报「已设置」⇒ 面板与列表都显示已排期，实际永不触发。
+      if (!this._schedule(rec, fire)) {
+        arr.pop()
+        return { error: rec.cron ? `非法的 cron 表达式：${rec.cron}` : `无效的触发时间：${rec.at}` }
+      }
       await this._save(arr)
-      this._schedule(rec, fire)
       return rec
     })
   }
@@ -99,7 +113,14 @@ export class ScheduleStore {
       try { await fire?.(rec) } catch { /* noop */ }
       if (!isCron) { try { await this.cancel(rec.id) } catch { /* noop */ } }
     })
+    // node-schedule 对非法 cron / 无效时间返回 null（不抛错）：必须把「没排上」如实回给调用方，
+    // 否则记录照样落 KV、列表显示已排期，实际永不触发（2026-10-17 审计 L1）。
+    if (!job) {
+      this.logger?.('warn', `[schedule] 无法排期（${isCron ? `cron=${rec.cron}` : `at=${rec.at}`}），已拒绝写入`)
+      return null
+    }
     this._jobs.set(rec.id, { job, info: rec })
+    return job
   }
 
   /** 取消本实例已排的全部 job（热重载/关闭时调，防止旧 job 泄漏继续触发） */
@@ -153,10 +174,48 @@ export class ScheduleStore {
  *  - 仅该用户本人的其余条目（提醒等，避免把他人私聊提醒内容暴露给所有人）。
  * 去重，任务链在前。修复「AI 建了提醒、web 看得到、#定时任务列表 返回暂无」。
  */
-export function selectScheduleForList(all = [], { userId = '', scopeUserId = '', isMaster = false } = {}) {
+/**
+ * 群共享模式的作用域 id。
+ *
+ * 2026-10-17 审计 C2/C3：原实现所有群共用字面量 `'__group__'`，于是
+ * ① `selectScheduleForList` 的归属判定 `u === scopeUserId` 让 A 群成员能列出（并取消）B 群的提醒/任务；
+ * ② 群共享的 recall/profile 键也以它为键，不同群的长期记忆互相串。
+ * 现改为带群号的 `__group__:<gid>`，跨群天然隔离。旧键记录仍可被本群识别（见 selectScheduleForList
+ * 与 apps/agent.js:ownsScheduleRecord 的 legacyShared 分支），但**不再跨群可见**。
+ */
+export const SHARED_SCOPE_PREFIX = '__group__'
+
+/** 群共享作用域 id：有群号带群号，无群号退回旧字面量（私聊/无群上下文不应走到这里） */
+export function sharedScopeId(groupId) {
+  const g = groupId == null || groupId === '' ? '' : String(groupId)
+  return g ? `${SHARED_SCOPE_PREFIX}:${g}` : SHARED_SCOPE_PREFIX
+}
+
+/** 是否为群共享作用域 id（新旧两种形态都算） */
+export function isSharedScopeId(v) {
+  const s = String(v ?? '')
+  return s === SHARED_SCOPE_PREFIX || s.startsWith(`${SHARED_SCOPE_PREFIX}:`)
+}
+
+/** 是否为「旧版」无群号群共享记录（跨群同名，必须再比 groupId 才能判定归属） */
+export function isLegacySharedRecord(rec, groupId) {
+  if (String(rec?.userId ?? '') !== SHARED_SCOPE_PREFIX) return false
+  const g = groupId == null || groupId === '' ? '' : String(groupId)
+  return g !== '' && String(rec?.groupId ?? '') === g
+}
+
+export function selectScheduleForList(all = [], { userId = '', scopeUserId = '', isMaster = false, groupId = null } = {}) {
   const uid = String(userId)
   const suid = String(scopeUserId || '')
-  const isMine = (r) => { const u = String(r?.userId); return !!r && (u === uid || (!!suid && u === suid)) }
+  const isMine = (r) => {
+    if (!r) return false
+    const u = String(r.userId)
+    if (u === uid) return true
+    // 旧版群共享记录（字面量 '__group__'）没有群信息就无法判定归属：必须再比 groupId，
+    // 否则「传 __group__ 当作用域」的旧调用口径会把别群条目一起列出（审计 C2）。
+    if (u === SHARED_SCOPE_PREFIX) return isLegacySharedRecord(r, groupId)
+    return !!suid && u === suid
+  }
   // 任务链同样按归属过滤：type='task' 并非天然"群级非私密"——私聊用 reminder_set 带 prompt
   // 建的记录也是 type='task' 且 groupId=null，曾无条件列出，把他人私聊任务描述泄露给任意用户。
   const tasks = (all || []).filter((r) => r?.type === 'task' && (isMaster || isMine(r)))
@@ -330,6 +389,7 @@ export const reminderSetTool = {
         message: p.message || '',
         prompt: isTask ? String(p.prompt).trim() : null,
       })
+      if (rec?.error) return rec // 排期失败（非法时间/服务不可用）不要让上层按成功回复
       return {
         ok: true, id: rec.id, at: at.toLocaleString('zh-CN'),
         note: isTask ? `已设一次性任务链，到点跑 Agent（${String(p.prompt).slice(0, 40)}）+ 发结果` : '已设提醒，到时间会主动发消息给用户',

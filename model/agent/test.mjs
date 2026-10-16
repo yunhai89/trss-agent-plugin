@@ -49,7 +49,7 @@ import {
 } from './index.js'
 import { normalizeUsage, mergeUsage } from './messages.js'
 import { estimateTokensApprox } from './token-estimate.js'
-import { reminderSetTool, scheduleTaskTool } from './schedule.js'
+import { reminderSetTool, scheduleTaskTool, sharedScopeId } from './schedule.js'
 import { guardUserIntent, evidenceAppears } from './evidence.js'
 import { createClient as createOpenAIClient } from '../openai/index.js'
 import { presets as openaiPresets } from '../openai/index.js'
@@ -685,6 +685,55 @@ await test('schedule：add/list/cancel/restore', async () => {
   eq(dropped, 1, '丢弃 1 个过期')
 })
 
+await test('systemPrompt 配置不被注册表里的内置模板顶掉（审计 B1）', async () => {
+  // 背景：promptRegistry 里始终装着内置 TEMPLATES（启动时 registerAll 无条件注册），
+  // 原实现直接 `promptRegistry.get('agent')?.system || this.systemPrompt`，于是
+  // `agent.systemPrompt` 永远被内置默认值遮蔽 —— 用户改了配置却没有任何效果（死配置）。
+  // 现在的口径：注册表值只有在**不等于内置模板**（即真被进化改写过）时才优先。
+  const { TEMPLATES } = await import('../prompt/library.js')
+  const mkAgent = (regSystem) => new Agent({
+    provider: { name: 'p', chat: async () => ({ content: '', toolCalls: [], finishReason: 'stop', usage: null }) },
+    tools: { list: () => [], get: () => null, names: () => [] },
+    systemPrompt: '【我的自定义身份】', model: 'm',
+    promptRegistry: { get: () => ({ system: regSystem }) },
+  })
+  const builtinReg = mkAgent(TEMPLATES.agent.system)._assembleSystem([], null, '', undefined).system
+  ok(builtinReg.includes('【我的自定义身份】'), '注册表=内置模板时，配置的 systemPrompt 生效')
+  ok(!builtinReg.includes(TEMPLATES.agent.system.slice(0, 30)), '内置默认身份不再遮蔽配置')
+  const evolved = mkAgent('【进化后的身份】')._assembleSystem([], null, '', undefined).system
+  ok(evolved.includes('【进化后的身份】'), '注册表=进化产物时优先用进化身份')
+  ok(!evolved.includes('【我的自定义身份】'), '进化身份优先于配置')
+  const override = mkAgent(TEMPLATES.agent.system)._assembleSystem([], '【人设身份】', '', undefined).system
+  ok(override.includes('【人设身份】'), '人设 override 优先级最高')
+})
+
+await test('schedule：非法 cron/无效时间拒绝落盘（审计 C6）+ id 不撞号（C8）', async () => {
+  // node-schedule 对无法解析的 cron 返回 null（不抛错）：原实现照样写 KV 并回报「已设置」，
+  // 面板/列表显示已排期、实际永不触发。
+  const kv = memoryKv()
+  const sched = { scheduleJob: () => null, cancelJob: () => {} }
+  const store = new ScheduleStore({ kv, scheduler: sched, logger: () => {} })
+  const bad = await store.add({ userId: 'u1', cron: '不是 cron', message: 'x' }, async () => {})
+  ok(!!bad?.error, `非法 cron 返回结构化错误：${bad?.error || ''}`)
+  eq((await store.listAll()).length, 0, '非法 cron 不落盘')
+  const badAt = await store.add({ userId: 'u1', at: NaN, message: 'x' }, async () => {})
+  ok(!!badAt?.error, '无效时间同样拒绝')
+
+  // id 撞号：取模回绕后原实现会给出重复 id，cancel 会按 id 全量过滤把别人的记录一起删掉。
+  const kv2 = memoryKv()
+  const okSched = { scheduleJob: () => ({ cancel() {} }), cancelJob: () => {} }
+  const s2 = new ScheduleStore({ kv: kv2, scheduler: okSched })
+  await kv2.set('Yz:agent:rem:jobs', [
+    { id: '00000', userId: 'u1', at: Date.now() + 10000 },
+    { id: '99999', userId: 'u1', at: Date.now() + 10000 },
+  ])
+  const r1 = await s2.add({ userId: 'u1', at: Date.now() + 10000, message: 'a' }, async () => {})
+  const r2 = await s2.add({ userId: 'u1', at: Date.now() + 10000, message: 'b' }, async () => {})
+  ok(r1.id !== r2.id, `连续新增 id 不重复（${r1.id} / ${r2.id}）`)
+  ok(!['00000', '99999'].includes(r1.id) && !['00000', '99999'].includes(r2.id), '避开已占用 id')
+  eq((await s2.listAll()).length, 4, '两条新记录都写入')
+})
+
 await test('schedule：触发前回查持久层（记录被外部删除后，残留定时器不得再发一次）', async () => {
   const kv = memoryKv()
   let fireFn = null
@@ -750,7 +799,6 @@ await test('schedule：formatScheduleList 标注类型（周期/一次性任务/
     { id: 'tmine', type: 'task', cron: '0 9 * * *', prompt: '我的任务链', userId: 'u1' },
     { id: 'rmine', type: 'reminder', message: '我的提醒', at: now, userId: 'u1' },
     { id: 'rother', type: 'reminder', message: '别人提醒', at: now, userId: 'u2' },
-    { id: 'rgroup', type: 'reminder', message: '群共享', at: now, userId: '__group__' },
   ]
   const vis = selectScheduleForList(all, { userId: 'u1', scopeUserId: 'u1' })
   ok(vis.some((r) => r.id === 'tmine'), '含本人的任务链')
@@ -758,8 +806,19 @@ await test('schedule：formatScheduleList 标注类型（周期/一次性任务/
   ok(!vis.some((r) => r.id === 'tother'), '不含他人任务链（IDOR 修复：曾全量列出）')
   ok(!vis.some((r) => r.id === 'rother'), '不含他人提醒（隐私）')
   eq(vis.length, 2, '去重后 2 条')
-  const visG = selectScheduleForList(all, { userId: 'u1', scopeUserId: '__group__' })
-  ok(visG.some((r) => r.id === 'rgroup'), '群共享模式含 __group__ 条目')
+  // 群共享（isolation 关闭）跨群隔离：作用域 id 为 `__group__:<gid>`（2026-10-17 审计 C2 —— 此前所有群
+  // 共用字面量 '__group__'，A 群成员能列出并取消 B 群的提醒/任务）。
+  const allG = [
+    { id: 'rg1', type: 'reminder', message: '本群旧版共享', at: now, userId: '__group__', groupId: 'g1' },
+    { id: 'rg2', type: 'reminder', message: '别群旧版共享', at: now, userId: '__group__', groupId: 'g2' },
+    { id: 'rg1n', type: 'reminder', message: '本群新版共享', at: now, userId: sharedScopeId('g1'), groupId: 'g1' },
+    { id: 'rnone', type: 'reminder', message: '无群号旧记录', at: now, userId: '__group__' },
+  ]
+  const visG = selectScheduleForList(allG, { userId: 'u1', scopeUserId: sharedScopeId('g1'), groupId: 'g1' })
+  ok(visG.some((r) => r.id === 'rg1'), '本群旧版共享记录可见（按记录 groupId 归属）')
+  ok(visG.some((r) => r.id === 'rg1n'), '本群新版共享记录可见')
+  ok(!visG.some((r) => r.id === 'rg2'), '别群共享记录不可见（跨群泄露回归）')
+  ok(!visG.some((r) => r.id === 'rnone'), '无群号的旧记录不归属任何群')
   // 主人可见全部任务链；他人"提醒"仍不外泄（提醒内容是私聊隐私，主人要看走 Web 面板）
   const visM = selectScheduleForList(all, { userId: 'master', scopeUserId: 'master', isMaster: true })
   ok(visM.some((r) => r.id === 'tother') && visM.some((r) => r.id === 'tmine'), '主人可见全部任务链')

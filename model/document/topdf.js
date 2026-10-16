@@ -26,6 +26,7 @@ import { buildHtml, mdToHtml } from '../render/index.js'
 import { excelBufferToText } from './excel.js'
 import { toFileSegment } from '../../utils/SendFile.js'
 import { toolSandbox, sandboxSelected, openToolSession, runToolCommand, missingCommand, sandboxTmp, shellQuote } from '../sandbox/bridge.js'
+import { hostPathError } from './path-guard.js'
 
 const TEMP_DIR = () => Config.path.temp
 const sofficeBin = () => Config.get().agent?.document?.soffice || 'soffice'
@@ -41,7 +42,12 @@ function esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&
 
 /** 解析输入：path 或已发送附件（落临时文件） */
 function resolveInput(ctx, p) {
-  if (p.path && fs.existsSync(p.path)) return { path: p.path, name: path.basename(p.path) }
+  if (p.path && fs.existsSync(p.path)) {
+    // 路径越界（config.yaml/.env/data/logs 等宿主敏感文件）：category=query 免审批 ⇒ 必须在这里挡住
+    const guard = hostPathError(p.path)
+    if (guard) return { error: guard }
+    return { path: p.path, name: path.basename(p.path) }
+  }
   const active = Array.isArray(ctx?.media) ? ctx.media : ctx?.media?.active || []
   if (!active.length) return { error: '未找到文件：请提供 path，或先发送文件后引用' }
   let mf

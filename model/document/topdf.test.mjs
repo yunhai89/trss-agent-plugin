@@ -15,6 +15,7 @@ import { Readable } from 'node:stream'
 import { runSofficeInSandbox, fileToPdfTool } from './topdf.js'
 import { SandboxManager } from '../sandbox/manager.js'
 import { makeCommandCounter } from '../sandbox/index.js'
+import Config from '../../utils/Config.js'
 
 let passed = 0
 let failed = 0
@@ -89,7 +90,9 @@ await test('沙箱档：模板缺 soffice → 探测即失败，不上传输入'
 })
 
 await test('工具层：mode=e2b 但沙箱未就绪 + docx → 拒绝在宿主跑 soffice', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'topdf-fc-'))
+  // 夹具放插件 data/temp 内：转档/读取类工具只允许读该目录（v1.26.30 审计 A1 路径白名单），
+  // 放 os.tmpdir() 会在路径校验处提前失败，测不到本用例真正要验的「沙箱未就绪 → fail-closed」。
+  const dir = fs.mkdtempSync(path.join(Config.path.temp, 'topdf-fc-'))
   const input = path.join(dir, 'report.docx')
   fs.writeFileSync(input, 'fake docx')
   try {

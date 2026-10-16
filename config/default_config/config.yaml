@@ -504,6 +504,13 @@ agent:
     maxCallsPerDay: 200    # 每会员每日浏览器操作上限
     blockedHosts: []       # 额外禁访主机（在默认内网/元数据黑名单之外）
     domSettleTimeoutMs: 3000  # act 前 DOM 稳定等待（毫秒）
+  tempFiles:
+    # 插件临时目录（data/temp）自动清理（2026-10-17 审计 A6）。该目录会积累 PDF/Excel 转档、
+    # STT 音频、下载中转、渲染图、日志包……此前只有 diagram 有专属清理，其余只增不减（磁盘满后
+    # 媒体/文档功能整族失败）。清理只删普通文件、不跟随符号链接、不越出 temp 目录，目录本身保留。
+    enable: true            # 关掉则完全不清理（不建议）
+    ttlHours: 24            # 超过该时长的临时文件删除
+    maxFiles: 500           # 目录内文件数上限（仍超限时从最旧的开始删）
   download:
     # 媒体下载工具（yt-dlp；仅框架主人，受约束）。下载视频/音频时 LLM 优先用 web_download，不走 terminal 裸 shell。
     # 依赖系统 yt-dlp + ffmpeg（合并格式）。默认开。启用 E2B 沙箱后下载在沙箱内执行（模板需含 yt-dlp）。

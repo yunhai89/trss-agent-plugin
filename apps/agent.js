@@ -25,6 +25,10 @@ import {
   scheduleTaskTool,
   formatScheduleList,
   selectScheduleForList,
+  SHARED_SCOPE_PREFIX,
+  sharedScopeId,
+  isSharedScopeId,
+  isLegacySharedRecord,
   ConfirmStore,
   nodeScheduleAdapter,
   memoryKv,
@@ -96,6 +100,7 @@ import { fileToPdfTool } from '../model/document/topdf.js'
 import { transcribeMediaTool } from '../model/document/media_stt.js'
 import { TtsService, makeTtsSpeakTool } from '../model/tts/index.js'
 import { DiagramService } from '../model/diagram/index.js'
+import { startTempSweep } from '../model/temp-sweeper.js'
 import { makeDiagramTool } from '../model/diagram/tool.js'
 import { makeDiagramDeliverer } from '../model/diagram/deliver.js'
 import { createUsageStats } from '../model/agent/store/usage-stats.js'
@@ -859,6 +864,21 @@ async function _buildRuntime(scope) {
   }
   scope.register(() => { try { diagram?.stop?.() } catch { /* noop */ } }, { name: 'diagram', order: 60 })
 
+  // 临时目录清理（2026-10-17 审计 A6）：temp 里堆着 PDF/Excel 转档、STT 音频、下载中转、渲染图、
+  // 日志包……此前只有 diagram 有专属 TTL 清理，其余只增不减（磁盘满 → 媒体/文档整族失败）。
+  // 进程内单例：热重载重建运行时不会重复起定时器。
+  if (cfg.tempFiles?.enable !== false) {
+    try {
+      const sw = startTempSweep({
+        dir: Config.path.temp,
+        ttlHours: cfg.tempFiles?.ttlHours,
+        maxFiles: cfg.tempFiles?.maxFiles,
+        logger: Log.tag('temp'),
+      })
+      if (sw.started) startupInfo.tempSweep = `TTL ${Number(cfg.tempFiles?.ttlHours) || 24}h / 上限 ${Number(cfg.tempFiles?.maxFiles) || 500}`
+    } catch (e) { Log.warn('[temp] 清理器启动失败', e?.message || e) }
+  }
+
   // skill 工具：模型主动调用 skill 的通道（按 name 加载说明书正文）—— 渐进式披露的载入入口
   tools.register(makeSkillTool(skills))
 
@@ -1529,7 +1549,10 @@ function ownsScheduleRecord(rec, ctx) {
   const owner = String(rec.userId ?? '')
   if (!owner) return false
   const mine = [ctx.userId, ctx.scopeUserId].filter((x) => x != null && x !== '').map(String)
-  return mine.includes(owner)
+  if (mine.includes(owner)) return true
+  // 旧版群共享记录（owner='__group__'，跨群同名）只能按记录自带 groupId 判定：
+  // 否则 A 群成员可以取消 B 群的任务（审计 C2 的越权路径之一）。
+  return owner === SHARED_SCOPE_PREFIX && isLegacySharedRecord(rec, ctx.groupId)
 }
 
 function ctxOf(e) {
@@ -1545,7 +1568,7 @@ function ctxOf(e) {
   // userId=真实用户(个人功能/get_chat_history 自过滤/回复@)；scopeUserId=session/recall 键；scopeId=MemoryStore 文件目录。
   const isolation = Config.get().agent?.isolation?.enable !== false
   const sharedGroup = !!(isGroup && groupId && !isolation)
-  const scopeUserId = sharedGroup ? '__group__' : userId
+  const scopeUserId = sharedGroup ? sharedScopeId(groupId) : userId
   const scopeId = !isGroup
     ? `u_${userId}`
     : (isolation ? `g${groupId}_u${userId}` : `g${groupId}`)
@@ -1619,7 +1642,7 @@ function ctxFromInfo(info) {
   const cfg = Config.get().agent || {}
   const isolation = cfg.isolation?.enable !== false
   const sharedGroup = !!(isGroup && groupId && !isolation)
-  const scopeUserId = sharedGroup ? '__group__' : userId
+  const scopeUserId = sharedGroup ? sharedScopeId(groupId) : userId
   const scopeId = !isGroup ? `u_${userId}` : (isolation ? `g${groupId}_u${userId}` : `g${groupId}`)
   // 创建者身份：定时任务 fire 时无用户事件，但任务创建者的主人身份必须保留——
   // 否则群管类工具（如 send_group_notice）会被判为 member 而 rejected_by_policy
@@ -3337,6 +3360,7 @@ export class Chat extends plugin {
       userId: String(this.e.user_id || ''), groupId: this.e.group_id ? String(this.e.group_id) : null,
       selfId: String(this.e.self_id || this.e.selfId || ''),
     }, makeFireDispatch(rt))
+    if (rec?.error) return this.e.reply(`✗ 创建失败：${rec.error}`), true
     await this.e.reply(`✓ 定时任务 #${rec.id}\n周期：${when}（${cron}）\n任务：${prompt}`)
     return true
   }
@@ -3347,7 +3371,7 @@ export class Chat extends plugin {
     const all = await rt.schedule.listAll()
     // 展示：所有任务链（群级）+ 仅本人的提醒。修复「AI 用 reminder_set 建了提醒、web 看得到、
     // #定时任务列表 却返回暂无」——此前只 filter(type==='task')，把 type='reminder' 的记录全漏掉。
-    const list = selectScheduleForList(all, { userId: ctx.userId, scopeUserId: ctx.scopeUserId, isMaster: ctx.isMaster })
+    const list = selectScheduleForList(all, { userId: ctx.userId, scopeUserId: ctx.scopeUserId, isMaster: ctx.isMaster, groupId: ctx.groupId })
     if (!list.length) return this.e.reply('暂无定时任务/提醒（#定时任务 <时间> <任务> 创建；或用 AI 帮你设）'), true
     await this.e.reply(`定时任务 / 提醒（${list.length}）：\n${formatScheduleList(list).join('\n')}`)
     return true
@@ -3548,7 +3572,7 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     const uid = String(this.e.user_id)
     const ctx = ctxOf(this.e)
-    const sharedGroup = ctx.scopeUserId === '__group__' // 关闭隔离的群聊：会话/记忆为群共享，不清（避免一人清空全群）
+    const sharedGroup = isSharedScopeId(ctx.scopeUserId) // 关闭隔离的群聊：会话/记忆为群共享，不清（避免一人清空全群）
     const now = Date.now()
     const last = _clearPending.get(uid)
     if (!last || now - last > 60000) {
@@ -3582,7 +3606,7 @@ export class Chat extends plugin {
         let keyUid = null
         if (parts[0] === 'conv') keyUid = parts[1] === 'active' ? parts[3] : parts[2]
         else keyUid = parts[1] // 旧 group:user 会话 <gid>:<uid>
-        if (keyUid === uid && keyUid !== '__group__') { await rt.session.clear(k); nSess++ }
+        if (keyUid === uid && !isSharedScopeId(keyUid)) { await rt.session.clear(k); nSess++ }
       }
       if (nSess) cleared.push(`对话历史(${nSess})`)
       // 压缩归档独立于会话 KV 落盘（按 convKey 分目录）：「清空所有记录」必须一并清理，
@@ -3607,11 +3631,18 @@ export class Chat extends plugin {
       // 任务账本（P0-3）：清理归属当前用户的任务记录（群共享任务不清，避免一人清全群）
       if (rt.taskStore) {
         let nTask = 0
-        for (const t of await rt.taskStore.list({ limit: 500 })) {
-          const au = t.scope?.userId != null ? String(t.scope.userId) : ''
-          const su = t.scope?.scopeUserId != null ? String(t.scope.scopeUserId) : ''
-          if (su === '__group__') continue
-          if (au === uid || su === uid) { const r = await rt.taskStore.remove(t.taskId, { scopeKey: t.scopeKey }); if (r.ok) nTask++ }
+        // 分页扫全库（2026-10-17 审计 L2）：list 的 limit 被 clamp 到 500，原实现只看最近 500 条，
+        // 更早的本人记录在「已清空你的所有记录」之后仍留在 sqlite 里 —— 隐私清理不完整。
+        for (let round = 0; round < 200; round++) {
+          const batch = await rt.taskStore.list({ limit: 500 })
+          let hit = 0
+          for (const t of batch) {
+            const au = t.scope?.userId != null ? String(t.scope.userId) : ''
+            const su = t.scope?.scopeUserId != null ? String(t.scope.scopeUserId) : ''
+            if (isSharedScopeId(su)) continue // 群共享域：按群隔离，不清（避免一人清空全群）
+            if (au === uid || su === uid) { const r = await rt.taskStore.remove(t.taskId, { scopeKey: t.scopeKey }); if (r.ok) { nTask++; hit++ } }
+          }
+          if (!hit) break
         }
         if (nTask) cleared.push(`任务记录(${nTask})`)
       }

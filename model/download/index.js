@@ -197,7 +197,10 @@ export function makeDownloadTool({ ytDlpBin } = {}) {
       // http://127.0.0.1:xxx、http://169.254.169.254/… 等内网/云元数据地址会被读回并可能发到群里；
       // 也可能被抓取内容里的提示注入诱导。复用 crawl 的 checkTargetAllowed（含混淆 IP/IPv6/域名解析）。
       if (!/^https?:\/\//i.test(url)) return { error: '仅支持 http/https URL' }
-      if (/\s|--|\bsource=|\bexec\b/i.test(url)) return { error: 'URL 含可疑字符' }
+      // 只挡真正的注入面：空白/控制字符（argv 数组不会被再分词，真正危险的是拼 shell 的路径，
+      // 那里另有 shellQuote）。原正则含 `\bsource=|\bexec\b` 会把 B 站/YouTube 分享链接
+      // （`?source=share`、`/exec` 段）当可疑字符拒绝，用户无从绕过（2026-10-17 审计 A4）。
+      if (/[\s\u0000-\u001f]/.test(url)) return { error: 'URL 含空白或控制字符' }
       const gate = await checkTargetAllowed(url, { allowPrivateHosts: cfg.allowPrivateHosts === true })
       if (!gate.ok) return { error: gate.error, code: gate.code, ...(gate.hint ? { hint: gate.hint } : {}) }
 

@@ -346,6 +346,16 @@ perception:
   sparseThreshold: 6
 ```
 
+### `agent.tempFiles` —— 临时文件自动清理
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `enable` | `true` | 是否清理插件临时目录（`data/temp`） |
+| `ttlHours` | `24` | 超过该时长的临时文件删除 |
+| `maxFiles` | `500` | 目录内文件数上限（仍超限时从最旧的开始删） |
+
+`data/temp` 会积累 PDF/Excel 转档、STT 音频、下载中转、渲染图、日志包等中间产物（此前只有 diagram 有专属清理，其余只增不减，磁盘占满后媒体/文档功能整族失败）。清理器只删普通文件、不跟随符号链接、不越出 `temp` 目录，目录本身保留；启动时扫一次，之后每 30 分钟扫一次（定时器 `unref`，不阻止进程退出）。
+
 ### `agent.tools` —— 工具 SDK
 
 | 字段 | 默认 | 说明 |
@@ -762,6 +772,8 @@ tts:
 | `file_to_pdf` | 宿主 `soffice` | 沙箱内 `soffice`，PDF 拉回；沙箱缺 soffice 时回退纯 JS 渲染（无 shell） |
 | `web_crawl` | 宿主 python crawl4ai（**默认恒走这里**：本地引擎，与 sandbox.mode 无关，同 diagram 的本机 Kroki） | 仅当 `agent.kb.crawl.execution: sandbox` 时在沙箱内 crawl4ai（脚本+请求文件上传，模板需预装 crawl4ai）；沙箱缺 crawl4ai → 降级纯 HTTP fetch |
 | `install_skill` | 宿主 `skillhub`（固定 argv） | 沙箱内 `skillhub`，只回传 `.md` 产物，校验后进宿主 skills/ |
+
+**转档/读取类工具的宿主路径白名单（v1.26.30 起）**：`file_to_pdf`（发 PDF 进群）、`read_pdf`、`read_excel`、`transcribe_media` 只允许读插件 `data/temp` 内的文件——这些工具是 `category: 'query'`（任意群成员免审批），此前接受任意宿主路径，等于任何成员都能把 `config/config.yaml`、`.env`、`data/logs/*.log` 原样转成 PDF 发进群（不可撤回）。需要处理宿主其它位置的文件时，先复制到 `data/temp`。
 
 **`web_download` 的地址门禁（v1.26.23 起）**：与 `web_crawl` 同一套 `checkTargetAllowed`——默认拒绝本机/内网/云元数据地址（`127.0.0.1`、`169.254.169.254`、`::1`、`10/172.16/192.168` 段，含混淆写法与域名解析结果），命中直接结构化失败并附提示。确需下载本地媒体服务器（NAS 等）时设 `agent.download.allowPrivateHosts: true`。原因是 yt-dlp 以**宿主身份**按通用 URL 抓取，内网响应体还会被回发到群里，也可被抓取内容里的提示注入诱导。
 

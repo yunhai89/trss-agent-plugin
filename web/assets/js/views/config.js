@@ -310,6 +310,11 @@
         }
         if (!form.download) form.download = {}
         if (form.download.allowPrivateHosts == null) form.download.allowPrivateHosts = false
+        // 临时文件清理（v1.26.30）：老配置里没有这段，补默认值，否则面板开关/输入框拿到 undefined
+        if (!form.tempFiles || typeof form.tempFiles !== 'object') form.tempFiles = {}
+        if (form.tempFiles.enable == null) form.tempFiles.enable = true
+        if (form.tempFiles.ttlHours == null) form.tempFiles.ttlHours = 24
+        if (form.tempFiles.maxFiles == null) form.tempFiles.maxFiles = 500
         if (!form.multiagent) form.multiagent = {}
         if (!form.multiagent.topology) form.multiagent.topology = 'spawn'
         if (!form.stt) form.stt = {}
@@ -1759,6 +1764,21 @@
                 </cfg-row>
                 <cfg-row name="允许内网地址" desc="默认关：拒绝本机/内网/云元数据地址（防 SSRF，与 web_crawl 同口径）。仅本地媒体服务器（NAS 等）调试时打开">
                   <v-switch v-model="form.download.allowPrivateHosts"/>
+                </cfg-row>
+              </div>
+            </div>
+
+            <div class="card" style="margin-top:14px">
+              <div class="mut" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="trash"/> 临时文件清理（data/temp）</div>
+              <div class="cf-grid">
+                <cfg-row name="自动清理" desc="删除 data/temp 里过期的转档/音频/下载中转/渲染图等中间产物；关掉会一直堆积直至磁盘占满">
+                  <v-switch v-model="form.tempFiles.enable"/>
+                </cfg-row>
+                <cfg-row name="保留时长(小时)" desc="超过该时长的临时文件删除">
+                  <input type="number" class="inp" style="width:100px" min="1" v-model.number="form.tempFiles.ttlHours">
+                </cfg-row>
+                <cfg-row name="文件数上限" desc="目录内文件数上限，仍超限时从最旧的开始删">
+                  <input type="number" class="inp" style="width:100px" min="1" v-model.number="form.tempFiles.maxFiles">
                 </cfg-row>
               </div>
             </div>

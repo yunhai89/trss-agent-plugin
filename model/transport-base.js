@@ -25,6 +25,36 @@ export function linkSignals(sources) {
   return ctl
 }
 
+/**
+ * 流式响应体的清理钩子（2026-10-17 审计 B2）。
+ *
+ * 原实现 `finally { to.clear(); linked.cleanup?.() }` 对流式分支同样执行：headers 一到就摘掉了
+ * caller signal 上的监听，此后「用户点停止 / 上层取消」再也无法中断已在传输的 SSE —— 模型继续
+ * 生成、连接继续占用、token 继续计费（取消只在上层停读，不等于断开请求）。
+ * 现在流式分支保留 link，把 cleanup 绑到响应体生命周期：读完 / 被取消 / 出错时才摘监听。
+ */
+function withStreamCleanup(res, cleanup) {
+  const body = res?.body
+  if (!body || typeof body.getReader !== 'function' || typeof ReadableStream !== 'function') {
+    try { cleanup() } catch { /* noop */ }
+    return res
+  }
+  let finished = false
+  const once = () => { if (!finished) { finished = true; try { cleanup() } catch { /* noop */ } } }
+  const reader = body.getReader()
+  const wrapped = new ReadableStream({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read()
+        if (done) { once(); controller.close(); return }
+        controller.enqueue(value)
+      } catch (e) { once(); controller.error(e) }
+    },
+    async cancel(reason) { once(); try { await reader.cancel(reason) } catch { /* noop */ } },
+  })
+  return new Response(wrapped, { status: res.status, statusText: res.statusText, headers: res.headers })
+}
+
 /** 构建超时 signal 与清理函数 */
 function makeTimeout(timeout) {
   if (!timeout || timeout === Infinity) return { signal: null, clear: () => {} }
@@ -130,6 +160,7 @@ export function createRequestWithRetry({ APIError, TimeoutError, ConnectionError
       let phaseErr = null
       let text = null
       let errBody = null
+      let keepSignalLink = false // 流式分支：abort 监听交给 withStreamCleanup 收尾（见其注释）
       try {
         res = await fetcher(url, {
           method,
@@ -138,7 +169,10 @@ export function createRequestWithRetry({ APIError, TimeoutError, ConnectionError
           signal: linked.signal,
         })
         if (res.ok) {
-          if (stream) return res
+          if (stream) {
+            keepSignalLink = true
+            return withStreamCleanup(res, () => linked.cleanup?.())
+          }
           text = await res.text()
         } else {
           // 错误响应体同样受 timeout 管辖：text() 的 abort/超时必须向外抛（不吞），
@@ -150,7 +184,7 @@ export function createRequestWithRetry({ APIError, TimeoutError, ConnectionError
         phaseErr = err
       } finally {
         to.clear()
-        linked.cleanup?.()
+        if (!keepSignalLink) linked.cleanup?.()
       }
 
       if (phaseErr) {

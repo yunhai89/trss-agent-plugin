@@ -203,7 +203,6 @@ export class SessionStore {
       if (!c) continue
       // 键形态：...conv:<gid>:<uid>:<convId>（gid='private' 或数字；末两段为 uid/convId）
       const parts = k.slice(`${this.prefix}conv:`.length).split(':')
-      const convId = parts[parts.length - 1]
       const userId = parts[parts.length - 2] || ''
       const groupId = parts.slice(0, -2).join(':') || 'private'
       out.push({
@@ -257,8 +256,16 @@ export class SessionStore {
   async appendConversation(userId, groupId, convId, msgs, extra = {}) {
     const k = this.convKey(userId, groupId, String(convId))
     return this._withLock(k, async () => {
-      const c = (await this.kv.get(k)) || { id: String(convId), title: `对话 ${convId}`, messages: [], createdAt: Date.now() }
-      const next = [...(c.messages || []), ...msgs]
+      const raw = await this.kv.get(k)
+      // 坏值护栏（2026-10-17 审计 M2/C4）：旧会话 API 早就拒绝写坏值，对话 API 漏了。
+      // 字符串值会让 `[...c.messages]` 静默产出单字符垃圾消息；setConversation 更直接抛裸 TypeError，
+      // 被 Agent 的 catch 吞成一行日志 ⇒ 该会话此后每轮都不落盘，用户历史永久丢失且无提示。
+      if (raw && !isConvShape(raw)) {
+        this.logger?.('warn', `[session] 对话数据损坏，已拒绝写回以免抹掉历史：${k}`)
+        throw new Error(CORRUPT_CONV_MSG)
+      }
+      const c = raw || { id: String(convId), title: `对话 ${convId}`, messages: [], createdAt: Date.now() }
+      const next = [...c.messages, ...msgs]
       // 同上：append-only；Agent 滞回压缩负责水位（cacheEpoch 持久化在 extra）
       const trimmed = next.length > this.window ? trimKeepFirst(next, this.window) : next
       c.messages = trimmed
@@ -285,7 +292,12 @@ export class SessionStore {
   async setConversation(userId, groupId, convId, messages, extra = {}) {
     const k = this.convKey(userId, groupId, String(convId))
     return this._withLock(k, async () => {
-      const c = (await this.kv.get(k)) || { id: String(convId), title: `对话 ${convId}`, messages: [], createdAt: Date.now() }
+      const raw = await this.kv.get(k)
+      if (raw && !isConvShape(raw)) {
+        this.logger?.('warn', `[session] 对话数据损坏，已拒绝覆写以免误判为压缩后落盘：${k}`)
+        throw new Error(CORRUPT_CONV_MSG)
+      }
+      const c = raw || { id: String(convId), title: `对话 ${convId}`, messages: [], createdAt: Date.now() }
       c.messages = Array.isArray(messages) ? messages : []
       c.updatedAt = Date.now()
       for (const [ek, ev] of Object.entries(extra || {})) if (ev !== undefined) c[ek] = ev
@@ -317,6 +329,12 @@ function unpack(val) {
   if (val && typeof val === 'object' && Array.isArray(val.messages)) return val.messages
   return null
 }
+
+/** 对话对象是否可识别（对象且 messages 为数组）；坏值写回会抹掉历史或抛裸 TypeError */
+function isConvShape(c) {
+  return !!(c && typeof c === 'object' && !Array.isArray(c) && Array.isArray(c.messages))
+}
+const CORRUPT_CONV_MSG = '会话数据损坏（不是可识别的对话结构），已拒绝写入以免清空历史'
 
 /**
  * 滑动窗口裁剪，但始终保留首条消息（用户原始意图），避免长对话丢失最初目标。

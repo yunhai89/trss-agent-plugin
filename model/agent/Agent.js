@@ -616,8 +616,11 @@ export class Agent {
       sessKey = this.session.key(ctx.groupId, scopeUserId)
       try { this.messages = await this.session.get(sessKey) } catch { this.messages = [] }
     }
-    // presetHistory 时全量覆写持久化：append 会读回会话再追加，导致续跑历史与旧历史重复/错位
-    const sessStart = presetHistory ? 0 : this.messages.length
+    // 持久化边界：本轮新生成的消息从「此刻的历史长度」开始。presetHistory 时此刻 = continueFrom
+    // 重建的续跑历史（它不在会话存储里，也不该进存储），故边界同样取当前长度。
+    // ⚠ 此处曾为 presetHistory 取 0 并在写回时整体覆写（2026-10-17 审计 H1）：`#继续任务` 会把该会话
+    // 历史抹成 2~3 条重建消息，用户视角「bot 突然失忆」，被覆盖的历史不可恢复。
+    const sessStart = this.messages.length
     // prompt_cache_key 的会话标识（_promptCacheKeyFor 读取）：多对话模式用 群:用户:会话id，
     // 群:用户 模式用 sessKey。此前从未赋值 → 不同会话算出同一个键，会话级路由隔离失效。
     this._curConvId = ephemeral
@@ -1092,13 +1095,15 @@ export class Agent {
       // 临时任务：不持久化会话历史
     } else if (useConv) {
       try {
-        if (compactedThisRun || presetHistory) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
+        // 压缩后必须整体覆写（分代压缩重写了整段历史）；续跑（presetHistory）不再覆写：
+        // 续跑历史只用于本次运行，写回只追加本轮新消息，原会话历史原样保留（审计 H1）
+        if (compactedThisRun && !presetHistory) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
         else await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages.slice(sessStart), extra)
         sessionPersisted = true
       } catch (e) { this.logger('warn', 'conversation 持久化失败', e) }
     } else if (sessKey) {
       try {
-        if (compactedThisRun || presetHistory) await this.session.set(sessKey, this.messages)
+        if (compactedThisRun && !presetHistory) await this.session.set(sessKey, this.messages)
         else await this.session.append(sessKey, this.messages.slice(sessStart))
         sessionPersisted = true
       } catch (e) { this.logger('warn', 'session 持久化失败', e) }
@@ -1270,11 +1275,17 @@ export class Agent {
     return (i >= 0 ? text.slice(i + marker.length) : text).trim()
   }
 
-  _assembleSystem(memories, systemPromptOverride, context, scopeId) {
+  // context/scopeId 保留在签名里（调用点位置参数），但已不再使用：声明式记忆快照自 v1.26.22 起
+  // 改由 run() 注入 user 消息尾部（快照进 system 会打穿前缀缓存：实机命中率 4.5%）
+  _assembleSystem(memories, systemPromptOverride, _context, _scopeId) {
     // 结构化分层（稳定前缀 → 动态后缀）：身份 → 服务准则 → 执行取向 → 工具目录 → 技能 → 记忆 → 情境 → 安全
     // identity 优先级：人设 override > 进化产出(registry) > config.systemPrompt > 默认 TEMPLATES.agent.system
+    // ⚠ 注册表里同时装着内置 TEMPLATES（apps/agent.js 启动时无条件 registerAll）：若把内置值也当 override，
+    // `config.systemPrompt`（面板「默认身份」/README/配置模板都公开的项）与 DEFAULT_IDENTITY 就永远不可达
+    // ——配了完全无效且无任何提示（2026-10-17 审计 B1）。故仅当注册表值与内置不同（＝确为进化产出）才采用。
     const regIdentity = this.promptRegistry?.get('agent')?.system
-    const identity = systemPromptOverride || regIdentity || this.systemPrompt
+    const evolvedIdentity = regIdentity && regIdentity !== TEMPLATES?.agent?.system ? regIdentity : ''
+    const identity = systemPromptOverride || evolvedIdentity || this.systemPrompt
     // 工具目录：按需发现模式→常驻工具速查 + 分类总览（不列全量工具名，防抵消 token 收益）；全量模式→原速查
     // ⚠ 缓存关键（KV 前缀）：目录只能由**配置决定的静态常驻集**拼出，绝不并入运行中增长的 this.activeTools。
     // 目录位于 system 中部（身份→准则→取向→**目录**→技能→记忆→安全），一旦随会话内激活的工具改名，
@@ -1294,10 +1305,12 @@ export class Agent {
     } else if (this.tools && this.tools.list().length) {
       toolCatalog = buildToolCatalogSection(this.tools.list())
     }
-    // 技能目录 / 声明式记忆进 system：均为可被污染的内容（skillhub 安装、手改 MEMORY.md），
-    // 命中注入特征时加 <untrusted_data> 边界标注（不阻断注入，只提示模型按数据处理）。
+    // 技能目录 / 声明式记忆 / 表情目录进 system：均为可被污染的内容（skillhub 安装、手改 MEMORY.md、
+    // 任意群成员发图自动入库的表情描述），命中注入特征时加 <untrusted_data> 边界标注（不阻断，只提示按数据处理）。
     const skillsSection = this.skills ? this._screenUntrusted(buildSkillsPromptSection(this.skills.catalog()), 'skills_catalog') : ''
-    const stickerSection = this.stickers ? buildStickerPromptSection(this.stickers.catalog()) : ''
+    // ⚠ 表情目录此前未过 _screenUntrusted（2026-10-17 审计 B4）：apps/sticker-watch.js 任意群成员发图即可
+    // 触发采集，模型转写的 name/desc/tags 会进**跨群持久**的 system 段 —— 一张带指令文字的图就是系统层注入。
+    const stickerSection = this.stickers ? this._screenUntrusted(buildStickerPromptSection(this.stickers.catalog()), 'sticker_catalog') : ''
     // 声明式记忆**不再进 system**（见 run 里的 dynParts 与 _memorySnapshot 注释）：
     // 它在会话内会随 memory 工具写入而变化，留在 system 里等于每次写记忆都打穿其后全部历史前缀。
     const memorySnapshot = ''

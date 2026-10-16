@@ -86,7 +86,10 @@ async function judgeOnce(vision, img, prompt) {
     // JSON 解析失败 = LLM 异常（内容审核拒绝 / 超时 / 思考未产出 JSON）：一律拒绝，不入库
     return { isSticker: false, name: '', desc: '', tags: [], raw: raw.slice(0, 160), parseFailed: true }
   }
-  const isSticker = j.isSticker !== false && j.isSticker !== 'false'
+  // 必须是显式 true 才入库（审计 A3：原判定 `!== false && !== 'false'` 是 fail-open ——
+  // 视觉模型漏字段 / 返回 null / "no" / is_sticker 蛇形命名时都被当成表情，
+  // 于是普通照片、文档截图、二维码会落进**插件级全局**表情库并被发到其它群）
+  const isSticker = j.isSticker === true || j.isSticker === 'true'
   return {
     isSticker,
     name: cleanName(j.name) || autoName(img.buffer),

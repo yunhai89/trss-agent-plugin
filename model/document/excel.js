@@ -7,6 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import Config from '../../utils/Config.js'
 import { toFileSegment } from '../../utils/SendFile.js'
+import { hostPathError } from './path-guard.js'
 
 async function getExcelJS() {
   const m = await import('exceljs')
@@ -163,7 +164,11 @@ export const readExcelTool = {
   },
   async execute(params) {
     const p = String(params?.path || '').trim()
-    if (!p || !fs.existsSync(p)) return { error: `文件不存在：${p}` }
+    if (!p) return { error: '请提供 Excel 文件路径' }
+    // 越界路径（config.yaml/.env/data/logs 等）必须先拒：category=query 对任意群成员免审批
+    const guard = hostPathError(p, { label: 'Excel 文件' })
+    if (guard) return { error: guard }
+    if (!fs.existsSync(p)) return { error: `文件不存在：${p}` }
     let buf
     try { buf = fs.readFileSync(p) } catch (e) { return { error: `读取失败：${e?.message || e}` } }
     const out = await excelBufferToText(buf, { sheet: params?.sheet, maxRows: params?.maxRows })

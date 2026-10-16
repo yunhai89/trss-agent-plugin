@@ -394,6 +394,14 @@ test('splitInlineThink 剥离内联 <think>', () => {
   eq(splitInlineThink('普通回复', 'rr'), { content: '普通回复', reasoning: 'rr' }, '无 think 原样返回')
   // 5. 未闭合 think（流式残缺）：视为思考，content 清空
   eq(splitInlineThink('<think>未闭合的思考').content, '', '未闭合 think 视为思考丢弃')
+  // 5b. 审计 B3：正文里出现字面量 `<think`（讲 HTML/XML、复述提示词）时，其后正文不能被吞掉
+  //（原实现无条件把 `<think` 之后全当思考，用户只看到半句话）
+  eq(
+    splitInlineThink('标签写法是这样的：<think 后面接正文').content,
+    '标签写法是这样的：<think 后面接正文',
+    '正文中段的未闭合 <think 不吞掉后续正文'
+  )
+  eq(splitInlineThink('<think 只有标签').content, '', '仅标签无正文时仍按思考处理')
   // 6. 容忍 <think> 上的属性
   eq(splitInlineThink('<think type="x">t</think>答案').content, '答案', '容忍 <think> 属性')
   // 7. 边界：空 content 安全

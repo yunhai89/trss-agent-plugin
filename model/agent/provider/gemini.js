@@ -14,6 +14,7 @@
  */
 import { Provider, toolsToList, jsonSchemaOf } from './base.js'
 import { toGeminiContent } from './content-blocks.js'
+import { isToolErrorContent } from '../tool-result.js'
 
 /** Agent OpenAI 风格 messages → Interactions Step[]（无状态全量历史） */
 export function toGeminiSteps(messages) {
@@ -68,8 +69,11 @@ function parseArgs(a) {
   try { return JSON.parse(a) } catch { return { _raw: String(a) } }
 }
 
+// 2026-10-17 审计 B5：原来是「前 200 字符里出现 `"error":` 就算错误」的子串判定 —— 正常正文里
+// 引用一段 JSON（例如文档片段、代码示例）会被误判成工具失败，且与 Agent 侧的结构化判定不一致
+//（`isToolErrorContent` 才判断 JSON 对象/数组里的 error 字段）。这里直接复用同一实现。
 function isToolError(s) {
-  return typeof s === 'string' && /"error"\s*:/.test(s.slice(0, 200))
+  return isToolErrorContent(s)
 }
 
 /** Agent 工具列表 → Gemini FunctionT[]（{type:'function', name, description, parameters}） */
@@ -143,7 +147,7 @@ function mapFinish(status) {
   if (status === 'incomplete') return 'max_tokens'
   if (status === 'budget_exceeded') return 'max_tokens'
   if (status === 'failed') return 'error'
-  if (status === 'cancelled') return 'stop'
+  if (status === 'cancelled') return 'incomplete' // 审计 B6：取消/中断不是正常收尾，回报 'stop' 会让上层当成完整回复
   return status || 'stop'
 }
 

@@ -28,15 +28,21 @@ function rid() {
 export function chunkText(text, size = 500, overlap = 50) {
   const t = String(text || '').trim()
   if (!t) return []
-  if (t.length <= size) return [t]
+  // 参数夹紧（2026-10-17 审计 M3）：`kb.chunkOverlap >= kb.chunkSize` 时 i 会停在原地
+  // ⇒ while 死循环 + out 无界增长，CPU 打满直至 OOM，且崩前无任何日志（用户只是改了个配置）。
+  const sz = Math.max(1, Math.floor(Number(size) || 500))
+  const ov = Math.max(0, Math.min(Math.floor(Number(overlap) || 0), sz - 1))
+  if (t.length <= sz) return [t]
   const out = []
   let i = 0
   while (i < t.length) {
-    const end = Math.min(i + size, t.length)
+    const end = Math.min(i + sz, t.length)
     out.push(t.slice(i, end))
     if (end >= t.length) break
-    i = end - overlap
-    if (i < 0) i = 0
+    const next = end - ov
+    // 兜底：任何情况下都必须前进，否则直接截断（宁可少一块，也不死循环）
+    if (next <= i) break
+    i = next
   }
   return out
 }
@@ -53,7 +59,7 @@ function queryCoverage(qSet, docTokens) {
 }
 
 export class KnowledgeStore {
-  constructor({ kv, embedFn = null, key = DEFAULT_KEY, chunkSize = 500, chunkOverlap = 50, topK = 5, minScore = 0.3 } = {}) {
+  constructor({ kv, embedFn = null, key = DEFAULT_KEY, chunkSize = 500, chunkOverlap = 50, topK = 5, minScore = 0.3, logger = null } = {}) {
     if (!kv) throw new Error('KnowledgeStore 需要 kv')
     this.kv = kv
     this.embedFn = embedFn
@@ -62,6 +68,7 @@ export class KnowledgeStore {
     this.chunkOverlap = chunkOverlap
     this.topK = topK
     this.minScore = minScore
+    this.logger = logger
     // 定时刷新（URL 文档周期 re-crawl）：scheduler 延后注入（见 attachScheduler）
     this.scheduler = null
     this._refreshJobs = new Map() // docId -> job handle
@@ -259,11 +266,14 @@ export class KnowledgeStore {
       if (!doc) return { error: `文档 ${docId} 不存在` }
       if (!doc.url) return { error: `文档 ${docId} 无 URL，不可设定时刷新` }
       this._cancelJob(docId) // 取消旧 job（不写 KV，下面统一 save）
+      // 先验证 cron 真能注册成功再落盘：非法 cron 不允许写入（否则列表显示已排期、实际永不触发）
+      if (cron && this.scheduler && !this._scheduleRefresh(docId, cron)) {
+        return { error: `非法的定时刷新表达式：${cron}（5 段 cron，例如 0 8 * * *）` }
+      }
       doc.refreshCron = cron || null
       await this._save(data)
       return { id: docId, cron: cron || null }
     })
-    if (!r.error && r.cron && this.scheduler) this._scheduleRefresh(docId, r.cron)
     return r
   }
 
@@ -287,13 +297,24 @@ export class KnowledgeStore {
   }
 
   _scheduleRefresh(docId, cron) {
-    if (!this.scheduler) return
+    if (!this.scheduler) return null
+    let job = null
     try {
-      const job = this.scheduler.scheduleJob(cron, () => {
+      job = this.scheduler.scheduleJob(cron, () => {
         this.refreshDoc(docId).catch(() => { /* 刷新失败保留下轮重试，此处静默 */ })
       })
-      this._refreshJobs.set(docId, job)
-    } catch { /* 非法 cron 静默 */ }
+    } catch (e) {
+      this.logger?.('warn', `[kb] 定时刷新注册失败（cron=${cron}）：${e?.message || e}`)
+      return null
+    }
+    // node-schedule 对无法解析的 cron 返回 null 而非抛错（2026-10-17 审计 L1）：此处原来只 catch 异常，
+    // 于是把 null 存进句柄表并回报「已设置」，重启恢复也一样 —— 面板/列表都显示已排期，实际永不触发。
+    if (!job) {
+      this.logger?.('warn', `[kb] 定时刷新 cron 非法，未注册：${cron}`)
+      return null
+    }
+    this._refreshJobs.set(docId, job)
+    return job
   }
 
   /** 重启恢复：遍历带 refreshCron 的 doc 重新注册 job。在 apps 启动恢复时调一次。

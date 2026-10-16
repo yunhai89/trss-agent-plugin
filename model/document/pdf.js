@@ -6,6 +6,12 @@
  */
 
 import fs from 'node:fs'
+import { hostPathError } from './path-guard.js'
+
+/** 单文件大小上限：pdfjs 会把整份文件读进内存，先挡超大文件（审计 A2） */
+const MAX_PDF_BYTES = 64 * 1024 * 1024
+/** 全文提取页数上限（正文只回传前 10000 字） */
+const MAX_TEXT_PAGES = 200
 
 export const readPdfTool = {
   name: 'read_pdf',
@@ -23,7 +29,14 @@ export const readPdfTool = {
   async execute(params, ctx) {
     const p = String(params?.path || '').trim()
     if (!p) return { error: '请提供 PDF 文件路径' }
+    // 越界路径（config.yaml/.env/data/logs 等）必须先拒：category=query 对任意群成员免审批
+    const guard = hostPathError(p, { label: 'PDF 文件' })
+    if (guard) return { error: guard }
     if (!fs.existsSync(p)) return { error: `文件不存在：${p}` }
+    try {
+      const st = fs.statSync(p)
+      if (st.size > MAX_PDF_BYTES) return { error: `PDF 过大：${(st.size / 1048576).toFixed(1)}MB（上限 ${MAX_PDF_BYTES / 1048576}MB）` }
+    } catch { /* stat 失败交给 readPdf 报错 */ }
     const maxPages = Math.min(20, Math.max(1, Number(params?.maxPages) || 5))
     try {
       return await readPdf(p, maxPages, ctx)
@@ -88,8 +101,10 @@ async function readPdf(filePath, maxPages, ctx) {
     await page.cleanup()
   }
 
-  // 剩余页：仅提取文本（不渲染，省资源）
-  for (let i = renderCount + 1; i <= numPages; i++) {
+  // 剩余页：仅提取文本（不渲染，省资源）；页数设上限——正文只回传前 10000 字（见下方 slice），
+  // 扫完整本几百页 PDF 纯属浪费 CPU/内存（审计 A2 放大器）
+  const textPageEnd = Math.min(numPages, renderCount + MAX_TEXT_PAGES)
+  for (let i = renderCount + 1; i <= textPageEnd; i++) {
     const page = await doc.getPage(i)
     const tc = await page.getTextContent()
     fullText += '\n\n' + tc.items.map((item) => item.str || '').join(' ')

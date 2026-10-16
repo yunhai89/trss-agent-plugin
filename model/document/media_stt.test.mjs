@@ -123,7 +123,8 @@ await test('沙箱档：模板缺 ffmpeg（exit 127）→ 可读失败点名模�
 await test('工具层：mode=e2b 但沙箱未就绪 → 拒绝转录（不在宿主提取）', async () => {
   // 工具先校验 STT apiKey：测试注入（config 进程内 set，不落盘）
   Config.set('agent', { ...(Config.get().agent || {}), stt: { apiKey: 'test-key' } })
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stt-fc-'))
+  // 同上：夹具必须在插件 data/temp 内（路径白名单），否则测不到沙箱 fail-closed 分支
+  const dir = fs.mkdtempSync(path.join(Config.path.temp, 'stt-fc-'))
   const input = path.join(dir, 'clip.mp4')
   fs.writeFileSync(input, 'fake video')
   try {
