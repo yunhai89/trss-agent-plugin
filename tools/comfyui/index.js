@@ -26,6 +26,7 @@ import { defineToolPack, defineTool, param, ok, fail } from '../../model/toolkit
 import Config from '../../utils/Config.js'
 import Log from '../../utils/Log.js'
 import { resolveMedia } from '../../model/media/resolve.js'
+import { assertUrlAllowed } from '../../model/stagehand/guard.js'
 import { newClient } from './api.js'
 import { listWorkflowFiles, getObjectInfo, DEFAULT_WORKFLOW_DIR } from './discover.js'
 import { availableModels, missingModels, listWorkflowsSummary, prepareWorkflow, uploadWorkflowInputs, executeGraph, formatNodeErrors } from './run.js'
@@ -45,6 +46,34 @@ function makeClient(c, ctx) {
   return newClient({ host: c.host, apiKey: c.apiKey, cloud: c.cloud, fetcher: ctx?.fetcher || globalThis.fetch })
 }
 
+/** 输入图 URL 直取的上限：防 SSRF + 防超大响应打爆内存（模型可被诱导填内网/元数据地址或大文件 URL） */
+const INPUT_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+const INPUT_IMAGE_TIMEOUT_MS = 30000
+
+/** 流式读取响应体，超过 cap 立即取消并返回 null；无 body 流（测试桩）时退回 arrayBuffer 再校验长度 */
+async function readCapped(res, cap) {
+  const reader = res.body?.getReader?.()
+  if (!reader) {
+    const buf = Buffer.from(await res.arrayBuffer())
+    return buf.length > cap ? null : buf
+  }
+  const chunks = []
+  let total = 0
+  let over = false
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value?.length || 0
+      if (total > cap) { over = true; break }
+      chunks.push(Buffer.from(value))
+    }
+  } finally {
+    if (over) await reader.cancel().catch(() => {})
+  }
+  return over ? null : Buffer.concat(chunks, total)
+}
+
 /** 取输入图 buffer：附件名 / URL / __last__(最近一张图片附件) */
 async function resolveInputImage(ref, ctx, fetcher) {
   const media = Array.isArray(ctx?.media) ? ctx.media : []
@@ -55,13 +84,19 @@ async function resolveInputImage(ref, ctx, fetcher) {
   } else if (/^https?:\/\//i.test(String(ref))) {
     const f = fetcher || globalThis.fetch
     if (f) {
-      try {
-        const r = await f(ref)
-        if (r.ok) {
-          const buf = Buffer.from(await r.arrayBuffer())
-          pick = { buffer: buf, name: String(ref).split('/').pop()?.split('?')[0] || 'input.png' }
-        }
-      } catch { /* noop */ }
+      // SSRF 门禁：拒绝本机/内网/元数据等地址（请求由宿主进程发出，不能由模型任意指定目标）
+      const allowed = await assertUrlAllowed(String(ref)).catch(() => ({ ok: false, reason: '校验异常' }))
+      if (!allowed.ok) logger('warn', `input_image URL 被拒绝（${allowed.reason}）：${ref}`)
+      else {
+        try {
+          const r = await f(ref, { signal: AbortSignal.timeout(INPUT_IMAGE_TIMEOUT_MS) })
+          if (r.ok) {
+            const buf = await readCapped(r, INPUT_IMAGE_MAX_BYTES)
+            if (!buf) logger('warn', `input_image 超过 ${INPUT_IMAGE_MAX_BYTES} 字节上限，已丢弃：${ref}`)
+            else pick = { buffer: buf, name: String(ref).split('/').pop()?.split('?')[0] || 'input.png' }
+          }
+        } catch { /* noop */ }
+      }
     }
   } else {
     pick = imgs.find((m) => m.name === ref || m.filename === ref) || null

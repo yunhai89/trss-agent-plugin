@@ -6,6 +6,14 @@
 
 export const ACCENT = '#3b82f6' // 主强调色（蓝）
 
+/**
+ * 文档级 CSP：卡片是纯静态 HTML（样式内联、图片 base64），不需要脚本/外链/网络请求。
+ * 渲染的正文来自 LLM 回复（可能被工具结果或网页内容间接注入），故这里默认全禁：
+ * 即便有原始 HTML 漏过 md 转义，也执行不了脚本、发不出请求、加载不了远程资源。
+ * （另一道防线：mdToHtml 转义原始 HTML；独立 puppeteer 路径再 setJavaScriptEnabled(false)。）
+ */
+export const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; script-src 'none'; object-src 'none'; frame-src 'none'; connect-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'">`
+
 export const THEME_CSS = `
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body {
@@ -223,6 +231,7 @@ export function buildChatHtml({ messages = [], head = '', tokens, reasoningToken
   }
   return `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+${CSP_META}
 <style>${THEME_CSS}${CHAT_CSS}</style></head>
 <body><div id="container" class="chat">
 <div class="chat-head">${_esc(head)}</div>

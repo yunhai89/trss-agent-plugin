@@ -78,7 +78,8 @@ export function formatReplies(replies) {
 
 function opt(ctx) {
   const m = ctx?.miyoushe || {}
-  return { cookie: m.cookie || '', fetcher: ctx?.fetcher }
+  // 透传 ctx.signal：工具调用被取消/超时时能中断在途请求（client 内另有默认超时兜底）
+  return { cookie: m.cookie || '', fetcher: ctx?.fetcher, signal: ctx?.signal }
 }
 
 export const miyousheSearchTool = {

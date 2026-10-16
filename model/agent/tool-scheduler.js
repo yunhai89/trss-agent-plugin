@@ -39,7 +39,8 @@ export const READ_PARALLEL_TOOLS = new Set([
   // 只读媒体读取（read_pdf 会发送渲染图 → 不在此列）
   'read_excel', 'read_attachment', 'transcribe_media',
   // 只读第三方内容检索
-  'miyoushe_search', 'miyoushe_post', 'miyoushe_replies',
+  // miyoushe_post 会发表评论（写外部状态）→ 不在此列，曾误列为只读并发
+  'miyoushe_search', 'miyoushe_replies',
   // 定时任务只读
   'reminder_list',
 ])

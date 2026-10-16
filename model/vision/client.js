@@ -35,7 +35,7 @@ export const DEFAULT_VIDEO_DESCRIBE = [
 ].join('\n')
 
 export class VisionService {
-  constructor({ provider, model, protocol = 'openai', describePrompt, maxTokens = 1024, thinking = null, temperature = null, videoCapable, logger = () => {} } = {}) {
+  constructor({ provider, model, protocol = 'openai', describePrompt, maxTokens = 1024, thinking = null, temperature = null, videoCapable, logger = () => {}, timeoutMs = 180_000 } = {}) {
     if (!provider) throw new Error('VisionService 需要 provider')
     if (!model) throw new Error('VisionService 需要 model')
     this.provider = provider
@@ -46,6 +46,7 @@ export class VisionService {
     this.thinking = thinking // 原生 thinking 控制：{type:'enabled'|'disabled'}；来自「模型列表」该模型的 thinking 设置
     this.temperature = temperature
     this.videoCapable = videoCapable !== false // 该视觉模型是否支持视频输入（caps.video；未传则保持旧行为=尝试）
+    this.timeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 180_000 // 单次调用总预算：视觉通道挂起/代理黑洞时不得无限占用会话（含 provider 内部重试）
     this.logger = logger
   }
 
@@ -78,6 +79,7 @@ export class VisionService {
         messages: [{ role: 'user', content }],
         max_tokens: this.maxTokens,
         stream: false,
+        signal: AbortSignal.timeout(this.timeoutMs),
         ...this._genOpts(),
       })
     } catch (e) {
@@ -123,6 +125,7 @@ export class VisionService {
         messages: [{ role: 'user', content }],
         max_tokens: Number(maxTokens) > 0 ? Number(maxTokens) : this.maxTokens,
         stream: false,
+        signal: AbortSignal.timeout(this.timeoutMs),
         ...this._genOpts(),
       })
     } catch (e) {
@@ -151,6 +154,7 @@ export class VisionService {
         messages: [{ role: 'user', content }],
         max_tokens: maxTokens || this.maxTokens,
         stream: false,
+        signal: AbortSignal.timeout(this.timeoutMs),
         ...this._genOpts(),
       })
     } catch (e) {

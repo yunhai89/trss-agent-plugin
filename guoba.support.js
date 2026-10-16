@@ -217,6 +217,12 @@ export function supportGuoba() {
         { field: 'agent.vision.enable', label: '启用视觉子模型', bottomHelpMessage: '主模型不支持视觉时，由它把图转文本', component: 'Switch' },
         { field: 'agent.vision.model', label: '视觉模型 ID', component: 'Input', componentProps: { placeholder: 'mimo-2.5' } },
         { field: 'agent.vision.apiKey', label: '视觉模型 API Key', bottomHelpMessage: '空则复用主 apiKey', component: 'Input' },
+        { field: 'agent.vision.allowPrivateHosts', label: '允许抓取内网图片', bottomHelpMessage: '默认关（防 SSRF）：关闭时拒绝本机/内网/元数据地址的图片；仅本地图床调试时需要打开', component: 'Switch' },
+
+        // —— 情境感知 ——
+        { label: '情境感知', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.perception.sparseInject', label: '稀薄上下文补全群聊', bottomHelpMessage: '新会话/历史很少时，额外注入一小段近期群聊记录，避免模型对群内近况一无所知。默认开', component: 'Switch' },
+        { field: 'agent.perception.sparseThreshold', label: '补全触发阈值(条)', bottomHelpMessage: '会话历史少于该条数时触发上面的补全（默认 6）', component: 'InputNumber', componentProps: { min: 0, max: 100 } },
 
         // —— 深度研究 ——
         { label: '深度研究', component: 'SOFT_GROUP_BEGIN' },
@@ -357,7 +363,8 @@ export function supportGuoba() {
           if (p === 'agent.shell.intercept' && typeof val === 'string') {
             val = val.split('\n').map((s) => String(s).trim()).filter(Boolean)
           }
-          setPath(cfg, p, val)
+          // 原型污染防护：非法路径段（__proto__/prototype/constructor）单独记录并跳过，不影响其余字段
+          try { setPath(cfg, p, val) } catch (e) { notes.push(`${p} 被拒：${e?.message || e}`) }
         }
         // 互斥：开启「思考自动决策」时自动关闭手动「深度思考」（agent.thinking=null），避免两套并存
         if (cfg.agent?.thinkingAuto?.enable === true) cfg.agent.thinking = null

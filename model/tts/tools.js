@@ -126,6 +126,13 @@ export function makeTtsSpeakTool(service) {
       const sent = await sendVoice(ctx, r.file)
       if (!sent) return { error: '语音已生成但发送失败（当前会话不支持语音消息？文件已保留在 data/tts/out）', file: r.file }
       const out = { ok: true, sent: true, voice: r.voice, tier: r.tier, mode: r.mode }
+      // 截断信息必须回传：max 档对超长文本会按段上限截断（service 已返回 truncated/totalChars/chars），
+      // 工具若丢弃它，模型与用户都会以为整段都念了。
+      if (r.truncated) {
+        out.truncated = true
+        out.chars = r.chars
+        out.totalChars = r.totalChars
+      }
       if (r.vector) out.emotion = r.vector
       if (r.segments) out.segments = r.segments.length
       if (r.reason) out.emotionReason = r.reason

@@ -19,12 +19,21 @@ export class StateMaintenance {
   /**
    * @param {object} opts { dao, emotion, cfg:()=>object, trace? }
    */
-  constructor({ dao, emotion, cfg, trace = null } = {}) {
+  constructor({ dao, emotion, concerns = null, cfg, trace = null } = {}) {
     if (!dao) throw new Error('StateMaintenance 需要 dao')
     this.dao = dao
     this.emotion = emotion
+    this.concerns = concerns
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.trace = trace
+  }
+
+  /** 心事过期：TTL = resentment.halfLifeDays × 2（§6.7）。统一走 ConcernManager.expireStale，
+   *  使面板「怨气半衰期(天)」生效（此前本文件硬编码 21 天 → 该配置项是死配置）。 */
+  async _expireConcerns({ botId, groupId, now }) {
+    if (this.concerns?.expireStale) return await this.concerns.expireStale({ botId, groupId, now })
+    const days = Math.max(1, Number(this._cfgFn().resentment?.halfLifeDays) || 7) * 2
+    return this._expire('ss_concerns', "status='active' AND updated_at<?", [now - days * 86400000], now)
   }
 
   /** 对一个群跑维护。返回统计。 */
@@ -41,7 +50,7 @@ export class StateMaintenance {
       const rt = cfg.retention || {}
       r.expired += await this._expire('ss_expectations', "status IN ('pending','uncertain') AND expires_at<?", [now - (rt.resolvedExpectationDays ?? 7) * 86400000], now)
       r.expired += await this._expire('ss_emotions', "status='resolved' AND resolved_at<?", [now - (rt.resolvedEmotionDays ?? 7) * 86400000], now)
-      r.expired += await this._expire('ss_concerns', "status='active' AND updated_at<?", [now - 21 * 86400000], now)
+      r.expired += await this._expireConcerns({ botId, groupId, now })
       r.expired += await this._expire('ss_reflections', "status='active' AND expires_at<?", [now], now)
       // 3. 负残留衰减（§20.4：无新证据支持 → 缓慢归零）
       const staleCutoff = now - 3 * 86400000

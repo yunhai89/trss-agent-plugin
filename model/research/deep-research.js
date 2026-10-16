@@ -182,7 +182,10 @@ export class DeepResearch {
     // 如果有缺口（上轮未覆盖），优先研究缺口
     const subs = state.brief._gaps?.length ? state.brief._gaps : state.brief.subquestions || []
     // 过滤掉已有充分发现的子问题（简单判断：findings 中已有 result 含子问题关键词）
-    const coveredText = state.findings.map((f) => f.task + ' ' + f.result).join(' ')
+    // 只用 f.result：f.task 就是子问题原文，一旦拼进去，任何被派过的子问题都会「自证已覆盖」，
+    // 缺口列表（state.brief._gaps ← coverage.gaps）会在下一轮被自己过滤光 → 外层重规划永不发生。
+    // 口径与 getCoverageReport（state.js）保持一致。
+    const coveredText = state.findings.map((f) => f.result || '').join(' ')
     const remaining = subs.filter((sq) => {
       const kw = (sq.match(/[一-鿿]{2,}|[a-zA-Z]{3,}/g) || []).slice(0, 3)
       return kw.length === 0 || !kw.every((k) => coveredText.includes(k))
@@ -321,7 +324,18 @@ export class DeepResearch {
       provider: this.provider, model: this.model,
       query, report, citations: state.getAllCitations(), signal,
     }).catch(() => null)
-    return { quick, llm }
+    // 展平口径：消费方（apps/research.js:155-158 与 render.js 徽章）读扁平的 pass/score/dimensions。
+    // 曾只返回 {quick, llm}（llm={scores,pass,rationale}、quick={issues,passed}），导致 evaluation.pass
+    // 恒 undefined → 未通过的报告也显示「评估通过」、五维分数整体丢弃。
+    const dims = llm?.scores || null
+    const nums = dims ? Object.values(dims).filter((n) => typeof n === 'number') : []
+    return {
+      quick,
+      llm, // 保留嵌套结构（测试与调试按 evaluation.llm.pass 断言）
+      pass: llm ? llm.pass === true : false, // judge 不可用时保守判未通过，不冒充「已通过」
+      score: nums.length ? Math.round((nums.reduce((a, b) => a + b, 0) / nums.length) * 100) : null,
+      dimensions: dims,
+    }
   }
 
   // ═══ 工具方法 ═══

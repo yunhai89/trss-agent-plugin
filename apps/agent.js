@@ -71,7 +71,7 @@ import {
 import { VisionService, describeImages } from '../model/vision/index.js'
 import { getStickerManager } from '../model/sticker/manager.js'
 import { isStickerOnly, stripMarkers } from '../model/sticker/parser.js'
-import { redactSecrets } from '../model/agent/redact.js'
+import { redactSecrets, redactSafeCut } from '../model/agent/redact.js'
 import { randomUUID } from 'node:crypto'
 import devLog from '../utils/DevLog.js'
 import { ReplySender, createRunQueues, makeProgressGate } from '../model/agent/reply-sender.js'
@@ -281,9 +281,11 @@ function pendingStickerStart(s) {
   return -1
 }
 
-export const makeDeltaStreamer = (safeReply, { enabled = false, minIntervalMs = 1200, minChars = 24 } = {}) => {
+export const makeDeltaStreamer = (safeReply, { enabled = false, minIntervalMs = 1200, minChars = 24, redact = redactSecrets } = {}) => {
+  const doRedact = typeof redact === 'function' ? redact : (s) => s
   let raw = ''
-  let sentLen = 0
+  let sentLen = 0 // 已发出的脱敏文本对应的 raw 前缀长度（deliveredEnd 也用它：调用方按 raw 坐标取剩余正文）
+  let sentSafeLen = 0 // 已发出脱敏文本的长度（差分在脱敏后的坐标系里做）
   let lastAt = 0
   let queuedAny = false
   let failed = false
@@ -320,16 +322,23 @@ export const makeDeltaStreamer = (safeReply, { enabled = false, minIntervalMs = 
   const flush = (force = false) => {
     if (!enabled) return
     if (!force && !(raw.length - sentLen >= minChars && Date.now() - lastAt >= minIntervalMs)) return
-    let next = raw.slice(sentLen)
-    if (!next) return
+    // 可发送的 raw 边界：尾部若「可能是不完整密钥」先扣住不发（收尾时无此顾虑）。
+    // 逐片调用 redactSecrets 必然漏掉跨片断裂的密钥（分片边界由 minChars/minIntervalMs 决定），
+    // 故这里改成：先定安全切点 → 对【完整前缀】脱敏 → 与上次的脱敏结果差分出新片段。
+    // redactSecrets 对前缀单调（同一处替换恒为 ***），因此差分不会错位、已发内容不会被推翻。
+    let cut = force ? raw.length : Math.min(raw.length, doRedact === redactSecrets ? redactSafeCut(raw) : raw.length)
     // 跨分片防泄漏：结尾若可能是 sticker 标记的【未闭合前缀】（含 `[`、`[s`、`[sti` 等），
     // 暂缓发送等后续增量补齐；force（收尾）时丢弃悬空前缀，绝不把 [sticker:x] 流给用户。
-    const hold = pendingStickerStart(next)
-    if (hold !== -1) next = next.slice(0, hold)
-    if (!next) return
-    const chunk = stripMarkers(redactSecrets(next))
-    sentLen += next.length
+    // 判定在 raw 坐标上做（标记字符不受脱敏影响），且不推进 sentLen → 收尾后仍可由调用方补发。
+    const hold = pendingStickerStart(raw.slice(sentLen, cut))
+    if (hold !== -1) cut = sentLen + hold
+    if (cut <= sentLen) return
+    const safe = doRedact(raw.slice(0, cut))
+    const part = safe.slice(sentSafeLen)
+    sentSafeLen = safe.length
+    sentLen = cut
     lastAt = Date.now()
+    const chunk = stripMarkers(part)
     if (chunk.trim()) enqueueChunk(chunk, sentLen)
   }
 
@@ -944,7 +953,9 @@ async function _buildRuntime(scope) {
   if (cfg.toolEvo?.enable !== false) {
     try {
       const te = await import('../model/toolEvo/index.js')
-      await te.initDb({ dir: path.resolve(PLUGIN_ROOT, path.dirname(cfg.toolEvo?.dbPath || 'data/evolution/tevo.db')) })
+      // 库名同样尊重 toolEvo.dbPath（此前只取 dirname，配 custom/other.db 仍写 tevo.db）
+      const teDbRel = cfg.toolEvo?.dbPath || 'data/evolution/tevo.db'
+      await te.initDb({ dir: path.resolve(PLUGIN_ROOT, path.dirname(teDbRel)), file: path.basename(teDbRel) })
       const toolEvoRegistry = new te.ToolEvoRegistry({ artifactsDir: path.resolve(PLUGIN_ROOT, cfg.toolEvo?.artifactsDir || 'data/evolution/tools') })
       // 兼容迁移：为旧版本回填内容哈希/源码，使既有 stable 工具升级后仍可校验与注入
       await toolEvoRegistry.backfillFromArtifacts().catch((e) => Log.warn('[toolEvo] 旧制品哈希回填失败', e?.message || e))
@@ -1485,6 +1496,20 @@ Config.startWatch() // 应用入口启动配置文件监听（不在 Config impo
 // 供 apps/research.js 等复用已装配的 provider / 工具集
 export { getRuntime }
 
+/**
+ * 调度条目归属判定（越权防护）：主人可操作全部；其余人只能操作
+ * 「自己创建（userId）」「本会话归属（scopeUserId，群共享模式下即本群共享任务）」的条目。
+ * 判据与写入端一致：reminder_set / schedule_task 写入的是 ctx.scopeUserId。
+ */
+function ownsScheduleRecord(rec, ctx) {
+  if (!rec || !ctx) return false
+  if (ctx.isMaster) return true
+  const owner = String(rec.userId ?? '')
+  if (!owner) return false
+  const mine = [ctx.userId, ctx.scopeUserId].filter((x) => x != null && x !== '').map(String)
+  return mine.includes(owner)
+}
+
 function ctxOf(e) {
   const isMaster = !!e.isMaster
   let role = 'member'
@@ -1932,20 +1957,39 @@ export class Chat extends plugin {
         )
       },
       list: (userId) => rt.schedule.listByUser(userId),
-      cancel: (id) => rt.schedule.cancel(id),
+      // 取消前校验归属：直接按 id 取消曾是越权路径（任意用户枚举 5 位顺序号即可删他人提醒/任务链）
+      cancel: async (id) => {
+        const all = await rt.schedule.listAll()
+        const rec = all.find((r) => String(r.id) === String(id))
+        if (!rec) return false
+        if (!ownsScheduleRecord(rec, ctx)) throw new Error('无权取消该提醒/任务（仅创建者或主人可取消）')
+        await rt.schedule.cancel(id)
+        return true
+      },
     }
     // 定时任务链：schedule_task 工具经此调 rt.schedule.add（type=task + cron + makeFireDispatch，到点跑 Agent + 发结果）
     ctx.cronTask = {
       add: (info) => {
         const cron = info.cron || parseCron(info.when)
-        if (!cron) return { error: `无法识别时间「${info.when || ''}」，支持：每天8点/每2小时/工作日9点/每周一8点30/每30分钟` }
+        if (!cron) {
+          return { error: `无法识别时间「${info.when || ''}」，支持：每天8点/每2小时/工作日9点/每周一8点30/每30分钟。若写了多个时间点且分钟不同（如 8:30和20:15），请分多条任务创建。` }
+        }
         return rt.schedule.add({ type: 'task', cron, prompt: info.prompt, userId: ctx.scopeUserId, groupId: ctx.groupId || null, selfId: ctx.selfId }, makeFireDispatch(rt))
       },
       list: async () => {
         const all = await rt.schedule.listAll()
-        return all.filter((r) => r.type === 'task')
+        // 只回本会话（或主人）拥有的任务链：曾返回全部 type='task'（含他人私聊任务），
+        // 普通成员据此可枚举并读取/取消他人任务
+        return all.filter((r) => r.type === 'task' && ownsScheduleRecord(r, ctx))
       },
-      cancel: (id) => rt.schedule.cancel(id),
+      cancel: async (id) => {
+        const all = await rt.schedule.listAll()
+        const rec = all.find((r) => String(r.id) === String(id))
+        if (!rec) return false
+        if (!ownsScheduleRecord(rec, ctx)) throw new Error('无权取消该任务（仅创建者或主人可取消）')
+        await rt.schedule.cancel(id)
+        return true
+      },
     }
     // 工具运行时能力（沙箱执行面 + 视觉子模型）：沙箱给 terminal/沙箱化工具（全员可用，无审批无黑名单，只有成本闸）；
     // 视觉给媒体类工具（bilibili__analyze 看视频等）
@@ -2136,7 +2180,11 @@ export class Chat extends plugin {
     const rs = makeReplyStream(this.e, { progress: wantProgress, recall: cfg.progressRecall ?? 3, shortCircuitTools: ['clarify'], replyQueue, gate: progressGate })
     // 流式：仅文本回复模式下逐字发增量（图片模式需整段渲染，不流式）；onDelta 始终用于观测计数
     const replyModeEarly = cfg.reply?.mode || 'image'
-    const streamer = makeDeltaStreamer(safeReply, { enabled: wantStream && replyModeEarly === 'text' })
+    const streamer = makeDeltaStreamer(safeReply, {
+      enabled: wantStream && replyModeEarly === 'text',
+      // 与最终整段发送同一口径（第 2248 行）：关闭脱敏时不必做尾部暂存，流式节奏不受影响
+      redact: cfg.redactSecrets === false ? null : redactSecrets,
+    })
     let __deltaEvents = 0, __deltaChars = 0, __reasonChars = 0
 
     // —— diagram 示意图交付（应用层发送，工具绝不直接 e.reply）——
@@ -2674,6 +2722,8 @@ export class Chat extends plugin {
 
   async promptRollback() {
     const key = this.e.msg.replace(/^#回滚\s+/, '').trim()
+    // 键白名单：此前 `#回滚 ../../../x` 会 path.join 越出 promptDir 并 unlinkSync 删掉任意 .json
+    if (!/^[A-Za-z0-9_-]+$/.test(key)) { await this.e.reply('❌ 模板键只能是字母/数字/下划线/短横线，如 #回滚 agent'); return true }
     let rt; try { rt = await getRuntime() } catch (e) { await this.e.reply(String(e?.message || e)); return true }
     const file = path.join(rt.promptDir, `${key}.json`)
     let removed = false
@@ -2689,7 +2739,9 @@ export class Chat extends plugin {
     let rt; try { rt = await getRuntime() } catch (e) { await this.e.reply(String(e?.message || e)); return true }
     const cfg = Config.get().agent || {}
     if (!rt.traceStore?.size) { await this.e.reply('TraceStore 暂无对话轨迹，先正常聊几轮再进化（每轮对话自动采迹）。'); return true }
-    if (!TEMPLATES[key] && !rt.promptRegistry.get(key)) { await this.e.reply(`未知 prompt 模板：${key}（可用：${Object.keys(TEMPLATES).join(', ')}）`); return true }
+    // 引擎（evolveTemplate）只认内置 TEMPLATES，registry 里的非内置键（data/evolution/prompts/*.json 覆盖文件）
+    // 进不去：此处必须同口径拒绝，否则先回「开始进化」再回「未知模板」，且该分支永远走不通
+    if (!TEMPLATES[key]) { await this.e.reply(`未知 prompt 模板：${key}（可进化：${Object.keys(TEMPLATES).join(', ')}）`); return true }
     await this.e.reply(`⏳ 开始离线进化 prompt「${key}」：采样轨迹 → GEPA 迭代 → LLM-as-judge 评分（约 1-3 分钟、消耗较多 token，期间勿重复触发）…`)
     try {
       const samples = rt.traceStore.sample(8)
@@ -2707,6 +2759,11 @@ export class Chat extends plugin {
       }
       const result = await evolveTemplate({ templateKey: key, provider: rt.provider, model: cfg.model, evalset, judge, iterations: 2, populationSize: 3, logger: Log.tag('evolve') })
       if (!result?.best) { await this.e.reply('进化未产出有效版本。'); return true }
+      // 产出与当前文本相同 → 无实质进化：不落盘（否则只是刷一个新的版本号）
+      if (result.unchanged || String(result.best.text) === String(TEMPLATES[key]?.system || '')) {
+        await this.e.reply(`ℹ️ 本轮进化未产出与当前不同的版本（评分 ${Number(result.best.score ?? 0).toFixed(3)}），已跳过写入。可先多聊几轮积累轨迹后再试。`)
+        return true
+      }
       // 回归门禁：best 得分不得低于 baseline（默认允许 0.01 波动）且需达到最低分，否则不落盘
       const gate = regressionGate(
         { meanScore: result.best.score ?? 0 },
@@ -2825,15 +2882,34 @@ export class Chat extends plugin {
   // —— 模型切换 ——
   async switchModel() {
     const id = this.e.msg.replace(/^#模型切换\s+/, '').trim()
+    if (!id) { await this.e.reply('用法：#模型切换 <模型名>'); return true }
     const rt = await getRuntime()
-    rt.agentConfig.model = id
     try {
       const c = Config.get()
       if (!c.agent) c.agent = {}
-      c.agent.model = id
+      // 引用制（配置了 agent.providerId + llmProviders/llmModels）下，单一真源是 agent.modelId：
+      // 只写镜像字段 agent.model 会在 Config.save() → syncBaseModel 时被按当前条目回填覆盖，
+      // 表现为「回复已切换、重载/重启后回退」（复核 #25/#26）。故按模型名反查条目并改引用。
+      if (c.agent.providerId) {
+        const models = Array.isArray(c.agent.llmModels) ? c.agent.llmModels : []
+        const hit = models.find((m) => m && m.model === id && m.providerId === c.agent.providerId)
+          || models.find((m) => m && m.model === id)
+        if (!hit) {
+          const names = [...new Set(models.map((m) => m?.model).filter(Boolean))]
+          await this.e.reply(`❌ 未找到模型：${id}\n当前「厂商/模型列表」可用模型名：${names.length ? names.join('、') : '（空，请先在面板添加）'}\n如需指定列表之外的任意模型名，请先清空 agent.providerId（改用扁平配置）。`)
+          return true
+        }
+        c.agent.modelId = hit.id
+        if (hit.providerId && hit.providerId !== c.agent.providerId) c.agent.providerId = hit.providerId
+      } else {
+        c.agent.model = id
+      }
+      rt.agentConfig.model = id // 立即生效（与落盘同一对象；引用制下 save 会同步镜像字段）
       Config.save()
     } catch (e) {
       Log.warn('模型切换持久化失败', e?.message || e)
+      await this.e.reply(`⚠ 已临时切换模型：${id}，但写入配置失败（${e?.message || e}），重启后会回退`)
+      return true
     }
     await this.e.reply(`已切换模型：${id}`)
     return true
@@ -2913,19 +2989,21 @@ export class Chat extends plugin {
   /** 逐个连接验证 + 注册工具；成功的写入配置持久化（触发热加载）。返回结果行数组。 */
   async _applyMcpServers(servers) {
     const rt = await getRuntime()
-    const cfg = Config.get()
-    cfg.agent = cfg.agent || {}
-    cfg.agent.mcp = cfg.agent.mcp || {}
-    cfg.agent.mcp.servers = cfg.agent.mcp.servers || {}
     const results = []
-    let anyOk = false
+    const okServers = []
+    // 冲突检测基线：连接验证是秒级 await，期间 fs.watch 热加载或面板保存都可能替换配置对象。
+    // Config.get() 返回的是活引用 _data，而 Config.save(data) 是整份覆盖写（无 merge），
+    // 所以绝不能在 await 之前取快照、await 之后原样写回（会吞掉期间的所有并发修改，复核 #42）。
+    // 基线必须是**深拷贝**：就地修改同一对象时，活引用会跟着一起变，冲突就检测不出来。
+    const before = (() => {
+      try { return JSON.parse(JSON.stringify(Config.get()?.agent?.mcp?.servers || {})) } catch { return {} }
+    })()
     for (const [name, scfg] of Object.entries(servers)) {
       try {
         // add() 会连接 + 注册工具 + 验证可用（失败 entry.status='error'）
         const entry = await rt.mcp.add(name, { ...scfg, enabled: true })
         if (entry.status === 'connected') {
-          cfg.agent.mcp.servers[name] = scfg
-          anyOk = true
+          okServers.push([name, scfg])
           results.push(`✅ ${name}：已连接，注册 ${entry.tools} 个工具（已写入配置）`)
         } else {
           results.push(`❌ ${name}：${entry.error || entry.status}（未写入配置）`)
@@ -2934,7 +3012,21 @@ export class Chat extends plugin {
         results.push(`❌ ${name}：${e?.message || e}（未写入配置）`)
       }
     }
-    if (anyOk) Config.save(cfg) // 持久化成功的 + 触发热加载
+    if (okServers.length) {
+      const cfg = Config.get() // await 之后再取快照
+      cfg.agent = cfg.agent || {}
+      cfg.agent.mcp = cfg.agent.mcp || {}
+      cfg.agent.mcp.servers = cfg.agent.mcp.servers || {}
+      for (const [name, scfg] of okServers) {
+        const cur = cfg.agent.mcp.servers[name]
+        if (cur && JSON.stringify(cur) !== JSON.stringify(before[name])) {
+          results.push(`⚠ ${name}：配置在连接验证期间被其它操作修改，已保留较新的那份（未覆盖）`)
+          continue
+        }
+        cfg.agent.mcp.servers[name] = scfg
+      }
+      Config.save(cfg) // 持久化成功的 + 触发热加载
+    }
     return results
   }
 
@@ -3186,7 +3278,7 @@ export class Chat extends plugin {
     const all = await rt.schedule.listAll()
     // 展示：所有任务链（群级）+ 仅本人的提醒。修复「AI 用 reminder_set 建了提醒、web 看得到、
     // #定时任务列表 却返回暂无」——此前只 filter(type==='task')，把 type='reminder' 的记录全漏掉。
-    const list = selectScheduleForList(all, { userId: ctx.userId, scopeUserId: ctx.scopeUserId })
+    const list = selectScheduleForList(all, { userId: ctx.userId, scopeUserId: ctx.scopeUserId, isMaster: ctx.isMaster })
     if (!list.length) return this.e.reply('暂无定时任务/提醒（#定时任务 <时间> <任务> 创建；或用 AI 帮你设）'), true
     await this.e.reply(`定时任务 / 提醒（${list.length}）：\n${formatScheduleList(list).join('\n')}`)
     return true
@@ -3196,6 +3288,10 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     const id = (this.e.msg.match(/^#取消定时任务\s+(\S+)/) || [])[1] || ''
     if (!id) return this.e.reply('用法：#取消定时任务 <id>（id 见 #定时任务列表）'), true
+    const all = await rt.schedule.listAll()
+    const rec = all.find((r) => String(r.id) === String(id))
+    if (!rec) return this.e.reply(`未找到 #${id}（用 #定时任务列表 查看）`), true
+    if (!ownsScheduleRecord(rec, ctxOf(this.e))) return this.e.reply('无权取消该任务（仅创建者或主人可取消）'), true
     await rt.schedule.cancel(id)
     await this.e.reply(`已取消定时任务 #${id}`)
     return true
@@ -3231,7 +3327,13 @@ export class Chat extends plugin {
 
   async cancelReminder() {
     const id = this.e.msg.match(/\d+/)?.[0]
+    if (!id) return this.e.reply('用法：#取消提醒 <id>（id 见 #我的提醒）'), true
     const rt = await getRuntime()
+    const all = await rt.schedule.listAll()
+    const rec = all.find((r) => String(r.id) === String(id))
+    if (!rec) return this.e.reply(`未找到 #${id}（用 #我的提醒 查看）`), true
+    // 归属校验：此前无权限、无归属校验 → 任意用户可按 5 位顺序号取消他人提醒与主人的周期任务链
+    if (!ownsScheduleRecord(rec, ctxOf(this.e))) return this.e.reply('无权取消该提醒/任务（仅创建者或主人可取消）'), true
     await rt.schedule.cancel(id)
     await this.e.reply(`已取消提醒 #${id}`)
     return true

@@ -220,6 +220,10 @@ export class TaskStore {
   async event({ taskId, kind, callId = null, attempt = 0, phase = null, stopReason = null, completion = null, payload = null }) {
     const now = Date.now()
     return this._tx(async () => {
+      // 任务不存在 → not_found，不写孤立事件（与 cancel/resume/get/remove/recordDelivery 同契约；
+      // 否则 begin 失败/传入错 taskId 时会留下无主 task_events，调用方却以为已记账）
+      const owner = await getP(this._db, `SELECT 1 AS x FROM tasks WHERE task_id = ?`, [taskId])
+      if (!owner) return { ok: false, code: 'not_found', inserted: false }
       const info = await runP(this._db, `INSERT OR IGNORE INTO task_events(task_id, kind, call_id, attempt, phase, stop_reason, completion, payload_json, created_at) VALUES (?,?,?,?,?,?,?,?,?)`, [
         taskId, kind, callId, Math.max(0, Number(attempt) || 0), phase, stopReason, completion, payload == null ? null : JSON.stringify(payload), now,
       ])
@@ -242,7 +246,9 @@ export class TaskStore {
     const now = Date.now()
     return this._tx(async () => {
       const cur = await getP(this._db, `SELECT phase FROM tasks WHERE task_id = ?`, [taskId])
-      if (cur && TERMINAL_PHASES.has(cur.phase) && cur.phase !== phase) {
+      // 任务不存在（begin 失败/传入错 taskId）→ not_found，不写孤立 finished 事件、不谎报已结算
+      if (!cur) return { ok: false, code: 'not_found' }
+      if (TERMINAL_PHASES.has(cur.phase) && cur.phase !== phase) {
         // 已处于终态（如 cancelled）→ 迟到 completed/failed 不得覆盖；只记录事件留痕
         await runP(this._db, `INSERT INTO task_events(task_id, kind, phase, stop_reason, payload_json, created_at) VALUES (?,?,?,?,?,?)`, [
           taskId, 'finish_ignored', phase, stopReason, JSON.stringify({ kept: cur.phase }), now,
@@ -486,6 +492,9 @@ export class TaskStore {
       return { skipped: false, cursor: c }
     })
     this._projChain.set(taskId, run.then(() => {}, () => {}))
+    // 结算后释放槽位（仅当自己仍是队尾）：否则长进程里 Map 会随历史 taskId 只增不减（缓慢泄漏）
+    const tail = this._projChain.get(taskId)
+    tail.then(() => { if (this._projChain.get(taskId) === tail) this._projChain.delete(taskId) })
     return run
   }
 

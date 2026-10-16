@@ -42,7 +42,9 @@ export function normalizePersona(input, { builtin = false, creator } = {}) {
   if (!name) throw new Error('人设缺少 name')
   const systemPrompt = String(input.systemPrompt || '').trim()
   if (!systemPrompt) throw new Error('人设缺少 systemPrompt')
-  const id = input.id ? String(input.id) : slugify(name)
+  // id 直接参与文件名（dir/<id>.json）：必须经 slug 归一。
+  // 曾原样采用 input.id → POST /api/personas 传 "../../x" 可越出 dir 写任意 .json（路径穿越）。
+  const id = input.id ? slugify(input.id) : slugify(name)
   return {
     id,
     name,
@@ -113,34 +115,57 @@ export class PersonaStore {
     )
   }
 
+  /** id → 落盘路径（纵深防御：任何情况下都不允许越出 this.dir） */
+  _fileOf(id) {
+    const file = path.resolve(this.dir, `${String(id)}.json`)
+    const root = path.resolve(this.dir)
+    if (file !== root && !file.startsWith(root + path.sep)) throw new Error(`人设 id 非法：${id}`)
+    return file
+  }
+
+  /**
+   * 精确查找（id 大小写不敏感 / name 完全一致）——**写路径必须用它**。
+   * get() 带子串模糊匹配，用于展示/引用很方便，但被 add/update/remove 复用时会命中"另一个人设"：
+   * 新人设被误判「已存在」、更新/删除改错对象。
+   */
+  getExact(idOrName) {
+    if (!idOrName) return null
+    const key = String(idOrName).trim()
+    const lower = key.toLowerCase()
+    const all = this.list()
+    return all.find((p) => p.id === lower) || all.find((p) => p.name === key) || null
+  }
+
   /** 新增自定义人设；id 与内置/已有冲突则报错 */
   add(input, { creator } = {}) {
     const p = normalizePersona(input, { builtin: false, creator })
     assertSafePersonaPrompt(p.systemPrompt)
     if (this.builtinIds().has(p.id)) throw new Error(`人设 id「${p.id}」与内置冲突，请换个名称`)
-    if (this.get(p.id)) throw new Error(`人设「${p.name}」已存在`)
-    const file = path.join(this.dir, `${p.id}.json`)
-    fs.writeFileSync(file, JSON.stringify(p, null, 2))
+    // 精确判重（id + 名称）：模糊匹配会把"名字包含我"的既有人设误判为重名
+    if (this.getExact(p.id)) throw new Error(`人设 id「${p.id}」已存在`)
+    if (this.getExact(p.name)) throw new Error(`人设「${p.name}」已存在`)
+    fs.writeFileSync(this._fileOf(p.id), JSON.stringify(p, null, 2))
     return p
   }
 
   /** 更新自定义人设（内置不可改） */
   update(id, patch) {
-    const existing = this.get(id)
+    const existing = this.getExact(id)
     if (!existing) throw new Error(`人设「${id}」不存在`)
     if (existing.builtin) throw new Error(`内置人设「${existing.name}」不可修改`)
     const merged = normalizePersona({ ...existing, ...patch, id: existing.id, createdAt: existing.createdAt }, { builtin: false })
     assertSafePersonaPrompt(merged.systemPrompt)
-    fs.writeFileSync(path.join(this.dir, `${existing.id}.json`), JSON.stringify(merged, null, 2))
+    fs.writeFileSync(this._fileOf(existing.id), JSON.stringify(merged, null, 2))
     return merged
   }
 
   /** 删除自定义人设（内置不可删） */
   remove(id) {
-    const existing = this.get(id)
+    // 精确匹配：此前用模糊 get()，删除可能命中另一个人设
+    const existing = this.getExact(id)
     if (!existing) return false
     if (existing.builtin) throw new Error(`内置人设「${existing.name}」不可删除`)
-    try { fs.unlinkSync(path.join(this.dir, `${existing.id}.json`)) } catch { /* noop */ }
+    try { fs.unlinkSync(this._fileOf(existing.id)) } catch { /* noop */ }
     return true
   }
 }

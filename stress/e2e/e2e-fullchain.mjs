@@ -329,7 +329,8 @@ await test('S10 伪人看图：图片 → 视觉描述 → 注入 prompt', async
   const port = srv.address().port
   RT.vision = { analyze: async () => '一张猫咪表情包，配字哈哈' }
   const { MediaDescriber } = await f('model/humanize/vision-context.js')
-  const md = new MediaDescriber({ vision: RT.vision })
+  // allowPrivateHosts：本条用例用 127.0.0.1 本地图床；默认配置下私网/回环地址被 SSRF 门禁拒绝
+  const md = new MediaDescriber({ vision: RT.vision, allowPrivateHosts: true })
   ok(md.available, 'MediaDescriber 可用（vision 已配）')
   const annotated = await md.annotate([
     { id: 'img1', userId: U1, displayName: 'U1', timestamp: Date.now(), isSelf: false, text: '看这个 [图片]', media: [{ kind: 'image', url: `http://127.0.0.1:${port}/cat.png` }] },
@@ -338,7 +339,7 @@ await test('S10 伪人看图：图片 → 视觉描述 → 注入 prompt', async
   // 缓存：第二次同 URL 不再调 vision（计数验证）
   let calls = 0
   RT.vision = { analyze: async () => { calls++; return 'x' } }
-  const md2 = new MediaDescriber({ vision: RT.vision })
+  const md2 = new MediaDescriber({ vision: RT.vision, allowPrivateHosts: true })
   await md2.describeUrl(`http://127.0.0.1:${port}/cat.png`)
   await md2.describeUrl(`http://127.0.0.1:${port}/cat.png`)
   ok(calls === 1, `同图走缓存不重复调 API（calls=${calls}）`)

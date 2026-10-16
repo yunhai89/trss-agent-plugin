@@ -122,12 +122,14 @@ function execP(db, sql) {
   return new Promise((resolve, reject) => { db.exec(sql, (err) => (err ? reject(err) : resolve())) })
 }
 
-/** 幂等获取 DB 句柄（首次需传 dir）。热重载由 closeDb 处理。 */
-export function getDb({ dir } = {}) {
+/** 幂等获取 DB 句柄（首次需传 dir；file 为库文件名，缺省 tevo.db）。热重载由 closeDb 处理。 */
+export function getDb({ dir, file } = {}) {
   if (_db) return _db
   if (!dir) throw new Error('[toolEvo] getDb 首次调用须传 { dir }')
   fs.mkdirSync(dir, { recursive: true })
-  _dbPath = path.join(dir, 'tevo.db')
+  // 库名可配（toolEvo.dbPath 的文件名部分）：曾硬编码 tevo.db，配 custom/other.db 只换了目录、
+  // 库名被丢弃（复核 #45）。basename 兜底防止把库写到 dir 之外。
+  _dbPath = path.join(dir, path.basename(file || 'tevo.db'))
   _db = new sqlite3.Database(_dbPath)
   Log.info(`[toolEvo] db opened: ${_dbPath}`)
   return _db
@@ -156,8 +158,8 @@ async function migrate(db) {
 }
 
 /** 初始化：建全部表 + PRAGMA（WAL 并发读、外键约束）+ 增量迁移。幂等。 */
-export async function initDb({ dir }) {
-  const db = getDb({ dir })
+export async function initDb({ dir, file }) {
+  const db = getDb({ dir, file })
   await execP(db, 'PRAGMA journal_mode=WAL;')
   await execP(db, 'PRAGMA foreign_keys=ON;')
   for (const [name, sql] of Object.entries(SCHEMA)) {

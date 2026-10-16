@@ -93,16 +93,21 @@ export async function runYtDlp(url, opts = {}) {
     } catch (e) {
       return done({ ok: false, error: String(e?.message || e) })
     }
-    const timer = setTimeout(() => { try { proc.kill('SIGKILL') } catch { /* noop */ } }, ms)
+    // 超时标志：killer 与 close 共享，否则 SIGKILL 触发的 close 会把超时误报成「下载失败」
+    // （消费点第 230 行按 res.timedOut 区分「下载超时」与「下载失败」）。
+    let timedOut = false
+    let fallback
+    const timer = setTimeout(() => { timedOut = true; try { proc.kill('SIGKILL') } catch { /* noop */ } }, ms)
     proc.stdout?.on('data', () => {}) // 进度行不累积（省内存）
     proc.stderr?.on('data', (d) => { stderr += d.toString() })
-    proc.on('error', (e) => { clearTimeout(timer); done({ ok: false, error: String(e?.message || e) }) })
+    proc.on('error', (e) => { clearTimeout(timer); clearTimeout(fallback); done({ ok: false, error: String(e?.message || e) }) })
     proc.on('close', (code) => {
       clearTimeout(timer)
-      done({ ok: code === 0, exitCode: code, timedOut: false })
+      clearTimeout(fallback)
+      done({ ok: !timedOut && code === 0, exitCode: code, timedOut })
     })
-    // 超时分支
-    setTimeout(() => { try { if (!proc.killed) proc.kill('SIGKILL') } catch { /* noop */ } ; done({ ok: false, timedOut: true }) }, ms + 500)
+    // 超时分支：close 未按时到达时的兜底收尾
+    fallback = setTimeout(() => { timedOut = true; try { if (!proc.killed) proc.kill('SIGKILL') } catch { /* noop */ } ; done({ ok: false, timedOut: true }) }, ms + 500)
   })
 }
 

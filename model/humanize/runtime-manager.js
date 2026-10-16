@@ -17,18 +17,30 @@ import { newHolderId } from './store.js'
 class Semaphore {
   constructor(max = 1) {
     this.max = Math.max(1, max | 0)
-    this._free = this.max
+    // 以「在飞数量」为唯一判据（而非剩余令牌数）：热重载改 max 才能立刻生效。
+    this._inFlight = 0
     this._waiters = []
   }
-  setMax(max) { this.max = Math.max(1, max | 0) }
+  setMax(max) {
+    this.max = Math.max(1, max | 0)
+    // 调高上限后唤醒等待者补齐；调低不打断在飞任务，由 release 自然收敛。
+    while (this._waiters.length && this._inFlight < this.max) {
+      this._inFlight++
+      this._waiters.shift()()
+    }
+  }
   async acquire() {
-    if (this._free > 0) { this._free--; return () => this.release() }
+    if (this._inFlight < this.max) { this._inFlight++; return () => this.release() }
     await new Promise((res) => this._waiters.push(res))
     return () => this.release()
   }
   release() {
-    if (this._waiters.length) { this._waiters.shift()(); return }
-    if (this._free < this.max) this._free++
+    if (this._inFlight > 0) this._inFlight--
+    // 令牌移交给等待者（不经过空闲态），否则留给后续 acquire。
+    if (this._waiters.length && this._inFlight < this.max) {
+      this._inFlight++
+      this._waiters.shift()()
+    }
   }
 }
 

@@ -138,13 +138,49 @@ const hget = (res, name) => {
   try { return typeof res?.headers?.get === 'function' ? String(res.headers.get(name) || '') : '' } catch { return '' }
 }
 
-/** 读响应体：优先整数节读 + 按声明字符集解码；桩/简易 fetcher 只有 text() 时兼容。 */
-async function readBody(res) {
-  if (typeof res?.arrayBuffer === 'function') {
-    return decodeHtmlBuffer(Buffer.from(await res.arrayBuffer()), hget(res, 'content-type'))
+/** 响应体读取上限：2xx 正文 2MB（超出截断）、非 2xx 错误页 256KB（只需识别挑战页），防单个大响应打爆内存 */
+const MAX_BODY_BYTES = 2 * 1024 * 1024
+const MAX_ERROR_BODY_BYTES = 256 * 1024
+
+/**
+ * 流式读响应体：按 maxBytes 边读边累计，超限立即 reader.cancel() 并返回已读片段
+ * （旧实现 `res.arrayBuffer()` 先把整个 body 读进内存，之后的 slice/上限检查形同虚设）。
+ * 桩/简易 fetcher 只有 text() 时兼容。
+ * @returns {Promise<{text:string, truncated:boolean}>}
+ */
+async function readBody(res, { maxBytes = MAX_BODY_BYTES } = {}) {
+  const ct = hget(res, 'content-type')
+  const reader = res?.body?.getReader?.()
+  if (typeof reader?.read === 'function') {
+    const chunks = []
+    let total = 0
+    let truncated = false
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const chunk = Buffer.from(value)
+        if (total + chunk.length > maxBytes) {
+          chunks.push(chunk.subarray(0, Math.max(0, maxBytes - total)))
+          total = maxBytes
+          truncated = true
+          break
+        }
+        chunks.push(chunk)
+        total += chunk.length
+      }
+    } finally {
+      if (truncated) await reader.cancel().catch(() => {})
+    }
+    return { text: decodeHtmlBuffer(Buffer.concat(chunks, total), ct), truncated }
   }
-  if (typeof res?.text === 'function') return String((await res.text()) || '')
-  return ''
+  if (typeof res?.arrayBuffer === 'function') {
+    const buf = Buffer.from(await res.arrayBuffer())
+    const truncated = buf.length > maxBytes
+    return { text: decodeHtmlBuffer(truncated ? buf.subarray(0, maxBytes) : buf, ct), truncated }
+  }
+  if (typeof res?.text === 'function') return { text: String((await res.text()) || ''), truncated: false }
+  return { text: '', truncated: false }
 }
 
 // ───────────────────────── Cookie Jar（内存，按 host 隔离） ─────────────────────────
@@ -410,7 +446,7 @@ export async function crawlWithFetch(url, { timeout = 30, fetcher, retries = 3, 
       const finalUrl = out.finalUrl || url
       const status = Number(res?.status) || 0
       if (res.ok || (status >= 200 && status < 300)) {
-        const html = await readBody(res)
+        const { text: html, truncated } = await readBody(res)
         const { title, text } = htmlToText(html)
         if (looksLikeChallenge({ status, html, title })) {
           return { success: false, code: 'challenge', status, finalUrl, title, error: '命中反爬挑战页（Cloudflare 等）', hint: '目标站点使用 JS 挑战/风控：需真浏览器渲染（crawl4ai 默认引擎，确认已跑 scripts/install-crawl4ai.sh）；仍失败可在 agent.proxy 配置出口代理' }
@@ -421,11 +457,11 @@ export async function crawlWithFetch(url, { timeout = 30, fetcher, retries = 3, 
           }
           return { success: false, code: 'empty', status, finalUrl, title, error: '页面无有效正文（可能是 JS 动态渲染页）', hint: '该页需真浏览器渲染；安装 crawl4ai（scripts/install-crawl4ai.sh）后重试' }
         }
-        return { success: true, markdown: text, title, via: 'fetch', status, finalUrl }
+        return { success: true, markdown: text, title, via: 'fetch', status, finalUrl, ...(truncated ? { truncated: true } : {}) }
       }
-      // 非 2xx：读取小响应体识别挑战页；挑战页不重试（重试也过不去，交给浏览器路径）
+      // 非 2xx：读取小响应体识别挑战页（上限 256KB，读满即断流，不再整段进内存）；挑战页不重试（重试也过不去，交给浏览器路径）
       let body = ''
-      try { body = (await readBody(res)).slice(0, 200000) } catch { /* 错误页读取失败可忽略 */ }
+      try { body = (await readBody(res, { maxBytes: MAX_ERROR_BODY_BYTES })).text.slice(0, 200000) } catch { /* 错误页读取失败可忽略 */ }
       const pageTitle = load(body || '').root().find('title').first().text().trim()
       if (looksLikeChallenge({ status, html: body, title: pageTitle })) {
         return { success: false, code: 'challenge', status, finalUrl, error: `命中反爬挑战页（HTTP ${status || '?'}）`, hint: '目标站点使用 JS 挑战/风控：需真浏览器渲染（crawl4ai）并确认 agent.proxy 出口可用' }

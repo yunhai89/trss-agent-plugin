@@ -192,13 +192,20 @@ function withTimeout(promise, ms, onTimeout) {
  * @param {object} [opts] { blockedHosts, lookup, timeoutMs, signal }
  * @returns {Promise<{ ok:boolean, url?:string, reason?:string }>}
  */
-export async function assertUrlAllowed(rawUrl, { blockedHosts = [], lookup = dns.lookup, timeoutMs = 5000, signal = null } = {}) {
+export async function assertUrlAllowed(rawUrl, { blockedHosts = [], lookup = dns.lookup, timeoutMs = 5000, signal = null, allowPrivateHosts = false } = {}) {
   let u
   try { u = new URL(String(rawUrl || '')) } catch { return { ok: false, reason: 'URL 非法' } }
   if (!/^https?:$/.test(u.protocol)) return { ok: false, reason: '仅允许 http/https 协议' }
   if (signal?.aborted) return { ok: false, reason: '已取消' }
   const host = normalizeHost(u.hostname)
   if (!host) return { ok: false, reason: 'URL 缺少主机名' }
+  // 显式放行内网（自建图床/本地服务）：仍强制 http(s) 与元数据主机黑名单
+  if (allowPrivateHosts) {
+    if (BLOCKED_HOSTS.some((b) => { const n = normalizeHost(b); return n && (host === n || host.endsWith(`.${n}`)) })) {
+      return { ok: false, reason: `禁止访问元数据/本地主机：${host}` }
+    }
+    return { ok: true, url: u.href }
+  }
   if (hostIsBlocked(host, blockedHosts)) return { ok: false, reason: `禁止访问本地/内网/元数据主机：${host}` }
   // IP 字面量（含混淆写法）：直接判定，不做 DNS
   const loose = parseLooseIPv4(host)
@@ -223,6 +230,37 @@ export async function assertUrlAllowed(rawUrl, { blockedHosts = [], lookup = dns
   if (!list.length) return { ok: false, reason: `域名无解析结果：${host}` }
   if (list.some((a) => isPrivateIp(a?.address))) return { ok: false, reason: `域名解析到内网地址：${host}` }
   return { ok: true, url: u.href }
+}
+
+/**
+ * 带 SSRF 门禁的 fetch：入口校验 → 逐跳复验重定向（redirect:'manual'），最多 maxRedirects 跳。
+ * 返回未读 body 的 Response；被拒时抛 code='ssrf_blocked' 的错误（调用方可据此做永久负缓存）。
+ * 调用方负责读 body 时的字节上限。
+ * @param {string} rawUrl
+ * @param {object} opts { fetchImpl?, maxRedirects?, signal?, allowPrivateHosts?, ...fetchInit }
+ */
+export async function fetchWithSsrfGuard(rawUrl, { fetchImpl = globalThis.fetch, maxRedirects = 3, signal = null, allowPrivateHosts = false, ...init } = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('运行环境缺少 fetch')
+  let current = String(rawUrl || '')
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    const gate = await assertUrlAllowed(current, { signal, allowPrivateHosts })
+    if (!gate.ok) {
+      const e = new Error(`SSRF 拦截：${gate.reason}`)
+      e.code = 'ssrf_blocked'
+      throw e
+    }
+    const res = await fetchImpl(current, { ...init, redirect: 'manual', ...(signal ? { signal } : {}) })
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers?.get?.('location')
+      if (!loc) return res
+      try { current = new URL(loc, current).href } catch { return res }
+      continue
+    }
+    return res
+  }
+  const e = new Error(`重定向次数过多（>${maxRedirects}）`)
+  e.code = 'too_many_redirects'
+  throw e
 }
 
 /**

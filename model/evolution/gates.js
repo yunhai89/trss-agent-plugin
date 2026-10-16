@@ -79,9 +79,10 @@ export function cacheGate(text, baseline, { prefixKeepRatio = 0.3 } = {}) {
 export function grammarGate(text, { minChars = 5 } = {}) {
   const t = String(text || '')
   const failures = []
-  // 括号平衡检查
-  const openMap = { '(': ')', '[': ']', '{': '}', '<': '>' }
-  const closeSet = new Set([')', ']', '}', '>'])
+  // 括号平衡检查（只认 () [] {}）：`<`/`>` 在 prompt 里多为比较符（「置信度 < 0.5」「得分 > 0.8」），
+  // 当括号会误判成「括号不匹配/未闭合」→ 合法候选静默 0 分淘汰（见 #进化 prompt）。
+  const openMap = { '(': ')', '[': ']', '{': '}' }
+  const closeSet = new Set([')', ']', '}'])
   const openSet = new Set(Object.keys(openMap))
   const stack = []
   for (const ch of t) {

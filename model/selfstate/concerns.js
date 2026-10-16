@@ -42,6 +42,8 @@ export class ConcernManager {
     if (!actorUserId) return null
     const cfg = this._cfgFn()
     const rcfg = cfg.resentment || {}
+    // 面板「启用怨气」开关：关掉后不再新建/升级心事（rcfg 此前取出未用 → 开关无读取点）
+    if (rcfg.enabled === false) return null
     const concernType = CONcern_TRIGGERS[eventType]
     if (!concernType) return null
     if (significance < 0.2) return null // base 门槛（§7.1/§20.2）：无指向/与机器人无关的消息不建心事
@@ -109,14 +111,15 @@ export class ConcernManager {
     return repairAmount
   }
 
-  /** 心事过期（TTL/自然衰减）。 */
+  /** 心事过期（TTL/自然衰减）。返回过期行数（供 maintenance 统计）。 */
   async expireStale({ botId, groupId, now = Date.now() }) {
     const rcfg = this._cfgFn().resentment || {}
     const ttl = (rcfg.halfLifeDays ?? 7) * 2 * 86400000
-    await this.dao.run(
+    const res = await this.dao.run(
       "UPDATE ss_concerns SET status='expired', resolved_at=?, updated_at=? WHERE bot_id=? AND group_id=? AND status='active' AND updated_at<?",
       [now, now, botId, groupId, now - ttl],
-    ).catch(() => {})
+    ).catch(() => null)
+    return res?.changes || 0
   }
 
   /** 取某目标的活跃心事（投影用）。 */

@@ -162,10 +162,21 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
   let warmHit = 0
   const clamp01 = (v) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0))
   for (const f of listLogFiles(dir)) {
-    if (f.ts < since) continue
+    // 文件名里的 ts 是**会话创建时间**：整文件跳过会让「昨天创建、今天仍在跑」的会话在
+    // window=1h/24h 下被完全漏掉（逐事件过滤救不回整个被跳过的文件）。
+    // 改用文件 mtime 判定：mtime ≥ 最后一条事件时间，故 mtime < since ⇒ 文件内事件必然全在窗口外。
+    if (since > 0) {
+      let mtime = 0
+      try { mtime = fs.statSync(path.resolve(dir, f.file)).mtimeMs } catch { mtime = f.ts }
+      if (mtime && mtime < since) continue
+    }
     let firstRunEndInFile = true
     for (const e of readLogFile(dir, f.file)) {
       if (!e || !e.time) continue
+      // 事件时间也必须过窗口：此前只按**文件名日期**筛文件，跨窗口边界的那一天会整段累加
+      // （window=1h/24h 时把该文件里更早的请求全算进来，cold/warm 分层与命中率同步失真）
+      const et = Date.parse(e.time)
+      if (since > 0 && Number.isFinite(et) && et < since) continue
       const day = String(e.time).slice(5, 10) // ISO → MM-DD
       if (e.event === 'run_end') {
         totalRequests++
@@ -198,8 +209,7 @@ export function aggregateStats(dir, { since = 0, topK = 5 } = {}) {
             dayMap[day].cacheWrite += n.cacheWrite
             dayMap[day].uncached += n.observedUncached || 0
             dayMap[day].cached += n.cacheRead
-            const t = Date.parse(e.time)
-            if (Number.isFinite(t) && (firstObservedAt == null || t < firstObservedAt)) firstObservedAt = t
+            if (Number.isFinite(et) && (firstObservedAt == null || et < firstObservedAt)) firstObservedAt = et
           } else {
             unobservedRequests++
           }

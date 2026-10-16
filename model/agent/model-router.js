@@ -63,8 +63,10 @@ export function createModelRouter({ cfg = {}, mainProvider = null, mainModel = '
       const prov = providers.find((p) => p && p.id === entry.providerId)
       if (prov) return { provider: providerFor(prov), model: entry.model || mainModel || v, matched: true, entry, prov }
     }
-    // 3) 回退主 provider（裸模型名，旧行为）
-    return { provider: mainProvider, model: v, matched: false }
+    // 3) 回退主 provider（旧行为）。注意：按 id 命中条目、但其 provider 已在配置里缺失时，
+    //    模型名要取条目的 model（而不是把「条目 id」当模型名发给主厂商 → 非法模型名/400）。
+    const model = entry ? (entry.model || mainModel || v) : v
+    return { provider: mainProvider, model, matched: false, ...(entry ? { reason: 'provider_missing', entry } : {}) }
   }
 
   return { resolve, get size() { return cache.size } }

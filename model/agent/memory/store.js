@@ -117,8 +117,8 @@ export class MemoryStore {
 
   /**
    * 解析 .md 文本 → 条目数组。
-   * 规则：`- ` / `* ` 开头的行是条目（去掉前缀）；缩进续行（非空、非 bullet、非注释）追加到上一条；
-   * `#`/`<!--`/`-->`/LABEL 用量头/空行 忽略。
+   * 规则：缩进续行（`^\s+\S`）优先追加到上一条（多行条目）；`- ` / `* ` 开头的行是条目（去掉前缀）；
+   * `#`/`<!--`/`-->`/LABEL 用量头/空行 忽略（缩进续行可含这些前缀，属条目内容）。
    */
   _parseMd(text) {
     const entries = []
@@ -126,6 +126,13 @@ export class MemoryStore {
     for (const raw of String(text || '').split('\n')) {
       const line = raw.replace(/\s+$/, '') // 去行尾空白
       if (!line.trim()) continue
+      // 缩进续行 → 追加到上一条（多行条目）；必须先于 bullet/注释判定，
+      // 否则 _renderMd 缩进 2 空格的续行（如 "  - x"、"  # 标题"）会被误判为新条目或整行丢弃（往返损坏）
+      if (cur !== null && /^\s+\S/.test(line)) {
+        entries[entries.length - 1] = cur + '\n' + line.trim()
+        cur = entries[entries.length - 1]
+        continue
+      }
       // bullet 行（- 或 * 开头）
       const bm = line.match(/^\s*[-*]\s+(.*)$/)
       if (bm) {
@@ -136,12 +143,6 @@ export class MemoryStore {
       // 注释 / 标题 / LABEL 用量头 → 忽略
       if (/^\s*(#|<!--|-->)/.test(line)) continue
       if (/^\s*MEMORY\b|^\s*USER\b/.test(line) && /\[\d+%/.test(line)) continue
-      // 缩进续行 → 追加到上一条（多行条目）
-      if (cur !== null && /^\s+\S/.test(line)) {
-        entries[entries.length - 1] = cur + '\n' + line.trim()
-        cur = entries[entries.length - 1]
-        continue
-      }
       // 其余独立行忽略（人手写的非 bullet 内容）
     }
     return entries.filter((e) => typeof e === 'string')

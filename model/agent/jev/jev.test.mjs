@@ -84,6 +84,21 @@ await test('client：429 遵守 Retry-After 后退避重试，最终成功', asy
   ok(Date.now() - t0 >= 4, '等待了 Retry-After（≥5ms 量级）')
 })
 
+await test('client：429 只带标准 Retry-After（秒）也生效（缺失 retry-after-ms 曾恒判 0 秒）', async () => {
+  // 回归：Headers.get 缺失返回 null，Number(null)===0 曾让首个分支恒命中并返回 0 —— 秒头分支成死代码、
+  // 退避被 0 覆盖成「立刻重发」。这里 backoffInitialMs=1，只有真正读了 Retry-After 才会等 ~1s。
+  const { fn, calls } = seqFetch([
+    res(429, { error: 'slow down' }, { 'Retry-After': '1' }),
+    res(200, okBody({ q: { type: 'noul', noul: 0.5 } })),
+  ])
+  const c = new JevClient({ apiKey: 'k', fetch: fn, maxRetries: 2, retry: { backoffInitialMs: 1 } })
+  const t0 = Date.now()
+  const r = await c.systemOne({ state: {}, questions: { q: { type: 'noul', instructions: 'x' } } })
+  ok(r.answers.q.noul === 0.5, '重试后成功')
+  eq(calls.length, 2, '429 触发一次重试')
+  ok(Date.now() - t0 >= 900, '遵守 Retry-After: 1（≥1s，而非退避 1ms 立刻重发）')
+})
+
 await test('client：5xx 指数退避重试至上限后抛出', async () => {
   const { fn, calls } = seqFetch([res(503, { error: 'overloaded' })])
   const c = new JevClient({ apiKey: 'k', fetch: fn, maxRetries: 2, retry: { backoffInitialMs: 1 } })

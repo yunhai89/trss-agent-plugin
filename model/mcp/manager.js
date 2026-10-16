@@ -67,17 +67,24 @@ export class McpManager {
   }
 
   _prefix(cfg, name) {
-    return cfg.prefix != null ? cfg.prefix : name
+    // 前缀决定命名空间：必须非空。曾允许空串（显式 `prefix: ""` 或服务端名为空）→
+    // 工具以原名注册，可静默覆盖内置工具。这里逐级回退：配置前缀 → 服务端名 → 'mcp'
+    const raw = cfg.prefix != null ? cfg.prefix : name
+    const p = String(raw ?? '').trim()
+    return p || String(name ?? '').trim() || 'mcp'
   }
 
   async add(name, cfg = {}) {
     if (this._entries.has(name)) await this.remove(name)
     const transport = buildTransport({ ...cfg, name })
-    // 上报子进程 stderr（npx 下载失败/包不存在/服务端崩溃等原因才可见，否则只剩 timeout）
-    if (transport && typeof transport.onLog !== 'undefined') {
-      transport.onLog = (chunk) => this.logger('warn', `${name} stderr: ${String(chunk).trim()}`)
+    // 上报子进程 stderr（npx 下载失败/包不存在/服务端崩溃等原因才可见，否则只剩 timeout）。
+    // BaseTransport 的 onLog 只有 setter、没有 getter，读 transport.onLog 恒为 undefined——
+    // 曾用 `typeof transport.onLog !== 'undefined'` 判断，恒为 false，stderr 实时上报从未生效。
+    if (transport) {
+      try { transport.onLog = (chunk) => this.logger('warn', `${name} stderr: ${String(chunk).trim()}`) } catch { /* 非 BaseTransport：忽略 */ }
     }
     const client = new MCPClient({
+      logger: this.logger,
       transport,
       clientInfo: cfg.clientInfo,
       requestTimeout: cfg.requestTimeout || this.requestTimeout,

@@ -65,7 +65,9 @@ export const chatHistoryTool = {
         anchor = next
       }
       acc.sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
-      const msgs = acc.slice(-want)
+      // formatHistory 契约：入参「最新在前」→ 输出时间正序（perception 适配器通常逆序返回）。
+      // 本处 acc 已排成升序，须先翻转为降序再交出去，否则会被再 reverse 一次 → 输出最新在前，与工具描述相反。
+      const msgs = acc.slice(-want).reverse()
       const lines = formatHistory(msgs, e, want)
       if (!lines.length) return { count: 0, note: '未取到聊天记录（协议端未返回或会话无历史）' }
       return { count: lines.length, history: lines.join('\n') }

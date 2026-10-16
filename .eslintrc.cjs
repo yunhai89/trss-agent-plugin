@@ -39,6 +39,11 @@ module.exports = {
   rules: {
     // 高价值：未定义变量必须报错（捕拼写错误 / 漏 import）
     'no-undef': 'error',
+    // 高价值：对象字面量重复键 / 重复 else-if / 重复类成员
+    // （曾漏掉 model/sandbox/transport.js 的重复 list 键——目录列举被运维列举静默覆盖）
+    'no-dupe-keys': 'error',
+    'no-dupe-else-if': 'error',
+    'no-dupe-class-members': 'error',
     // 存量温和提示（warn 不阻塞）
     'no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
     'no-empty': ['warn', { allowEmptyCatch: true }],

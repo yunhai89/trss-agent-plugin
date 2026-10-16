@@ -26,6 +26,32 @@ import { concatSegments, runFfmpeg } from './audio.js'
 import { enhanceVoice } from './enhance.js'
 import { createKeyedLock } from '../agent/store/lock.js'
 
+/**
+ * 分段数硬上限：MAX_SEGMENTS（12）是给 LLM 规划提示词的"建议段数"，不能当作合成时的截断阈值——
+ * 超过 12 段的长文本会被静默丢弃（只合成前 12 段却返回 ok:true 且 chars 为全文长度）。
+ * 这里按文本长度推导实际需要的段数（保证覆盖全文），并留 4 倍余量作为成本/时延硬闸。
+ */
+const MAX_SEGMENTS_HARD = MAX_SEGMENTS * 4
+
+/**
+ * 分段上限：max(MAX_SEGMENTS, 覆盖全文所需段数)，并受 hardMax 约束。
+ * 下限必须是 MAX_SEGMENTS——短文本拆成多段是"逐段情绪"的正常用法（不能因为字数少就把
+ * LLM 规划好的多段压回 1 段）；上限随文本增长，保证长文本不被静默截断。
+ */
+export function segmentsNeeded(text, perSeg, hardMax = MAX_SEGMENTS_HARD) {
+  const len = String(text || '').length
+  const per = Math.max(20, Number(perSeg) || MAX_SEGMENT_CHARS)
+  const hard = Math.max(MAX_SEGMENTS, Number(hardMax) || MAX_SEGMENTS_HARD)
+  const need = Math.ceil(len / per) || 1
+  return Math.max(MAX_SEGMENTS, Math.min(hard, need))
+}
+
+/** 截断说明：返回 null 表示未截断（段数在覆盖全文所需之内） */
+function truncationNote(kept, all) {
+  const charsOf = (arr) => arr.reduce((n, x) => n + String(x?.text ?? x ?? '').length, 0)
+  return `内容超长：仅合成前 ${kept}/${all.length} 段（${charsOf(all.slice(0, kept))}/${charsOf(all)} 字），其余未合成。可缩短文本或调大 agent.tts.*.maxSegmentChars`
+}
+
 export const TTS_LANGS = ['ZH', 'EN', 'JA', 'AR', 'ES']
 export const TTS_TEXT_MAX = 5000
 
@@ -334,6 +360,7 @@ export class TtsService {
       }
 
       // ── max：LLM 按需拆分 → 逐段情绪 → 逐段合成 → ffmpeg 合并 ──
+      const segCap = segmentsNeeded(text, Number(ix.maxSegmentChars) || MAX_SEGMENT_CHARS)
       let baseVector = parseVectorParam(p.vector) || parseVectorParam(ix.vector)
       let segments = null
       let reason = ''
@@ -341,7 +368,8 @@ export class TtsService {
         const plan = await planEmotion(this.llm, {
           text, tier: 'max', voiceName: voice.name, logger: this.logger,
           context: normalizeContext(p.context?.messages),
-          maxSegments: MAX_SEGMENTS, maxSegmentChars: Number(ix.maxSegmentChars) || MAX_SEGMENT_CHARS,
+          // 段数按文本长度推导（同一上限也写进 LLM 提示词），否则长文本必然丢内容
+          maxSegments: segCap, maxSegmentChars: Number(ix.maxSegmentChars) || MAX_SEGMENT_CHARS,
           timeoutMs: Number(ix.judgeTimeoutMs) || TTS_DEFAULTS.indextts.judgeTimeoutMs,
         })
         if (plan?.segments?.length) {
@@ -355,10 +383,16 @@ export class TtsService {
         notes.push('LLM 自动调节已关闭，max 档按标点分段并使用默认向量')
       }
       if (!segments) {
-        segments = splitByPunctuation(text, Number(ix.maxSegmentChars) || MAX_SEGMENT_CHARS)
-          .slice(0, MAX_SEGMENTS)
+        const allSegs = splitByPunctuation(text, Number(ix.maxSegmentChars) || MAX_SEGMENT_CHARS)
+        if (allSegs.length > segCap) notes.push(truncationNote(segCap, allSegs))
+        segments = allSegs
+          .slice(0, segCap)
           .map((t) => ({ text: t, vector: baseVector || clampVector(null) }))
         if (segments.length > 1) notes.push(`已按标点拆分为 ${segments.length} 段`)
+      } else if (segments.length > segCap) {
+        // LLM 规划给出的段数超上限（长文本）：如实标注后再截断
+        notes.push(truncationNote(segCap, segments))
+        segments = segments.slice(0, segCap)
       }
       if (!segments.length) return { ok: false, error: '文本分段为空' }
 
@@ -393,9 +427,14 @@ export class TtsService {
           if (!merged.ok) return { ok: false, error: `分段合成完成但合并失败：${merged.error}` }
         }
         const hd = await this._applyHd(finalFile)
-        this.logger('info', `[tts] 合成完成：${mode}/max ${files.length}段 音色=${voice.name} ${text.length}字 用时=${Date.now() - t0}ms${hd.enhanced ? '（已高清增强）' : ''}`)
+        // chars 报"实际合成的字数"而非全文长度：曾恒定返回 text.length，配合静默截断
+        // 让调用方以为全文都合成了
+        const synthChars = segments.reduce((n, x) => n + String(x.text || '').length, 0)
+        const truncated = synthChars < text.length
+        this.logger('info', `[tts] 合成完成：${mode}/max ${files.length}段 音色=${voice.name} ${synthChars}/${text.length}字 用时=${Date.now() - t0}ms${hd.enhanced ? '（已高清增强）' : ''}`)
         return {
-          ok: true, file: hd.file, rawFile: finalFile, enhanced: hd.enhanced, tier: 'max', mode, voice: voice.name, lang, chars: text.length,
+          ok: true, file: hd.file, rawFile: finalFile, enhanced: hd.enhanced, tier: 'max', mode, voice: voice.name, lang, chars: synthChars,
+          ...(truncated ? { truncated: true, totalChars: text.length } : {}),
           segments: segments.map((s) => ({ text: s.text, vector: vectorToObject(s.vector) })),
           ...(baseVector ? { vector: vectorToObject(baseVector) } : {}),
           ...(reason ? { reason } : {}),
@@ -439,6 +478,7 @@ export class TtsService {
     const auto = cfgProv.autoEmotion !== false && !!this.llm
     const tier = ['pro', 'max'].includes(p.tier) ? p.tier : (['pro', 'max'].includes(cfgProv.tier) ? cfgProv.tier : 'pro')
     const maxSegChars = Math.max(20, Number(cfgProv.maxSegmentChars) || MAX_SEGMENT_CHARS) // max 档单段字符上限（面板可调）
+    const segCap = segmentsNeeded(text, maxSegChars)
     const explicitVec = parseVectorParam(p.vector)
     let planVector = explicitVec
     let segments = null
@@ -455,7 +495,7 @@ export class TtsService {
         voiceName: voice, logger: this.logger,
         context: normalizeContext(p.context?.messages),
         timeoutMs: this._judgeTimeoutMs(),
-        maxSegments: MAX_SEGMENTS, maxSegmentChars: maxSegChars,
+        maxSegments: segCap, maxSegmentChars: maxSegChars,
       })
       if (plan?.vector) {
         planVector = clampVector(plan.vector)
@@ -492,9 +532,17 @@ export class TtsService {
     })
     try {
       if (tier === 'max') {
-        const segs = (segments && segments.length)
-          ? segments
-          : splitByPunctuation(text, maxSegChars).slice(0, MAX_SEGMENTS).map((t) => ({ text: t, vector: planVector }))
+        let segs
+        if (segments && segments.length) {
+          if (segments.length > segCap) {
+            notes.push(truncationNote(segCap, segments))
+            segs = segments.slice(0, segCap)
+          } else segs = segments
+        } else {
+          const allSegs = splitByPunctuation(text, maxSegChars)
+          if (allSegs.length > segCap) notes.push(truncationNote(segCap, allSegs))
+          segs = allSegs.slice(0, segCap).map((t) => ({ text: t, vector: planVector }))
+        }
         if (segs.length > 1) {
           if (!segments) notes.push(`已按标点拆分为 ${segs.length} 段`)
           const tmpDir = path.join(this.dataDir, 'tmp')
@@ -520,9 +568,13 @@ export class TtsService {
             })
             if (!merged.ok) return { ok: false, error: `分段合成完成但合并失败：${merged.error}` }
             const hd = await this._applyHd(finalFile)
-            this.logger('info', `[tts] 合成完成：${id}/max ${files.length}段 音色=${voice} ${text.length}字 用时=${Date.now() - t0}ms${hd.enhanced ? '（已高清增强）' : ''}`)
+            // chars = 实际合成的字数（曾恒为全文长度，掩盖静默截断）
+            const synthChars = segs.reduce((n, x) => n + String(x.text || '').length, 0)
+            const truncated = synthChars < text.length
+            this.logger('info', `[tts] 合成完成：${id}/max ${files.length}段 音色=${voice} ${synthChars}/${text.length}字 用时=${Date.now() - t0}ms${hd.enhanced ? '（已高清增强）' : ''}`)
             return {
-              ok: true, file: hd.file, rawFile: finalFile, enhanced: hd.enhanced, tier: 'max', mode: 'cloud', voice, chars: text.length,
+              ok: true, file: hd.file, rawFile: finalFile, enhanced: hd.enhanced, tier: 'max', mode: 'cloud', voice, chars: synthChars,
+              ...(truncated ? { truncated: true, totalChars: text.length } : {}),
               ..._segReturn(segs),
               ...(planVector ? { vector: vectorToObject(planVector) } : {}),
               ...(reason ? { reason } : {}),

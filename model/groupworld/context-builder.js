@@ -45,13 +45,20 @@ export class WorldContextBuilder {
     if (!Number.isFinite(ttl) || ttl <= 0) {
       return this.retriever.gather({ botId: input.botId, groupId: input.groupId, focusUserId: input.focusUserId, relatedUserIds: input.relatedUserIds || [], topicText: input.topicText || '', now })
     }
-    const key = `${role}|${input.groupId}|${input.focusUserId || ''}|${input.topicText || ''}`
+    // key 必须包含影响检索结果的全部入参：曾只含 role|groupId|focusUserId|topicText，
+    // 导致同一话题文本下「不同 @集合 / 不同 bot」在 TTL 内互相命中对方的旧检索结果（缓存串味）。
+    const related = (input.relatedUserIds || []).map(String).join(',')
+    const key = `${role}|${input.groupId}|${input.botId || ''}|${input.focusUserId || ''}|${related}|${input.topicText || ''}`
     const hit = this._cache.get(String(input.groupId))?.get(key)
     if (hit && now - hit.at < ttl * 1000) return hit.raw
     const raw = await this.retriever.gather({ botId: input.botId, groupId: input.groupId, focusUserId: input.focusUserId, relatedUserIds: input.relatedUserIds || [], topicText: input.topicText || '', now })
     let bucket = this._cache.get(String(input.groupId))
     if (!bucket) { bucket = new Map(); this._cache.set(String(input.groupId), bucket) }
+    // 写入时顺手淘汰：ttl 此前只用于读命中判断、不清理旧项，而 key 含逐条触发的 topicText
+    // → 长跑进程内每个话题文本都永久留一份 gather 结果（无界增长）。过期项清掉 + bucket 容量上限。
+    for (const [k, v] of bucket) { if (now - v.at >= ttl * 1000) bucket.delete(k) }
     bucket.set(key, { at: now, raw })
+    while (bucket.size > 50) bucket.delete(bucket.keys().next().value)
     return raw
   }
 

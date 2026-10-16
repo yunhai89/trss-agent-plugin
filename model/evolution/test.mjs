@@ -273,6 +273,9 @@ await test('grammarGate：括号平衡 + 词数 + 控制字符', async () => {
   ok(grammarGate('hello world test').passed, '正常文本通过')
   ok(grammarGate('hello (world) [test] {ok}').passed, '平衡括号通过')
   ok(!grammarGate('hello (world').passed, '未闭合括号拒绝')
+  // 比较符不是括号：曾把 < > 当括号 → 含「置信度 < 0.5」「得分 > 0.8」的合法变体被判 0 分淘汰
+  ok(grammarGate('当置信度 < 0.5 时重试').passed, '比较符 < 不误判为括号未闭合')
+  ok(grammarGate('若得分 > 0.8 才采纳').passed, '比较符 > 不误判为括号不匹配')
   ok(!grammarGate('hi').passed, '词数不足拒绝')
   ok(grammarGate('hello world test', { minWords: 1 }).passed, 'minWords=1 通过')
   // runGates 含 grammar

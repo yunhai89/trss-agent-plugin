@@ -34,6 +34,11 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
   presenceWindowSeconds: 300,
   maxRepliesPer10Minutes: 4,
 
+  // 伪人看图（视觉子模型）：图片 URL 来自群消息，可被任意成员构造
+  vision: {
+    allowPrivateHosts: false,  // true=放行私网/回环图床（自建图床场景）；默认拒绝（SSRF 防护）
+  },
+
   bufferCapacity: 150,
   bufferTtlHours: 2,
 

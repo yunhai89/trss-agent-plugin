@@ -255,7 +255,10 @@ export function checkInput(text, { sensitivity = 'medium', action = 'flag' } = {
  * 是「注入一段系统提示 / 技能以解除限制」类攻击在本框架里的对应落点。
  * 只把"明确的攻击指令"类别计入（不含角色扮演框架 / 提权自称等正常拟人用法）。
  */
-export const PERSONA_FORBIDDEN_CATS = ['override', 'jailbreak', 'refusal_suppression', 'safety_bypass', 'evasion', 'separator', 'exfil']
+// 曾漏掉 encoding/structured/hidden/bypass 四类：它们在 PATTERNS 里已定义（如 base64/零宽/分隔符包装绕过），
+// 却永远不计入 relevant —— 把越狱指令编码/藏进结构化字段即可绕过人设安全评估。
+// 仍不含 mode_framing/continuation/escalation/invisible_unicode/placeholder（正常拟人用法误伤面大）。
+export const PERSONA_FORBIDDEN_CATS = ['override', 'jailbreak', 'refusal_suppression', 'safety_bypass', 'bypass', 'evasion', 'separator', 'exfil', 'encoding', 'structured', 'hidden']
 
 /**
  * @param {string} text 待评估的人设 systemPrompt

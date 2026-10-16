@@ -22,6 +22,7 @@ import { buildResumeMessages } from './continuation.js'
 import { ToolScheduler, resolveToolConcurrency } from './tool-scheduler.js'
 import { resolveExecutionMeta } from './tool-effects.js'
 import { validateToolArgs } from './tool-schema.js'
+import { isToolErrorContent } from './tool-result.js'
 import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, SEARCH_VERIFICATION, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 import { detectScheduleIntent } from './schedule.js'
@@ -64,10 +65,15 @@ function brief(v, n = 160) {
   return s.length > n ? s.slice(0, n) + `…(+${s.length - n})` : s
 }
 
-/** 判定工具结果是否为失败形态：{"error":...}（stringifyArgs 后的 JSON 键） */
-function isToolError(content) {
-  return typeof content === 'string' && /"error"\s*:/.test(content)
-}
+/**
+ * 判定工具结果是否为失败形态 —— 语义见 `./tool-result.js`（全仓唯一实现，registry/usage-stats 共用）。
+ *
+ * 曾用无锚点子串正则 `/"error"\s*:/`——工具返回的**正文**里只要出现字面量 `"error":`
+ * （API 文档、Issue 页、JSON 代码示例、用户笔记）就会被判成失败：注入「这是失败原因，请如实回复」
+ * 提示、账本记 toolFailed（写操作 effectState 从 applied 变 unknown → 恢复计划要求人工核对）。
+ * 现按结构化形态判定，并接受 MCP 纯文本错误约定（`Error:` 前缀），两处判定不再漂移。
+ */
+const isToolError = isToolErrorContent
 
 /** 这些错误码表示工具「未执行」（策略/校验/审批拒绝、未启动取消、账本阻断）→ effectState=none。 */
 const NOT_EXECUTED_ERRORS = new Set([
@@ -111,33 +117,82 @@ function resultSignature(content) {
  * 避免按字符 slice 把 JSON 切成非法片段——那会让模型无法解析、不知道缺哪些字段、反复重调。
  */
 function truncateJson(value, max) {
-  if (JSON.stringify(value).length <= max) return value
-  if (Array.isArray(value)) {
-    const total = value.length
-    const items = []
-    for (const it of value) {
-      const probe = JSON.stringify({ items: [...items, it], _truncated: true, omitted: total - items.length - 1, total })
-      if (probe.length > max) break
-      items.push(it)
+  const limit = Math.max(128, Number(max) || 0)
+  const size = (v) => { try { const t = JSON.stringify(v); return t == null ? 0 : t.length } catch { return Infinity } }
+  if (size(value) <= limit) return value
+
+  const MARK = 56 // _truncated/omitted/total 等标注字段的余量
+  /** 截断字符串到「JSON 序列化后不超过 cap」——必须计入引号与反斜杠的转义开销。
+   *  曾按裸长度计（`str.length <= cap`），含引号/反斜杠的值会撑破预算：轻则整字段被丢弃
+   *  （`{text:'y'.repeat(200000)}` 直接退化成 only _truncated），重则整体超限。 */
+  const sliceStr = (str, cap) => {
+    if (size(str) <= cap) return str
+    const suffix = `…(截断 ${str.length} 字符)`
+    const cut = (n) => str.slice(0, n) + suffix
+    if (size(cut(0)) > cap) return cut(Math.max(0, Math.min(str.length, cap - suffix.length - 2)))
+    let lo = 0
+    let hi = str.length
+    while (lo < hi) { // 单调 → 二分定切点，保证 size(cut(n)) <= cap
+      const mid = Math.ceil((lo + hi) / 2)
+      if (size(cut(mid)) <= cap) lo = mid
+      else hi = mid - 1
     }
-    return { items, _truncated: true, omitted: total - items.length, total }
+    return cut(lo)
   }
-  if (value && typeof value === 'object') {
-    const out = {}
-    for (const k of Object.keys(value)) {
-      const next = { ...out, [k]: value[k], _truncated: true }
-      if (JSON.stringify(next).length > max && Object.keys(out).length) break
-      out[k] = value[k]
-    }
-    for (const k of Object.keys(out)) {
-      if (typeof out[k] === 'string' && out[k].length > max * 0.6) {
-        out[k] = out[k].slice(0, Math.max(80, Math.floor(max / 4))) + `…(字段截断 ${out[k].length} 字符)`
+
+  /** 递归按预算裁剪任意 JSON 值；返回值的序列化长度不超过 cap（含标注） */
+  const shrink = (v, cap, depth) => {
+    if (v === null || typeof v !== 'object') return typeof v === 'string' ? sliceStr(v, cap) : v
+    const budget = Math.max(24, cap - MARK)
+    if (Array.isArray(v)) {
+      if (depth >= 8) return { items: [], _truncated: true, omitted: v.length, total: v.length }
+      const items = []
+      let used = 0
+      for (const it of v) {
+        const room = budget - used - 1
+        if (room <= 24) break
+        const shrunk = shrink(it, room, depth + 1)
+        const len = size(shrunk) + 1
+        if (used + len > budget) break
+        items.push(shrunk); used += len
       }
+      if (items.length === v.length) return items
+      return { items, _truncated: true, omitted: v.length - items.length, total: v.length }
     }
-    return { ...out, _truncated: true }
+    if (depth >= 8) return { _truncated: true, omitted: Object.keys(v).length }
+    const out = {}
+    const droppedKeys = []
+    let used = 0
+    for (const k of Object.keys(v)) {
+      const keyLen = k.length + 3 // "k":
+      const room = budget - used - keyLen
+      if (room <= 24) { droppedKeys.push(k); continue }
+      const shrunk = shrink(v[k], room, depth + 1)
+      const len = size(shrunk) + keyLen
+      if (used + len > budget) { droppedKeys.push(k); continue }
+      out[k] = shrunk; used += len
+    }
+    if (!droppedKeys.length) return out
+    return { ...out, _truncated: true, omitted_fields: droppedKeys.slice(0, 12), ...(droppedKeys.length > 12 ? { omittedCount: droppedKeys.length } : {}) }
   }
-  const s = typeof value === 'string' ? value : JSON.stringify(value)
-  return { _truncated: true, value: s.slice(0, Math.max(80, max - 80)) + `…(截断 ${s.length} 字符)` }
+
+  const shrunk = shrink(value, limit, 0)
+  if (size(shrunk) <= limit) return shrunk
+  // 兜底：极端形态（超深嵌套/单字段巨大）仍超限 → 字面量截断，保证结果仍可 JSON.parse。
+  // 该字面量是作为**字符串值**嵌入的，每个 `"` / `\` 都会转义膨胀（万键对象约 +190 字符），
+  // 故切点按「实际序列化长度」二分确定——曾用 `limit - suffix.length - 32` 估算，实测 2000 上限下输出 2189。
+  let flat
+  try { flat = typeof value === 'string' ? value : (JSON.stringify(value) ?? String(value)) } catch { flat = String(value) }
+  const suffix = `…(截断 ${flat.length} 字符)`
+  const wrap = (n) => ({ _truncated: true, value: flat.slice(0, n) + suffix })
+  let lo = 0
+  let hi = flat.length
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2)
+    if (size(wrap(mid)) <= limit) lo = mid
+    else hi = mid - 1
+  }
+  return wrap(lo)
 }
 
 /** 失败回灌提示：注入错误 tool 结果的 _hint 字段，引导模型据实回复、勿臆测编造。
@@ -405,7 +460,9 @@ export class Agent {
   async continueFrom(checkpoint, opts = {}) {
     const messages = buildResumeMessages(checkpoint, { continuationPrompt: opts.continuationPrompt })
     this.setHistory(messages)
-    return this.run(opts.goal || '请继续完成原任务并给出最终结果。', opts)
+    // presetHistory：run() 必须保留上面重建的续跑历史，不得再从会话存储整体载入覆盖。
+    // 否则检查点里的「已完成步骤 + 勿重复执行」指引被会话历史顶掉——已完成副作用会被重做。
+    return this.run(opts.goal || '请继续完成原任务并给出最终结果。', { ...opts, presetHistory: true })
   }
 
   /** F13：根任务 token 预算——嵌套工作开始前预留，结算真实用量并释放预留。 */
@@ -457,6 +514,8 @@ export class Agent {
     // 临时任务模式（如人设补齐）：借用真实 ctx 的身份/权限/任务账本，但不读写会话历史、
     // 不注入/抽取召回记忆与画像——避免把一次性研究污染用户长期上下文。
     const ephemeral = opts.ephemeral === true
+    // 续跑（F06）：历史已由 continueFrom 依检查点重建，绝不再从会话存储载入覆盖
+    const presetHistory = opts.presetHistory === true
 
     const rawText = this._inputText(input)
     this._lastUserText = rawText // 本轮用户原始文本（反思 Jev 判定用）
@@ -528,13 +587,16 @@ export class Agent {
     let sessKey = null
     if (ephemeral) {
       this.messages = [] // 临时任务：不加载会话历史（任务账本仍按 ctx 的 scopeKey 记账）
+    } else if (presetHistory) {
+      // 保留 setHistory 预置的重建历史（不读会话存储）
     } else if (useConv) {
       try { this.messages = await this.session.getConversation(scopeUserId, ctx.groupId, ctx.conversationId) } catch { this.messages = [] }
     } else if (this.session && ctx) {
       sessKey = this.session.key(ctx.groupId, scopeUserId)
       try { this.messages = await this.session.get(sessKey) } catch { this.messages = [] }
     }
-    const sessStart = this.messages.length
+    // presetHistory 时全量覆写持久化：append 会读回会话再追加，导致续跑历史与旧历史重复/错位
+    const sessStart = presetHistory ? 0 : this.messages.length
     // prompt_cache_key 的会话标识（_promptCacheKeyFor 读取）：多对话模式用 群:用户:会话id，
     // 群:用户 模式用 sessKey。此前从未赋值 → 不同会话算出同一个键，会话级路由隔离失效。
     this._curConvId = ephemeral
@@ -676,6 +738,11 @@ export class Agent {
     let runDoneResolve = () => {}
     const runDone = new Promise((r) => { runDoneResolve = r })
     _activeRuns.set(taskId, { cancel: () => { this._runCancelled = true; try { workCtl.abort({ kind: 'user' }) } catch { /* noop */ } }, done: runDone })
+    // F02/F14：**整段 run 体**都必须在 try 内——注销登记与 runDone 结算放在唯一的 finally 里。
+    // 曾把 try 只开在收尾段（原 :998），主循环里 provider 抛错/被取消时异常直接从 run 冒出，
+    // 该 finally 根本不执行：_activeRuns 永久残留（isAgentRunActive 恒 true、同 taskId 后续被误判"仍在跑"），
+    // runDone 永不结算 → abortAllActiveRuns()/运行期关闭 await 挂死（单测 F14 unsettled top-level await）。
+    try {
     let workTimer = null
     if (this.governor?.timeBudgetMs) {
       workTimer = setTimeout(() => {
@@ -872,15 +939,21 @@ export class Agent {
 
         // 工具执行期间工作预算耗尽（用户未取消）：剩余工具已按"未执行"配对，
         // 直接进入既有收尾路径，不再跑下一轮模型/工具。
-        if (workSignal.aborted && !signal?.aborted) {
+        // 取消分类必须与 catch 分支同口径：abortActiveRun（#取消任务/Web 取消）会置 _runCancelled
+        // 并 abort workSignal——只排除了外层 signal 的话，运行中取消会被误当"时间预算到点"：
+        // 不抛 aborted、照常进收尾并交付迟到结果（用户已看到"已取消"却又收到回复）。
+        // 交给下一轮循环顶部的 `_runCancelled` 检查抛出 aborted，落 cancelled 终态。
+        if (workSignal.aborted && !signal?.aborted && !this._runCancelled) {
           stopReason = 'time_budget'
           this.logger('warn', '[governor] 工具执行期间时间预算到点，剩余工具未执行，进入收尾')
           this.devLog?.('governor_stop', { reason: 'time_budget', phase: 'in_tools', ...this.governor?.snapshot?.() }, taskId, ctx?.devScope)
           break
         }
 
-        // clarify 短路：指定工具的结果作为最终回复
-        const sc = toolResults.find((tr) => this.shortCircuitTools.includes(tr.name))
+        // clarify 短路：指定工具的结果作为最终回复。
+        // 必须排除失败结果：clarify 参数非法（schema 校验失败）时错误串同样带着 name='clarify'，
+        // 曾把它当最终回复交付给用户（用户收到一段原始 JSON 错误），并把任务记成 waiting_input。
+        const sc = toolResults.find((tr) => tr && !isToolError(tr.content) && this.shortCircuitTools.includes(tr.name))
         if (sc) {
           let q = sc.content
           try { const o = JSON.parse(q); if (o && o.clarify) q = o.clarify } catch { /* keep raw */ }
@@ -928,10 +1001,13 @@ export class Agent {
     } finally {
       if (workTimer) clearTimeout(workTimer) // 工作计时到点即清——收尾走独立宽限窗
       if (signal) signal.removeEventListener('abort', onUserAbort)
-      _activeRuns.delete(taskId) // F02：run 结束注销在途登记
-      try { runDoneResolve() } catch { /* noop */ }
     }
 
+    // F14/M-028：在途登记（_activeRuns + runDone）必须在 run **真正结束**后才注销/结算——
+    // 即收尾模型调用、会话持久化、账本 finish 全部完成之后。此前在主循环 finally 里就注销：
+    // abortAllActiveRuns 只等到主循环返回（甚至返回 0），而旧运行时的 disposer 随后即关闭
+    // taskStore（sqlite）/usageStats 等资源，正在进行的收尾与落盘会写失败或丢终态；
+    // isAgentRunActive() 也会在任务仍在跑时误报 false。
     if (!stopReason) {
       stopReason = 'max_turns'
       this.logger('warn', `Agent 达到 maxTurns(${this.maxTurns})，提前结束`)
@@ -967,13 +1043,13 @@ export class Agent {
       // 临时任务：不持久化会话历史
     } else if (useConv) {
       try {
-        if (compactedThisRun) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
+        if (compactedThisRun || presetHistory) await this.session.setConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages, extra)
         else await this.session.appendConversation(scopeUserId, ctx.groupId, ctx.conversationId, this.messages.slice(sessStart), extra)
         sessionPersisted = true
       } catch (e) { this.logger('warn', 'conversation 持久化失败', e) }
     } else if (sessKey) {
       try {
-        if (compactedThisRun) await this.session.set(sessKey, this.messages)
+        if (compactedThisRun || presetHistory) await this.session.set(sessKey, this.messages)
         else await this.session.append(sessKey, this.messages.slice(sessStart))
         sessionPersisted = true
       } catch (e) { this.logger('warn', 'session 持久化失败', e) }
@@ -1047,6 +1123,10 @@ export class Agent {
       ...(this._budget?.limit != null ? { tokenBudget: { ...this._budget } } : {}),
       // 本轮思考决策（供应用层日志/观测）：auto 生效时有 depth/budget/source/style
       ...(this.thinkInfo ? { think: this.thinkInfo } : {}),
+    }
+    } finally {
+      _activeRuns.delete(taskId) // F02：run 真正结束（含收尾/落盘/账本）才注销在途登记
+      try { runDoneResolve() } catch { /* noop */ }
     }
   }
 
@@ -1635,7 +1715,20 @@ export class Agent {
         })
       })))
     }
-    return settled.map((r, i) => (r && r.cancelled ? this._cancelledToolResult(toolCalls[i]) : r?.value))
+    // 每个 tool_call 都必须拿到一条**合法**的 tool 消息：调度层以 {ok:false,error} 结算
+    // （任务 reject）时 r.value 为 undefined，直接回插会让 undefined 进入 messages——
+    // 该 tool_call 失去配对结果（下一轮端点 400），且下方 find(tr => tr.name) 会抛 TypeError。
+    return settled.map((r, i) => {
+      if (r && r.cancelled) return this._cancelledToolResult(toolCalls[i])
+      if (!r || r.ok === false || r.value == null) {
+        const reason = r?.error?.message || (r?.error != null ? String(r.error) : '工具调度未返回结果')
+        return {
+          role: 'tool', tool_call_id: toolCalls[i].id, name: toolCalls[i].name,
+          content: stringifyArgs({ error: 'tool_task_failed', reason, _hint: TOOL_FAIL_HINT }),
+        }
+      }
+      return r.value
+    })
   }
 
   /** 账本不可用时阻止工具执行的配对结果（不伪装成功、不触发副作用）。 */
@@ -1719,11 +1812,17 @@ export class Agent {
         if (this.toolSchemaValidate) {
           const v = validateToolArgs(tool, tc.arguments)
           if (!v.ok) {
+            // v.code 透传：schema_invalid（工具契约错误，重试无用）与 invalid_arguments（模型可自行修正）
+            // 必须区分——曾统一回 invalid_arguments 并附「请修正后重试」，把工具缺陷伪装成参数错误，
+            // 模型会反复改参数直到 maxTurns（白烧 token 且日志看不出真因）。
+            const schemaBroken = v.code === 'schema_invalid'
             content = stringifyArgs({
-              error: 'invalid_arguments',
-              reason: `参数不符合 ${tc.name} 的 schema`,
+              error: v.code || 'invalid_arguments',
+              reason: schemaBroken ? `工具 ${tc.name} 的参数 schema 无法编译（工具契约错误）` : `参数不符合 ${tc.name} 的 schema`,
               fields: v.fields,
-              _hint: '请按参数 schema 修正后重试；不要臆造字段或类型。',
+              _hint: schemaBroken
+                ? '这是工具自身契约错误，重试无用：请改用其它工具完成，或如实告知用户该工具当前不可用。'
+                : '请按参数 schema 修正后重试；不要臆造字段或类型。',
             })
             this.logger('warn', 'tool invalid args', tc.name, brief(v.fields))
             this._safeCb(cb.onToolEnd, tc, content)
@@ -1742,8 +1841,12 @@ export class Agent {
           this._safeCb(cb.onToolEnd, tc, content)
           return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
         }
-        // policy + confirm 门（代码层强制，agent 无法绕过）
+      // policy + confirm 门（代码层强制，agent 无法绕过）
+      // 关键：meta.alwaysConfirm 的判定与审批执行**必须在 `if (this.policy && ctx)` 之外**——
+      // 曾整段包在守卫内，导致无 policy 的装配（子代理 SubagentSpec 明确不传 policy/confirm、
+      // 以及任何省略 opts.ctx 的嵌入用法）下，声明「每次都需主人确认」的写类工具被静默放行。
       const alwaysConfirm = tool?.meta?.alwaysConfirm === true
+      let needConfirm = alwaysConfirm
       if (this.policy && ctx) {
         const dec = this.policy.decide(ctx, tool)
         if (dec.decision === 'deny') {
@@ -1752,45 +1855,48 @@ export class Agent {
           this._safeCb(cb.onToolEnd, tc, content)
           return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
         }
-        // meta.alwaysConfirm（如 terminal）：即便主人/policy 放行，也强制走确认
-        let needConfirm = dec.decision === 'confirm' || alwaysConfirm
-        // meta.shouldConfirm（按入参否决审批）：如 terminal 的 allowlist 命中 → 免审批直跑
-        if (needConfirm && typeof tool?.meta?.shouldConfirm === 'function') {
-          try {
-            if (await tool.meta.shouldConfirm(tc.arguments, ctx) === false) {
-              needConfirm = false
-              this.logger('mark', 'tool auto-allow', tc.name, 'meta.shouldConfirm 否决审批（如 allowlist 命中）')
-            }
-          } catch { /* shouldConfirm 出错保守起见仍走确认 */ }
-        }
-        if (needConfirm) {
-          // 主人免确认（高危）：masterSkipConfirm 开启且当前是主人 → 跳过 #确认、发高危提示。
-          // denylist 仍是硬底线（execute 里拦），不会因免确认而放行灾难命令。
-          if (this.masterSkipConfirm && ctx?.isMaster) {
-            this.logger('warn', '⚠️ 主人任务免确认自动执行（高危）', tc.name, brief(tc.arguments))
-            this._safeCb(cb.onMasterAutoApprove, tc)
+        if (dec.decision === 'confirm') needConfirm = true
+      }
+      // meta.shouldConfirm（按入参否决审批）：如 terminal 的 allowlist 命中 → 免审批直跑
+      if (needConfirm && typeof tool?.meta?.shouldConfirm === 'function') {
+        try {
+          if (await tool.meta.shouldConfirm(tc.arguments, ctx) === false) {
             needConfirm = false
+            this.logger('mark', 'tool auto-allow', tc.name, 'meta.shouldConfirm 否决审批（如 allowlist 命中）')
           }
+        } catch { /* shouldConfirm 出错保守起见仍走确认 */ }
+      }
+      if (needConfirm) {
+        // 主人免确认（高危）：masterSkipConfirm 开启且当前是主人 → 跳过 #确认、发高危提示。
+        // denylist 仍是硬底线（execute 里拦），不会因免确认而放行灾难命令。
+        if (this.masterSkipConfirm && ctx?.isMaster) {
+          this.logger('warn', '⚠️ 主人任务免确认自动执行（高危）', tc.name, brief(tc.arguments))
+          this._safeCb(cb.onMasterAutoApprove, tc)
+          needConfirm = false
         }
-        // await shouldConfirm 之后：审批前置判定期间可能被取消
-        if (aborted()) return cancelledReturn('审批前置判定期间任务已取消，工具未执行')
-        if (needConfirm) {
-          if (!this.confirm) {
-            // 需确认但无确认器 → 拒绝（绝不放行危险动作）
-            content = stringifyArgs({ error: 'rejected_by_confirm', reason: '该操作需确认但未装配确认器' })
-            this.logger('warn', 'tool blocked', tc.name, '需确认但无 ConfirmStore')
-            this._safeCb(cb.onToolEnd, tc, content)
-            return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
-          }
-          // 审批等待期间取消：ConfirmStore 随 signal 撤销 pending（迟到批准无效）
-          const approved = await this.confirm.request({ tool: tc.name, args: tc.arguments, ctx, notify: ctx?.notify, signal: execCtx?.signal })
-          if (aborted()) return cancelledReturn('审批期间任务已取消，工具未执行')
-          if (!approved) {
-            content = stringifyArgs({ error: 'rejected_by_confirm', reason: '未获批准或超时' })
-            this.logger('mark', 'tool rejected', tc.name, '未获批准/超时')
-            this._safeCb(cb.onToolEnd, tc, content)
-            return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
-          }
+      }
+      // await shouldConfirm 之后：审批前置判定期间可能被取消
+      if (aborted()) return cancelledReturn('审批前置判定期间任务已取消，工具未执行')
+      if (needConfirm) {
+        if (!this.confirm) {
+          // 需确认但无确认器 → 拒绝（绝不放行危险动作；子代理等无审批通道的装配即走此分支）
+          content = stringifyArgs({
+            error: 'rejected_by_confirm',
+            reason: '该操作需主人确认，但当前上下文未装配确认器（如子代理/内嵌调用）',
+            _hint: '该工具每次执行都需主人审批。请让主对话直接调用它，或改用无需审批的替代方案。',
+          })
+          this.logger('warn', 'tool blocked', tc.name, '需确认但无 ConfirmStore')
+          this._safeCb(cb.onToolEnd, tc, content)
+          return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
+        }
+        // 审批等待期间取消：ConfirmStore 随 signal 撤销 pending（迟到批准无效）
+        const approved = await this.confirm.request({ tool: tc.name, args: tc.arguments, ctx, notify: ctx?.notify, signal: execCtx?.signal })
+        if (aborted()) return cancelledReturn('审批期间任务已取消，工具未执行')
+        if (!approved) {
+          content = stringifyArgs({ error: 'rejected_by_confirm', reason: '未获批准或超时' })
+          this.logger('mark', 'tool rejected', tc.name, '未获批准/超时')
+          this._safeCb(cb.onToolEnd, tc, content)
+          return { role: 'tool', tool_call_id: tc.id, name: tc.name, content }
         }
       }
       // shell 自定义拦截（确定性，与 Jev 是否开启无关）：命中即拒绝执行，命令不发往第三方
@@ -1931,7 +2037,9 @@ export class Agent {
     const text = (res?.content || '').trim()
     const m = text.match(/\{\s*"revise"\s*:\s*(true|false)\s*\}/i)
     if (!m || !/true/i.test(m[1])) return { revise: false, usage: res?.usage || null }
-    const feedback = text.slice(text.indexOf('}') + 1).trim() || '草拟回复存在未达标之处'
+    // 起点必须用正则实际匹配到的位置：曾用 text.indexOf('}')（全文第一个 }），
+    // 模型在 JSON 之前输出任何含 } 的内容（分析过程/片段/表格）时反馈会整段错位
+    const feedback = text.slice(m.index + m[0].length).trim() || '草拟回复存在未达标之处'
     return { revise: true, feedback, usage: res?.usage || null }
   }
 

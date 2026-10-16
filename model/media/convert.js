@@ -37,7 +37,8 @@ export function toOpenaiBlocks(media, { caps = {}, degrade = 'note' } = {}) {
   const blocks = []
   for (const mf of media) {
     if (mf.resolveError || !mf.buffer) {
-      blocks.push({ type: 'text', text: degradeNote(mf, degrade, true) })
+      const t = degradeNote(mf, degrade, true)
+      if (t != null) blocks.push({ type: 'text', text: t })
       continue
     }
     if (isImage(mf.mime)) {
@@ -71,7 +72,8 @@ export function toAnthropicBlocks(media, { caps = {}, degrade = 'note' } = {}) {
   const blocks = []
   for (const mf of media) {
     if (mf.resolveError || !mf.buffer) {
-      blocks.push({ type: 'text', text: degradeNote(mf, degrade, true) })
+      const t = degradeNote(mf, degrade, true)
+      if (t != null) blocks.push({ type: 'text', text: t })
       continue
     }
     if (isImage(mf.mime)) {
@@ -102,7 +104,8 @@ export function toGeminiBlocks(media, { caps = {}, degrade = 'note' } = {}) {
   const blocks = []
   for (const mf of media) {
     if (mf.resolveError || !mf.buffer) {
-      blocks.push({ type: 'text', text: degradeNote(mf, degrade, true) })
+      const t = degradeNote(mf, degrade, true)
+      if (t != null) blocks.push({ type: 'text', text: t })
       continue
     }
     if (isImage(mf.mime)) {

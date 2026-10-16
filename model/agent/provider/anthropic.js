@@ -49,7 +49,9 @@ export function toAnthropicMessages(messages, system) {
         if (Array.isArray(m.tool_calls)) {
           for (const tc of m.tool_calls) {
             const name = tc.function?.name || tc.name
-            const input = parseArgs(tc.function?.arguments ?? tc.arguments)
+            // tool_use.input 必须是对象：parseArgs 对非法 JSON 会原样返回字符串，
+            // 直接下发会被 Anthropic 判 400（整轮失败）
+            const input = asObjectInput(parseArgs(tc.function?.arguments ?? tc.arguments))
             blocks.push({ type: 'tool_use', id: tc.id, name, input })
           }
         }
@@ -97,6 +99,30 @@ function nativePayload(content) {
   return blocks.length ? { type: 'anthropic', content: blocks } : null
 }
 
+/**
+ * 统一契约归一（见 provider/base.js 头部声明）：AssistantResult.toolCalls 的元素必须是
+ * `{ id, name, arguments }`。Anthropic 原生 tool_use block 的入参字段名是 `input`
+ * （../../anthropic/helpers.js#extractToolUses、stream.js 的 toolUses），若直接透传，
+ * Agent 侧 `tc.arguments` 恒为 undefined → 参数 schema 预校验必然失败
+ * （"参数必须是 JSON 对象（收到 undefined）"），工具永不执行。此处统一改名为 arguments。
+ */
+function normalizeToolCalls(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter((tc) => tc && (tc.name || tc.function?.name))
+    .map((tc) => ({
+      id: tc.id,
+      name: tc.name || tc.function.name,
+      arguments: tc.arguments !== undefined ? tc.arguments : (tc.input !== undefined ? tc.input : {}),
+    }))
+}
+
+/** tool_use.input 必须是对象（parseArgs 对非法 JSON 返回字符串） */
+function asObjectInput(v) {
+  if (v && typeof v === 'object' && !Array.isArray(v)) return v
+  if (v == null) return {}
+  return { _raw: typeof v === 'string' ? v : JSON.stringify(v) }
+}
+
 function resultFromResponse(res) {
   const content = res.content || []
   // 防御：若 text block 里被内联了 <think>，剥离到 reasoning（原生 Anthropic 走 thinking block，此处为 no-op）
@@ -109,7 +135,7 @@ function resultFromResponse(res) {
   return {
     role: 'assistant',
     content: cleanText,
-    toolCalls: structured.length ? structured : inlineCalls,
+    toolCalls: normalizeToolCalls(structured.length ? structured : inlineCalls),
     reasoning: reasoning || null,
     finishReason: res.stop_reason ?? null,
     usage: res.usage ?? null,
@@ -127,7 +153,7 @@ function resultFromStream(s) {
   return {
     role: 'assistant',
     content: cleanText,
-    toolCalls: structured.length ? structured : inlineCalls,
+    toolCalls: normalizeToolCalls(structured.length ? structured : inlineCalls),
     reasoning: reasoning || null,
     finishReason: s.stopReason,
     usage: s.usage,
@@ -221,6 +247,9 @@ export class AnthropicProvider extends Provider {
           if (ev.text && onDelta) { const c = stripper.feed(ev.text); if (c) onDelta(c) }
           if (ev.thinking && onReasoning) onReasoning(ev.thinking)
         }
+        // 流结束收尾（L-086）：stripper 会滞留"可能是 <think> 标签前缀"的尾部字符，
+        // 不调用 end() 则正文结尾的 '<'/'<thi' 等被永久吞掉（live 播报缺字）。
+        if (stripper) { const tail = stripper.end(); if (tail) onDelta(tail) }
         return resultFromStream(s)
       }
       const res = await this.client.messages.create(body, { signal, sessionId })
@@ -241,6 +270,7 @@ export class AnthropicProvider extends Provider {
             if (ev.text && onDelta) { const c = stripper.feed(ev.text); if (c) onDelta(c) }
             if (ev.thinking && onReasoning) onReasoning(ev.thinking)
           }
+          if (stripper) { const tail = stripper.end(); if (tail) onDelta(tail) } // L-086：同上，流结束必须收尾
           return resultFromStream(s)
         }
         return resultFromResponse(await this.client.messages.create(body, { signal, sessionId }))

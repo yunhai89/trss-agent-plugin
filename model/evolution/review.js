@@ -228,9 +228,16 @@ export function listPendingSuggestions(suggestionDir, scopeId) {
   } catch { return [] }
 }
 
-/** 删除已处理（采纳/拒绝）的 suggestion 文件 */
+/** 删除已处理（采纳/拒绝）的 suggestion 文件。
+ *  id/scopeId 直接来自用户消息（#拒绝进化 <id>），必须先白名单化：否则 path.join 归一化后
+ *  `../../prompts/agent` 会删除 suggestionDir 之外的任意 `<name>.json`（路径穿越）。 */
 export function removeSuggestion(suggestionDir, scopeId, id) {
-  const file = path.join(suggestionDir, String(scopeId || '__global__'), `${id}.json`)
+  const scope = String(scopeId || '__global__')
+  const safeId = String(id ?? '')
+  if (!/^[A-Za-z0-9_-]+$/.test(safeId) || !/^[A-Za-z0-9_-]+$/.test(scope)) return false
+  const base = path.resolve(suggestionDir, scope)
+  const file = path.resolve(base, `${safeId}.json`)
+  if (path.dirname(file) !== base) return false // 双保险：解析结果必须仍在 scope 目录内
   try { fs.unlinkSync(file); return true } catch { return false }
 }
 

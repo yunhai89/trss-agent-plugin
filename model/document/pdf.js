@@ -54,7 +54,11 @@ async function readPdf(filePath, maxPages, ctx) {
   const factory = await factoryMaker.create()
 
   const data = new Uint8Array(fs.readFileSync(filePath))
-  const doc = await pdfjs.getDocument({ data, canvasFactory: factory, isEvalSupported: false, verbosity: 0 }).promise
+  // 销毁必须走 loadingTask：pdfjs-dist v6 的 PDFDocumentProxy 只有 cleanup()/numPages，
+  // 已移除 destroy()（v6 API：PDFDocumentLoadingTask.destroy(): Promise<void>）。
+  // 曾调用 doc.destroy() → 每次读取都在末尾抛 TypeError，已提取的全文被整份丢弃。
+  const loadingTask = pdfjs.getDocument({ data, canvasFactory: factory, isEvalSupported: false, verbosity: 0 })
+  const doc = await loadingTask.promise
   const numPages = doc.numPages
   const renderCount = Math.min(maxPages, numPages)
   const seg = (typeof segment !== 'undefined' && segment) || null
@@ -92,6 +96,6 @@ async function readPdf(filePath, maxPages, ctx) {
     await page.cleanup()
   }
 
-  await doc.destroy()
+  await loadingTask.destroy()
   return { pages: numPages, rendered, text: fullText.slice(0, 10000).trim() }
 }

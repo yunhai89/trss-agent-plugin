@@ -212,6 +212,9 @@ async function withPage(html, fn) {
     return null
   }
   try {
+    // 渲染的 HTML 里含 LLM 正文（可能被工具结果/网页内容间接注入）；这些卡片本身不需要 JS（theme.js 全静态）
+    // → 直接关掉页面 JS：双保险（另一道是 mdToHtml 转义原始 HTML + 文档 CSP meta），防 XSS 打到本机
+    await page.setJavaScriptEnabled(false).catch(() => {})
     await page.setContent(String(html), { waitUntil: 'load', timeout: 30000 })
     return await fn(page)
   } catch (e) {

@@ -68,15 +68,108 @@ function collectSecrets() {
 }
 
 /**
+ * 各模式正则的「字面起始标记」（流式尾部暂存判定用；与上方 PATTERNS 一一对应）。
+ * ci=true 表示该模式带 i 标志（大小写不敏感）。
+ */
+const PATTERN_HEADS = [
+  { head: 'sk-ant-', ci: false, b: false }, { head: 'sk-or-', ci: false, b: false },
+  // 注意：PATTERNS 里 sk- 这条没有 \b 前缀，故 b=false（'catsk-xxx' 同样会被脱敏）
+  { head: 'sk-', ci: false, b: false },
+  { head: 'Bearer ', ci: true, b: true },
+  { head: 'github_pat_', ci: false, b: true },
+  { head: 'ghp_', ci: false, b: true }, { head: 'gho_', ci: false, b: true },
+  { head: 'ghu_', ci: false, b: true }, { head: 'ghs_', ci: false, b: true },
+  { head: 'ghr_', ci: false, b: true },
+  { head: 'AKIA', ci: false, b: true }, { head: 'AIza', ci: false, b: true },
+  { head: 'hf_', ci: false, b: true },
+  { head: 'xoxb-', ci: false, b: true }, { head: 'xoxp-', ci: false, b: true },
+  { head: 'xoxo-', ci: false, b: true }, { head: 'xoxa-', ci: false, b: true },
+]
+
+/** 模式里的 \b：标记起点必须落在词边界上（否则该模式本就不会命中，无需暂存） */
+const WORD_CHAR = /[A-Za-z0-9_]/
+const atBoundary = (s, i) => i === 0 || !WORD_CHAR.test(s[i - 1])
+
+/** 模式 {16,} 类里出现过的字符：标记之后仍是这类字符 → 密钥可能还在延伸，不能先发 */
+const KEY_CHAR = /[A-Za-z0-9._-]/
+
+/** 暂存窗口上界：避免异常长的「疑似密钥」把流式彻底卡死（真实密钥远小于此） */
+const MAX_HOLD = 512
+
+/**
+ * 流式安全切点：返回 raw 中「可以立即脱敏外发」的前缀长度。
+ *
+ * 为什么需要它：redactSecrets 是**整串**语义（已知密钥靠 includes 精确命中、模式正则要求
+ * 密钥在同一字符串内完整出现）。流式逐片调用时，密钥被分片边界切开 → 两片都不命中 →
+ * 明文外发。故凡「尾部可能是不完整密钥」的部分一律先扣住不发，等后续增量补齐后再判定：
+ *   1) 尾部是某个已知密钥值的前缀（如配置里 sk-xxx 的 'sk-xx'）；
+ *   2) 已出现模式起始标记（sk- / Bearer / AKIA …）且其后的密钥字符一直延伸到串尾
+ *      （即可能还在增长，尚未定型）；
+ *   3) 尾部本身就是某个标记的真前缀（'s' / 'sk' / 'Bear' …）。
+ * 三种情况之外照常即时发送，故正常文本的流式体验不受影响（不会一律压到收尾）。
+ *
+ * @param {string} text 累积原文
+ * @param {string[]} [secrets] 预先收集的已知密钥（不传则实时收集）
+ * @returns {number} 可安全外发的前缀长度（0..text.length）
+ */
+export function redactSafeCut(text, secrets) {
+  if (typeof text !== 'string' || !text) return 0
+  let cut = text.length
+  try {
+    // 1) 已知密钥：尾部是某密钥的真前缀 → 从该前缀起点扣住
+    const list = Array.isArray(secrets) ? secrets : collectSecrets()
+    for (const sec of list) {
+      if (!sec) continue
+      const max = Math.min(sec.length - 1, text.length)
+      for (let L = max; L > 0; L--) {
+        if (text.endsWith(sec.slice(0, L))) { cut = Math.min(cut, text.length - L); break }
+      }
+    }
+    // 2) 已出现的起始标记：其后全是密钥字符且直到串尾 → 可能仍在延伸
+    const low = text.toLowerCase()
+    for (const { head, ci, b } of PATTERN_HEADS) {
+      const hay = ci ? low : text
+      const needle = ci ? head.toLowerCase() : head
+      for (let idx = hay.indexOf(needle); idx !== -1; idx = hay.indexOf(needle, idx + 1)) {
+        if (b && !atBoundary(text, idx)) continue
+        const after = idx + head.length
+        let extending = true
+        for (let i = after; i < text.length; i++) {
+          if (!KEY_CHAR.test(text[i])) { extending = false; break }
+        }
+        if (extending) cut = Math.min(cut, idx)
+      }
+    }
+    // 3) 尾部只是标记的一半（'s'/'sk'/'Bear'）→ 也会被下片补成完整密钥
+    for (const { head, ci, b } of PATTERN_HEADS) {
+      const max = Math.min(head.length - 1, text.length)
+      let L = max
+      for (; L > 0; L--) {
+        const tail = text.slice(text.length - L)
+        const same = ci ? tail.toLowerCase() === head.slice(0, L).toLowerCase() : tail === head.slice(0, L)
+        if (same) break
+      }
+      if (L > 0 && (!b || atBoundary(text, text.length - L))) cut = Math.min(cut, text.length - L)
+    }
+    if (text.length - cut > MAX_HOLD) cut = text.length - MAX_HOLD
+    return Math.max(0, Math.min(cut, text.length))
+  } catch {
+    return 0 // 判定失败一律全量扣住（fail-closed：宁可延迟，不可明文外发）
+  }
+}
+
+/**
  * 脱敏一段文本：已知密钥值 + 常见模式 → ***。
  * 纯字符串操作；异常时原样返回，绝不阻塞发送。
+ * @param {string} text 待脱敏文本
+ * @param {string[]} [secrets] 预先收集的已知密钥（流式侧按流缓存，避免每片重扫配置）
  */
-export function redactSecrets(text) {
+export function redactSecrets(text, secrets) {
   if (typeof text !== 'string' || !text) return text
   try {
     let out = text
     // 1) 已知密钥值（split/join 免正则转义问题）
-    for (const sec of collectSecrets()) {
+    for (const sec of (Array.isArray(secrets) ? secrets : collectSecrets())) {
       if (sec && out.includes(sec)) out = out.split(sec).join('***')
     }
     // 2) 模式兜底

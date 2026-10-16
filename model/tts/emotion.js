@@ -175,14 +175,16 @@ export function segmentsFaithful(segments, text) {
 export function splitByPunctuation(text, maxChars = MAX_SEGMENT_CHARS) {
   const s = String(text || '').trim()
   if (!s) return []
+  // 配置可能被手改成负数/小数（调用方不做夹取）：强切步长必须 ≥1，否则 slice 后 cur 永不缩短而死循环
+  const limit = Math.max(1, Math.floor(Number(maxChars)) || MAX_SEGMENT_CHARS)
   const parts = s.split(/(?<=[。！？!?；;\n])/).map((x) => x.trim()).filter(Boolean)
   const out = []
   let cur = ''
   for (const p of parts) {
-    if (cur && (cur + p).length > maxChars) { out.push(cur); cur = p }
+    if (cur && (cur + p).length > limit) { out.push(cur); cur = p }
     else cur += p
-    // 单段仍超限：按 maxChars 强切
-    while (cur.length > maxChars) { out.push(cur.slice(0, maxChars)); cur = cur.slice(maxChars) }
+    // 单段仍超限：按 limit 强切
+    while (cur.length > limit) { out.push(cur.slice(0, limit)); cur = cur.slice(limit) }
   }
   if (cur) out.push(cur)
   return out

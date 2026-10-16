@@ -55,15 +55,13 @@
     name: 'HumanizeView',
     components: { CfgRow, TagEditor },
     setup() {
-      const { ref, reactive, watch, computed, onMounted, nextTick } = Vue
+      const { ref, reactive, watch, computed, onMounted, onUnmounted, nextTick } = Vue
       const { toast } = window.UI
       const M = window.MOCK
 
-      const form = reactive({})
       let origSnapshot = {}
       const dirty = ref(false)
       let dirtySuppressed = true
-      watch(form, () => { if (!dirtySuppressed) dirty.value = true }, { deep: true })
 
       /* 深合并默认值（保证子对象存在） */
       const withDefaults = (h) => {
@@ -80,6 +78,11 @@
         }
         return merge(DEFAULTS, h || {})
       }
+
+      // 初始即填默认值：模板首屏就会解引用 form.persona.name / form.reply.maxBubbles 等嵌套字段，
+      // 空对象会刷屏 26 条 TypeError，且 /api/config 失败时缺失的行永久不渲染。
+      const form = reactive(withDefaults({}))
+      watch(form, () => { if (!dirtySuppressed) dirty.value = true }, { deep: true })
 
       const syncForm = (snap) => {
         dirtySuppressed = true
@@ -156,8 +159,9 @@
           if (M.config) syncForm(M.config.humanize)
         } catch (e) { toast(e.message, 'error') }
       })
-      // onUnmounted: 简单清理（本视图常驻，scroll 监听与 config 页同模式，切换路由不主动移除以保持一致）
-      window.removeEventListener('scroll', onScroll)
+      // 监听器在 onMounted 里注册，卸载时移除；路由切换会真正卸载并重建视图组件（app.js 的 :key="route"），
+      // 写在 setup 同步区的 remove 早于 add、等于空操作，每次访问都会泄漏一个监听器。
+      onUnmounted(() => window.removeEventListener('scroll', onScroll))
 
       const talkPct = computed(() => (form.talkValue || 0) * 100 + '%')
       const tempPlannerPct = computed(() => ((form.planner?.temperature ?? 0.2) / 1) * 100 + '%')

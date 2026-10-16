@@ -24,8 +24,13 @@ import { isImage } from '../media/resolve.js'
  *   video=false 时保留视频原样（一般不用，视频无主模型原生块路径）。
  * @returns {Promise<MediaFile[]>} 转换后的媒体列表（图片/视频 → 文本）
  */
-export async function describeImages(vision, mediaList, question, { images = true, video = true } = {}) {
+export async function describeImages(vision, mediaList, question, { images = true, video = true, budgetMs = 0 } = {}) {
   if (!vision || !Array.isArray(mediaList)) return mediaList || []
+  // 视觉阶段整体预算：单次调用已在 VisionService 内设超时，但多图/多视频串行会线性叠加，
+  // 超预算的媒体直接降级为占位文本（否则视觉通道抖动时整轮消息静默十几分钟）。
+  const budget = Number(budgetMs) > 0 ? Number(budgetMs) : Math.max(60_000, (Number(vision.timeoutMs) > 0 ? Number(vision.timeoutMs) : 180_000) * 2)
+  const deadline = Date.now() + budget
+  const outOfBudget = () => Date.now() >= deadline
   const out = []
   for (const mf of mediaList) {
     const img = mf.kind === 'image' || isImage(mf.mime)
@@ -52,6 +57,10 @@ export async function describeImages(vision, mediaList, question, { images = tru
         continue
       }
       let desc = ''
+      if (outOfBudget()) {
+        out.push(toTextMedia(mf, `${label}（视觉识别超出本轮预算，未送识别）${urlPart}`))
+        continue
+      }
       try {
         desc = await vision.recognizeVideo({ buffer: mf.buffer, mime: mf.mime, name: mf.name }, { question })
       } catch (e) {
@@ -82,6 +91,10 @@ export async function describeImages(vision, mediaList, question, { images = tru
     }
 
     let desc = ''
+    if (outOfBudget()) {
+      out.push(toTextMedia(mf, `${label}（视觉识别超出本轮预算，未送识别）${urlPart}`))
+      continue
+    }
     try {
       desc = await vision.recognize({ buffer: mf.buffer, mime: mf.mime, name: mf.name }, { question })
     } catch (e) {

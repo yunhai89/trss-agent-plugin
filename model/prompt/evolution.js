@@ -19,7 +19,7 @@
 
 import { TEMPLATES } from './library.js'
 import { PromptTemplate } from './versioning.js'
-import { evolve, writeReport } from '../evolution/index.js'
+import { evolve, writeReport, createMutator } from '../evolution/index.js'
 
 /**
  * 对一个 prompt 模板执行 GEPA 进化优化。
@@ -32,6 +32,7 @@ import { evolve, writeReport } from '../evolution/index.js'
  *   gates?: 约束门控（默认 size+semantic+cache）
  *   reportDir?: 写报告目录（不传则不写）
  *   signal?: 中断信号
+ *   mutator?: 自定义变异器（默认用 provider 驱动 LLM 变异；测试可注入 mock）
  * @returns {Promise<{ best, baseline, history, improved, templateKey, reportPaths? }>}
  */
 export async function evolveTemplate({
@@ -45,6 +46,7 @@ export async function evolveTemplate({
   judge,
   reportDir,
   signal,
+  mutator: optMutator,
   logger = () => {},
 } = {}) {
   if (!templateKey) throw new Error('evolveTemplate 需要 templateKey')
@@ -78,6 +80,26 @@ export async function evolveTemplate({
     },
   })
 
+  // 变异通道（关键）：evolveTemplate 只有 provider/model，没有 agent。此前既没传 mutator，
+  // evolve 的默认 createMutator({ agent: undefined }) 便退化为"原样返回"——seed 只给 baseline、
+  // mutate 只给 parent，全部被种群去重丢弃 → 产出与当前 system 完全相同，却照样过门控并落盘。
+  // 这里用 provider 自行驱动 LLM 变异（可被 opts.mutator 覆盖，便于测试注入 mock）。
+  const mutator = optMutator || createMutator({
+    agent: {
+      async run(prompt) {
+        const res = await provider.chat({
+          model,
+          messages: [{ role: 'user', content: String(prompt) }],
+          stream: false,
+          temperature: 0.8,
+          max_tokens: Math.max(512, Math.min(4096, currentText.length * 2)),
+          ...(signal ? { signal } : {}),
+        })
+        return { content: res?.content || '' }
+      },
+    },
+  })
+
   logger('info', `[evolve] 开始优化模板 ${templateKey}（v${template.version}, ${currentText.length} chars, ${evalset.length} eval cases）`)
 
   const result = await evolve({
@@ -89,10 +111,15 @@ export async function evolveTemplate({
     populationSize,
     seed: 42,
     gates: defaultGates,
+    mutator,
     logger,
   })
 
-  logger('info', `[evolve] 完成：baseline=${result.baseline.score.toFixed(3)} → best=${result.best.score.toFixed(3)} improved=${result.improved}`)
+  // 产出与当前文本完全相同 → 不算改进：绝不写盘（曾把"没变"当成进化通过并落盘新版本号）
+  const unchanged = !!result.best && String(result.best.text) === String(currentText)
+  if (unchanged) result.improved = false
+
+  logger('info', `[evolve] 完成：baseline=${result.baseline.score.toFixed(3)} → best=${result.best.score.toFixed(3)} improved=${result.improved}${unchanged ? '（产出与当前文本相同，视为未改进）' : ''}`)
 
   // 写报告
   let reportPaths = null
@@ -105,6 +132,7 @@ export async function evolveTemplate({
     templateKey,
     templateVersion: template.version,
     reportPaths,
+    ...(unchanged ? { unchanged: true } : {}),
   }
 }
 

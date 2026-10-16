@@ -53,6 +53,9 @@ export function buildWorkerTools(sourceRegistry, names, defaultNames) {
     const tool = sourceRegistry.get(name)
     if (!tool) { dropped.push(name); continue }
     if (!ALLOWED_TOOL_CATEGORIES.has(tool.category || 'query')) { dropped.push(name); continue }
+    // 需主人逐次审批的工具不下发子代理：Worker 无审批通道（Agent 侧会 fail-closed 拒绝），
+    // 下发只会让子代理白跑一轮并拿到 rejected_by_confirm
+    if (tool.meta?.alwaysConfirm === true) { dropped.push(name); continue }
     // 声明式能力校验：meta.requires 里有子代理 ctx 不提供的键 → 不下发
     if (Array.isArray(tool.meta?.requires) && tool.meta.requires.some((k) => !WORKER_CTX_KEYS.has(k))) { dropped.push(name); continue }
     if (!workerReg.has(name)) { workerReg.register(tool); granted.push(name) }

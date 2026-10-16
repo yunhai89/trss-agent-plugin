@@ -171,7 +171,7 @@ export class GroupWorldIngester {
    *  纯删除：不写 optout（#删除≠#关闭；是否停止建模由 service.setOptOut 单独决定）。
    *  幂等：全部为 DELETE/JSON 过滤操作，重复执行零副作用。 */
   async purgeUser(groupId, userId) {
-    if (!groupId || !userId) return
+    if (!groupId || !userId) return false
     try {
       await this.dao.txn(async () => {
         await this.dao.run('DELETE FROM gw_member_profiles WHERE group_id=? AND user_id=?', [groupId, userId])
@@ -205,16 +205,19 @@ export class GroupWorldIngester {
         }
       })
       Log.mark('[groupworld]', `${ANSI.y}清理成员${ANSI.R} 群${groupId} 用户${userId}`)
-    } catch (e) { Log.warn('[groupworld] purgeUser 失败', e?.message || e) }
+      return true
+    // 写库异常不再静默：返回 false，避免 service/apps 层回「已删除」假成功（M-058）
+    } catch (e) { Log.warn('[groupworld] purgeUser 失败', e?.message || e); return false }
   }
 
   /** 写/删 optout（#关闭/#开启 我的群聊建模）。 */
   async setOptOut(groupId, userId, on, now = Date.now()) {
-    if (!groupId || !userId) return
+    if (!groupId || !userId) return false
     try {
       if (on) await this.dao.run('INSERT OR REPLACE INTO gw_optout(group_id,user_id,opted_at) VALUES (?,?,?)', [groupId, userId, now])
       else await this.dao.run('DELETE FROM gw_optout WHERE group_id=? AND user_id=?', [groupId, userId])
-    } catch (e) { Log.warn('[groupworld] setOptOut 失败', e?.message || e) }
+      return true
+    } catch (e) { Log.warn('[groupworld] setOptOut 失败', e?.message || e); return false }
   }
 
   async isOptedOut(groupId, userId) {
@@ -222,9 +225,9 @@ export class GroupWorldIngester {
     try { return !!(await this.dao.get('SELECT 1 FROM gw_optout WHERE group_id=? AND user_id=?', [groupId, userId])) } catch { return false }
   }
 
-  /** 删某群全部派生数据（保留原始消息可选）。 */
+  /** 删某群全部派生数据（保留原始消息可选）。true=已清理，false=写库失败（调用方不再回假成功，M-058）。 */
   async purgeGroup(groupId, { keepMessages = false } = {}) {
-    if (!groupId) return
+    if (!groupId) return false
     const tables = ['gw_segments', 'gw_member_profiles', 'gw_traits', 'gw_evidence', 'gw_edges', 'gw_bot_rel', 'gw_episodes', 'gw_communities', 'gw_cursor', 'gw_optout']
     if (!keepMessages) tables.unshift('gw_messages')
     try {
@@ -232,7 +235,8 @@ export class GroupWorldIngester {
         for (const t of tables) await this.dao.run(`DELETE FROM ${t} WHERE group_id=?`, [groupId])
       })
       Log.mark('[groupworld]', `${ANSI.y}清理整群${ANSI.R} 群${groupId}（${keepMessages ? '保留原始消息' : '全删'}）`)
-    } catch (e) { Log.warn('[groupworld] purgeGroup 失败', e?.message || e) }
+      return true
+    } catch (e) { Log.warn('[groupworld] purgeGroup 失败', e?.message || e); return false }
   }
 }
 

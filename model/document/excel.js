@@ -56,7 +56,9 @@ export const createExcelTool = {
   async execute(params, ctx) {
     const ExcelJS = await getExcelJS()
     const wb = new ExcelJS.Workbook()
-    const filename = String(params?.filename || 'export').trim()
+    // filename 来自 LLM 工具参数：消毒（去扩展名、非法字符→_、限长），防 `../../x` 穿越临时目录写出宿主文件（对照 topdf.js safeName）
+    const rawName = String(params?.filename || 'export')
+    const filename = rawName.replace(path.extname(rawName), '').replace(/[^\w一-龥-]/g, '_').slice(0, 60) || 'export'
 
     for (const sheet of params?.sheets || []) {
       const ws = wb.addWorksheet(sheet.name || `Sheet${wb.worksheets.length + 1}`)

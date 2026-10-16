@@ -112,6 +112,7 @@ agent:
     timeoutMs: 15000        # 单张卡片图渲染总超时（毫秒）：超时/失败降级文本，不让指令永久卡住
     replyTimeoutMs: 30000   # 回复图渲染总超时（毫秒）
   cacheControl: false      # Anthropic 协议显式 prompt 缓存断点（tools/system/末消息；OpenAI 兼容端自动前缀缓存无需开）
+  promptCacheKey: false    # OpenAI 官方 prompt_cache_key 稳定会话路由（仅 OpenAI 官方端点/支持该能力的模型下发，兼容网关绝不发）
   reflectMaxIterations: 1   # 反思回环修正最大次数（封顶防无限循环）
   progress: true            # 工具调用时推送节流进度消息（消除干等，默认开）
   progressRecall: 3         # 进度消息多少秒后自动撤回（默认 3；适配器不支持则忽略）
@@ -218,6 +219,9 @@ agent:
     apiKey: ""
     maxTokens: 1024        # 识图/观看报告输出上限（视频报告建议 2048+；思考型模型建议关思考）
     describePrompt: ""      # 识图自定义指令（留空=内置；不影响视频——视频用内置“看视频”报告指令或工具自带 watchPrompt）
+  perception:
+    sparseInject: true      # 会话上下文稀薄（新会话/历史很少）时，额外注入一小段近期群聊，避免模型对群内近况一无所知
+    sparseThreshold: 6      # 触发上述补全的会话历史条数阈值（会话历史 < 该值才补）
   tools:
     builtin: true
     dir: "tools"
@@ -517,6 +521,8 @@ agent:
     # 已知问题：评分粗糙（纯关键词）、无效果追踪、无表达学习、Planner 可能抢答/重复。
     # 建议：shadow=true 观察 #伪人决策 质量后再放量。
     enable: false                  # 总开关（即便 true，groups 为空也不开启）
+    vision:
+      allowPrivateHosts: false     # 伪人看图是否允许私网/回环图片地址（默认 false；自建图床才开，防 SSRF）
     groups: []                     # 显式白名单群号（字符串）；空数组=不开启
     shadow: true                   # true=只记录决策 trace、不真实发送（先观察再放量）
     talkValue: 0.35                # 0~1 主动性基线（不等于回复概率）

@@ -96,6 +96,38 @@ await test('flush 失败保留缓冲，重试成功', async () => {
   st.stop()
 })
 
+await test('并发：flush 期间新采集的增量不丢（曾无条件 delete 缓冲键）', async () => {
+  const kv = memoryKv()
+  // 拉长 get/set：制造「flush 已取快照、尚未落盘」的 await 窗口
+  const slow = {
+    get: async (k) => { await sleep(20); return kv.get(k) },
+    set: async (k, v, ttl) => { await sleep(20); return kv.set(k, v, ttl) },
+  }
+  const st = createUsageStats({ kv: slow, flushIntervalMs: 0 })
+  st.recordRun({ inputTokens: 100 })
+  const p = st.flushNow()
+  await sleep(5) // 窗口内完成一次新采集
+  st.recordRun({ inputTokens: 200 })
+  await p
+  await st.flushNow() // 缓冲保留 → 下一轮落盘（而非被 delete 整块丢掉）
+  const d = await kv.get(DAY_KEY_PREFIX + localDayKey())
+  eq(d?.inputTokens, 300, '落盘 300（100+200；旧实现丢 200 且缓冲为空）')
+  st.stop()
+})
+
+await test('logger 契约：兼容 Log 对象（apps 传的是对象，不是函数）', async () => {
+  const kv = memoryKv()
+  const calls = []
+  const LogLike = { warn: (...a) => calls.push(a), info: () => {} }
+  // now() 抛错 = 采集异常路径：旧实现 logger(...) 直接抛 TypeError，原始错误被顶掉且无日志
+  const st = createUsageStats({ kv, flushIntervalMs: 0, logger: LogLike, now: () => { throw new Error('clock broke') } })
+  st.recordRun({ inputTokens: 1 })
+  eq(calls.length, 1, 'Log.warn 被调用（而非 TypeError）')
+  ok(String(calls[0]?.[0] || '').includes('采集异常'), '原始错误被如实记录')
+  eq(st.stats.recorded, 1, '采集仍计数（异常不吞统计主流程）')
+  st.stop()
+})
+
 await test('readDays：最近 N 天 + 缺失天补零骨架', async () => {
   const kv = memoryKv()
   const st = createUsageStats({ kv, flushIntervalMs: 0 })

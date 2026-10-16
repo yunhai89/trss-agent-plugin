@@ -76,18 +76,31 @@ export function toGeminiTools(tools) {
   }))
 }
 
-/** 中性 tool_choice → Gemini toolConfig.functionCallingConfig.mode（AUTO/ANY/NONE） */
-export function mapGeminiToolChoice(tc) {
-  if (!tc) return undefined
-  const mode = typeof tc === 'string' ? tc : tc?.mode
-  if (mode === 'none') return { functionCallingConfig: { mode: 'NONE' } }
-  if (mode === 'any' || mode === 'required') {
-    const name = typeof tc === 'object' ? tc.name : null
-    return name
-      ? { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [name] } }
-      : { functionCallingConfig: { mode: 'ANY' } }
+/**
+ * 中性 tool_choice → Gemini Interactions 的 `generation_config.tool_choice` 取值。
+ *
+ * 两代错误形态的最终修正：
+ *  ① 最早 `mapGeminiToolChoice` 产出 `{functionCallingConfig:{mode}}` —— 那是**旧 generateContent**
+ *     接口的 ToolConfig 形态，写到 Interactions 请求上无效；
+ *  ② 中间形态把 any/required「无法表达」静默降级 auto —— 依据（「接口没有该字段」）是事实错误。
+ * SDK .d.ts 明确：`GenerationConfig_2.tool_choice?: ToolChoiceConfig | ToolChoiceType`
+ * （ToolChoiceType = 'auto'|'any'|'none'|'validated'；ToolChoiceConfig = {allowed_tools?:{mode?,tools?[]}}），
+ * 而 Interactions create 的 `generation_config` 正是该类型 —— 强制调用、禁调用、指定函数名都能如实下发。
+ *
+ * @param {*} tc 中性形态：'auto'|'none'|'any'|'required'|'tool' 或 {mode,name}
+ * @returns {string|{allowed_tools:{mode:string,tools:string[]}}|null} null = 不显式下发（用接口默认 auto）
+ */
+export function toolChoiceConfig(tc) {
+  if (!tc) return null
+  const mode = String((typeof tc === 'string' ? tc : (tc?.mode || (tc?.name ? 'tool' : 'auto'))) || 'auto').toLowerCase()
+  if (mode === 'none') return 'none'
+  if (mode === 'any' || mode === 'required') return 'any'
+  if (mode === 'validated') return 'validated'
+  if (mode === 'tool' || mode === 'function') {
+    const name = typeof tc === 'object' && tc?.name ? String(tc.name) : ''
+    return name ? { allowed_tools: { mode: 'any', tools: [name] } } : 'any'
   }
-  return { functionCallingConfig: { mode: 'AUTO' } } // auto / 默认
+  return null // auto / 未知模式：不显式下发
 }
 
 /** Agent 生成参数 → Gemini generation_config（temperature/maxOutputTokens/thinkingLevel） */
@@ -101,6 +114,21 @@ function toGenConfig(opts = {}) {
     else if (opts.thinking.type === 'enabled') cfg.thinking_level = 'medium'
   }
   return cfg
+}
+
+/**
+ * ThoughtSummaryDelta.content（Content_2）→ 文本。
+ * SDK 类型为 `ThoughtSummaryDelta = { content?: Content_2; type:'thought_summary' }`：
+ * 增量文本在 **content** 上，此前按 `d.text` 读（恒为 undefined）导致 onReasoning 从不触发、
+ * reasoning 永远为空（L-084）。兼容 {text} / {parts:[{text}]} / 字符串 / 块数组多种形态。
+ */
+function deltaContentText(c) {
+  if (!c) return ''
+  if (typeof c === 'string') return c
+  if (typeof c.text === 'string') return c.text
+  if (Array.isArray(c.parts)) return c.parts.map((p) => p?.text || '').join('')
+  if (Array.isArray(c)) return textOf(c)
+  return ''
 }
 
 /** Interaction.status → AssistantResult.finishReason（Agent 据此判终止） */
@@ -200,9 +228,14 @@ export class GeminiProvider extends Provider {
     }
     if (opts.system) baseParams.system_instruction = typeof opts.system === 'string' ? opts.system : textOf(opts.system)
     const tools = opts.tools ? toGeminiTools(opts.tools) : null
-    if (tools?.length) baseParams.tools = tools
-    const tc = mapGeminiToolChoice(opts.tool_choice)
-    if (tc) baseParams.tool_config = tc
+    // tool_choice 语义落地（M-023 + 复核 #6 返工）：
+    //   none → 既**不下发 tools**（与 model/humanize/replyer.js 等处 `tools:undefined, tool_choice:{mode:'none'}`
+    //          的双保险写法一致），也显式下发 tool_choice:'none'；
+    //   any/required/指定函数名 → 经 generation_config.tool_choice 如实下发（接口支持），不再静默降级 auto。
+    const tc = toolChoiceConfig(opts.tool_choice)
+    const hasTools = !!tools?.length
+    if (hasTools && tc !== 'none') baseParams.tools = tools
+    if (tc === 'none' || (hasTools && tc)) baseParams.generation_config.tool_choice = tc
     // 结构化输出：Interactions API 原生形态 response_format{type:'text',mime_type:'application/json',schema}；
     // 绝不把 OpenAI 的 response_format.json_schema 原样透传（审计 P1-2）。
     const jsonSchema = jsonSchemaOf(opts.response_format)
@@ -245,10 +278,18 @@ export class GeminiProvider extends Provider {
           if (d.type === 'text' && d.text) {
             content += d.text
             try { opts.onDelta?.(d.text) } catch { /* noop */ }
-          } else if (d.type === 'thought_summary' && d.text) {
-            reasoning += d.text
-            try { opts.onReasoning?.(d.text) } catch { /* noop */ }
+          } else if (d.type === 'thought_summary') {
+            const rt = deltaContentText(d.content) || deltaContentText(d.text)
+            if (rt) {
+              reasoning += rt
+              try { opts.onReasoning?.(rt) } catch { /* noop */ }
+            }
           }
+        } else if (ev.event_type === 'error') {
+          // 流内错误事件（SDK 类型 ErrorEvent：{event_type:'error', error}）：此前被忽略，
+          // 于是"中途报错 + 已产出半截正文"会被当成正常结束（截断当成功）。显式上抛。
+          const em = ev.error?.message || ev.error?.code || '流式响应返回 error 事件'
+          throw new Error(`gemini stream error: ${typeof em === 'string' ? em : JSON.stringify(em)}`)
         } else if (ev.event_type === 'interaction.completed' && ev.interaction) {
           interaction = ev.interaction
         }
@@ -266,7 +307,13 @@ export class GeminiProvider extends Provider {
       content: content || fromInteraction.content || '',
       toolCalls: fromInteraction.toolCalls,
       reasoning: reasoning || fromInteraction.reasoning || null,
-      finishReason: mapFinish(interaction?.status) || fromInteraction.finishReason || 'stop',
+      // 未收到 interaction.completed 说明流被中断/截断（拿到半截正文也不算正常结束）：
+      // 此前 `mapFinish(undefined)` 走 `status || 'stop'` 兜底成 'stop'，截断与完整回复无法区分。
+      // 这里如实标 'incomplete'（不列入 GOVERNOR_STOP，故不会给用户追加"未产出正文"话术，
+      // 但 turn 日志、账本 lastTurn.finish、Web 时间线都能看出这次是截断）。
+      finishReason: interaction
+        ? (mapFinish(interaction.status) || fromInteraction.finishReason || 'stop')
+        : (fromInteraction.finishReason || 'incomplete'),
       usage: {
         input: u.total_input_tokens ?? fromInteraction.usage?.input ?? null,
         output: u.total_output_tokens ?? fromInteraction.usage?.output ?? null,

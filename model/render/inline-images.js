@@ -13,6 +13,7 @@
  */
 
 import Log from '../../utils/Log.js'
+import { assertUrlAllowed } from '../stagehand/guard.js'
 
 /** 默认 Referer 域名映射：按图片 host 匹配，解决防盗链（米游社系图床需 www.miyoushe.com）*/
 const DEFAULT_REFERERS = {
@@ -32,17 +33,17 @@ const LIMITS = {
   jpegQuality: 0.85,
 }
 
-/** SSRF 校验：拒绝非 http(s)、loopback、私网、link-local、localhost */
-function isAllowedRemoteUrl(raw) {
-  let u
-  try { u = new URL(raw) } catch { return false }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
-  const host = u.hostname.toLowerCase()
-  if (host === 'localhost' || host === '::1') return false
-  if (/^(127\.|10\.|192\.168\.|169\.254\.|0\.)/.test(host)) return false
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return false
-  if (/^(fc|fd|fe80)/i.test(host)) return false
-  return true
+/**
+ * SSRF 校验：拒绝非 http(s)、loopback、私网、link-local、元数据地址与解析到内网的域名。
+ *
+ * 曾自行实现一套正则：`host === '::1'` 永远匹配不到 IPv6 字面量（URL.hostname 形如 `[::1]`），
+ * `fd00::/8`、`::ffff:127.0.0.1`、十进制/十六进制混淆写法也全都能绕过。
+ * 现统一复用 stagehand/guard.js 的 assertUrlAllowed（含宽松 IPv4、IPv6 映射/NAT64/6to4、
+ * 域名解析结果全量校验），保持全仓一套 SSRF 判据。
+ */
+async function isAllowedRemoteUrl(raw) {
+  const r = await assertUrlAllowed(raw).catch(() => ({ ok: false }))
+  return !!r?.ok
 }
 
 /** 按图片 host 选 Referer（DEFAULT_REFERERS + 调用方 refererMap）*/
@@ -57,21 +58,34 @@ function pickReferer(imgUrl, refererMap = {}) {
   return null
 }
 
-/** 带 Referer + 超时下载图片，返回 { buf, mime } 或 null */
-async function download(url, refererMap) {
+/**
+ * 带 Referer + 超时下载图片，返回 { buf, mime } 或 null。
+ * 重定向逐跳复验：`redirect:'follow'` 会让"公网 URL 302 到 127.0.0.1/元数据地址"绕过入口校验，
+ * 故改为 manual，每跳重新跑 SSRF 判定（上限 3 跳），并默认限制在 3MB 内。
+ */
+async function download(url, refererMap, depth = 0) {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), LIMITS.timeoutMs)
   try {
     const referer = pickReferer(url, refererMap)
     const res = await fetch(url, {
       signal: ctrl.signal,
-      redirect: 'follow',
+      redirect: 'manual',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (compatible; agents-plugin)',
         Accept: 'image/*,*/*;q=0.8',
         ...(referer ? { Referer: referer } : {}),
       },
     })
+    // 重定向：逐跳复验目标地址（防 302 到内网/元数据）
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get('location')
+      if (!loc || depth >= 3) return null
+      let next
+      try { next = new URL(loc, url).href } catch { return null }
+      if (!(await isAllowedRemoteUrl(next))) return null
+      return await download(next, refererMap, depth + 1)
+    }
     if (!res.ok) return null
     const len = Number(res.headers.get('content-length') || 0)
     if (len && len > LIMITS.maxBytes) return null // 声明且超大 → 省下载
@@ -165,8 +179,10 @@ export async function inlineImages(html, opts = {}) {
   }
   if (!http.length && !remove.length) return html
 
-  const valid = http.filter((x) => isAllowedRemoteUrl(x.url)) // SSRF 过滤
-  const httpRemove = http.filter((x) => !valid.includes(x)) // SSRF 非法 → 移除
+  // SSRF 过滤（异步：含域名解析，防 DNS 指向内网）
+  const checks = await pMap(http, async (x) => ({ x, ok: await isAllowedRemoteUrl(x.url) }), 5)
+  const valid = checks.filter((c) => c.ok).map((c) => c.x)
+  const httpRemove = checks.filter((c) => !c.ok).map((c) => c.x) // SSRF 非法 → 移除
 
   // 并发下载 + 处理
   const results = await pMap(valid, async (x) => {

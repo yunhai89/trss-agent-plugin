@@ -7,6 +7,9 @@
     L3: { name: 'L3 偏好', cls: 'p-vio', desc: '用户偏好' },
     L4: { name: 'L4 事实', cls: 'p-mint', desc: '稳定事实/身份' },
   }
+  // 兜底：后端 LLM 抽取的 level 未经枚举校验，可能是别名/大小写/undefined。
+  // 直接 LEVEL[e.level].cls 会抛 TypeError 使整个列表渲染失败（曾整页空白）。
+  const lv = (l) => LEVEL[l] || LEVEL.L3
 
   window.VIEWS.recall = {
     name: 'RecallView',
@@ -63,7 +66,7 @@
       })
       watch(userId, (v) => { if (v) window.store.loadRecall(v).catch((e) => toast(e.message, 'error')) })
 
-      return { userIds, userId, level, showSuspect, entries, expanded, toggle, del, addModal, add, LEVEL, fmt }
+      return { userIds, userId, level, showSuspect, entries, expanded, toggle, del, addModal, add, LEVEL, lv, fmt }
     },
     template: `
     <div>
@@ -98,7 +101,7 @@
         <div v-for="(e, i) in entries" :key="e.id" class="card lift pad" :class="{suspect: e.suspect}" :style="{'--i': i + 2}">
           <div class="row-b">
             <div class="row g6 wrap">
-              <span class="pill" :class="LEVEL[e.level].cls">{{ LEVEL[e.level].name }}</span>
+              <span class="pill" :class="lv(e.level).cls">{{ lv(e.level).name }}</span>
               <span class="pill p-line mono">{{ e.type }}</span>
               <span v-if="e.suspect" class="pill p-rose"><v-icon name="warn"/>疑似注入</span>
             </div>

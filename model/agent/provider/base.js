@@ -29,9 +29,16 @@ export function toolsToList(tools) {
   return Array.isArray(tools) ? tools : []
 }
 
-/** 构造底层客户端时的配置（剥离 provider 专属字段，透传 baseURL/apiKey/preset/fetch 等） */
+/**
+ * 构造底层客户端时的配置（剥离 provider 专属字段，透传 baseURL/apiKey/preset/fetch 等）。
+ *
+ * 注意：`reasoningFields` **不能剥离**——它同时是客户端的字段
+ * （model/openai/Client.js:32 读取，并在 :117 交给 createStream 做流式推理增量提取）。
+ * 曾在此剥离 → 客户端拿到空列表，流式路径的 reasoning 永远为空：
+ * onReasoning 不触发、工具轮 reasoning 无法回传（DeepSeek thinking 模式下一轮直接 400）。
+ */
 export function clientOpts(config) {
-  const { protocol, client, model, defaultModel, systemRole, reasoningFields, ...rest } = config
+  const { protocol, client, model, defaultModel, systemRole, ...rest } = config
   return rest
 }
 

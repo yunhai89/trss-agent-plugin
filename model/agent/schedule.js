@@ -83,13 +83,23 @@ export class ScheduleStore {
     this._jobs.clear()
   }
 
+  /**
+   * 取消指定 id。
+   * @returns {Promise<{ok:boolean, removed:number, code?:string}>} 结构化结果——
+   *   此前内层函数没有 return，调用方按真值判定成功，导致 reminder_cancel / DELETE /api/schedule
+   *   恒报「未找到」（记录其实已删）；命令路径不读返回值、永远回「已取消」，同一缺陷两条路径结论相反。
+   */
   async cancel(id) {
     return this._lock.withLock(this._key(), async () => {
-      const j = this._jobs.get(id)
-      if (j?.job) this.scheduler.cancelJob(j.job)
-      this._jobs.delete(id)
-      const arr = (await this._load()).filter((r) => r.id !== id)
-      await this._save(arr)
+      const key = String(id)
+      const j = this._jobs.get(key)
+      if (j?.job) { try { this.scheduler.cancelJob(j.job) } catch { /* noop */ } }
+      this._jobs.delete(key)
+      const arr = await this._load()
+      const next = arr.filter((r) => String(r.id) !== key)
+      const removed = arr.length - next.length
+      if (removed) await this._save(next)
+      return removed ? { ok: true, removed } : { ok: false, removed: 0, code: 'not_found' }
     })
   }
 
@@ -118,11 +128,13 @@ export class ScheduleStore {
  *  - 仅该用户本人的其余条目（提醒等，避免把他人私聊提醒内容暴露给所有人）。
  * 去重，任务链在前。修复「AI 建了提醒、web 看得到、#定时任务列表 返回暂无」。
  */
-export function selectScheduleForList(all = [], { userId = '', scopeUserId = '' } = {}) {
+export function selectScheduleForList(all = [], { userId = '', scopeUserId = '', isMaster = false } = {}) {
   const uid = String(userId)
   const suid = String(scopeUserId || '')
   const isMine = (r) => { const u = String(r?.userId); return !!r && (u === uid || (!!suid && u === suid)) }
-  const tasks = (all || []).filter((r) => r?.type === 'task')
+  // 任务链同样按归属过滤：type='task' 并非天然"群级非私密"——私聊用 reminder_set 带 prompt
+  // 建的记录也是 type='task' 且 groupId=null，曾无条件列出，把他人私聊任务描述泄露给任意用户。
+  const tasks = (all || []).filter((r) => r?.type === 'task' && (isMaster || isMine(r)))
   const mine = (all || []).filter(isMine)
   const seen = new Set()
   const out = []
@@ -213,9 +225,16 @@ export function parseCron(text) {
   if (/^(?:每天)?\d{1,2}(?:点|:)\d{0,2}(?:(?:和|、|,)\d{1,2}(?:点|:)\d{0,2})+$/.test(t)) {
     const pts = [...t.matchAll(/(\d{1,2})(?:点|:)(\d{1,2})?/g)].map((x) => [Number(x[1]), x[2] ? Number(x[2]) : 0])
     if (pts.every(([h, mi]) => h <= 23 && mi <= 59)) {
-      const hours = [...new Set(pts.map((p) => p[0]))].sort((a, b) => a - b).join(',')
-      const mins = [...new Set(pts.map((p) => p[1]))].sort((a, b) => a - b).join(',')
-      return `${mins} ${hours} * * *`
+      // 分钟相同 → 单条表达式即可（hours 列表语义正确）；
+      // 分钟不同 → 5 段 cron **无法**表达 {(8,30),(20,15)} 这种配对（minute 与 hour 是笛卡尔积），
+      // 曾直接拼 `30,15 8,20 * * *` 让实际触发变成 4 次。此处如实返回 null，
+      // 由调用方提示用户拆成多条任务，绝不生成语义错误的表达式。
+      const mins = [...new Set(pts.map((p) => p[1]))]
+      if (mins.length === 1) {
+        const hours = [...new Set(pts.map((p) => p[0]))].sort((a, b) => a - b).join(',')
+        return `${mins[0]} ${hours} * * *`
+      }
+      return null
     }
   }
   // 每月X号[时段H点]（如 每月1号8点 / 每月15号下午3点）
@@ -371,12 +390,12 @@ export const reminderCancelTool = {
     if (!id) return { error: '需要提供 id（从 reminder_list 获取）' }
     try {
       if (ctx?.reminder?.cancel) {
-        const ok = await ctx.reminder.cancel(id)
-        if (ok) return { ok: true, id, note: '已取消提醒' }
+        const r = await ctx.reminder.cancel(id)
+        if (r === true || r?.ok) return { ok: true, id, note: r?.note || '已取消提醒' }
       }
       if (ctx?.cronTask?.cancel) {
-        const ok = await ctx.cronTask.cancel(id)
-        if (ok) return { ok: true, id, note: '已取消定时任务' }
+        const r = await ctx.cronTask.cancel(id)
+        if (r === true || r?.ok) return { ok: true, id, note: r?.note || '已取消定时任务' }
       }
       return { error: `未找到 id=${id} 的提醒或定时任务。用 reminder_list 查看当前列表。` }
     } catch (e) {

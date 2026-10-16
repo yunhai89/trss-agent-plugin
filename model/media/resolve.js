@@ -20,11 +20,15 @@ const EXT_MIME = {
   pdf: 'application/pdf',
   txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json', log: 'text/plain',
   html: 'text/html', htm: 'text/html', xml: 'application/xml', yaml: 'text/yaml', yml: 'text/yaml',
-  js: 'text/javascript', ts: 'text/typescript', py: 'text/x-python', java: 'text/x-java',
+  js: 'text/javascript', py: 'text/x-python', java: 'text/x-java',
   c: 'text/x-c', cpp: 'text/x-cpp', go: 'text/x-go', rs: 'text/x-rust', sh: 'application/x-sh',
   mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac',
   mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', mkv: 'video/x-matroska', avi: 'video/x-msvideo',
   flv: 'video/x-flv', wmv: 'video/x-ms-wmv', m4v: 'video/x-m4v', '3gp': 'video/3gpp', mpeg: 'video/mpeg', mpg: 'video/mpeg',
+  // 注：'ts' 既是 TypeScript 源码扩展名也是 MPEG-TS 视频容器。此处按「聊天附件更常见的是视频」
+  // 取 video/mp2t；源码场景由魔数嗅探（文本）与显式 mime 覆盖兜底。
+  // 曾同时存在 `ts: 'text/typescript'` 与 `ts: 'video/mp2t'` 两个键——后者静默覆盖前者，
+  // 且掩盖了类型判断意图（eslint no-dupe-keys 现已开启防回归）。
   ts: 'video/mp2t', m2ts: 'video/mp2t',
   avif: 'image/avif', heic: 'image/heic', heif: 'image/heic',
   zip: 'application/zip', '7z': 'application/x-7z-compressed', gz: 'application/gzip', tar: 'application/x-tar',

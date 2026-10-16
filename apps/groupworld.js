@@ -25,6 +25,11 @@ import { GroupWorldService } from '../model/groupworld/index.js'
 
 let _gw = null
 let _gwFailed = null
+let _gwFailedAt = 0
+/** 装配失败后的短路窗口：窗口内直接抛旧错误（避免每条群消息都重试装配），超时后允许再试以自愈。
+ *  M-057：此前 _gwFailed 一旦置位即永久短路——启动时未配 apiKey 这类瞬时故障，
+ *  之后补好配置/热重载也救不回来（agent 侧 _runtimeFailed 有配置修好后重试的出口，这里没有）。 */
+const GW_RETRY_MS = 60_000
 
 /** 取机器人自身 id 集合。 */
 function botSelfIds(e) {
@@ -44,7 +49,7 @@ function botSelfIds(e) {
 let _gwPromise = null
 export async function getGroupWorld() {
   if (_gw) return _gw
-  if (_gwFailed) throw _gwFailed
+  if (_gwFailed && Date.now() - _gwFailedAt < GW_RETRY_MS) throw _gwFailed
   if (_gwPromise) return _gwPromise
   _gwPromise = (async () => {
     const rt = await getRuntime()
@@ -63,7 +68,7 @@ export async function getGroupWorld() {
     _gw = svc
     _gwFailed = null
     return svc
-  })().catch((e) => { _gwFailed = e; Log.warn('[groupworld] 装配失败（agent 未初始化？），旁听暂停', e?.message || e); throw e }).finally(() => { _gwPromise = null })
+  })().catch((e) => { _gwFailed = e; _gwFailedAt = Date.now(); Log.warn('[groupworld] 装配失败（agent 未初始化？），旁听暂停', e?.message || e); throw e }).finally(() => { _gwPromise = null })
   return _gwPromise
 }
 
@@ -193,6 +198,8 @@ export class GroupWorld extends plugin {
     let gw; try { gw = await getGroupWorld() } catch (err) { return e.reply(`群聊小世界未就绪：${err?.message || err}`, true) }
     const c = cfgNow()
     if (c.privacy?.allowUserInspect === false) return e.reply('管理员已关闭画像自查。', true)
+    // M-058：数据层未就绪时 inspectUserProfile 恒回 null，不能当成「暂无数据」误导用户
+    if (gw.isReady?.() === false) return e.reply('群聊小世界数据层未就绪，暂时无法查询（请稍后重试或检查 gw.db 可写性）。', true)
     const data = await gw.inspectUserProfile(e.group_id, e.user_id)
     if (!data) return e.reply('暂无你的群聊画像数据。', true)
     if (data.optedOut) return e.reply('你已关闭群聊建模，当前没有进行画像。发送「#开启我的群聊建模」可恢复。', true)
@@ -224,6 +231,8 @@ export class GroupWorld extends plugin {
     if (!content) return e.reply('用法：#纠正我的群聊画像 <你想补充/纠正的内容>', true)
     const okCorr = await gw.correctUserProfile(e.group_id, e.user_id, content)
     if (!okCorr) {
+      // M-058：区分「数据层未就绪（写不进去）」与「内容被敏感过滤」，后者此前会误导成内容问题
+      if (gw.isReady?.() === false) return e.reply('群聊小世界数据层未就绪，本次纠正未生效，请稍后重试。', true)
       await e.reply('该内容包含不适宜建模的敏感信息（如证件/住址/健康/政治等），未被记录。请换一般性描述（兴趣/习惯/称呼偏好等）。')
       return true
     }
@@ -234,7 +243,9 @@ export class GroupWorld extends plugin {
   async gwDelete() {
     const e = this.e
     let gw; try { gw = await getGroupWorld() } catch (err) { return e.reply(`群聊小世界未就绪：${err?.message || err}`, true) }
-    await gw.deleteUserProfile(e.group_id, e.user_id)
+    const okDel = await gw.deleteUserProfile(e.group_id, e.user_id)
+    // M-058：此前无条件回「已删除」——未就绪/写库失败时用户以为数据已删
+    if (!okDel) return e.reply('群聊小世界数据层未就绪或写入失败，本次删除未生效，请稍后重试。', true)
     await e.reply('已删除你的群聊画像（画像/特征/关系/主观关系）。如需停止后续建模，发送 #关闭我的群聊建模。')
     return true
   }
@@ -245,7 +256,9 @@ export class GroupWorld extends plugin {
     const c = cfgNow()
     if (c.privacy?.allowUserOptOut === false) return e.reply('管理员已关闭退出选项。', true)
     const on = /关闭/.test(e.msg)
-    await gw.setOptOut(e.group_id, e.user_id, on) // service 层关闭时已内置清除派生数据
+    const okOpt = await gw.setOptOut(e.group_id, e.user_id, on) // service 层关闭时已内置清除派生数据
+    // M-058：此前无条件回「已关闭」——未写入 gw_optout 时消息仍会被采集，与承诺相反
+    if (!okOpt) return e.reply('群聊小世界数据层未就绪或写入失败，本次操作未生效，请稍后重试。', true)
     await e.reply(`已${on ? '关闭' : '开启'}对你在此群的聊天建模。${on ? '已有画像已清除，后续消息不再被分析。' : ''}`)
     return true
   }
@@ -265,7 +278,9 @@ export class GroupWorld extends plugin {
       const s = await gw.getStats(gid)
       if (s) {
         lines.push(`- 群 ${gid}：成员 ${s.members}（hot ${s.hotMembers}）｜特征 ${s.traits}｜关系边 ${s.edges}｜事件 ${s.episodes}｜圈子 ${s.communities}`)
-        lines.push(`  待分析片段 ${s.pendingSegments}｜失败 ${s.deadSegments}｜今日调用 ${s.cursor?.daily_calls_today || 0}/${c.analysis?.maxDailyCallsPerGroup || 100}`)
+        // M-081 附带：预算 0（禁用）此前被 `|| 100` 显示成 100，管理员看不到真实配置
+        const budget = Number.isFinite(Number(c.analysis?.maxDailyCallsPerGroup)) ? Math.max(0, Number(c.analysis.maxDailyCallsPerGroup)) : 100
+        lines.push(`  待分析片段 ${s.pendingSegments}｜失败 ${s.deadSegments}｜今日调用 ${s.cursor?.daily_calls_today || 0}/${budget}`)
       }
     }
     await e.reply(lines.join('\n'))
@@ -277,7 +292,9 @@ export class GroupWorld extends plugin {
     let gw; try { gw = await getGroupWorld() } catch (err) { return e.reply(`群聊小世界未就绪：${err?.message || err}`, true) }
     const gid = e.msg.match(/\d+/)?.[0]
     if (!gid) return e.reply('用法：#群世界清理 <群号>', true)
-    await gw.purgeGroup(gid, { keepMessages: false })
+    const okPurge = await gw.purgeGroup(gid, { keepMessages: false })
+    // M-058：未就绪（null）/写库失败（false）时不再回「已清理」
+    if (!okPurge) return e.reply('群聊小世界数据层未就绪或清理失败，本次清理未生效，请稍后重试。', true)
     await e.reply(`已清理群 ${gid} 的全部 GroupWorld 数据（含原始消息）。`)
     return true
   }

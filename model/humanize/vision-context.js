@@ -12,20 +12,64 @@
  *  - 只处理 http(s) URL（QQ 多媒体域），本地 file/id 无法拉取。
  */
 import { createHash } from 'node:crypto'
+import { fetchWithSsrfGuard } from '../stagehand/guard.js'
 
 const DESC_PROMPT = '这是群聊里的一张图片。用一句话简述内容（≤30字）：是什么图（表情包/截图/照片/聊天记录/商品图…）、画面要点、有字就念出关键文字。直接输出描述本身。'
 
+/** 单张图字节上限（12MiB） */
+const MAX_IMAGE_BYTES = 12 * 1024 * 1024
+
+/**
+ * 带上限读取响应体：先看 content-length 预检，再边读边累计，超限立即 cancel（不再把整个响应拉完）。
+ * 此前 `Buffer.from(await res.arrayBuffer())` 再判大小 —— 一个 13MiB（或恶意无限）的图会被 100% 拉下来
+ * 才抛 too large，配合"任意成员可构造图片 URL"就是一条廉价的带宽/内存放大路径。
+ */
+async function readCapped(res, cap) {
+  const len = Number(res.headers?.get?.('content-length') || 0)
+  if (len > cap) {
+    try { await res.body?.cancel?.() } catch { /* noop */ }
+    throw new Error('too large')
+  }
+  const body = res.body
+  if (!body || typeof body.getReader !== 'function') {
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (buf.length > cap) throw new Error('too large')
+    return buf
+  }
+  const reader = body.getReader()
+  const chunks = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > cap) {
+        try { await reader.cancel() } catch { /* noop */ }
+        throw new Error('too large')
+      }
+      chunks.push(Buffer.from(value))
+    }
+  } finally {
+    try { reader.releaseLock?.() } catch { /* noop */ }
+  }
+  return Buffer.concat(chunks, total)
+}
+
 export class MediaDescriber {
   /**
-   * @param {object} opts { vision?(VisionService), maxPerTurn?:number, cacheSize?:number, fetcher?, trace? }
+   * @param {object} opts { vision?(VisionService), maxPerTurn?:number, cacheSize?:number, fetcher?, trace?, allowPrivateHosts? }
    */
-  constructor({ vision = null, maxPerTurn = 3, cacheSize = 120, fetcher = null, trace = null } = {}) {
+  constructor({ vision = null, maxPerTurn = 3, cacheSize = 120, fetcher = null, trace = null, allowPrivateHosts = false } = {}) {
     this.vision = vision
     this.maxPerTurn = Math.max(0, maxPerTurn | 0)
     this._cache = new Map() // urlHash → desc
     this._transient = new Map() // urlHash → 瞬态失败重试时间戳（60s 冷却）
     this._cacheSize = cacheSize
     this._fetcher = fetcher || globalThis.fetch
+    // 内网放行（默认关）：图片 URL 来自群消息，可被任意成员构造；默认拒绝私网/回环/元数据地址，
+    // 仅在自建图床等明确场景由配置开启。
+    this._allowPrivateHosts = allowPrivateHosts === true
     this.trace = trace
   }
 
@@ -51,19 +95,25 @@ export class MediaDescriber {
       this._transient.delete(h)
     }
     try {
-      const res = await this._fetcher(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(15000) })
+      // 门禁：入口 + 逐跳重定向复验（防 302 到 127.0.0.1 / 169.254.169.254 等内网地址）
+      const res = await fetchWithSsrfGuard(u, {
+        fetchImpl: this._fetcher,
+        allowPrivateHosts: this._allowPrivateHosts,
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(15000),
+      })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const mime = String(res.headers.get('content-type') || 'image/jpeg').split(';')[0]
       if (!mime.startsWith('image/')) throw new Error(`not image: ${mime}`)
-      const buffer = Buffer.from(await res.arrayBuffer())
-      if (buffer.length > 12 * 1024 * 1024) throw new Error('too large')
+      const buffer = await readCapped(res, MAX_IMAGE_BYTES)
       const desc = String(await this.vision.analyze({ buffer, mime, name: h }, DESC_PROMPT, { maxTokens: 120 }) || '').trim().slice(0, 60)
       if (this._cache.size >= this._cacheSize) { const k = this._cache.keys().next().value; this._cache.delete(k) }
       this._cache.set(h, desc)
       return desc
     } catch (e) {
       const msg = String(e?.message || e)
-      const deterministic = /not image:|too large/.test(msg) || /^HTTP 4\d\d/.test(msg)
+      // SSRF 拦截同属确定性失败（重试也不会放行），进永久负缓存
+      const deterministic = /not image:|too large|SSRF 拦截/.test(msg) || /^HTTP 4\d\d/.test(msg)
       if (deterministic) {
         if (this._cache.size >= this._cacheSize) { const k = this._cache.keys().next().value; this._cache.delete(k) }
         this._cache.set(h, '') // 永久负缓存：确定性失败（非图片/过大/4xx）不再重试

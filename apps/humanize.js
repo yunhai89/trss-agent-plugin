@@ -28,6 +28,10 @@ import * as H from '../model/humanize/index.js'
 
 let _humanize = null
 let _humanizeFailed = null
+let _humanizeFailedAt = 0
+/** 装配失败后的短路窗口（同 apps/groupworld.js 的 GW_RETRY_MS）：窗口内不重复装配，
+ *  超时后允许再试以自愈——否则一次启动期瞬时失败（如未配 apiKey）会让伪人模式在进程内永久失效。 */
+const HUMANIZE_RETRY_MS = 60_000
 let _humanizePromise = null // in-flight buildHumanize()：并发首次调用共享同一次构建（防重复建 SQLite/服务）
 
 /** 取机器人自身 id 集合（normalizer 用）。 */
@@ -193,6 +197,9 @@ async function buildHumanize() {
   // 伪人看图：配置了视觉模型（agent.vision.enable + model → rt.vision）时，把上下文里的图片注成一句话描述
   const mediaDesc = new H.MediaDescriber({
     vision: rt.vision || null,
+    // 图片 URL 来自群消息（任意成员可构造）：默认拒绝私网/回环/元数据地址（SSRF）。
+    // 自建图床等明确场景可开 humanize.vision.allowPrivateHosts。
+    allowPrivateHosts: cfgFn().vision?.allowPrivateHosts === true,
     trace: { record: (event, data = {}) => { try { trace.record(event, data) } catch { /* noop */ } } },
   })
   if (mediaDesc.available) Log.info('[humanize] 视觉已接入：伪人可看见群友图片（每轮最多 3 张新描述，按图缓存）')
@@ -363,11 +370,11 @@ async function buildHumanize() {
 /** 取伪人装配体（manager/hmem/trace 等；web 与测试用）。 */
 export async function getHumanize() {
   if (_humanize) return _humanize
-  if (_humanizeFailed) throw _humanizeFailed
+  if (_humanizeFailed && Date.now() - _humanizeFailedAt < HUMANIZE_RETRY_MS) throw _humanizeFailed
   if (!_humanizePromise) {
     _humanizePromise = buildHumanize()
       .then((h) => { _humanize = h; _humanizeFailed = null; return h })
-      .catch((e) => { _humanizeFailed = e; throw e })
+      .catch((e) => { _humanizeFailed = e; _humanizeFailedAt = Date.now(); throw e })
       .finally(() => { _humanizePromise = null })
   }
   return _humanizePromise
@@ -376,7 +383,10 @@ export async function getHumanize() {
 /** 取 SelfStateService（web API 用；未装配/enabled=false → null）。 */
 export async function getSelfState() {
   const h = await getHumanize()
-  return (await h.ssLazy) || null
+  const ss = (await h.ssLazy) || null
+  // enabled=false 时 service.init() 返 false（未装配）：按契约返回 null，web 的 /selfstate/* 才知道未就绪
+  if (ss && typeof ss.isReady === 'function' && !ss.isReady()) return null
+  return ss
 }
 
 function makeSendFn(groupId) {
@@ -507,6 +517,10 @@ export class Humanize extends plugin {
         try {
           const ent = h.manager.getOrCreate(gid)
           const rt = ent.runtime
+          // L-144：getOrCreate 只新建 runtime、不触发恢复（route 路径由 runtime-manager.js 调 restored()），
+          // 新建时缓冲为空、lastSeq=0 → 下面既会误判水位回退（把 consolidated_seq 重置为 0，
+          // 之后 adopt 回填的旧消息被重复整合），日全量分支也会对着空缓冲整合。先恢复再判定。
+          try { await rt.restored?.() } catch { /* noop：恢复失败按未恢复处理 */ }
           if (hourly && !await h.hmem.shouldConsolidate(gid, rt.buffer.lastSeq, cfg.memory?.incrementalMinMessages ?? 20)) continue
           // 断点1修复：只整合水位之后的新消息（此前每轮取最近100条——同一事件反复整合+重要性反复+0.05，
           // 造成"马赛克梗"被强化到最高权重。水位前的消息上轮已处理过）
@@ -518,7 +532,11 @@ export class Humanize extends plugin {
             await h.hmem.markConsolidated(gid, 0)
             since = 0
           }
-          const msgs = rt.buffer.snapshotAfter(since).slice(-100)
+          // L-142：超量时必须取最旧的一批（原先 slice(-100) 取最近 100 条，而 consolidate 用水位=
+          // 该批最后一条 seq → 更早、还没整合过的新消息被水位永久跳过，长时记忆静默缺段）
+          const all = rt.buffer.snapshotAfter(since)
+          const msgs = all.slice(0, 100)
+          if (all.length > msgs.length) Log.info('[humanize] 记忆整合分批', `群${gid} 本轮 ${msgs.length}/${all.length}（其余下轮继续）`)
           const r = await h.hmem.consolidate({ groupId: gid, messages: msgs })
           await h.hmem.decay(gid)
           Log.mark('[humanize] 记忆整合', `群${gid} 新增${r.created} 合并${r.merged}${r.skipped ? `（跳过:${r.skipped}）` : ''}${hourly ? ' [增量]' : ' [日全量]'}`)
@@ -677,7 +695,7 @@ export class Humanize extends plugin {
   async humanizeMemory() {
     let h
     try { h = await getHumanize() } catch (e) { return this.e.reply(`伪人模式未就绪：${e?.message || e}`, true) }
-    const gid = String(this.e.msg.match(/\d+/)?.[1] || this.e.group_id || (h.cfgFn().groups || [])[0] || '')
+    const gid = String(this.e.msg.match(/\d+/)?.[0] || this.e.group_id || (h.cfgFn().groups || [])[0] || '')
     if (!gid) return this.e.reply('请指定群号或在白名单群内使用：#伪人记忆 960179589', true)
     const st = await h.hmem.stats(gid)
     const rows = await h.hmem.recent(gid, 15)

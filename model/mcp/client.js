@@ -13,13 +13,15 @@ import { JsonRpcChannel, JsonRpcError, ERR } from './jsonrpc.js'
 import { PROTOCOL_VERSION, METHODS, LOG_LEVELS } from './protocol.js'
 
 export class MCPClient {
-  constructor({ transport, clientInfo, protocolVersion, capabilities, requestTimeout, connectTimeout } = {}) {
+  constructor({ transport, clientInfo, protocolVersion, capabilities, requestTimeout, connectTimeout, logger = () => {} } = {}) {
     if (!transport) throw new Error('MCPClient 需要 transport')
     this.transport = transport
     this.clientInfo = clientInfo || { name: 'agents-plugin-mcp', version: '0.1.0' }
     this.requestedProtocolVersion = protocolVersion || PROTOCOL_VERSION
     this.requestedCapabilities = capabilities || {}
     this.requestTimeout = requestTimeout ?? 60000
+    // 旁路传输错误的落点：不接住会连告警一起吞掉（见 _onTransportError）
+    this.logger = typeof logger === 'function' ? logger : () => {}
     // initialize 握手用更长超时：stdio 服务端常经 npx 首次拉取（下载耗时远超普通请求）
     this.connectTimeout = connectTimeout ?? Math.max(this.requestTimeout, 180000)
 
@@ -76,9 +78,16 @@ export class MCPClient {
   }
 
   _onTransportError(e) {
-    // 默认把传输错误冒泡为未处理；子类/调用方可覆盖
+    // 请求级致命错误已由传输层在 send 内 throw（直接 reject 对应 pending）；
+    // 这里到达的是推送/监听/解析等旁路错误。曾只写 this._transportError（**全仓无任何读取者**），
+    // 故障与真实原因被静默丢弃，调用方只能等到超时后看到误导性的 "request timeout"。
     this._transportError = e
+    this._lastTransportErrorAt = Date.now()
+    try { this.logger('warn', `[mcp] 传输错误：${e?.message || e}`) } catch { /* 日志失败不影响主流程 */ }
   }
+
+  /** 最近一次旁路传输错误（超时/诊断文案用；无则 null） */
+  get lastTransportError() { return this._transportError || null }
 
   /** 把传输 close 信息格式化为可读原因（退出码 / spawn 失败 / stderr 末尾） */
   _closeReason(info) {

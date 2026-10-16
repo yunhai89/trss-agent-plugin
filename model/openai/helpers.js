@@ -193,7 +193,17 @@ export function createThinkStripper() {
   }
   return {
     feed(chunk) { buf += chunk; return flush() },
-    // 流结束：未闭合 think 内的残余丢弃；否则把残留（非 think）发出
-    end() { const r = inThink ? '' : buf; buf = ''; return r },
+    // 流结束：未闭合 think 内的残余丢弃；否则把残留（非 think）发出。
+    // 但若残留里出现了**未闭合的开标签** `<think`（含残留整段就是它的情况），
+    // splitInlineThink 会把开标签之后的全部内容当思考丢弃 → live 文本必须同样丢弃，
+    // 否则 streamer.rawFull 比最终 content 多出这段，「流式是否已覆盖终稿」判等失败会整段重发，
+    // 用户看到「流式残句 + 完整回复」两条（复核 EXTRA-3）。
+    end() {
+      if (inThink) { buf = ''; return '' }
+      const i = buf.indexOf('<think')
+      const r = i >= 0 && !/<\/think\s*>/.test(buf.slice(i)) ? buf.slice(0, i) : buf
+      buf = ''
+      return r
+    },
   }
 }

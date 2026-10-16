@@ -36,6 +36,25 @@ async function getEngine() {
         },
       }),
       { gfm: true, breaks: false },
+      {
+        // 原始 HTML 一律转义：正文来自 LLM 回复（可能被工具结果/网页内容间接注入），
+        // 而卡片会被注入 JS 的 Chromium 渲染。marked 默认原样透传 <script>/<img onerror=…> → 这里堵死。
+        // （另两道防线：文档 CSP meta、独立 puppeteer 路径 setJavaScriptEnabled(false)）
+        renderer: {
+          html(token) {
+            const s = typeof token === 'string' ? token : (token?.text ?? token?.raw ?? '')
+            return escapeHtml(s)
+          },
+          // 链接：只放行 http(s)/mailto，其余（javascript: 等）退化成纯文本（卡片是静态图，链接本就点不了）
+          link(token) {
+            let text
+            try { text = this.parser.parseInline(token?.tokens || []) } catch { text = escapeHtml(token?.text ?? '') }
+            const href = String(token?.href ?? '')
+            if (!/^(https?:|mailto:)/i.test(href)) return text
+            return `<a href="${escapeHtml(href)}">${text}</a>`
+          },
+        },
+      },
     )
     _engine = {
       hljs: true,

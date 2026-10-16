@@ -95,11 +95,15 @@ export class JsonRpcChannel {
     const msg = makeRequest(id, method, params)
     return new Promise((resolve, reject) => {
       let timer = null
+      // 结算即摘除 signal 上的 abort 监听器：此前只在 abort 触发时移除（once），
+      // 正常返回的请求会把监听器永久留在长生命周期 signal 上（监听器泄漏 / MaxListeners 警告）。
+      let onAbort = null
       const clean = () => {
         if (timer) clearTimeout(timer)
         this._pending.delete(id)
+        if (signal && onAbort) { try { signal.removeEventListener('abort', onAbort) } catch { /* noop */ } }
       }
-      const onAbort = () => {
+      onAbort = () => {
         clean()
         reject(new JsonRpcError(-1, `aborted: ${method}`))
       }

@@ -13,8 +13,13 @@ export class ConfirmStore {
     this._seq = 0
   }
 
+  /**
+   * 递增 id（**不回绕**）。此前 `(seq+1) % 10000` + `padStart(4)`：id 复用会覆盖同 id 的
+   * pending 条目——旧条目的超时定时器按 id 反查时清掉新条目的 timer 并删除其登记，
+   * 使新条目的审批 Promise 永不结算（会话永久挂起）。数字递增无副作用（仅显示变长）。
+   */
   _nextId() {
-    this._seq = (this._seq + 1) % 10000
+    this._seq += 1
     return String(this._seq).padStart(4, '0')
   }
 
@@ -28,20 +33,22 @@ export class ConfirmStore {
     return new Promise((resolve) => {
       let done = false
       const id = this._nextId()
+      const entry = { resolve: null, timer: null, info: { id, tool, args, ctx, createdAt: this._now() } }
       const settle = (val) => {
         if (done) return
         done = true
-        const p = this._pending.get(id)
-        if (p) {
-          clearTimeout(p.timer)
+        // 按**对象身份**清理（而非按 id 反查）：同 id 的其它条目绝不会被误删/误清定时器
+        if (this._pending.get(id) === entry) {
+          clearTimeout(entry.timer)
           this._pending.delete(id)
         }
         if (signal) { try { signal.removeEventListener('abort', onAbort) } catch { /* noop */ } }
         resolve(val)
       }
       const onAbort = () => settle(false)
-      const timer = setTimeout(() => settle(false), this.timeout)
-      this._pending.set(id, { resolve: settle, timer, info: { id, tool, args, ctx, createdAt: this._now() } })
+      entry.resolve = settle
+      entry.timer = setTimeout(() => settle(false), this.timeout)
+      this._pending.set(id, entry)
       if (signal) {
         if (signal.aborted) { settle(false); return }
         signal.addEventListener('abort', onAbort, { once: true })
@@ -54,7 +61,9 @@ export class ConfirmStore {
 
   /** master 端调用：批准/拒绝某个待审 id。pending 已因取消/超时撤销时返回 false（迟到批准无效） */
   resolve(id, approved) {
-    const p = this._pending.get(String(id))
+    // 容错：id 形如 '0001'，主人手输 `#确认 1` 时补零后仍能命中（此前会静默"未找到"）
+    const raw = String(id ?? '').trim()
+    const p = this._pending.get(raw) || (/^\d+$/.test(raw) ? this._pending.get(raw.padStart(4, '0')) : null)
     if (!p) return false
     p.resolve(!!approved)
     return true

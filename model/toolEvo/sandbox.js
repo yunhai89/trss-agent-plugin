@@ -51,6 +51,7 @@ import('./index.mjs').then(async ({ run }) => {
 
 /** 统一把「原始输出文本 + 退出码」折成结果对象（两档共用，保证文案一致） */
 function foldOutput(raw, { exitCode, duration, maxOutput, stderr }) {
+  // raw.dropped > 0：候选输出超过累积上限，已丢弃尾部（附在 stderr 便于定位"输出被截断"）
   if (raw.timedOut) return { ok: false, error: `执行超时(>${raw.timeoutMs}ms，疑似死循环)`, timedOut: true, duration, stderr: String(stderr || '').slice(0, 512) }
   if (raw.spawnError) return { ok: false, error: '子进程启动失败：' + raw.spawnError, duration }
   if (raw.sandboxError) return { ok: false, error: `沙箱执行失败(${raw.sandboxError.kind})：${String(raw.stderr || '').slice(0, 300)}`, duration, stderr: String(stderr || '').slice(0, 512) }
@@ -60,6 +61,11 @@ function foldOutput(raw, { exitCode, duration, maxOutput, stderr }) {
   } catch {
     return { ok: false, error: '候选输出非 JSON（或未正确 return）：' + String(raw.stdout || '').slice(0, 200), exitCode, duration, stderr: String(stderr || '').slice(0, 512) }
   }
+}
+
+/** 输出累积上限（宿主内存保护）：上限 = maxOutput*4 + 64KB 余量 */
+function outputCap(maxOutput) {
+  return Math.max(64 * 1024, (Number(maxOutput) || 8192) * 4)
 }
 
 /**
@@ -86,14 +92,26 @@ export async function createLocalCandidateSession({ source, timeoutMs = 3000, ma
         const e = { ...env, TOOL_INPUT_JSON: JSON.stringify(input ?? {}) }
         const proc = spawn(launch.command, [...launch.args, 'runner.mjs'], { cwd: bundleDir, env: e, stdio: ['ignore', 'pipe', 'pipe'] })
         let stdout = '', stderr = ''
+        // 输出累积上限：候选代码可无限打印（如死循环 print），无上限累积会把宿主 RSS 拖爆
+        // （实测 ~700MB 后在 'data' 回调内抛未捕获 RangeError → 进程退出）。上限 = maxOutput*4 + 64KB
+        // 余量（foldOutput 仍按 maxOutput 截断），超限后停止累积并丢弃管道数据。
+        const cap = Math.max(64 * 1024, (Number(mo) || 8192) * 4)
+        let dropped = 0
+        const accumulate = (cur, d) => {
+          const s = d.toString()
+          if (cur.length >= cap) { dropped += s.length; return cur }
+          const room = cap - cur.length
+          if (s.length > room) { dropped += s.length - room; return cur + s.slice(0, room) }
+          return cur + s
+        }
         const timer = setTimeout(() => {
           try { proc.kill('SIGKILL') } catch { /* noop */ }
           resolve({ timedOut: true, timeoutMs: ms, stdout, stderr })
         }, ms)
-        proc.stdout?.on('data', (d) => { stdout += d.toString() })
-        proc.stderr?.on('data', (d) => { stderr += d.toString() })
-        proc.on('error', (err) => { clearTimeout(timer); resolve({ spawnError: err.message, stdout, stderr }) })
-        proc.on('close', (code) => { clearTimeout(timer); resolve({ exitCode: code, stdout, stderr }) })
+        proc.stdout?.on('data', (d) => { stdout = accumulate(stdout, d) })
+        proc.stderr?.on('data', (d) => { stderr = accumulate(stderr, d) })
+        proc.on('error', (err) => { clearTimeout(timer); resolve({ spawnError: err.message, stdout, stderr, dropped }) })
+        proc.on('close', (code) => { clearTimeout(timer); resolve({ exitCode: code, stdout, stderr, dropped }) })
       })
       return foldOutput(r, { exitCode: r.exitCode, duration: Date.now() - t0, maxOutput: mo, stderr: r.stderr })
     },

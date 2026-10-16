@@ -70,6 +70,8 @@ export function rateOf(ok, total) {
 
 /**
  * @param {object} deps { kv, logger?, flushIntervalMs?=2000, keepDays?=90, now?() }
+ *   logger 兼容两种形态：函数 `(level, ...args)`（Log.tag 产物）与 Log 对象（取 level 同名方法），
+ *   两者内部调用都再包 try——观测失败不得反过来吃掉统计。
  */
 export function createUsageStats({ kv, logger = () => {}, flushIntervalMs = 2000, keepDays = 90, now = () => new Date() } = {}) {
   if (!kv) throw new Error('createUsageStats 需要 kv 实例')
@@ -79,11 +81,19 @@ export function createUsageStats({ kv, logger = () => {}, flushIntervalMs = 2000
   let stopped = false
   const stats = { recorded: 0, flushed: 0, lastFlushAt: 0 }
 
+  const log = (level, ...args) => {
+    try {
+      if (typeof logger === 'function') return logger(level, ...args)
+      const fn = typeof logger?.[level] === 'function' ? logger[level] : logger?.info
+      if (typeof fn === 'function') return fn.call(logger, ...args)
+    } catch { /* 日志失败不影响统计 */ }
+  }
+
   const dayOf = (d) => localDayKey(d)
 
   const bump = (fn) => {
     if (stopped) return
-    try { fn() } catch (e) { logger('warn', '[usage-stats] 采集异常', e?.message || e) }
+    try { fn() } catch (e) { log('warn', '[usage-stats] 采集异常', e?.message || e) }
     stats.recorded++
     if (!timer && flushIntervalMs > 0) {
       timer = setTimeout(() => { timer = null; flushNow().catch(() => {}) }, flushIntervalMs)
@@ -126,22 +136,31 @@ export function createUsageStats({ kv, logger = () => {}, flushIntervalMs = 2000
   async function flushNow() {
     if (flushing || stopped || !buffer.size) return
     flushing = true
-    const snapshot = [...buffer.entries()]
+    // 先摘除待落盘增量再 await：旧实现落盘期间新采集的增量会写进缓冲的新对象，
+    // await 结束后无条件 delete(key) 会把该窗口内尚未落盘的增量整块丢掉（统计少计）。
+    const pending = [...buffer.entries()]
+    for (const [key, inc] of pending) if (buffer.get(key) === inc) buffer.delete(key)
     try {
-      for (const [key, inc] of snapshot) {
+      while (pending.length) {
+        const [key, inc] = pending[0]
         const fullKey = DAY_KEY_PREFIX + key
         let existing = null
         try { existing = await kv.get(fullKey) } catch { existing = null }
         const merged = mergeDay(existing && typeof existing === 'object' ? existing : emptyDay(key), { ...inc, updatedAt: now().getTime() })
         await kv.set(fullKey, merged, keepDays * 86400)
-        buffer.delete(key) // set 成功才出缓冲（失败保留重试）
+        pending.shift() // set 成功才出缓冲（失败保留重试）
         stats.flushed++
       }
       await kv.set(SINCE_KEY, { at: now().getTime() }, keepDays * 86400).catch(() => {})
       stats.lastFlushAt = now().getTime()
     } catch (e) {
-      logger('warn', '[usage-stats] flush 失败（缓冲保留待重试）', e?.message || e)
+      log('warn', '[usage-stats] flush 失败（缓冲保留待重试）', e?.message || e)
     } finally {
+      // 未落盘的增量并回缓冲，与 await 期间新采集的增量合并，等下轮重试
+      for (const [key, inc] of pending) {
+        const d = buffer.get(key) || emptyDay(key)
+        buffer.set(key, mergeDay(inc, d))
+      }
       flushing = false
     }
   }

@@ -77,6 +77,15 @@ export async function openSandboxBundle(manager, key, { files = [], execCwd = '/
           let timer = null
           let onAbort = null
           let done = false
+          // 输出累积上限（宿主内存保护）：命令可无限打印（如 `yes`），只在命令结束后截断
+          // 不足以保护宿主——上限 = maxOutput*4 + 64KB，超限即丢弃后续增量。
+          const cap = Math.max(64 * 1024, (Number(maxOutput) || 8192) * 4)
+          const accumulate = (cur, d) => {
+            if (cur.length >= cap) return cur
+            const str = String(d)
+            const room = cap - cur.length
+            return str.length > room ? cur + str.slice(0, room) : cur + str
+          }
           const cleanup = () => { if (timer) clearTimeout(timer); if (onAbort && signal) signal.removeEventListener('abort', onAbort) }
           const finish = (r) => { if (done) return; done = true; cleanup(); resolve(r) }
           const fail = (e) => { if (done) return; done = true; cleanup(); reject(e) }
@@ -93,8 +102,8 @@ export async function openSandboxBundle(manager, key, { files = [], execCwd = '/
               envs: runEnvs || undefined,
               // 服务端兜底比本地 timer 宽 5s：本地先到给出 timedOut 语义，网关卡死时由 envd 终止
               timeoutMs: timeoutMs + 5000,
-              onStdout: (d) => { stdout += String(d) },
-              onStderr: (d) => { stderr += String(d) },
+              onStdout: (d) => { stdout = accumulate(stdout, d) },
+              onStderr: (d) => { stderr = accumulate(stderr, d) },
             }))
             .then((h) => { cmdHandle = h; return h.wait() })
             .then((res) => {

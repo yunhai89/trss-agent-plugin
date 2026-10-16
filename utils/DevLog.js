@@ -87,7 +87,11 @@ export default async function devLog(event, data = {}, traceId = null, scope = n
     if (!devLog._warnedStrScope) { devLog._warnedStrScope = true; console.warn('[agents-dev] devLog 收到字符串 scope（应为对象或 null，请改用 opts {dir,filename}）——按无 scope 处理') }
     scope = null
   }
-  const dir = opts.dir ? path.resolve(opts.dir) : (c.dir ? path.resolve(c.dir) : Config.path.logs)
+  // 相对目录一律以**插件根**为基准（与 apps 的 path.resolve(PLUGIN_ROOT, cfg.xxx) 同约定）：
+  // path.resolve(dir) 会按 process.cwd()（生产上是 Yunzai 根）解析，把日志写到插件之外，
+  // 而 Web 日志面板只读 Config.path.logs → 面板看不到内容、排障误判「日志没写」。
+  const fromPlugin = (d) => path.resolve(Config.path?.plugin || process.cwd(), String(d))
+  const dir = fromPlugin(opts.dir || c.dir || Config.path.logs)
   const filename = opts.filename || (scope ? devLogFilename(scope) : 'dev-fallback.log')
   const filepath = path.join(dir, filename)
   const obj = {

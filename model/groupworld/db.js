@@ -11,6 +11,7 @@
  * 事务：分析在 BEGIN/COMMIT 内「标记 analyzed + 推进 cursor」，失败 ROLLBACK 不提交（§6.3、§15.2）。
  */
 import sqlite3 from 'sqlite3'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import fs from 'node:fs'
 import path from 'node:path'
 import Log from '../../utils/Log.js'
@@ -452,26 +453,62 @@ export function closeDb() {
 }
 
 /* —— DAO：async 查询入口 —— */
+/**
+ * 事务上下文（AsyncLocalStorage）：区分「事务内的嵌套调用」与「事务外的并发调用」。
+ * 仅靠全局布尔量会把"另一个群在事务 await 期间发起的写"误判为嵌套，从而并入同一事务。
+ */
+const _txnCtx = new AsyncLocalStorage()
+
+/** 事务串行链：同一连接上第二条 BEGIN 会直接报错，故事务必须排队（不是并发） */
+let _txnChain = Promise.resolve()
+let _txnBusy = false
+let _spSeq = 0
+
 export const dao = {
   db: () => _db,
-  run: (sql, params) => runP(_db, sql, params),
+  /**
+   * 写操作网关：事务进行中且**不在该事务上下文内** → 排队等事务结束再写。
+   * 否则该写会被卷入别人的事务：它自己没提交，事务 ROLLBACK 时它的数据静默消失。
+   * 事务上下文内的写（含事务自身）直接执行——排在最前的那个事务必须在自己的上下文里写。
+   */
+  run: (sql, params) => (_txnCtx.getStore() || !_txnBusy)
+    ? runP(_db, sql, params)
+    : _txnChain.then(() => runP(_db, sql, params)),
   all: (sql, params) => allP(_db, sql, params),
   get: (sql, params) => getP(_db, sql, params),
+
+  /** 事务体：嵌套时用 SAVEPOINT（不重开 BEGIN），非嵌套时 BEGIN/COMMIT。 */
+  async _txnRun(fn) {
+    const nested = !!_txnCtx.getStore()
+    const sp = nested ? `gw_sp_${++_spSeq}` : null
+    await runP(_db, nested ? `SAVEPOINT ${sp}` : 'BEGIN')
+    try {
+      const r = await fn()
+      await runP(_db, nested ? `RELEASE ${sp}` : 'COMMIT')
+      return r
+    } catch (e) {
+      try { await runP(_db, nested ? `ROLLBACK TO ${sp}` : 'ROLLBACK') } catch { /* noop */ }
+      throw e
+    }
+  },
+
   /**
    * 事务：fn 内的 dao.run 串行执行，任一失败 ROLLBACK 并抛出。
+   * - 事务之间**串行排队**：此前并发 txn 会让第二条直接 `cannot start a transaction within a transaction`
+   *   且错误被吞（调用方仍以为成功）；
+   * - 事务内的嵌套 txn 走 SAVEPOINT，不会自锁。
+   * - 注意：fn 内不要做 embed/LLM 等网络调用——事务窗口越长，其它链路的写入越容易被卷入。
    * @param {() => Promise} fn
    */
   async txn(fn) {
     if (!_db) throw new Error('[groupworld] txn: db 未初始化')
-    await runP(_db, 'BEGIN')
-    try {
-      const r = await fn()
-      await runP(_db, 'COMMIT')
-      return r
-    } catch (e) {
-      try { await runP(_db, 'ROLLBACK') } catch { /* noop */ }
-      throw e
-    }
+    if (_txnCtx.getStore()) return this._txnRun(fn) // 真嵌套：同一异步上下文，直接 SAVEPOINT
+    const run = _txnChain.then(async () => {
+      _txnBusy = true
+      try { return await _txnCtx.run(true, () => this._txnRun(fn)) } finally { _txnBusy = false }
+    })
+    _txnChain = run.then(() => {}, () => {})
+    return run
   },
 }
 

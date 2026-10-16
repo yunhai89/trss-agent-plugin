@@ -26,6 +26,12 @@ Config.onChange(async () => {
     _started = false
     _watchedPort = null
     startServer().then(() => { _started = true; _watchedPort = port }).catch(() => {})
+    return
+  }
+  // enable 由 false→true（或启动时即开启）时补启动：此前只处理「已启动且端口变化」，
+  // 一旦关闭过就再也开不回来，必须重启进程才生效。
+  if (!_started) {
+    startServer().then(() => { _started = true; _watchedPort = port }).catch(() => {})
   }
 })
 

@@ -109,6 +109,14 @@
       MOCK.cache = d.cache || null
       MOCK.perceptions = d.perceptions
       MOCK.totalRequests = d.totalRequests || 0; MOCK.totalToolCalls = d.totalToolCalls || 0; MOCK.totalTokens = d.totalTokens || 0
+      // 工具成功/失败/成功率与数据源标记（后端 /api/overview 已返回）。
+      // 曾漏拷这四个字段 → 概览页「异常」恒 0、成功率恒「暂无」、KV 明细块永不渲染。
+      // 注意 null 与 0 语义不同：null = 尚无 KV 数据（显示「暂无」），0 = 真实为零。
+      MOCK.toolOk = d.toolOk ?? null
+      MOCK.toolFail = d.toolFail ?? null
+      MOCK.toolSuccessRate = d.toolSuccessRate ?? null
+      MOCK.toolFailRate = d.toolFailRate ?? null
+      MOCK.statsSource = d.statsSource || 'log'
       if (d.counts) MOCK.counts = d.counts
     },
   }

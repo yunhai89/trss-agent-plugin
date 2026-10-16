@@ -251,6 +251,7 @@ agent:
 | `maxTokens` | 空 | 单次回复最大 token（留空=厂商默认；Anthropic 默认 4096） |
 | `contextWindow` | 空 | 模型上下文窗口 token 数（如 `32000`）；超 80% 自动压缩历史、保留首条意图 |
 | `maxToolResultChars` | `4000` | 单条工具结果字符上限，超长截断防上下文膨胀 |
+| `promptCacheKey` | `false` | OpenAI 官方 `prompt_cache_key` 稳定会话路由（多轮命中前缀缓存的命中率更高）。仅当当前 provider 声明支持该能力（OpenAI 官方 preset）时才下发，兼容网关/其它厂商一律不发 |
 | `keepReasoning` | `false` | 是否把推理(`reasoning_content`)回灌历史；默认 `false` 省 context。thinking 模式下带工具调用的轮次按协议必需始终回传（不受此开关影响），否则上游会报 "reasoning_content must be passed back" |
 | `stream` | `false` | 逐字流式输出（依赖适配器、不稳，默认关） |
 | `progress` | `true` | 工具调用时推送节流进度消息（消除"干等"，默认开） |
@@ -312,6 +313,21 @@ vision:
   apiKey: ""            # 空则复用主 apiKey
   maxTokens: 1024
   describePrompt: ""    # 自定义"描述这张图"指令
+```
+
+### `agent.perception` —— 情境感知
+
+每轮对话开头注入的「情境」里，若会话历史很少（新会话、刚清空、久未发言），会额外补一小段近期群聊记录，避免模型对群内近况一无所知；历史已足够时改用常规注入，二者互斥不重复。
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `sparseInject` | `true` | 稀薄上下文时补全群聊；`false` 关闭（仅保留常规情境注入） |
+| `sparseThreshold` | `6` | 触发阈值：会话历史条数 **小于** 该值才补 |
+
+```yaml
+perception:
+  sparseInject: true
+  sparseThreshold: 6
 ```
 
 ### `agent.tools` —— 工具 SDK

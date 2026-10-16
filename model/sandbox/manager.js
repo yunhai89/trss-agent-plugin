@@ -107,6 +107,13 @@ export class SandboxManager {
         network: this.network,
         allowInternetAccess: this.allowInternetAccess,
       })
+      // shutdown 可能与在途 create 交错：_closed 置位后新到手的沙箱无人清理（租约在 shutdown
+      // 遍历之后才登记），必须在这里就地回收，否则容器/进程永久泄漏。
+      if (this._closed) {
+        try { await this.transport.kill(handle) } catch { /* best-effort */ }
+        this._releaseSlot()
+        throw new SandboxError('killed', '沙箱管理器已关闭（创建完成时已展开 shutdown）')
+      }
       const t = this._now()
       this._leases.set(k, { handle, lastUsed: t, lastRenew: t, purpose })
       this._info(`[sandbox] 已创建沙箱 ${handle.id}（key=${k} · ${purpose} · 占用 ${this._active}/${this.maxSandboxes}）`)

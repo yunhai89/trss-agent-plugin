@@ -67,13 +67,16 @@ export class SessionStore {
   /**
    * 取当前会话历史条数（只读，复用缓存）。供 perception 判断"会话上下文是否稀薄"
    * —— 内部封装 conversation / group:user 两种模式的取数逻辑，调用方无需关心键构造。
+   * 取键口径与写入方 Agent.run 同源：优先 scopeUserId（群共享模式为 '__group__'；写入用 ctx.scopeUserId），
+   * 否则 isolation 关闭时会去读真实 userId 的键（不存在）→ 恒返回 0。
    */
-  async historyLength({ userId, groupId, conversationId } = {}) {
+  async historyLength({ userId, groupId, conversationId, scopeUserId } = {}) {
+    const uid = scopeUserId != null && scopeUserId !== '' ? scopeUserId : userId
     try {
       if (conversationId != null && typeof this.getConversation === 'function') {
-        return (await this.getConversation(userId, groupId, conversationId)).length
+        return (await this.getConversation(uid, groupId, conversationId)).length
       }
-      return (await this.get(this.key(groupId, userId))).length
+      return (await this.get(this.key(groupId, uid))).length
     } catch { return 0 }
   }
 

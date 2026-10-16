@@ -81,6 +81,14 @@ export class EmotionTransition {
     this.dao = dao
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.trace = trace
+    this._writeChain = null // _upsertEmotion 串行化链（防同拍 check-then-insert 重复建行）
+  }
+
+  /** 串行执行写段：前一段无论成败都接续（错误由调用方 await 拿到）。 */
+  _serialize(fn) {
+    const run = (this._writeChain || Promise.resolve()).then(fn, fn)
+    this._writeChain = run.catch(() => {})
+    return run
   }
 
   /**
@@ -156,7 +164,13 @@ export class EmotionTransition {
     return res?.lastID ?? null
   }
 
-  async _upsertEmotion({ botId, groupId, etype, intensity, targetUserId, eventId, temperament, now }) {
+  async _upsertEmotion(o) {
+    // SELECT→INSERT 非原子：同一用户连发两条（onMessage fire-and-forget）会让两条链都读到「无行」
+    // 各插一行，心境投影把同型重复行双倍累加（ss_emotions 无唯一约束兜底）。串行化整个读改写段。
+    return this._serialize(() => this._upsertEmotionRow(o))
+  }
+
+  async _upsertEmotionRow({ botId, groupId, etype, intensity, targetUserId, eventId, temperament, now }) {
     const halfLife = this._halfLifeFor(etype, temperament, targetUserId != null)
     const existing = await this.dao.get(
       "SELECT id, intensity, half_life_seconds, last_evaluated_at FROM ss_emotions WHERE bot_id=? AND group_id=? AND emotion_type=? AND target_user_id IS ? AND status='active' ORDER BY id DESC LIMIT 1",
@@ -276,6 +290,8 @@ export class EmotionTransition {
     if (!effects || !Object.keys(effects).length) return
     if (base < 0.2) return
     const rcfg = cfg.resentment || {}
+    // 面板「启用怨气」开关（selfState.resentment.enabled）：关掉后不再写关系残留/记仇
+    if (rcfg.enabled === false) return
     const confOK = (appraisal?.certainty ?? 0) >= (rcfg.minCreateConfidence ? rcfg.minCreateConfidence - 0.15 : 0.57)
     if (!confOK && Object.values(effects).some((w) => w > 0) && (appraisal?.desirability ?? 0) < 0) return // 低置信负面不入关系
     await this.dao.run('INSERT OR IGNORE INTO gw_bot_rel(bot_id,group_id,user_id,updated_at) VALUES (?,?,?,?)', [botId, groupId, actorUserId, now])

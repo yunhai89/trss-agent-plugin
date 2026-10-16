@@ -99,6 +99,10 @@ export class OpenAIProvider extends Provider {
         if (dc && onDelta) { const c = stripper.feed(dc); if (c) onDelta(c) }
         if (part.delta?.reasoning && onReasoning) onReasoning(part.delta.reasoning)
       }
+      // 流结束必须收尾（L-086）：stripper 为等待完整 <think> 标签会把可能的标签前缀
+      // （如正文结尾的 '<'、'<thi'）留在内部缓冲；不调用 end() 这些字符被永久吞掉，
+      // live 播报(飞书/QQ 流式卡片)尾部缺字。end() 会丢弃未闭合 think 内的残余、发出其余。
+      if (stripper) { const tail = stripper.end(); if (tail) onDelta(tail) }
       return this._resultFromStream(s)
     }
     const res = await this.client.chat.completions.create(body, { signal, sessionId })

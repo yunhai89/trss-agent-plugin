@@ -118,7 +118,9 @@ export function makeTransport(cfg = {}, { logger = null } = {}) {
     async write(handle, absPath, content) {
       const dir = path.posix.dirname(String(absPath))
       try { await handle.raw.files.makeDir(dir) } catch { /* 已存在或父目录自动创建失败 → 让 write 报真实错误 */ }
-      await handle.raw.files.write(String(absPath), String(content))
+      // 原样透传：曾无条件 String(content) —— 传 ReadableStream/Buffer 时会被写成
+      // 字面量 "[object ReadableStream]"，大文件流式上传静默变成垃圾文本。
+      await handle.raw.files.write(String(absPath), normalizeWriteData(content))
     },
 
     /** 批量写入（一次 RPC；制品多文件场景用）。失败时抛错，由上层转结构化失败 */
@@ -130,10 +132,10 @@ export function makeTransport(cfg = {}, { logger = null } = {}) {
         try { await handle.raw.files.makeDir(d) } catch { /* noop */ }
       }
       if (typeof handle.raw.files.writeFiles === 'function') {
-        await handle.raw.files.writeFiles(list.map((f) => ({ path: String(f.path), data: String(f.data ?? '') })))
+        await handle.raw.files.writeFiles(list.map((f) => ({ path: String(f.path), data: normalizeWriteData(f.data) })))
         return
       }
-      for (const f of list) await handle.raw.files.write(String(f.path), String(f.data ?? ''))
+      for (const f of list) await handle.raw.files.write(String(f.path), normalizeWriteData(f.data))
     },
 
     /** 读文件：format='bytes' → Uint8Array；'stream' → ReadableStream（大文件流式落盘用，调用方须消费或 cancel） */
@@ -159,8 +161,13 @@ export function makeTransport(cfg = {}, { logger = null } = {}) {
       await handle.raw.updateNetwork(network)
     },
 
-    /** 列表（运维/排障用；不做自动回收） */
-    async list({ metadata = null, limit = 20 } = {}) {
+    /**
+     * 列举账号下的沙箱（运维/排障用；不做自动回收）。
+     * 注意：本对象曾同时存在两个 `list` 键——目录列举 list(handle, path, opts) 与这里的运维列举，
+     * 后者覆盖前者，导致 manager.transport.list(handle, dir) 实际去列举沙箱、列目录永久失效。
+     * 运维列举改名 listSandboxes，directory 列举保持唯一名字 list。
+     */
+    async listSandboxes({ metadata = null, limit = 20 } = {}) {
       const page = SandboxCls.list({ limit, ...(metadata ? { query: { metadata } } : {}) })
       const items = page && typeof page.nextItems === 'function' ? await page.nextItems() : []
       return (items || []).map((s) => ({ id: String(s.sandboxId || s.id || ''), metadata: s.metadata || {}, endAt: s.endAt || null, state: s.state || null }))
@@ -168,4 +175,13 @@ export function makeTransport(cfg = {}, { logger = null } = {}) {
   }
 
   return transport
+}
+
+/**
+ * 写入内容归一：字符串/二进制/流原样交给 SDK；只对 undefined 兜底空串。
+ * 绝不做 String() 强转——那会把 ReadableStream/Buffer 变成 "[object ...]" 字面量。
+ */
+function normalizeWriteData(data) {
+  if (data == null) return ''
+  return data
 }

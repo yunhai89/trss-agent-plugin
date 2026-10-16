@@ -47,7 +47,7 @@
     name: 'StickerView',
     components: { CfgRow, TagEditor },
     setup() {
-      const { ref, reactive, watch, computed, onMounted, nextTick } = Vue
+      const { ref, reactive, watch, computed, onMounted, onUnmounted, nextTick } = Vue
       const { toast } = window.UI
       const M = window.MOCK
 
@@ -152,7 +152,8 @@
         } catch (e) { toast(e.message, 'error') }
         refreshLib()
       })
-      window.removeEventListener('scroll', onScroll)
+      // 监听器在 onMounted 里注册，必须在卸载时移除（setup 同步区里的 remove 早于 add，等于空操作）
+      onUnmounted(() => window.removeEventListener('scroll', onScroll))
 
       return {
         form, dirty, save, reset, sections, open, activeSec, jump,

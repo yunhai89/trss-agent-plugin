@@ -184,19 +184,20 @@ export class GroupWorldService {
     return true
   }
 
-  /** 删除自己的画像（派生数据全删；不强制 optout）。 */
+  /** 删除自己的画像（派生数据全删；不强制 optout）。写库失败返回 false（调用方据此不再回假成功，M-058）。 */
   async deleteUserProfile(groupId, userId) {
     if (!await this.init()) return false
-    await this.ingester.purgeUser(String(groupId), String(userId))
+    if (await this.ingester.purgeUser(String(groupId), String(userId)) === false) return false
     this.trace?.record?.('gw_privacy', { groupId, action: 'delete' })
     return true
   }
 
-  /** 关闭/开启对我的建模。关闭时同时清除已有派生数据（修 E-L1：曾残留底层表）。 */
+  /** 关闭/开启对我的建模。关闭时同时清除已有派生数据（修 E-L1：曾残留底层表）。
+   *  写库失败返回 false（调用方据此不再回假成功，M-058）。 */
   async setOptOut(groupId, userId, on) {
     if (!await this.init()) return false
-    await this.ingester.setOptOut(String(groupId), String(userId), on)
-    if (on) await this.ingester.purgeUser(String(groupId), String(userId))
+    if (await this.ingester.setOptOut(String(groupId), String(userId), on) === false) return false
+    if (on && await this.ingester.purgeUser(String(groupId), String(userId)) === false) return false
     this.trace?.record?.('gw_privacy', { groupId, action: on ? 'opt_out' : 'opt_in' })
     return true
   }

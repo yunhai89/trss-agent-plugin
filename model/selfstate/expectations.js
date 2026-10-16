@@ -145,6 +145,9 @@ export class ExpectationManager {
   /** 扫描到期期待并判定（由 onMessage/维护调用）。返回需产生 ignored 事件的列表。 */
   async sweepExpired({ botId, groupId, now = Date.now() }) {
     const cfg = this._cfgFn(); const ec = cfg.expectations || {}
+    // 关闭「期待/冷落」后存量 pending 期待不再判冷落（register/resolveForMessage 都已判 enabled，
+    // 此前 sweepExpired 漏判 → 关掉开关仍继续产出 ignored_expectation 累积负面关系）
+    if (ec.enabled === false) return []
     const expired = await this.dao.all(
       "SELECT * FROM ss_expectations WHERE bot_id=? AND group_id=? AND status='pending' AND expires_at<?",
       [botId, groupId, now],

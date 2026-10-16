@@ -45,6 +45,13 @@ export function createStream(response, { reasoningFields = [], idleMs = 60000 } 
   }
 
   function processChunk(chunk) {
+    // 错误帧：OpenAI 兼容网关会在流中插 {"error":{...}}（限流/超长/内容过滤等）。
+    // 此前忽略它 → 无 choices 的分支直接返回空增量，循环静默结束，半截正文被当作完整回复。
+    if (chunk.error) {
+      const e = chunk.error
+      const msg = e.message || e.code || e.type || '未知错误'
+      throw new Error(`OpenAI 流式响应返回错误帧：${typeof msg === 'string' ? msg : JSON.stringify(msg)}`)
+    }
     const out = { delta: {}, finishReason: null, usage: null, raw: chunk }
     if (chunk.usage) {
       state.usage = chunk.usage

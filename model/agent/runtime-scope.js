@@ -10,7 +10,7 @@
  *     返回「注销句柄」，只移除自身这次登记，便于可逆注册且不误删同名新资源。
  *   - child(name)：子作用域，父 abort/close 时联动；关闭顺序=先子后父（依赖方先退出）。
  *   - close(reason)：幂等；abort → 关闭子作用域 → 按序 await 各 disposer（单个失败不影响其余）→ 解绑。
- *   - rollback()：初始化失败时按「逆序」回滚已登记资源。
+ *   - rollback()：初始化失败时按「逆序」回滚已登记资源，并做 close 同款收尾（子作用域/解绑/openCount）。
  *   - stats()：可观测（disposers/children/closed）。不要求引入 Cordis。
  */
 
@@ -101,10 +101,27 @@ export class RuntimeScope {
     return this._closing
   }
 
-  /** 初始化失败回滚：按逆序执行已登记 disposer（幂等：已执行的不重复）。 */
+  /**
+   * 初始化失败回滚：按逆序执行已登记 disposer（幂等：已执行的不重复），并做与 close 相同的收尾
+   * （关子作用域 → 解绑父作用域 → 递减 openCount）——否则 /api/runtime/scopes 的 openScopes 永久虚高。
+   * 已 close/rollback 过则直接返回，不重复递减。
+   */
   async rollback() {
+    if (this._closed) return { name: this.name, reason: 'rollback', skipped: true }
+    this._closed = true
+    this.abort('rollback')
+    for (const c of [...this._children]) { try { await c.close('rollback') } catch { /* noop */ } }
+    this._children.clear()
     const list = [...this._disposers].sort((a, b) => (b.order - a.order) || (b.seq - a.seq))
-    for (const rec of list) { try { await runDisposer(rec) } catch { /* noop */ } }
+    let disposed = 0
+    for (const rec of list) { try { await runDisposer(rec); disposed++ } catch { /* noop */ } }
+    this._disposers = []
+    if (this.parent instanceof RuntimeScope) {
+      this.parent._children.delete(this)
+      if (this._onParentAbort) { try { this.parent._ctl.signal.removeEventListener('abort', this._onParentAbort) } catch { /* noop */ } }
+    }
+    _openScopes = Math.max(0, _openScopes - 1)
+    return { name: this.name, reason: 'rollback', disposed, children: 0 }
   }
 
   stats() {

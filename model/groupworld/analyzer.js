@@ -15,6 +15,12 @@ import Log, { ANSI } from '../../utils/Log.js'
 
 const dateKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
+/** 每日调用预算：显式 0 是合法值（=关闭熔断，校验器下限 0/面板 min=0），不能被 `|| 100` 吞成 100。 */
+const budgetOf = (analysis) => {
+  const n = Number(analysis?.maxDailyCallsPerGroup)
+  return Number.isFinite(n) ? Math.max(0, n) : 100
+}
+
 export class WorldAnalyzer {
   /**
    * @param {object} opts { provider, dao, segmenter, resolver, cfg:()=>object, trace? }
@@ -38,7 +44,7 @@ export class WorldAnalyzer {
     try { await this.segmenter.processGroup(groupId, c.ingestion || {}, now) } catch (e) { Log.warn('[groupworld] 切片失败', groupId, e?.message || e) }
 
     // 2. 预算
-    const budget = await this._checkBudget(groupId, Number(c.analysis?.maxDailyCallsPerGroup) || 100)
+    const budget = await this._checkBudget(groupId, budgetOf(c.analysis))
     if (!budget.ok) {
       this.trace?.record?.('gw_analyze', { groupId, skipped: 'budget', used: budget.used, max: budget.max })
       return { skipped: 'budget', analyzed: 0 }
@@ -51,7 +57,7 @@ export class WorldAnalyzer {
     let analyzed = 0; let failed = 0; let budgetHit = false
     for (const seg of pending) {
       // 单轮内逐段复查预算（修 H1：入口只查一次会让单轮突破 maxDailyCallsPerGroup）
-      const b = await this._checkBudget(groupId, Number(c.analysis?.maxDailyCallsPerGroup) || 100)
+      const b = await this._checkBudget(groupId, budgetOf(c.analysis))
       if (!b.ok) { budgetHit = true; break }
       const ok = await this._analyzeSegment(groupId, seg, c, now)
       if (ok) analyzed++; else failed++

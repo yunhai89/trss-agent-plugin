@@ -43,6 +43,17 @@ async function getRt(res) {
   }
 }
 
+/** 会话日志的实际目录：以 agent.devLog.dir 为准（与写入侧 utils/DevLog.js 同源），
+ *  相对路径按插件根解析。曾一律硬编码 Config.path.logs —— 用户设了 agent.devLog.dir
+ *  后日志写在别处，面板永远是空的（读写不同源）。 */
+function logDir() {
+  try {
+    const dir = Config.get()?.agent?.devLog?.dir
+    if (dir) return path.isAbsolute(dir) ? dir : path.resolve(Config.path?.plugin || process.cwd(), String(dir))
+  } catch { /* 配置未就绪：回退默认路径 */ }
+  return Config.path.logs
+}
+
 /** 取 GroupWorld 服务；失败则响应 5000 并返回 null。 */
 async function getGw(res) {
   try { return await getGroupWorld() }
@@ -91,17 +102,17 @@ router.get('/scopes', asyncHandler(async (req, res) => {
 router.get('/logs/files', asyncHandler(async (req, res) => {
   const { from, to, event, q } = req.query
   const limit = Number(req.query.limit) > 0 ? Number(req.query.limit) : 10
-  return ok(res, queryLogFiles(Config.path.logs, { from, to, event, q, limit }))
+  return ok(res, queryLogFiles(logDir(), { from, to, event, q, limit }))
 }))
 
 // GET /api/logs?file= —— 单文件事件流（{file,label,events}，对齐 mock）
 router.get('/logs', asyncHandler(async (req, res) => {
   const file = String(req.query.file || '')
   if (!file) return fail(res, CODE.BAD, '缺少 file 参数')
-  const all = listLogFiles(Config.path.logs)
+  const all = listLogFiles(logDir())
   const meta = all.find((f) => f.file === file)
   if (!meta) return fail(res, CODE.NOTFOUND, '日志文件不存在')
-  const events = readLogFile(Config.path.logs, file)
+  const events = readLogFile(logDir(), file)
   return ok(res, { file, label: meta.label, events })
 }))
 
@@ -358,16 +369,19 @@ router.get('/overview', asyncHandler(async (req, res) => {
   // 旧版本日志（无缓存字段）不进窗口，避免稀释新链路的命中率。
   // 窗口参数参与缓存键（60s 聚合缓存按窗口分桶）。
   const win = String(req.query.window || '7d')
-  const r0 = aggregateStats(Config.path.logs, { since: 0, topK: 5 })
+  // 缓存命中必须先返回再聚合：全量 aggregateStats 是 O(全部日志)，原顺序让它每次都白跑一遍
+  if (_overviewCache && _overviewCache.win === win && Date.now() - _overviewCache.at < 60000) return ok(res, _overviewCache.data)
+  const r0 = aggregateStats(logDir(), { since: 0, topK: 5 })
   let since
   if (win === '1h') since = Date.now() - 3600e3
   else if (win === '24h') since = Date.now() - 24 * 3600e3
   else if (win === 'new') since = r0.firstObservedAt != null ? r0.firstObservedAt - 1 : 0
   else if (win === 'all') since = 0
   else since = Date.now() - 7 * 86400000
-  if (_overviewCache && _overviewCache.win === win && Date.now() - _overviewCache.at < 60000) return ok(res, _overviewCache.data)
-  const r = await getRuntime().catch(() => null)
-  const stats = since === 0 ? r0 : aggregateStats(Config.path.logs, { since, topK: 5 })
+  // 走注入的运行时提供者（离线测试的桩），不再直连 getRuntime() —— 曾绕过 _runtimeProvider，
+  // 概览端点在无真实运行时时连桩测试都拿不到数据
+  const r = await _runtimeProvider().catch(() => null)
+  const stats = since === 0 ? r0 : aggregateStats(logDir(), { since, topK: 5 })
   // ── KV 日统计（主数据源）：token 趋势/请求趋势/工具统计优先走 Redis 按日 JSON（替代读日志的不稳定聚合：
   //    日志趋势的 day 取 UTC ISO——本地 0~8 点"今天"被归到 UTC 昨天，Web 端近几日时有时无的根因）。
   //    日志侧仅保留 KV 首个有数据日之前的天（按日切换、无双算）；KV 无数据时全量回退日志（部署首日）。
@@ -631,6 +645,7 @@ router.put('/config', asyncHandler(async (req, res) => {
   if (!changes || typeof changes !== 'object') return fail(res, CODE.BAD, 'changes 必须是对象')
   const cfg = Config.get()
   let n = 0
+  const rejected = []
   for (const [p, v] of Object.entries(changes)) {
     if (!p.startsWith('agent.')) continue // 仅允许 agent.* 命名空间
     // Jev Key 掩码 = 用户未修改：跳过，避免把掩码写进配置（redactConfig 只掩码展示）
@@ -641,12 +656,14 @@ router.put('/config', asyncHandler(async (req, res) => {
       val = { ...val }
       delete val.apiKey
     }
-    setPath(cfg, p, val)
-    n++
+    // 原型污染防护：setPath 内含 __proto__/prototype/constructor 段时抛错，
+    // 这里归一为「该字段被拒」而不是 500（其余字段照常保存）
+    try { setPath(cfg, p, val); n++ } catch (e) { rejected.push({ path: p, reason: e?.message || String(e) }) }
   }
+  if (rejected.length && !n) return fail(res, CODE.BAD, `路径非法：${rejected.map((r) => r.path).join('、')}`)
   Config.save(cfg)
   Config.reload(true)
-  return ok(res, { applied: n }, '已保存（已热加载）')
+  return ok(res, { applied: n, ...(rejected.length ? { rejected } : {}) }, rejected.length ? `已保存 ${n} 项，${rejected.length} 项路径非法被拒` : '已保存（已热加载）')
 }))
 
 // PUT /api/memories/:scopeId/:target —— 全量替换条目（超限 4001）

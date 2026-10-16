@@ -79,6 +79,13 @@ export class CircuitBreaker {
       if (was !== 'open') this.onEvent({ event: 'kroki_circuit_open' })
     }
   }
+  /**
+   * 探测名额已取但请求未真正发出（信号量排队期间被取消）：只复位 halfOpenInFlight，不计失败。
+   * 否则 halfOpenInFlight 永久为 true，之后所有 acquire 都返回 circuit_half_open_busy（Kroki 彻底不可用）。
+   */
+  onAborted() {
+    this.halfOpenInFlight = false
+  }
 }
 
 /** 简单信号量（等待也响应 abort） */
@@ -146,7 +153,7 @@ export class KrokiClient {
     this.onEvent = (e) => { try { this.cfg.onEvent?.(e) } catch { /* 日志失败不影响渲染 */ } }
     // circuitBreaker.enabled=false → 用空操作熔断器（永不放行拒绝、永不累计失败）
     this.cb = this.cfg.circuitBreaker?.enabled === false
-      ? { acquire: () => null, state: 'disabled', onSuccess() {}, onFailure() {} }
+      ? { acquire: () => null, state: 'disabled', onSuccess() {}, onFailure() {}, onAborted() {} }
       : new CircuitBreaker({ ...this.cfg.circuitBreaker, onEvent: this.onEvent })
     this.sem = new Semaphore(this.cfg.maxConcurrency)
   }
@@ -173,7 +180,13 @@ export class KrokiClient {
       return { ok: false, errorClass: 'renderer_unavailable', message: `Kroki 熔断中（${gate}），稍后自动恢复`, retryable: false, circuitState: this.cb.state }
     }
 
-    await this.sem.acquire(agentSignal)
+    try {
+      await this.sem.acquire(agentSignal)
+    } catch (e) {
+      // acquire 已在 half_open 分支占掉探测名额（halfOpenInFlight=true），此处被取消必须复位，否则熔断器永久卡在 half_open
+      this.cb.onAborted()
+      throw e
+    }
     try {
       let attempt = 0
       // 自动重试：仅可重试错误且未取消，最多一次

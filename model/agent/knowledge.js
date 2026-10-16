@@ -41,6 +41,17 @@ export function chunkText(text, size = 500, overlap = 50) {
   return out
 }
 
+/**
+ * 查询词覆盖率：query 分词在文档中出现的占比（绝对尺度 0~1，不受「除以最大值」影响）。
+ * 短查询靠它拦住「只共享一个常见分词」的无关片段，query 为空返回 0。
+ */
+function queryCoverage(qSet, docTokens) {
+  if (!qSet.size) return 0
+  let n = 0
+  for (const t of new Set(docTokens)) if (qSet.has(t)) n++
+  return n / qSet.size
+}
+
 export class KnowledgeStore {
   constructor({ kv, embedFn = null, key = DEFAULT_KEY, chunkSize = 500, chunkOverlap = 50, topK = 5, minScore = 0.3 } = {}) {
     if (!kv) throw new Error('KnowledgeStore 需要 kv')
@@ -101,7 +112,7 @@ export class KnowledgeStore {
     })
   }
 
-  /** 检索：有 embedding → cosine；无 embedding → BM25 纯代码检索（jieba 分词，归一化到 [0,1]） */
+  /** 检索：有 embedding → cosine；无 embedding → BM25 × 查询词覆盖率（纯代码，分数为绝对尺度 0~1） */
   async retrieve(query, topK, minScore) {
     const k = Math.max(1, Number(topK) || this.topK)
     const min = Number.isFinite(Number(minScore)) ? Number(minScore) : this.minScore
@@ -117,10 +128,16 @@ export class KnowledgeStore {
       // 有 embedding：cosine 语义检索
       scores = data.chunks.map((c) => (c.embedding ? cosine(qvec, c.embedding) : 0))
     } else {
-      // 无 embedding：BM25 纯代码检索（jieba 分词），归一化到 [0,1] 适配 minScore
+      // 无 embedding：BM25 纯代码检索（jieba 分词）。
+      // scoresNormalized 是「除以最大值」的相对分（top1 恒为 1.00），单独用来比 minScore 会让阈值失效、
+      // 展示给模型的 score 也具误导性；故再乘「查询词覆盖率」这一绝对尺度（命中的 query 分词占比）。
+      const qTokens = await tokenize(query)
+      const qSet = new Set(qTokens)
       const bm = new BM25()
-      for (const c of data.chunks) bm.add(await tokenize(c.text))
-      scores = bm.scoresNormalized(await tokenize(query))
+      const docTokens = []
+      for (const c of data.chunks) { const t = await tokenize(c.text); docTokens.push(t); bm.add(t) }
+      const rel = bm.scoresNormalized(qTokens)
+      scores = rel.map((s, i) => s * queryCoverage(qSet, docTokens[i]))
     }
     const scored = data.chunks.map((c, i) => ({
       text: c.text, docId: c.docId, idx: c.idx, doc: docsMap.get(c.docId), _score: scores[i] || 0,
@@ -131,8 +148,9 @@ export class KnowledgeStore {
   async listDocs() { return (await this._load()).docs }
 
   async removeDoc(docId) {
-    // 删前取消定时刷新 job（防野 job 到点对一个已删 doc 跑刷新）
-    try { if (this._refreshJobs.has(docId)) await this.cancelRefresh(docId) } catch { /* noop */ }
+    // 删前取消定时刷新 job（防野 job 到点对一个已删 doc 跑刷新）；persist=false——refreshCron 随文档一并删除，
+    // 不在锁外做「load→改→save」的 RMW（会被并发 ingest/refresh 的旧快照覆盖）
+    try { if (this._refreshJobs.has(docId)) await this.cancelRefresh(docId, false) } catch { /* noop */ }
     return this._lock.withLock(this.key, async () => {
       const data = await this._load()
       const before = data.docs.length
@@ -218,28 +236,39 @@ export class KnowledgeStore {
 
   /** 设定时刷新：更新 doc.refreshCron + 注册 job（先取消旧 job 防重复）。cron=null 即取消。 */
   async setRefresh(docId, cron) {
-    const data = await this._load()
-    const doc = data.docs.find((d) => d.id === docId)
-    if (!doc) return { error: `文档 ${docId} 不存在` }
-    if (!doc.url) return { error: `文档 ${docId} 无 URL，不可设定时刷新` }
-    await this.cancelRefresh(docId, false) // 取消旧 job（不写 KV，下面统一 save）
-    doc.refreshCron = cron || null
-    await this._save(data)
-    if (cron && this.scheduler) this._scheduleRefresh(docId, cron)
-    return { id: docId, cron: cron || null }
+    // load→改→save 与 ingest/removeDoc/refreshDoc 共用同一把 key 锁：无锁 RMW 会被并发写者的旧快照
+    // 整体覆盖（定时刷新配置静默丢失 / 反向时序下新入库文档被抹掉）
+    const r = await this._lock.withLock(this.key, async () => {
+      const data = await this._load()
+      const doc = data.docs.find((d) => d.id === docId)
+      if (!doc) return { error: `文档 ${docId} 不存在` }
+      if (!doc.url) return { error: `文档 ${docId} 无 URL，不可设定时刷新` }
+      this._cancelJob(docId) // 取消旧 job（不写 KV，下面统一 save）
+      doc.refreshCron = cron || null
+      await this._save(data)
+      return { id: docId, cron: cron || null }
+    })
+    if (!r.error && r.cron && this.scheduler) this._scheduleRefresh(docId, r.cron)
+    return r
   }
 
-  /** 取消定时刷新：cancelJob + 清句柄。persist=true 时同步把 doc.refreshCron 写回 null。 */
+  /** 取消定时刷新：cancelJob + 清句柄。persist=true 时同步把 doc.refreshCron 写回 null（与其它 RMW 同锁）。 */
   async cancelRefresh(docId, persist = true) {
-    const j = this._refreshJobs.get(docId)
-    if (j && this.scheduler) { try { this.scheduler.cancelJob(j) } catch { /* noop */ } }
-    this._refreshJobs.delete(docId)
-    if (persist) {
+    this._cancelJob(docId)
+    if (!persist) return { id: docId }
+    return this._lock.withLock(this.key, async () => {
       const data = await this._load()
       const doc = data.docs.find((d) => d.id === docId)
       if (doc && doc.refreshCron) { doc.refreshCron = null; await this._save(data) }
-    }
-    return { id: docId }
+      return { id: docId }
+    })
+  }
+
+  /** 取消某 doc 的调度 job 并清句柄（不碰 KV，故可在 key 锁内调用，不会自锁死） */
+  _cancelJob(docId) {
+    const j = this._refreshJobs.get(docId)
+    if (j && this.scheduler) { try { this.scheduler.cancelJob(j) } catch { /* noop */ } }
+    this._refreshJobs.delete(docId)
   }
 
   _scheduleRefresh(docId, cron) {

@@ -65,17 +65,24 @@ export class TraceStore {
 /**
  * 包装一个 Agent：每次 run 后把执行轨迹写入 TraceStore。
  * target 快照标注这条轨迹属于哪个进化对象。
+ * scope/scopeId 必须与 SelfReviewer 的读取口径同源（review.js：`t.scope === scopeUserId`）——
+ * 生产者不写 scope 时，自评审的「近期对话摘要」恒为「（暂无）」。
+ * 构造参数给默认值，run 的 opts 可逐次覆盖（与生产侧手写 record({ scope: ctx.scopeUserId }) 一致）。
  */
 export class TraceCollector {
-  constructor({ agent, store, target }) {
+  constructor({ agent, store, target, scope = null, scopeId = null }) {
     this.agent = agent
     this.store = store
     this.target = target || null
+    this.scope = scope
+    this.scopeId = scopeId
   }
 
   async run(input, opts = {}) {
     const result = await this.agent.run(input, opts)
     const trace = {
+      scope: opts.scope ?? this.scope ?? null,
+      scopeId: opts.scopeId ?? this.scopeId ?? null,
       target: this.target,
       input: typeof input === 'string' ? input : input?.content ?? input,
       output: result.content,

@@ -31,8 +31,9 @@ export async function decideThinkingWithJev({
     const depth = String(ans?.choice || '').toLowerCase()
     const confidence = Number(ans?.confidence)
     if (!DEPTHS.includes(depth)) return null
-    // 思考非破坏性：低置信保守回退规则（不猜测档位）
-    if (!Number.isFinite(confidence) || confidence < th.thinkingMinConfidence) return null
+    // 思考非破坏性：低置信保守回退规则（不猜测档位）。
+    // lowConfidence 是「通用低置信边界（低→回退）」，与 thinkingMinConfidence 取更严者——两个公开阈值都生效。
+    if (!Number.isFinite(confidence) || confidence < Math.max(th.thinkingMinConfidence, th.lowConfidence)) return null
     const decision = buildThinkingDecision(depth, {
       source: 'jev', reasons: ['jev'], confidence, protocol, preset, model, style, budgets, maxBudget,
     })
@@ -113,7 +114,7 @@ export async function decideReflectWithJev({
  * shell 风险门控（fail-closed）：
  *  - 不可用/失败（result=null）→ 放行并标记 fallback（回退现有行为，不静默阻断只读命令）
  *  - destructive → **默认一律拒绝**（terminal 无审批，Jev 是唯一闸门）；仅当显式开启
- *    allowDestructive 时才允许"高置信（≥ terminalRiskFloor）"放行（文档三段式）
+ *    allowDestructive 时才允许"高置信（≥ max(terminalRiskFloor, highConfidence)）"放行（文档三段式）
  *  - readonly/reversible → 放行
  * @param {object} result assessShellRiskWithJev 结果或 null
  * @param {object} thresholds 阈值覆盖
@@ -129,10 +130,13 @@ export function evaluateShellRisk(result, thresholds = {}, { allowDestructive = 
         reason: `Jev 判定为破坏性命令（置信度 ${result.confidence}），默认拒绝执行。如确需执行，请先让用户明确确认；或在配置中开启 agent.jev.allowDestructive。`,
       }
     }
-    if (!(result.confidence >= th.terminalRiskFloor)) {
+    // highConfidence（高→才允许破坏性动作）与 terminalRiskFloor 同为下限，取更严者：
+    // 两键都是公开可调阈值，任一调高都只会更保守，绝不放宽 fail-closed。
+    const floor = Math.max(th.terminalRiskFloor, th.highConfidence)
+    if (!(result.confidence >= floor)) {
       return {
         allow: false, fallback: false, risk: result.risk, confidence: result.confidence,
-        reason: `Jev 判定为破坏性命令，但置信度不足（${result.confidence} < ${th.terminalRiskFloor}），已拒绝执行`,
+        reason: `Jev 判定为破坏性命令，但置信度不足（${result.confidence} < ${floor}），已拒绝执行`,
       }
     }
   }

@@ -247,11 +247,11 @@ export function evaluate({ messages = [], candidates, pendingCount, presence = {
   if (pressure > 0) positive.push(`pressure(${pending}/${pendingThreshold})`)
 
   // —— idleBonus（空闲补偿：群变慢后适度提高参与机会）——
-  // presence.recentExternalIntervals 平均间隔；idle 秒 = now - lastExternalAt
+  // presence.recentExternalIntervals 平均间隔（毫秒，见 message-buffer.presenceStats）；idle 秒 = now - lastExternalAt
   const intervals = presence.recentExternalIntervals || []
   const avgInterval = intervals.length ? intervals.reduce((a, b) => a + b, 0) / intervals.length : 0
   const idleSec = presence.lastExternalAt ? Math.max(0, (now - presence.lastExternalAt) / 1000) : 0
-  const idleReachedAvg = avgInterval > 0 && idleSec >= avgInterval
+  const idleReachedAvg = avgInterval > 0 && idleSec * 1000 >= avgInterval
   const idleBonus = idleReachedAvg ? 15 : 0
   if (idleBonus > 0) positive.push('idle_bonus')
 

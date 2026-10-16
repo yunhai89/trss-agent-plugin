@@ -47,13 +47,19 @@ export class StickerManager {
     this._usageTimer = null
   }
 
-  /** 频率闸 Map 有界化：超限丢最旧的会话键（仅影响该会话下一轮的冷却/防连发判断，无害） */
+  /** 频率闸 Map 有界化：超限丢最旧的会话键（仅影响该会话下一轮的冷却/防连发判断，无害）。
+   *  两个 Map 都要判界：_lastHad 对所有会话无条件写入（含从未带图/未启用的会话），
+   *  只看 _cooldown 大小时它随见过的会话数无界增长（_gateMax 对其不生效）。 */
   _pruneGates() {
-    if (this._cooldown.size <= this._gateMax) return
-    const drop = this._cooldown.size - this._gateMax
-    let n = 0
-    for (const k of this._cooldown.keys()) {
-      if (n++ >= drop) break
+    this._pruneGateMap(this._lastHad)
+    this._pruneGateMap(this._cooldown)
+  }
+
+  _pruneGateMap(m) {
+    if (m.size <= this._gateMax) return
+    let drop = m.size - this._gateMax
+    for (const k of m.keys()) {
+      if (drop-- <= 0) break
       this._cooldown.delete(k)
       this._lastHad.delete(k)
     }
@@ -342,6 +348,10 @@ export class StickerManager {
     cfg.agent = cfg.agent || {}; cfg.agent.sticker = cfg.agent.sticker || {}
     cfg.agent.sticker.enable = !!v
     Config.save(cfg)
+    // save 就地更新内存 _data → 文件监听的 reload() 因 JSON 相等不通知（utils/Config.js:253-257），
+    // 运行时（含 send_sticker 工具注册）不会重建、catalog 却实时读配置 → 能力声明与实际不符。
+    // 与 web/guoba 的写入口一致：显式 reload(true) 强制通知订阅者。
+    try { Config.reload(true) } catch (e) { Log.warn('[sticker] 配置热重载失败', e?.message || e) }
     return cfg.agent.sticker.enable
   }
 

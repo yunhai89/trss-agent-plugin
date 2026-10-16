@@ -54,9 +54,12 @@ function backoffDelay(attempt, retry) {
 
 function retryAfterMs(headers, retry) {
   if (!retry.respectRetryAfter || !headers || typeof headers.get !== 'function') return null
-  const ms = Number(headers.get('retry-after-ms'))
+  // 缺失头返回 null（Number(null)===0 会被误判为「等 0ms」，使标准 Retry-After 分支变死代码）
+  const rawMs = headers.get('retry-after-ms')
+  const ms = rawMs == null || rawMs === '' ? NaN : Number(rawMs)
   if (Number.isFinite(ms) && ms >= 0) return Math.min(ms, retry.maxRetryAfterMs)
-  const sec = Number(headers.get('retry-after'))
+  const rawSec = headers.get('retry-after')
+  const sec = rawSec == null || rawSec === '' ? NaN : Number(rawSec)
   if (Number.isFinite(sec) && sec >= 0) return Math.min(sec * 1000, retry.maxRetryAfterMs)
   return null
 }

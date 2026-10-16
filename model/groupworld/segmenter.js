@@ -104,8 +104,10 @@ export class ConversationSegmenter {
       }
       await this._append(open, m)
     }
-    // 推进水位到本批最后一条
-    await this.dao.run('UPDATE gw_cursor SET last_segmented_msg_id=? WHERE group_id=?', [msgs[msgs.length - 1].id, groupId])
+    // 推进水位到本批 MAX(id)（不能取 sent_at 序最后一条的 id：QQ 事件延迟投递/并发 INSERT 会让
+    // 「sent_at 更早、id 更大」的消息排在前面，水位回退 → 下轮重复消费同一条消息）
+    const maxId = msgs.reduce((mx, m) => Math.max(mx, Number(m.id) || 0), watermark)
+    await this.dao.run('UPDATE gw_cursor SET last_segmented_msg_id=? WHERE group_id=?', [maxId, groupId])
     // 顺带闭合已静默的 open（分析任务期望 closed 才处理）
     closed += await this._closeIdleOpen(groupId, idleMs, now)
     this.trace?.record?.('gw_segment', { groupId, processed: msgs.length, closed, topicSplits })
@@ -175,9 +177,13 @@ export class ConversationSegmenter {
   /** 追加一条消息到 open 片段（维护近窗文本 + 片内消息 id 集）。 */
   async _append(open, m) {
     open.msgCount += 1
-    open.lastSentAt = m.sent_at
     open.msgIds = open.msgIds || new Set()
     open.msgIds.add(String(m.message_id))
+    // end_msg_id 是片段末尾（pendingSegments 用它的 sent_at 作时间窗上界 + 静默闭合用 lastSentAt）：
+    // 乱序（延迟投递）消息的 sent_at 可能早于已追加的消息，直接回退会让窗口反转塌缩（装载不全）。
+    // 只保留 sent_at 更大者作末尾，保证上界单调。
+    const older = Number(m.sent_at) < Number(open.lastSentAt)
+    if (!older) open.lastSentAt = m.sent_at
     if (isLowValue(m)) open.lowValue += 1
     else {
       open.recentTexts = open.recentTexts || []
@@ -186,7 +192,7 @@ export class ConversationSegmenter {
     }
     await this.dao.run(
       'UPDATE gw_segments SET end_msg_id=?, msg_count=?, low_value_count=? WHERE id=?',
-      [m.message_id, open.msgCount, open.lowValue, open.id],
+      [older ? open.end_msg_id : m.message_id, open.msgCount, open.lowValue, open.id],
     )
   }
 

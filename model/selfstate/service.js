@@ -37,6 +37,7 @@ export class SelfStateService {
     this.embedder = embedFn ? makeEmbedder({ embedFn, model: embedModel }) : null
     this._ready = false
     this._initPromise = null
+    this._dbReady = false // 建库（initDb 全量 DDL）是否已成功跑过一次
     this._coreCache = null
   }
 
@@ -45,10 +46,15 @@ export class SelfStateService {
 
   async init() {
     if (this._ready) return true
+    // 关闭态短路：默认 selfState.enabled=false 的部署不该在每条群消息上重跑一遍
+    // Db.initDb 全套建表/索引/迁移 DDL。建库成功过（_dbReady）后关闭态直接返回 false；
+    // 配置可热开启——开启后照旧走下面的装配分支。
+    if (this._dbReady && !this.cfg().enabled) return false
     if (this._initPromise) return this._initPromise
     this._initPromise = (async () => {
       try {
         await Db.initDb({ dir: this.dataDir })
+        this._dbReady = true
         const dao = Db.dao
         const cFn = () => this.cfg()
         if (!cFn().enabled) { this._ready = false; return false } // 关闭时不装配
@@ -62,7 +68,7 @@ export class SelfStateService {
         this.concerns = new ConcernManager({ dao, emotion: this.emotion, cfg: cFn, trace: this.trace })
         this.reflection = new SelfReflectionJob({ dao, provider: this.provider, model, cfg: cFn, trace: this.trace })
         this.projector = new StateProjector({ dao, emotion: this.emotion, concerns: this.concerns, reflection: this.reflection, cfg: cFn, trace: this.trace })
-        this.maintenance = new StateMaintenance({ dao, emotion: this.emotion, cfg: cFn, trace: this.trace })
+        this.maintenance = new StateMaintenance({ dao, emotion: this.emotion, concerns: this.concerns, cfg: cFn, trace: this.trace })
         this._ready = true
         Log.info('[selfstate] 服务就绪', `shadow=${this.cfg().shadowMode}`)
         return true
@@ -103,7 +109,7 @@ export class SelfStateService {
             other_agency: 0.9, controllability: 0.5, expectedness: 0.5, norm_violation: 0,
             publicness: 0.5, repetition: 0, relationship_closeness: 0.5, playfulness: 0.2, repair_signal: 0,
           },
-          semantic: {}, sourceMessageIds: [String(norm.id)], now,
+          semantic: {}, sourceMessageIds: [String(norm.id)], now, ctx,
         })
       }
       const expiredIgnored = await this.expectations.sweepExpired({ botId, groupId, now })
@@ -116,7 +122,7 @@ export class SelfStateService {
           other_agency: 0.9, controllability: 0.2, expectedness: 0.4, norm_violation: 0.1,
           publicness: 0.5, repetition: 0.3, relationship_closeness: 0.5, playfulness: 0, repair_signal: 0,
         }
-        await this._applyEvent({ botId, groupId, actorUserId: ig.targetUserId, eventType: 'ignored_expectation', appraisal, semantic: {}, sourceMessageIds: [ig.expectation.source_message_id], now })
+        await this._applyEvent({ botId, groupId, actorUserId: ig.targetUserId, eventType: 'ignored_expectation', appraisal, semantic: {}, sourceMessageIds: [ig.expectation.source_message_id], now, ctx })
         ignoredCount++
       }
 
@@ -156,8 +162,11 @@ export class SelfStateService {
     }
   }
 
-  async _applyEvent({ botId, groupId, actorUserId, eventType, appraisal, semantic, sourceMessageIds, core, now }) {
-    const r = await this.emotion.applyEvent({ botId, groupId, actorUserId, eventType, appraisal, semantic, sourceMessageIds, core, now })
+  async _applyEvent({ botId, groupId, actorUserId, eventType, appraisal, semantic, sourceMessageIds, core, ctx = null, now }) {
+    // 期待派生路径（response_received/ignored_expectation）此前不传 core → 情绪脉冲恒按中性气质
+    // （0.5/0.5）算，SelfCoreCompiler 的人格调质被静默跳过；缺省时按 ctx 补齐（核心按人设版本缓存）。
+    const coreT = core || (ctx ? await this._getCore(ctx) : this._coreCache) || null
+    const r = await this.emotion.applyEvent({ botId, groupId, actorUserId, eventType, appraisal, semantic, sourceMessageIds, core: coreT, now })
     await this.concerns.onEvent({ botId, groupId, actorUserId, eventType, appraisal, eventId: r.eventId, significance: r.significance ?? 0, now })
     return r
   }
@@ -248,8 +257,12 @@ export class SelfStateService {
 
   async setExpressionFrozen(groupId, frozen) {
     if (!await this.init() || !this._ready) return false
-    await this.dao.run('UPDATE ss_group_state SET expression_frozen=?, updated_at=? WHERE bot_id=? AND group_id=?', [frozen ? 1 : 0, Date.now(), this.botId, String(groupId)]).catch(() => {})
-    return true
+    const g = String(groupId); const now = Date.now()
+    // 群还没有状态行时先补行：只 UPDATE 会 0 行受影响 →「已冻结情绪外显」假成功，
+    // 之后 _getOrCreateState 建行取默认 expression_frozen=0，冻结被静默丢弃。
+    await this.dao.run('INSERT OR IGNORE INTO ss_group_state(bot_id,group_id,updated_at) VALUES (?,?,?)', [this.botId, g, now]).catch(() => {})
+    const res = await this.dao.run('UPDATE ss_group_state SET expression_frozen=?, updated_at=? WHERE bot_id=? AND group_id=?', [frozen ? 1 : 0, now, this.botId, g]).catch(() => null)
+    return !!res
   }
 
   // ─────────────── 查询（web §19.1/19.2）───────────────

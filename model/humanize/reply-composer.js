@@ -47,10 +47,12 @@ export function splitSegments(text, { maxBubbles = 3, rand = Math.random } = {})
   if (textLen < 3) return [restore(masked, tokens)]
   // 1. 按句末标点 + 换行切
   let parts = masked.split(/(?<=[。！？!?…\n])\s*/).map((s) => s.trim()).filter(Boolean)
+  // 合并/分组时的还原分隔符：空格切分路径必须用空格，否则英文等空格分词文本被粘连成一个词
+  let joiner = ''
   // 2. 不足 2 段且较长 → 按逗号/分号/空格切
   if (parts.length < 2 && textLen > 40) {
     parts = masked.split(/(?<=[，,；;])\s*/).map((s) => s.trim()).filter(Boolean)
-    if (parts.length < 2) parts = masked.split(/\s+/).filter(Boolean)
+    if (parts.length < 2) { parts = masked.split(/\s+/).filter(Boolean); joiner = ' ' }
   }
   // 3. 概率合并（MaiBot split_strength by length：短文高合并率，长文低合并率）
   if (parts.length > 1) {
@@ -58,7 +60,7 @@ export function splitSegments(text, { maxBubbles = 3, rand = Math.random } = {})
     const mergeProb = 1.0 - splitStrength
     const merged = [parts[0]]
     for (let i = 1; i < parts.length; i++) {
-      if (rand() < mergeProb) merged[merged.length - 1] += parts[i]
+      if (rand() < mergeProb) merged[merged.length - 1] += joiner + parts[i]
       else merged.push(parts[i])
     }
     parts = merged
@@ -67,7 +69,7 @@ export function splitSegments(text, { maxBubbles = 3, rand = Math.random } = {})
   if (parts.length <= max) return parts.map((p) => restore(p, tokens))
   const groupSize = Math.ceil(parts.length / max)
   const out = []
-  for (let i = 0; i < parts.length; i += groupSize) out.push(parts.slice(i, i + groupSize).join(''))
+  for (let i = 0; i < parts.length; i += groupSize) out.push(parts.slice(i, i + groupSize).join(joiner))
   while (out.length > max) { out[out.length - 2] += out[out.length - 1]; out.pop() }
   return out.map((p) => restore(p, tokens))
 }
@@ -141,7 +143,7 @@ export class HumanizeReplyComposer {
         // 把机器人自身发言写入 buffer（presence 占比统计 + 后续 quotesBot 判定）；displayName 与
         // Planner/Replyer 人设名同源（resolvePersonaIdentity 单一来源，不再一处角色名一处"我"）
         runtime.buffer.append({
-          id: sentId, groupId: runtime.groupId, userId: botId, displayName: resolvePersonaIdentity(c).name,
+          id: String(sentId), groupId: runtime.groupId, userId: botId, displayName: resolvePersonaIdentity(c).name,
           timestamp: Date.now(), text: segments[i], segments: [],
           replyToId: null, atBot: false, mentionsBotName: false, quotesBot: false,
           isCommand: false, isSelf: true, handledByDirectAgent: false, media: [],
@@ -172,7 +174,7 @@ export class HumanizeReplyComposer {
           if (Array.isArray(seg) && seg.length) {
             try {
               const sid = await send(seg[0], { quoteTargetId: null })
-              if (sid) { sentIds.push(sid); this.stickerManager?.noteSent?.(sn) }
+              if (sid) { sentIds.push(sid); this.stickerManager?.noteSent?.([firstName]) }
             } catch (e) { Log.warn('[humanize] 表情包发送失败', e?.message || e) }
           }
         }

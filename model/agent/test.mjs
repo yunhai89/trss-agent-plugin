@@ -710,20 +710,28 @@ await test('schedule：formatScheduleList 标注类型（周期/一次性任务/
   ok(lines[2].includes('[提醒') && lines[2].includes('喝水'), '提醒标注')
   eq(formatScheduleList([]).length, 0, '空列表')
   eq(formatScheduleList(null).length, 0, 'null 安全')
-  // 命令实际用的选择逻辑：所有任务链 + 本人提醒；他人提醒不外泄
+  // 命令实际用的选择逻辑：本人的任务链 + 本人的提醒；他人条目（含任务链）一律不外泄。
+  // 任务链曾无条件全量列出（注释假设"type=task 都是群级非私密"），但私聊用 reminder_set
+  // 带 prompt 建的记录同样是 type='task' 且 groupId=null → 他人私聊任务描述被任意用户看到。
   const all = [
-    { id: 't1', type: 'task', cron: '0 8 * * *', prompt: '群任务', userId: 'u2' },
+    { id: 'tother', type: 'task', cron: '0 8 * * *', prompt: '他人的私聊任务', userId: 'u2' },
+    { id: 'tmine', type: 'task', cron: '0 9 * * *', prompt: '我的任务链', userId: 'u1' },
     { id: 'rmine', type: 'reminder', message: '我的提醒', at: now, userId: 'u1' },
     { id: 'rother', type: 'reminder', message: '别人提醒', at: now, userId: 'u2' },
     { id: 'rgroup', type: 'reminder', message: '群共享', at: now, userId: '__group__' },
   ]
   const vis = selectScheduleForList(all, { userId: 'u1', scopeUserId: 'u1' })
-  ok(vis.some((r) => r.id === 't1'), '含所有任务链')
+  ok(vis.some((r) => r.id === 'tmine'), '含本人的任务链')
   ok(vis.some((r) => r.id === 'rmine'), '含本人提醒（本次 bug：此前漏掉 → 返回暂无）')
+  ok(!vis.some((r) => r.id === 'tother'), '不含他人任务链（IDOR 修复：曾全量列出）')
   ok(!vis.some((r) => r.id === 'rother'), '不含他人提醒（隐私）')
   eq(vis.length, 2, '去重后 2 条')
   const visG = selectScheduleForList(all, { userId: 'u1', scopeUserId: '__group__' })
   ok(visG.some((r) => r.id === 'rgroup'), '群共享模式含 __group__ 条目')
+  // 主人可见全部任务链；他人"提醒"仍不外泄（提醒内容是私聊隐私，主人要看走 Web 面板）
+  const visM = selectScheduleForList(all, { userId: 'master', scopeUserId: 'master', isMaster: true })
+  ok(visM.some((r) => r.id === 'tother') && visM.some((r) => r.id === 'tmine'), '主人可见全部任务链')
+  ok(!visM.some((r) => r.id === 'rother'), '他人提醒仍不列出（隐私红线不因主人放宽）')
 })
 
 await test('detectScheduleIntent：周期 vs 一次性', async () => {

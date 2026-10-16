@@ -130,7 +130,7 @@ export function newClient({ host, apiKey, cloud, fetcher, timeoutMs = 30000 } = 
     return h
   }
 
-  async function req(path, { method = 'GET', headers, body, raw = false, redirect, timeout } = {}) {
+  async function req(path, { method = 'GET', headers, body, text = false, redirect, timeout } = {}) {
     const url = resolveUrl(base, path, isCloud)
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(new Error('comfyui request timeout')), timeout || timeoutMs)
@@ -142,8 +142,10 @@ export function newClient({ host, apiKey, cloud, fetcher, timeoutMs = 30000 } = 
         signal: ctrl.signal,
         ...(redirect ? { redirect } : {}),
       })
-      if (raw) return res
+      // 响应体必须在定时器存活期内读完：曾经 raw 模式在这里把裸 Response 交出去、finally 立刻 clearTimeout，
+      // 调用方随后的 res.text() 就完全没有超时/取消手段（半开连接可永久挂住会话）。
       const txt = await res.text()
+      if (text) return { ok: res.ok, status: res.status, data: txt, res }
       let data = null
       try { data = txt ? JSON.parse(txt) : null } catch { data = txt }
       return { ok: res.ok, status: res.status, data, res }
@@ -192,9 +194,9 @@ export function newClient({ host, apiKey, cloud, fetcher, timeoutMs = 30000 } = 
     /** 用户数据文件内容（返回原始文本；工作流 JSON 由调用方解析） */
     async getUserdata(file, { timeout = 30000 } = {}) {
       // 整个相对路径编码为单个路径段（aiohttp 路由 /userdata/{file} 不匹配裸斜杠，必须 %2F）
-      const res = await req(`/userdata/${encodeURIComponent(String(file))}`, { raw: true, timeout })
-      if (!res.ok) throw new Error(`/userdata/${file} HTTP ${res.status}`)
-      return res.text()
+      const r = await req(`/userdata/${encodeURIComponent(String(file))}`, { text: true, timeout })
+      if (!r.ok) throw new Error(`/userdata/${file} HTTP ${r.status}`)
+      return r.data
     },
 
     async interrupt() {

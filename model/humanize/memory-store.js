@@ -272,7 +272,7 @@ export class HumanizeMemoryStore {
     //     余弦 ≥0.65 / 词面 ≥0.40）才绕过——「主动引用预算」的硬实现。
     //  ③ hit 轻惩罚：用得越多的梗略降权（盘包浆防护）；impression 免话题门（对人的合法联想）
     //     但同样受使用冷却约束。
-    const mc = this.cfg().memory || {}
+    const mc = this.cfg() // cfg() 已返回 memory 段（此前二次取 .memory 恒为空对象 → 四道门限全落默认值）
     const topicGateEmb = Number.isFinite(Number(mc.topicGateEmb)) ? Number(mc.topicGateEmb) : 0.5
     const topicGateLex = Number.isFinite(Number(mc.topicGateLex)) ? Number(mc.topicGateLex) : 0.2
     const strongEmb = Number.isFinite(Number(mc.strongRecallEmb)) ? Number(mc.strongRecallEmb) : 0.65

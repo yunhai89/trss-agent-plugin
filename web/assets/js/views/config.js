@@ -122,6 +122,11 @@
       const form = reactive({})
       let origSnapshot = {}
       const dirty = ref(false)
+      // loadConfig 失败时置为错误文案：此时 syncForm 未执行、form 仍是空对象，
+      // 继续渲染表单会在各处解引用 undefined 抛错（整页空白），改为渲染页面级错误态（M-051 失败分支）
+      const loadError = ref('')
+      // 表单就绪前不渲染表单主体：form 为空时模板里大量 form.x.y 解引用会抛 TypeError（M-051 首屏必抛错）
+      const formReady = ref(false)
       let dirtySuppressed = true
       watch(form, () => { if (!dirtySuppressed) dirty.value = true }, { deep: true })
       // 思考自动决策开启时，自动关闭手动「深度思考」（agent.thinking=null），两者互斥
@@ -156,6 +161,13 @@
         origSnapshot = JSON.parse(JSON.stringify(snap))
         mcpServersToUi()
         // 兜底：确保各子对象存在（防旧 config 无此字段时 v-model 报错）
+        if (!form.llmProviders) form.llmProviders = []
+        if (!form.llmModels) form.llmModels = []
+        if (!form.memory) form.memory = {}
+        if (!form.reply) form.reply = {}
+        if (!form.evolution) form.evolution = {}
+        if (!form.isolation) form.isolation = {}
+        if (form.temperature == null) form.temperature = 1
         if (!form.stagehand) form.stagehand = {}
         if (!form.stagehand.permission) form.stagehand.permission = 'all'
         if (form.stagehand.stealth == null) form.stagehand.stealth = true
@@ -395,7 +407,8 @@
       // 与主厂商同端点（协议相同 + baseURL 归一相等）的厂商视同主厂商——运行时主端点类功能
       // （旁路/记忆/评审/子代理/伪人/群世界）复用主 provider 端点调用，同端点模型完全可用；
       // 只认 providerId 字符串相等会把用户重复登记的同端点厂商（如主接入 mimo + 另一条目同地址 mimo）全部误禁。
-      const mainProv = computed(() => form.llmProviders.find((p) => p.id === form.providerId) || null)
+      // form 初值为空对象、loadConfig 失败时 syncForm 不会跑，此处必须容忍 llmProviders 为空（M-051）
+      const mainProv = computed(() => (form.llmProviders || []).find((p) => p.id === form.providerId) || null)
       const mainModels = computed(() => (form.llmModels || []).filter((m) => m && mainProv.value && m.providerId === mainProv.value.id))
       const mainModel = computed(() => (form.llmModels || []).find((m) => m && m.id === form.modelId) || null)
       // —— Jev（TypeSafe 判断模型）：作为「厂商 + 模型」注册；判档/反思/工具选择等卡片据此判断是否显示 jev 选项 ——
@@ -607,9 +620,10 @@
         window.addEventListener('scroll', onScroll, { passive: true })
         try {
           await window.store.loadConfig()
-          if (M.config) syncForm(JSON.parse(JSON.stringify(M.config)))
+          if (M.config) { syncForm(JSON.parse(JSON.stringify(M.config))); formReady.value = true }
+          else loadError.value = '未取到配置数据（/api/config 返回为空）'
           window.store.loadTools().catch(() => {}) // 工具列表（失败不阻塞配置加载）
-        } catch (e) { toast(e.message, 'error') }
+        } catch (e) { loadError.value = e?.message || String(e); toast(e.message, 'error') }
       })
       onUnmounted(() => window.removeEventListener('scroll', onScroll))
 
@@ -736,6 +750,26 @@
         set: (v) => { form.thinking = v ? { type: 'enabled', budget_tokens: 16000 } : null },
       })
 
+      const numOr = (v, def) => { const n = Number(v); return Number.isFinite(n) ? n : def }
+
+      /* thinking 预算：默认配置 agent.thinking 为 null（thinkingAuto 接管时也会置 null），
+       * 直接 v-model 到 form.thinking.budget_tokens 会在渲染期抛 TypeError 并把整行变成注释节点（L-116）。
+       * 用可写 computed 承载：无 thinking 时展示默认 16000，用户输入时按需建出对象。 */
+      const thinkingBudget = computed({
+        get: () => (form.thinking?.budget_tokens != null ? form.thinking.budget_tokens : 16000),
+        set: (v) => { form.thinking = { ...(form.thinking || {}), type: form.thinking?.type || 'enabled', budget_tokens: numOr(v, 16000) } },
+      })
+
+      /* 记忆字符上限：agent.memoryLimits 默认为 null，同样不能在渲染期解引用（M-050）。 */
+      const memoryLimitMemory = computed({
+        get: () => (form.memoryLimits?.memory != null ? form.memoryLimits.memory : 2200),
+        set: (v) => { form.memoryLimits = { ...(form.memoryLimits || { user: 1375 }), memory: numOr(v, 2200) } },
+      })
+      const memoryLimitUser = computed({
+        get: () => (form.memoryLimits?.user != null ? form.memoryLimits.user : 1375),
+        set: (v) => { form.memoryLimits = { ...(form.memoryLimits || { memory: 2200 }), user: numOr(v, 1375) } },
+      })
+
       const tempPct = computed(() => (form.temperature / 2) * 100 + '%')
 
       /* OpenRouter 模型目录 + key 余额（preset=openrouter 时显示） */
@@ -780,10 +814,10 @@
       }
 
       return {
-        form, dirty, save, reset, sections, open, activeSec, jump, OPT, updateJson, adv,
+        form, dirty, save, reset, sections, open, activeSec, jump, OPT, updateJson, adv, loadError, formReady,
         addFallback, delFallback, masterInput, addMaster, delMaster,
         mcpServersToUi, delMcp, mcpModal, openNewMcp, confirmNewMcp,
-        thinkingOn, tempPct,
+        thinkingOn, tempPct, thinkingBudget, memoryLimitMemory, memoryLimitUser,
         orModels, orSearch, orLoading, loadOrModels, orFiltered, pickOrModel, orKey, loadOrKey,
         allTools, toolCats, toolsByCat, toggleAlwaysOn,
         // 厂商/模型注册表 + 功能分配
@@ -796,6 +830,15 @@
     },
     template: `
     <div class="cf-wrap">
+      <div v-if="loadError" class="card" style="margin:16px;padding:14px">
+        <b>配置加载失败</b>
+        <div class="mut2" style="margin-top:6px;font-size:12px">读取 /api/config 失败：{{ loadError }}。修复后请刷新页面重试。</div>
+      </div>
+      <div v-else-if="!formReady" class="card" style="margin:16px;padding:14px">
+        <b>正在加载配置…</b>
+        <div class="mut2" style="margin-top:6px;font-size:12px">已向 /api/config 请求配置，加载完成前不渲染表单。</div>
+      </div>
+      <template v-else>
       <!-- 锚点导航 -->
       <div class="cf-nav">
         <a v-for="s in sections" :key="s.id" :class="{on: activeSec === s.id}" @click="jump(s.id)">{{ s.name }}</a>
@@ -1170,7 +1213,7 @@
               <v-switch v-model="thinkingOn" :disabled="form.thinkingAuto.enable"/>
             </cfg-row>
             <cfg-row name="思考预算 tokens" desc="thinking.budget_tokens">
-              <input type="number" class="inp" style="width:130px" min="1024" step="1024" :disabled="!form.thinking || form.thinkingAuto.enable" v-model.number="form.thinking.budget_tokens">
+              <input type="number" class="inp" style="width:130px" min="1024" step="1024" :disabled="!form.thinking || form.thinkingAuto.enable" v-model.number="thinkingBudget">
             </cfg-row>
             <cfg-row name="思考自动决策" desc="按提问复杂度自动决定是否思考与深度(覆盖手动 thinking；模型级覆盖仍优先)">
               <v-switch v-model="form.thinkingAuto.enable"/>
@@ -1253,6 +1296,9 @@
                   <option value="off">off</option><option value="auto">auto</option><option value="explicit">explicit</option>
                 </select>
               </cfg-row>
+              <cfg-row name="OpenAI 会话路由键" desc="promptCacheKey：官方 prompt_cache_key，仅 OpenAI 官方端点下发（兼容网关绝不发）">
+                <v-switch v-model="form.promptCacheKey"/>
+              </cfg-row>
             </div></div>
           </div></div>
         </div>
@@ -1329,10 +1375,10 @@
               <v-switch v-model="form.memory.threatScan"/>
             </cfg-row>
             <cfg-row name="MEMORY 字符上限" desc="Agent 个人笔记上限">
-              <input type="number" class="inp" style="width:120px" min="200" v-model.number="form.memoryLimits.memory">
+              <input type="number" class="inp" style="width:120px" min="200" v-model.number="memoryLimitMemory">
             </cfg-row>
             <cfg-row name="USER 字符上限" desc="用户画像上限">
-              <input type="number" class="inp" style="width:120px" min="200" v-model.number="form.memoryLimits.user">
+              <input type="number" class="inp" style="width:120px" min="200" v-model.number="memoryLimitUser">
             </cfg-row>
             <cfg-row name="长期记忆条数上限" desc="每用户;超限按价值淘汰">
               <input type="number" class="inp" style="width:120px" min="10" v-model.number="form.recall.cap">
@@ -2113,6 +2159,7 @@
           </div>
         </Transition>
       </div>
+      </template>
 
     </div>`,
   }

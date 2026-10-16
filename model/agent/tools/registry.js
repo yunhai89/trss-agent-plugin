@@ -13,6 +13,7 @@
 
 import { cosine } from '../recall.js'
 import { BM25 } from '../../llm/local-sim.js'
+import { isToolErrorContent } from '../tool-result.js'
 
 function brief(v, n = 160) {
   let s
@@ -23,16 +24,11 @@ function brief(v, n = 160) {
   return s.length > n ? s.slice(0, n) + `…(+${s.length - n})` : s
 }
 
-/** 软失败判定：工具以"不抛异常、返回错误对象/串"的方式报错。
- *  - 对象：含 error 字段 或 ok===false
- *  - 字符串：形如 {"error":...} 或 error: 前缀（被 stringify 过的结果）
- * 导出供 usage-stats 等统计方复用（判定语义与 AOP 日志一致，避免两处漂移） */
-export function isErrorShape(r) {
-  if (r == null) return false
-  if (typeof r === 'string') return /^\s*\{.*"error"\s*:/i.test(r) || /^error\b/i.test(r)
-  if (typeof r === 'object' && !Array.isArray(r)) return r.error != null || r.ok === false
-  return false
-}
+/** 软失败判定（工具以"不抛异常、返回错误对象/串"的方式报错）。
+ *  语义已与 Agent 账本/恢复判定统一到 `model/agent/tool-result.js` 的**唯一实现**：
+ *  曾因这里用无锚点子串 /"error"\s*:/（正文出现 "error": 即误判失败）而与 Agent 结构化判定漂移，
+ *  同一次调用在 AOP/usage-stats 与账本里结论相反。导出保留给 usage-stats 等统计方复用。 */
+export const isErrorShape = isToolErrorContent
 
 export class ToolRegistry {
   constructor({ logger = () => {} } = {}) {
@@ -42,6 +38,7 @@ export class ToolRegistry {
     this._indexDirty = true // register/unregister/setEmbedFn 置脏 → search 时重建
     this._embedFn = null // 可选 embedding 函数（apps 注入；留空 = 纯关键词 jaccard）
     this._invSink = null // 可选调用埋点（toolEvo 注入 recordInvocation；留空 = 不持久化）
+    this._registeredRaw = new WeakSet() // 已注册的原始工具对象（同名覆盖告警时排除幂等重复注册）
   }
 
   /** 注入 embedding 函数（apps 用；留空 = 纯关键词 jaccard 检索）。切换会重建索引。 */
@@ -71,6 +68,14 @@ export class ToolRegistry {
     for (const tool of tools.flat(Infinity).filter(Boolean)) {
       if (!tool || !tool.name) throw new Error('工具必须包含 name')
       if (typeof tool.execute !== 'function') throw new Error(`工具 ${tool.name} 必须包含 execute 函数`)
+      // 同名覆盖曾完全静默：MCP 服务端的同名工具可以把内置工具顶掉（其 meta.shell/alwaysConfirm
+      // 等策略元数据一并丢失，shell 拦截与强制审批随之失效）。此处至少不再静默——同引用重复注册
+      // （热重载/幂等注册）不告警。
+      const prev = this.tools.get(tool.name)
+      if (prev && !this._registeredRaw.has(tool)) {
+        this.logger('warn', `[tools] 同名工具重复注册，「${tool.name}」被后者覆盖（前者 meta=${brief(prev.meta)}）`)
+      }
+      this._registeredRaw.add(tool)
       tool.meta = tool.meta || {} // 保证 meta 引用稳定（bindVersion 才能更新到 #wrap 闭包里的同一对象）
       this.tools.set(tool.name, this.#wrap(tool))
     }

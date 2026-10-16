@@ -58,6 +58,23 @@ await test('prompt 类 → 落盘待审，不自动写 memory', async () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+await test('removeSuggestion：拒绝路径穿越 id/scopeId（#拒绝进化 的输入不得越出 suggestionDir）', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'revsec-'))
+  const sugg = path.join(base, 'data', 'evolution', 'suggestions')
+  const outside = path.join(base, 'data', 'evolution', 'prompts')
+  fs.mkdirSync(path.join(sugg, 'u_1'), { recursive: true })
+  fs.mkdirSync(outside, { recursive: true })
+  fs.writeFileSync(path.join(outside, 'agent.json'), '{}')
+  fs.writeFileSync(path.join(sugg, 'u_1', 'ok1.json'), '{}')
+  ok(removeSuggestion(sugg, 'u_1', '../../prompts/agent') === false, 'id 含 ../ → 拒绝')
+  ok(fs.existsSync(path.join(outside, 'agent.json')), '目录外文件未被删除')
+  ok(removeSuggestion(sugg, '../../prompts', 'agent') === false, 'scopeId 含 ../ → 拒绝')
+  ok(fs.existsSync(path.join(outside, 'agent.json')), '目录外文件仍在')
+  ok(removeSuggestion(sugg, 'u_1', 'ok1') === true, '正常 id 仍可删除')
+  ok(!fs.existsSync(path.join(sugg, 'u_1', 'ok1.json')), '正常文件已删除')
+  fs.rmSync(base, { recursive: true, force: true })
+})
+
 await test('tick 计数：未到 every 不触发 LLM', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rev-'))
   let chatCalled = 0

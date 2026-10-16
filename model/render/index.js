@@ -4,7 +4,7 @@
  *
  * 不含截图动作（screenshot 在 apps/render.js，由 app 层组合，避免 model 反向依赖 apps）。
  */
-import { THEME_CSS } from './theme.js'
+import { THEME_CSS, CSP_META } from './theme.js'
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
@@ -29,6 +29,7 @@ export function buildHtml({ title, subtitle, bodyHtml = '', footer, extraCss = '
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+${CSP_META}
 <style>${THEME_CSS}${extraCss ? '\n' + extraCss : ''}</style>
 </head>
 <body>
@@ -41,5 +42,5 @@ ${footer ? `<div class="footer">${esc(footer)}</div>` : ''}
 </html>`
 }
 
-export { THEME_CSS } from './theme.js'
+export { THEME_CSS, CSP_META } from './theme.js'
 export { mdToHtml, mdToHtmlSync, fallbackMd, isHighlightAvailable } from './md.js'

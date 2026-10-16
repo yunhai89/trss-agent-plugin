@@ -38,7 +38,10 @@ function writeTempFile(mf) {
  * @returns {Promise<object|null>} 解析结果；非办公文档返回 null（交由上层走默认二进制分支）
  */
 async function parseOfficeDoc(mf) {
-  const ext = (mf.ext || path.extname(mf.name || '') || '').toLowerCase()
+  // mf.ext 来自 resolve.js 的 inferMime，是无点形式（如 'xlsx'）；path.extname 带点。
+  // 统一补成带点前缀，否则 `.xls` 之类的比较永远为 false（老 .xls 附件此前完全不解析）。
+  const rawExt = (mf.ext || path.extname(mf.name || '') || '').toLowerCase().trim()
+  const ext = rawExt && !rawExt.startsWith('.') ? `.${rawExt}` : rawExt
   const mime = (mf.mime || '').toLowerCase()
   const isXlsx = ext === '.xlsx' || ext === '.xls' || mime.includes('spreadsheet')
   const isPdf = ext === '.pdf' || mime === 'application/pdf'

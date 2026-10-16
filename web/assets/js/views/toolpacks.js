@@ -16,6 +16,7 @@
     components: { CfgRow },
     setup() {
       const { ref, reactive, onMounted } = Vue
+      const { toast } = window.UI // 提示统一走 window.UI.toast（window.toast 从未定义，可选链会静默吞掉提示）
       const packs = ref([])
       const state = reactive({}) // 包名 → 当前表单值
       const active = ref(null) // 当前打开配置的包
@@ -33,21 +34,21 @@
           const list = (await window.store.loadToolPacks()) || []
           for (const p of list) ensure(p)
           packs.value = list
-        } catch (e) { window.toast?.(e?.message || '加载失败', 'error') } finally { loading.value = false }
+        } catch (e) { toast(e?.message || '加载失败', 'error') } finally { loading.value = false }
       }
       const openCfg = (p) => { ensure(p); active.value = p }
       const closeCfg = () => { active.value = null }
       const dirty = (p) => JSON.stringify(state[p.name]) !== JSON.stringify(defaultsOf(p))
-      const reset = (p) => { state[p.name] = defaultsOf(p); window.toast?.('已还原', 'info') }
+      const reset = (p) => { state[p.name] = defaultsOf(p); toast('已还原', 'info') }
       const save = async (p) => {
         const changes = {}
         for (const f of p.config || []) changes[`agent.tools.${p.name}.${f.key}`] = state[p.name][f.key]
         try {
           await window.api.put('/config', { changes })
           await load()
-          window.toast?.('已保存（已热加载）', 'success')
+          toast('已保存（已热加载）', 'success')
           closeCfg()
-        } catch (e) { window.toast?.(e?.message || '保存失败', 'error') }
+        } catch (e) { toast(e?.message || '保存失败', 'error') }
       }
       const iconUrl = (p) => /^(https?:|data:)/i.test(p.info?.icon || '')
 

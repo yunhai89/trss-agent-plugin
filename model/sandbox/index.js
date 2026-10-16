@@ -170,7 +170,10 @@ export async function createSandboxRuntime(cfg = {}, { logger = null, transport 
       network: verifyEgress.network,
       allowInternetAccess: verifyEgress.allowInternetAccess,
     })
-    return {
+    // 先建返回对象再挂方法：probe 失败要写回**调用方持有的那个对象**。
+    // 曾写成 `{...base, probe(){ ... base.error = e ... }}`——base 是展开前的字面量，
+    // 赋值落在副本上，调用方读 sandbox.error 永远是 null，预检失败被当成「无错误」。
+    const handle = {
       ...base,
       transport: t,
       manager,
@@ -178,7 +181,7 @@ export async function createSandboxRuntime(cfg = {}, { logger = null, transport 
       evoManager,
       /** 可达性/鉴权预检（不抛：调用方据此决定提示用户还是继续） */
       async probe(timeoutMs = 3000) {
-        try { await t.ping(timeoutMs); return true } catch (e) { base.error = e; return false }
+        try { await t.ping(timeoutMs); handle.error = null; return true } catch (e) { handle.error = e; return false }
       },
       async shutdown() {
         commands.clear()
@@ -189,6 +192,7 @@ export async function createSandboxRuntime(cfg = {}, { logger = null, transport 
         return n
       },
     }
+    return handle
   } catch (e) {
     const info = classify(e) || { kind: 'unknown', retryable: false, detail: null }
     const err = e instanceof SandboxError ? e : new SandboxError(info.kind, `沙箱初始化失败：${info.detail || '未知原因'}`, { retryable: info.retryable, cause: e })

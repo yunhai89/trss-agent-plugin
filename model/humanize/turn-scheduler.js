@@ -100,8 +100,27 @@ export class TurnScheduler {
     return false
   }
 
-  /** debounce 到期：门控 + 规划。 */
+  /**
+   * debounce 到期入口：同群门控互斥。
+   * 上一轮可能仍在 await（场景 LLM / 拿锁）时 debounce 又到期；若并发跑两轮，落败轮的早退分支
+   * 会把另一轮进行中的 planning/sending 相位抹成 idle（此后新消息既不中断也不重规划，回复基于旧上下文）。
+   * 这里不并发执行、只记账，本轮结束后立刻用最新上下文补跑一次（不丢弃，否则新消息要等下一条才被评估）。
+   */
   async _onDebounced(rt) {
+    if (rt._gateRunning) { rt._gatePending = true; return }
+    rt._gateRunning = true
+    try {
+      do {
+        rt._gatePending = false
+        try { await this._onDebouncedRun(rt) } catch (e) {
+          rt.trace?.record('error', { where: 'onDebounced', msg: String(e?.message || e) })
+        }
+      } while (rt._gatePending)
+    } finally { rt._gateRunning = false }
+  }
+
+  /** debounce 到期主体：门控 + 规划。 */
+  async _onDebouncedRun(rt) {
     const c = this.cfg()
     if (!this._enabled()) {  rt.setPhase('idle'); return }
 
@@ -332,7 +351,17 @@ export class TurnScheduler {
       // ctxWindow 已把 blocked 过滤掉，用它会让被压制消息永远挡住水位）
       await this._applyAction(action, external, decision, gen, turnId)
     } catch (e) {
-      rt.trace?.record('planner_error', { turnId, gen, msg: String(e?.message || e) })
+      // 打断（新消息 abortPlanning / 热重载 cancelAll / planner 超时）不是「决定沉默」，
+      // 不得计入 no_action 退避：否则用户正常插话两次就把整群静音 15~300s（与 idle-backoff.js
+      // 头部约定的累加条件「Planner 本轮以 no_tool/wait/ignore 终结」相悖），且退避窗口内的
+      // 新消息会被 shouldDelay 分支 markObserved 吞掉。
+      const msg = String(e?.message || e)
+      if (!rt.isCurrent(gen) || /abort|superseded|timeout/i.test(msg)) {
+        rt.trace?.record('planner_aborted', { turnId, gen, current: rt.plannerGeneration, msg })
+        rt.setPhase('idle')
+        return
+      }
+      rt.trace?.record('planner_error', { turnId, gen, msg })
       rt.backoff.recordNoAction(now)
       rt.setPhase('idle')
     } finally {
@@ -475,6 +504,10 @@ export class TurnScheduler {
       result = { sentIds: [], cancelled: true, cancelReason: String(e?.message || e) }
     }
 
+    // 过期回合（发送期间被新消息 bump 代）：已发段仍登记（sentIds/sentTexts 落地是设计意图），
+    // 但不得改写当代的冷却/退避节奏，也不得把相位打回 idle（否则新回合的 planning 相位被抹、
+    // 后续消息不再触发中断）。
+    const stale = !rt.isCurrent(gen)
     if (result?.sentIds?.length) {
       // deliveredText = 实际发送段拼接（部分发送中断时只含已发段——未发送内容不得进
       // buffer/GW/SS/期待/梗使用等任何持久化或情绪关系状态）
@@ -486,13 +519,22 @@ export class TurnScheduler {
       this._appendSelf(deliveredText, result.sentIds[0]) // 自身发言入 buffer（解锁 presence/引用/追问信号）
       this._notifyDelivered(target, { sentText: deliveredText, replyGuide: action.replyGuide || '', sourceMessageId: result.sentIds[0], usedMemoryIds: [...(rt.turnMemoryIds || [])] }) // GW 主观关系 + SS 出站期待 + 记忆真实使用
         .catch((e) => Log.warn('[humanize] onDelivered 未捕获异常', e?.message || e))
-      rt.enterCooldown(c.cooldownSeconds ?? 45)
-      rt.backoff.recordSuccess()
+      if (!stale) {
+        rt.enterCooldown(c.cooldownSeconds ?? 45)
+        rt.backoff.recordSuccess()
+      }
       rt.trace?.record('delivery', { turnId, sent: true, count: result.sentIds.length, cancelled: !!result.cancelled, deliveredLen: deliveredText.length })
     } else {
       rt.trace?.record('delivery', { turnId, sent: false, cancelReason: result?.cancelReason || 'unknown' })
     }
     rt.markObserved(batch)
+    if (stale) {
+      // 相位归属当代：仅释放本轮自己留下的 sending 相位（cancelAll 等无新回合的场景），
+      // 其余情况由补跑的新回合自行写相位。
+      if (rt.phase === 'sending') rt.setPhase('idle')
+      rt.trace?.record('delivery_stale_dropped', { turnId, gen, current: rt.plannerGeneration })
+      return
+    }
     rt.setPhase('idle')
   }
 
@@ -521,6 +563,12 @@ export class TurnScheduler {
       rt.trace?.record('react_error', { turnId, msg: String(e?.message || e) })
     }
     rt.markObserved(batch)
+    // 过期回合（react 期间被新消息 bump 代）不得把相位打回 idle——相位归补跑的新回合。
+    if (!rt.isCurrent(gen)) {
+      if (rt.phase === 'sending') rt.setPhase('idle')
+      rt.trace?.record('delivery_stale_dropped', { turnId, gen, current: rt.plannerGeneration, kind: 'react' })
+      return
+    }
     rt.setPhase('idle')
   }
 

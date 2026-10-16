@@ -118,10 +118,22 @@ async function wbiParams(params, opts) {
   return encWbi(params, k.img, k.sub)
 }
 
+/** AbortSignal.timeout 触发的超时错误 → 与 rawJson/getJson 一致的 BiliError（kind=http） */
+function asTimeoutError(e, timeoutMs) {
+  if (e?.name === 'TimeoutError' || e?.name === 'AbortError') return new BiliError(`请求超时（${timeoutMs}ms）`, { kind: 'http' })
+  return e
+}
+
 /** 解析短链（b23.tv）→ 视频标识 */
 export async function resolveShortUrl(short, opts = {}) {
   const f = fetcherOf(opts)
-  const res = await f(short, { headers: defaultHeaders(await cookieHeader(opts)), redirect: 'follow' })
+  const timeoutMs = Number(opts?.timeoutMs) || DEFAULT_TIMEOUT_MS
+  let res
+  try {
+    res = await f(short, { headers: defaultHeaders(await cookieHeader(opts)), redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) })
+  } catch (e) {
+    throw asTimeoutError(e, timeoutMs)
+  }
   const finalUrl = res.url || short
   const id = parseVideoId(finalUrl)
   if (!id) throw new BiliError(`短链未解析出视频：${finalUrl}`, { kind: 'parse' })
@@ -194,8 +206,15 @@ export async function getComments({ aid, ps = 10, pn = 1 }, opts = {}) {
 /** 弹幕（取样） */
 export async function getDanmaku(cid, { limit = 100 } = {}, opts = {}) {
   const f = fetcherOf(opts)
-  const res = await f(`${HOSTS.api}/x/v1/dm/list.so?oid=${cid}`, { headers: defaultHeaders(await cookieHeader(opts)) })
-  const buf = Buffer.from(await res.arrayBuffer())
+  const timeoutMs = Number(opts?.timeoutMs) || DEFAULT_TIMEOUT_MS
+  let buf
+  try {
+    // signal 同时覆盖响应头与响应体读取：上游卡住/半开连接时按 timeoutMs 中断，不再无限挂起会话
+    const res = await f(`${HOSTS.api}/x/v1/dm/list.so?oid=${cid}`, { headers: defaultHeaders(await cookieHeader(opts)), signal: AbortSignal.timeout(timeoutMs) })
+    buf = Buffer.from(await res.arrayBuffer())
+  } catch (e) {
+    throw asTimeoutError(e, timeoutMs)
+  }
   let xml = ''
   try {
     if (buf[0] === 0x78) xml = zlib.inflateSync(buf).toString('utf8')
