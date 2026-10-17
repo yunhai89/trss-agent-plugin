@@ -104,6 +104,10 @@ export function createMemoryTool(store) {
       '记忆会自动注入本轮上下文（user 消息尾部），无需 read。接近上限(>80%)时先 replace/remove 合并再 add。',
       ...WRITE_RULES,
     ].join(' '),
+    // RBAC 类别：personal=全员可用（写读自范围，scopeId 隔离；防护在 guardMemoryWrite 的来源佐证 + threatScan）。
+    // 注意：不声明会被 policy 当「未知类别」fail-closed（仅主人）——实机事故：群管理员写长期记忆被拒
+    // 「角色 admin 低于 未知 所需等级」（v1.28.1 修）。
+    category: 'personal',
     parameters: {
       type: 'object',
       properties: {

@@ -39,6 +39,7 @@ export class ToolRegistry {
     this._embedFn = null // 可选 embedding 函数（apps 注入；留空 = 纯关键词 jaccard）
     this._invSink = null // 可选调用埋点（toolEvo 注入 recordInvocation；留空 = 不持久化）
     this._registeredRaw = new WeakSet() // 已注册的原始工具对象（同名覆盖告警时排除幂等重复注册）
+    this._warnedNoCategory = new Set() // 缺 category 告警去重（同名只提示一次/实例）
   }
 
   /** 注入 embedding 函数（apps 用；留空 = 纯关键词 jaccard 检索）。切换会重建索引。 */
@@ -77,6 +78,12 @@ export class ToolRegistry {
       }
       this._registeredRaw.add(tool)
       tool.meta = tool.meta || {} // 保证 meta 引用稳定（bindVersion 才能更新到 #wrap 闭包里的同一对象）
+      // 漏声明 category 的手写工具会被 policy 按「未知类别」fail-closed（仅主人可用）——静默降权，
+      // 实机事故：memory 工具漏声明 → 群管理员写长期记忆被拒。MCP 工具由 bridge 兜底 'query'，不在此列。
+      if (!tool.category && !tool.meta.mcp && !this._warnedNoCategory.has(tool.name)) {
+        this._warnedNoCategory.add(tool.name)
+        this.logger('warn', `[tools] 「${tool.name}」未声明 category → RBAC 将按未知类别处理（仅主人可用）；请补 category（见 开发指南 §2.8）`)
+      }
       this.tools.set(tool.name, this.#wrap(tool))
     }
     this._indexDirty = true

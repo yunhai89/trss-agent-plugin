@@ -590,6 +590,26 @@ await test('policy：decide 决策矩阵 + 群管放行', async () => {
   ok(visibleCategories({ role: 'member', isMaster: false }).includes('query'), 'member 可见 query')
   ok(!visibleCategories({ role: 'member', isMaster: false }).includes('system'), 'member 不可见 system')
   eq(roleLabel({ isMaster: true }), '主人', 'roleLabel master')
+  // memory（长期记忆）工具必须声明 personal：曾漏声明 → 未知类别 fail-closed → 群管理员写记忆被拒
+  // （实机：角色 admin 低于 未知 所需等级）。personal = 全员可用（写读自范围 + 来源佐证/威胁扫描防护）。
+  const memTool = createMemoryTool({})
+  eq(memTool.category, 'personal', 'memory 工具声明 personal')
+  eq(decide({ role: 'member', isMaster: false }, memTool).decision, 'allow', 'member→memory allow')
+  eq(decide({ role: 'admin', isMaster: false }, memTool).decision, 'allow', 'admin→memory allow')
+})
+
+// ---------- 13b. registry：缺 category 告警（fail-closed 提示） ----------
+await test('ToolRegistry：缺 category 打警告（MCP/已声明不提示）', async () => {
+  const logs = []
+  const reg = new ToolRegistry({ logger: (level, ...args) => logs.push([level, ...args].join(' ')) })
+  reg.register({ name: 'no_cat_tool', description: 'd', parameters: { type: 'object' }, async execute() { return 'ok' } })
+  reg.register({ name: 'no_cat_tool', description: 'd', parameters: { type: 'object' }, async execute() { return 'ok' } })
+  eq(logs.filter((l) => l.includes('no_cat_tool') && l.includes('category')).length, 1, '缺 category 告警一次（去重）')
+  const logs2 = []
+  const reg2 = new ToolRegistry({ logger: (level, ...args) => logs2.push([level, ...args].join(' ')) })
+  reg2.register({ name: 'has_cat', category: 'query', description: 'd', parameters: { type: 'object' }, async execute() { return 'ok' } })
+  reg2.register({ name: 'mcp_no_cat', category: 'query', meta: { mcp: true }, description: 'd', parameters: { type: 'object' }, async execute() { return 'ok' } })
+  ok(!logs2.some((l) => l.includes('category')), '已声明/MCP 工具不告警')
 })
 
 // ---------- 14. confirm：审批门 ----------
