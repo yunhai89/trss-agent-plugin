@@ -93,7 +93,14 @@
         if (!t) return
         window.api.setToken(t)
         try { await window.store.loadScopes(); loggedIn.value = true }
-        catch (e) { window.api.setToken(''); alert('登录失败：' + (e?.message || e)) }
+        catch (e) {
+          window.api.setToken('')
+          window.UI.alert({
+            title: '登录失败',
+            icon: 'warn',
+            message: `Token 校验未通过：${e?.message || e}<br>请私聊 bot 重新发送 <b>#agents登录</b> 获取新链接，或核对粘贴的 token 是否完整。`,
+          })
+        }
       }
       const logout = () => { loggedIn.value = false; window.api && window.api.setToken('') }
 
@@ -184,8 +191,11 @@
           </div>
         </template>
       </div>
-      <toast-host/>
-    </div>`,
+    </div>
+    <!-- 全局服务宿主：放在登录壳之外，未登录/掉线（4010 清 token）时依然可用——
+         登录失败提示本身就是用户唯一能看到的反馈渠道，放壳内会随掉线一起被卸载 -->
+    <toast-host/>
+    <dialog-host/>`,
   }
 
   const app = createApp(App)

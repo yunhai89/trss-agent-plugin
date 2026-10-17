@@ -18,6 +18,7 @@ import { getGroupWorld } from '../../apps/groupworld.js'
 import { parseCron } from '../agent/schedule.js'
 import { redactConfig, JEV_KEY_MASK } from './redact.js'
 import { listLogFiles, readLogFile, aggregateStats, queryLogFiles, buildCachePayload } from './logs.js'
+import { clearDevLogs, resolveDevLogDir } from '../../utils/DevLog.js'
 import { mergeTrend, summarizeKvDays } from '../agent/store/usage-stats.js'
 import { ok, fail, asyncHandler, CODE } from './response.js'
 import { listAllSuggestions, applySuggestion, removeSuggestion } from '../evolution/review.js'
@@ -43,15 +44,11 @@ async function getRt(res) {
   }
 }
 
-/** 会话日志的实际目录：以 agent.devLog.dir 为准（与写入侧 utils/DevLog.js 同源），
- *  相对路径按插件根解析。曾一律硬编码 Config.path.logs —— 用户设了 agent.devLog.dir
+/** 会话日志的实际目录：与写入侧 utils/DevLog.js 共用 resolveDevLogDir（agent.devLog.dir 优先，
+ *  相对路径按插件根解析）。曾一律硬编码 Config.path.logs —— 用户设了 agent.devLog.dir
  *  后日志写在别处，面板永远是空的（读写不同源）。 */
 function logDir() {
-  try {
-    const dir = Config.get()?.agent?.devLog?.dir
-    if (dir) return path.isAbsolute(dir) ? dir : path.resolve(Config.path?.plugin || process.cwd(), String(dir))
-  } catch { /* 配置未就绪：回退默认路径 */ }
-  return Config.path.logs
+  try { return resolveDevLogDir() } catch { return Config.path.logs }
 }
 
 /** 取 GroupWorld 服务；失败则响应 5000 并返回 null。 */
@@ -455,6 +452,30 @@ router.get('/overview', asyncHandler(async (req, res) => {
   }
   _overviewCache = { at: Date.now(), win, data }
   return ok(res, data)
+}))
+
+// POST /api/cache/clear —— 清空 Token 缓存命中统计的全部数据（面板概览「Token 缓存」卡）。
+// 两个数据源一起清（口径说明：命中率 = KV 日统计 ∪ devLog 聚合，只清其一数字仍会从另一源出现）：
+//   1) usageStats 全量日统计（Redis/KV，先丢进程内未落盘缓冲再删键，防 2s 去抖把旧值写回）
+//   2) devLog 会话日志（agent.devLog.dir 下全部 *.log；与日志时间线同目录口径）
+// 连带失效 overview 的 60s 聚合缓存；记忆/会话/配置等一律不动。
+router.post('/cache/clear', asyncHandler(async (req, res) => {
+  const r = await getRt(res)
+  if (!r) return
+  let kvRemoved = 0
+  try {
+    const s = await r.usageStats?.clearAll?.()
+    kvRemoved = s?.removed || 0
+  } catch (e) {
+    return fail(res, CODE.INTERNAL, `日统计清空失败：${e?.message || e}`)
+  }
+  const logs = clearDevLogs()
+  _overviewCache = null // 否则清空后 60s 内仍返回旧聚合（用户看到「清了没变」）
+  return ok(
+    res,
+    { kvRemoved, logsRemoved: logs.removed, dir: logs.dir },
+    `已清空：日统计 ${kvRemoved} 天 · 会话日志 ${logs.removed} 个文件（新对话重新累计）`,
+  )
 }))
 
 // ── SelfState 自我状态（主人面板 §19）──

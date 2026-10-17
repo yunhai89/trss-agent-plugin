@@ -69,6 +69,10 @@
   --ch-hit-in: #24404f;  --ch-hit-out: #6a9c7b;
   --ch-miss-in: #7d5810; --ch-miss-out: #8a6212;
 
+  /* 搜索命中高亮（配置搜索）：色纸黄底 = 找到；当前命中转靛青 */
+  --hit: rgba(125, 88, 16, .16);
+  --hit-on: rgba(44, 76, 94, .16);
+
   --r1: 6px; --r2: 8px; --r3: 10px; --r4: 12px;
 
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
@@ -132,6 +136,10 @@
     --ch-in: #9cc3d6;      --ch-out: #86bd97;
     --ch-hit-in: #7fb0c9;  --ch-hit-out: #a8d3b5;
     --ch-miss-in: #d9b45c; --ch-miss-out: #c79a3a;
+
+    /* 搜索命中高亮：夜账下用账页色的低透明层 */
+    --hit: rgba(239, 230, 210, .09);
+    --hit-on: rgba(156, 195, 214, .16);
   }
 }
 
@@ -309,7 +317,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
    ========================================================================== */
 .login-wrap { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 20px; }
 .login-card {
-  width: 400px; max-width: 100%; padding: 34px 30px; text-align: center;
+  width: 400px; max-width: calc(100% - 8px); padding: 34px 30px; text-align: center; box-sizing: border-box;
   background: var(--paper);
   border: 1px solid var(--rim); border-radius: var(--r4);
   box-shadow: var(--sh);
@@ -616,6 +624,22 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .modal-leave-active .mdl { transition: opacity .18s ease; opacity: 0; }
 .modal-enter-from, .modal-leave-to { opacity: 0; }
 
+/* —— 全局确认/输入弹窗（<dialog-host>，代替原生 confirm/alert/prompt） ——
+   与 .mdl 同族：纸面 + 1px 纸边 + 桌面影；正文可含 <b>/<code> 强调；危险对话确认钮落朱砂 */
+.mdl.dlg { width: 470px; }
+.mdl-ico.dg { background: var(--cinnabar); }
+.dlg-msg { font-size: 13.5px; color: var(--ink2); line-height: 1.7; }
+.dlg-msg b { color: var(--ink); }
+.dlg-msg code { background: var(--well); border: 1px solid var(--line); padding: 0 4px; }
+.dlg-field { display: block; margin-top: 14px; }
+.dlg-lab { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; color: var(--ink2); margin-bottom: 6px; }
+.dlg-lab .req {
+  font-style: normal; font-size: 11px; font-weight: 700; color: var(--cinnabar);
+  background: var(--cinnabar-soft); border-radius: 4px; padding: 1px 6px;
+}
+.dlg-field .inp, .dlg-field .txa { width: 100%; }
+.dlg-hint { margin-top: 8px; font-size: 12px; font-weight: 700; color: var(--cinnabar); }
+
 /* Toast */
 .tst-w { position: fixed; top: 18px; right: 18px; z-index: 200; display: flex; flex-direction: column; gap: 10px; }
 .tst {
@@ -804,6 +828,43 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 .cf-nav a:hover { color: var(--pri); background: var(--well); }
 .cf-nav a.on { color: var(--pri); font-weight: 700; background: var(--pri-soft); }
+
+/* 配置搜索（左栏顶部，与锚点导航同栏吸附）：输入框 + 命中计数 + 结果清单 */
+.cf-side { position: sticky; top: 96px; display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 120px); overflow-y: auto; }
+.cf-side .cf-nav { position: static; top: auto; }
+.cf-search { display: flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: var(--r1); background: var(--paper); border: 1px solid var(--line2); transition: border-color var(--dur) var(--eo); }
+.cf-search:focus-within { border-color: var(--pri); box-shadow: 0 0 0 3px var(--pri-soft); }
+.cf-search .cf-search-ico { width: 14px; height: 14px; flex: 0 0 14px; color: var(--ink3); }
+.cf-search-inp { flex: 1; min-width: 0; width: 100%; border: none; outline: none; background: transparent; padding: 9px 0; font-size: 12.5px; }
+.cf-search-inp::placeholder { color: var(--ink3); }
+.cf-search-clear { width: 22px; height: 22px; flex: 0 0 22px; border-radius: 5px; border: none; background: var(--well); color: var(--ink2); cursor: pointer; display: grid; place-items: center; }
+.cf-search-clear:hover { background: var(--cinnabar-soft); color: var(--cinnabar); }
+.cf-search-clear svg { width: 12px; height: 12px; }
+.cf-search-hint { font-size: 11px; color: var(--ink3); padding: 0 3px; display: flex; align-items: baseline; gap: 5px; }
+.cf-search-hint b { color: var(--ink2); }
+.cf-res-backdrop { position: fixed; inset: 0; z-index: 55; }
+.cf-res {
+  position: fixed; z-index: 56; max-height: 52vh; overflow-y: auto;
+  background: var(--g3); border: 1px solid var(--rim); border-radius: var(--r2);
+  box-shadow: var(--sh-lg); animation: popIn .18s var(--eo);
+}
+.cf-res-i {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left;
+  padding: 9px 12px; border: none; border-bottom: 1px solid var(--line); background: transparent;
+  cursor: pointer; font: inherit;
+}
+.cf-res-i:last-child { border-bottom: none; }
+.cf-res-i:hover, .cf-res-i.on { background: var(--pri-soft); }
+.cf-res-i .n { flex: 0 0 auto; max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 700; color: var(--ink); }
+.cf-res-i.on .n { color: var(--pri); }
+.cf-res-i .d { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--ink3); }
+.cf-res-empty { padding: 14px 12px; font-size: 12px; color: var(--ink2); }
+
+/* 命中高亮：常驻色纸（多命中）+ 落笔转靛青（当前命中）；均为静态，无第二动效语言 */
+[data-cf-row].cf-hit, .mem-row.cf-hit { background: var(--hit); box-shadow: inset 0 0 0 1px var(--line2); }
+[data-cf-row].cf-hit-on, .mem-row.cf-hit-on { background: var(--hit-on); box-shadow: inset 0 0 0 1.5px var(--pri); }
+[data-cf-row].cf-hit-on .name, .mem-row.cf-hit-on b { color: var(--pri); }
+
 .cf-sec { margin-bottom: 16px; scroll-margin-top: 96px; overflow: hidden; }
 .cf-sh {
   display: flex; align-items: center; gap: 12px;
@@ -1036,7 +1097,9 @@ pre.code {
   .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .g3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cf-wrap { grid-template-columns: 1fr; }
+  /* 单列：隐藏锚点导航（搜索保留，落在最上方） */
   .cf-nav { display: none; }
+  .cf-side { position: static; max-height: none; overflow: visible; gap: 8px; margin-bottom: 14px; }
   .cols-w, .cols-300, .cols-320 { grid-template-columns: 1fr; }
 }
 

@@ -43,7 +43,13 @@
         finally { busy.value = false }
       }
       const remove = async (id) => {
-        if (!confirm(`删除文档 ${id}？`)) return
+        const okDel = await window.UI.confirm({
+          title: '删除知识库文档',
+          danger: true,
+          confirmText: '删除文档',
+          message: `将删除文档 <b>${id}</b> 及其全部向量块，检索立即不再命中。此操作不可恢复。`,
+        })
+        if (!okDel) return
         try { await window.api.del('/kb/' + id); msg.value = '已删除'; await reload() }
         catch (e) { msg.value = '删除失败：' + (e?.message || e) }
       }

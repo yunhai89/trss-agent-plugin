@@ -1263,6 +1263,15 @@ node scripts/cache-hit-report.mjs --dir /path/to/plugins/agents-plugin/data/logs
 `turn:纯新增内容` = 每轮真正新增的 token，**无法靠缓存消除**，只能靠减小 `d`（`keepReasoning:false`、收紧
 `maxToolResultChars`、控制情境注入量）。
 
+#### 清空命中率统计（面板 · v1.28.0 起）
+
+命中率是两个数据源合成：**Redis 日统计**（`agents:stats:day:*`，面板趋势/工具统计/命中率主源）与 **devLog 会话日志**
+（`data/logs/*.log`，时间线与「未观测旧日志」计数）。想让面板的命中率从一次干净的改动后重新计时（例如刚推出
+`contextWindow` 调参 / 刚上线缓存修复，不想被历史污染），在概览 → **Token 缓存** 卡点「**清空统计**」：
+确认弹窗会明示影响面，执行后**两处一起清**（日统计键全删 + 日志文件全删，并失效 overview 的 60s 聚合缓存），
+下次对话从零累计。记忆/人设/会话/定时/配置一律不动；此操作不可恢复，且**日志时间线会同时清空**——
+若只想保留日志排查，请手工 `#agents` 侧改 `agent.devLog.dir` 或先备份 `data/logs`。
+
 ---
 
 ## 🙏 鸣谢

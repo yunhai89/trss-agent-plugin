@@ -28,6 +28,36 @@ function cfg() {
   return Config.get().agent?.devLog || {}
 }
 
+/**
+ * 会话日志目录（读写同源）：agent.devLog.dir 优先，相对路径以**插件根**为基准（与 apps 同约定），
+ * 留空 → Config.path.logs。写入侧（devLog）与读取侧（web 面板 logDir / #上报错误）必须共用本函数，
+ * 否则用户设了 devLog.dir 后两边指向不同目录，面板看不到日志。
+ */
+export function resolveDevLogDir() {
+  const fromPlugin = (d) => path.resolve(Config.path?.plugin || process.cwd(), String(d))
+  try {
+    const dir = cfg().dir
+    if (dir) return fromPlugin(dir)
+  } catch { /* 配置未就绪：回退默认路径 */ }
+  return Config.path.logs
+}
+
+/**
+ * 清空会话日志目录下的全部 *.log（「清空 Token 缓存统计」连带清理用；只删 .log，
+ * 目录本身与其它文件保留）。返回删除文件数；目录不存在视为 0。
+ */
+export function clearDevLogs() {
+  const dir = resolveDevLogDir()
+  let removed = 0
+  let names = []
+  try { names = fs.readdirSync(dir) } catch { return { removed: 0, dir } }
+  for (const name of names) {
+    if (!name.endsWith('.log')) continue
+    try { fs.unlinkSync(path.join(dir, name)); removed++ } catch { /* 单个失败不阻断其余 */ }
+  }
+  return { removed, dir }
+}
+
 /** 把毫秒时间戳格式化为文件名用的紧凑形式 YYYYMMDDHHmmss */
 function fmtTime(ms) {
   const d = new Date(ms || Date.now())
@@ -79,7 +109,6 @@ function inferLevel(event, data) {
 export default async function devLog(event, data = {}, traceId = null, scope = null, opts = {}) {
   if (_failed) return
   if (cfg().enable === false) return
-  const c = cfg()
   // 防御：scope 契约是 {gid,uid,convId,createdAt} 对象。传字符串（历史误用，如 'groupworld'）
   // 会被解构成全 undefined → 产出 private-unknown-0-*.log 落进主 agents 目录污染 web 时间线。
   // 现在显式拒绝并留痕，调用方应改传 opts {dir, filename}。
@@ -90,8 +119,11 @@ export default async function devLog(event, data = {}, traceId = null, scope = n
   // 相对目录一律以**插件根**为基准（与 apps 的 path.resolve(PLUGIN_ROOT, cfg.xxx) 同约定）：
   // path.resolve(dir) 会按 process.cwd()（生产上是 Yunzai 根）解析，把日志写到插件之外，
   // 而 Web 日志面板只读 Config.path.logs → 面板看不到内容、排障误判「日志没写」。
-  const fromPlugin = (d) => path.resolve(Config.path?.plugin || process.cwd(), String(d))
-  const dir = fromPlugin(opts.dir || c.dir || Config.path.logs)
+  // 默认目录解析已抽到 resolveDevLogDir（读取侧共用同一口径，勿在本文件另写一份）；
+  // opts.dir 是调用方显式覆盖（伪人日志等独立目录），优先于配置。
+  const dir = opts.dir
+    ? path.resolve(Config.path?.plugin || process.cwd(), String(opts.dir))
+    : resolveDevLogDir()
   const filename = opts.filename || (scope ? devLogFilename(scope) : 'dev-fallback.log')
   const filepath = path.join(dir, filename)
   const obj = {

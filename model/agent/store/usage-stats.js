@@ -192,12 +192,36 @@ export function createUsageStats({ kv, logger = () => {}, flushIntervalMs = 2000
     return out
   }
 
+  /**
+   * 清空全部日统计（面板「清空统计」用；连同 since 锚点）。
+   * 必须**先丢缓冲再删 KV**：先删后丢的话，缓冲里已采集未落盘的增量会在下一次
+   * flush（2s 去抖）把刚清掉的当日数据重新写回，用户看到「清完又有数」。
+   * 清空后新对话从零重新累计（next flush 建新当日键）。
+   */
+  async function clearAll() {
+    const buffered = buffer.size
+    buffer.clear()
+    let removed = 0
+    try {
+      const keys = (await kv.scan(DAY_KEY_PREFIX)) || []
+      for (const k of keys) {
+        try { await kv.del(k); removed++ } catch { /* 单键失败不阻断其余 */ }
+      }
+      await kv.del(SINCE_KEY)
+    } catch (e) {
+      log('warn', '[usage-stats] 清空日统计失败', e?.message || e)
+      throw e
+    }
+    stats.lastClearAt = now().getTime()
+    return { removed, buffered }
+  }
+
   function stop() {
     stopped = true
     if (timer) { clearTimeout(timer); timer = null }
   }
 
-  return { recordRun, recordToolResult, flushNow, readDays, stop, stats }
+  return { recordRun, recordToolResult, flushNow, readDays, clearAll, stop, stats }
 }
 
 /**

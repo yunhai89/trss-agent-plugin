@@ -177,7 +177,14 @@
         finally { upload.busy = false }
       }
       const delRef = async (r) => {
-        if (!window.confirm(`删除参考音频「${r.name}」？（正在使用它的音色会失效）`)) return
+        const okDel = await window.UI.confirm({
+          title: '删除参考音频',
+          danger: true,
+          confirmText: '删除音频',
+          message: `删除<b>「${String(r.name || r.id)}」</b>（${kindZh(r.kind)}）？<br>`
+            + `正在使用它的音色会失效，后续调用会回落默认音色；音频文件一并删除，不可恢复。`,
+        })
+        if (!okDel) return
         try { await window.api.del('/tts/refs/' + r.id); await load(); toast('已删除', 'success') }
         catch (e) { toast(e.message, 'error') }
       }

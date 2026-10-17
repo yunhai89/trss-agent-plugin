@@ -642,6 +642,9 @@
 
       onMounted(async () => {
         window.addEventListener('scroll', onScroll, { passive: true })
+        // 搜索面板用 fixed 定位：滚动/缩放时跟随输入框
+        window.addEventListener('scroll', onViewportChange, { passive: true })
+        window.addEventListener('resize', onViewportChange)
         try {
           await window.store.loadConfig()
           if (M.config) { syncForm(JSON.parse(JSON.stringify(M.config))); formReady.value = true }
@@ -649,7 +652,11 @@
           window.store.loadTools().catch(() => {}) // 工具列表（失败不阻塞配置加载）
         } catch (e) { loadError.value = e?.message || String(e); toast(e.message, 'error') }
       })
-      onUnmounted(() => window.removeEventListener('scroll', onScroll))
+      onUnmounted(() => {
+        window.removeEventListener('scroll', onScroll)
+        window.removeEventListener('scroll', onViewportChange)
+        window.removeEventListener('resize', onViewportChange)
+      })
 
       /* 回退模型列表(baseURL/apiKey 明文) */
       const addFallback = () => form.fallbackModels.push({ model: '', baseURL: '', apiKey: '', protocol: 'openai' })
@@ -778,6 +785,115 @@
         }
       }
 
+      /* ── 配置搜索：在已渲染的表单里找配置项（名称 + 说明 + 当前值），定位、展开并高亮 ──
+         索引不落数据层：直接读 DOM（.cf-item / .mem-row 的可见文字），囊括所有分区/子块/高级参数，
+         新增配置行零维护（无需逐行登记）。回车或「下一个」在结果间循环，命中行加 .cf-hit 由 CSS 高亮。 */
+      const search = reactive({ q: '', hits: [], idx: 0, open: false, panel: { top: 0, left: 0, width: 320 } })
+      const searchTick = () => {
+        const q = String(search.q || '').trim().toLowerCase()
+        if (!q) { clearSearch(); return }
+        const nodes = [...document.querySelectorAll('[data-cf-row], .mem-row')]
+        search.hits = nodes
+          .map((el) => {
+            const nameEl = el.querySelector('.name') || el.querySelector('b')
+            const descEl = el.querySelector('.desc')
+            const full = (el.textContent || '').replace(/\s+/g, ' ').trim()
+            // 名称不能含说明/「?」：命中清单标题与「需展开」判定都读它
+            let name = (nameEl?.textContent || '').replace(/\s+/g, ' ').trim()
+            name = name.replace(/^高危\s*/, '').replace(/\s*\?+$/, '').trim()
+            // 说明块原文（结果摘要 + 匹配用）；再从全文里去掉说明，剩余即「值」面文字
+            const desc = descEl?.textContent || ''
+            const text = desc ? full.split(desc)[0].trim() : full
+            return { el, name, desc, text }
+          })
+          .filter((r) => (r.name + ' ' + r.desc + ' ' + r.text).toLowerCase().includes(q))
+        search.idx = 0
+        search.open = true
+        updateSearchPanel()
+        restoreHighlight()
+      }
+      const clearSearch = () => {
+        search.hits = []; search.idx = 0; search.open = false
+        restoreHighlight()
+      }
+      const clearHighlight = () => document.querySelectorAll('.cf-hit,.cf-hit-on').forEach((n) => n.classList.remove('cf-hit', 'cf-hit-on'))
+      /* 结果节点在「折叠分区/高级参数」里可能尚未渲染：先清旧高亮，再按需展开后重标 */
+      const restoreHighlight = () => {
+        clearHighlight()
+        for (const h of search.hits) if (h.el?.isConnected) h.el.classList.add('cf-hit')
+        const cur = search.hits[search.idx]?.el
+        if (cur?.isConnected) cur.classList.add('cf-hit-on')
+      }
+      /* 展开命中项所在的折叠分区（只找 .cf-sec 上的 id → open 开关） */
+      const expandFor = (el) => {
+        const sec = el.closest('.cf-sec')
+        const id = String(sec?.id || '').replace(/^cfg-/, '')
+        if (id && open[id] === false) open[id] = true
+      }
+      /* 高级参数折叠块由 adv.* 控制：el 落在 v-show 隐藏区时 offsetParent 为 null → 展开对应开关 */
+      const expandHidden = (el) => {
+        expandFor(el)
+        if (el.offsetParent === null) {
+          const id = String(el.closest('.cf-sec')?.id || '').replace(/^cfg-/, '')
+          if (id && id in adv) adv[id] = true
+        }
+      }
+      const jumpTo = (i, scroll = true) => {
+        const h = search.hits[i]
+        if (!h) return
+        expandHidden(h.el)
+        // 展开是响应式变更（v-show/折叠分区）：nextTick 后布局才稳定，否则滚到旧坐标
+        nextTick(() => {
+          if (scroll && typeof h.el.scrollIntoView === 'function') {
+            try { h.el.scrollIntoView({ block: 'center', behavior: 'smooth' }) } catch { /* noop */ }
+          }
+          restoreHighlight()
+        })
+      }
+      const searchInput = { focus() { try { document.querySelector('#cf-search-input')?.focus?.() } catch { /* noop */ } } }
+      const onSearchInput = () => { searchTick() }
+      const onSearchKey = (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); nextHit() }
+        else if (e.key === 'Escape') { clearSearch() }
+      }
+      const nextHit = () => {
+        if (!search.hits.length) return
+        search.idx = (search.idx + 1) % search.hits.length
+        jumpTo(search.idx)
+        updateSearchPanel()
+      }
+      /* 点选结果：定位高亮并收起清单（清单是 fixed 浮层，留着会盖住要看的表单） */
+      const pickHit = (i) => {
+        search.idx = i
+        jumpTo(i)
+        search.open = false
+        searchInput.focus()
+      }
+      const clearSearchInput = () => { search.q = ''; clearSearch(); searchInput.focus() }
+      const updateSearchPanel = () => {
+        const inp = document.querySelector?.('#cf-search-box')
+        if (!inp || typeof inp.getBoundingClientRect !== 'function') return
+        const r = inp.getBoundingClientRect()
+        const vw = window.innerWidth || 360
+        const vh = window.innerHeight || 640
+        const width = Math.min(390, vw - 24)
+        let left = r.left
+        if (left + width > vw - 12) left = Math.max(12, vw - width - 12)
+        // 高度跟着视口底部收（否则移动端清单会顶到 Dock 之外）
+        const maxHeight = Math.max(150, Math.min(vh * 0.52, vh - r.bottom - 24))
+        search.panel = { top: r.bottom + 6, left, width, maxHeight }
+      }
+      const onViewportChange = () => { if (search.open) updateSearchPanel() }
+      const hitName = (h) => {
+        const t = h?.name || ''
+        return t.length > 18 ? t.slice(0, 18) + '…' : t
+      }
+      const hitDesc = (h) => {
+        // 摘要优先用说明块原文（信息量最大），无说明时退回「名称 值」
+        const d = h?.desc || h?.text || h?.name || ''
+        return d.length > 62 ? d.slice(0, 62) + '…' : d
+      }
+
       /* thinking 开关兼容 */
       const thinkingOn = computed({
         get: () => !!form.thinking,
@@ -880,6 +996,9 @@
         mainProv, mainModels, mainModel, setBaseProvider, setBaseModel,
         jevProviders, jevModels, jevReady, reflectOptions,
         FEATURES, featureVal, featureSel, onFeatureSel,
+        // 配置搜索
+        search, onSearchInput, onSearchKey, nextHit, pickHit, clearSearchInput, clearSearch,
+        hitName, hitDesc, searchInput,
       }
     },
     template: `
@@ -893,10 +1012,41 @@
         <div class="mut2" style="margin-top:6px;font-size:12px">已向 /api/config 请求配置，加载完成前不渲染表单。</div>
       </div>
       <template v-else>
-      <!-- 锚点导航 -->
-      <div class="cf-nav">
-        <a v-for="s in sections" :key="s.id" :class="{on: activeSec === s.id}" @click="jump(s.id)">{{ s.name }}</a>
+      <!-- 搜索 + 锚点导航（左栏，桌面吸附；移动端落在最上） -->
+      <div class="cf-side">
+        <div id="cf-search-box" class="cf-search">
+          <v-icon class="cf-search-ico" name="search"/>
+          <input id="cf-search-input" v-model="search.q" class="cf-search-inp" enterkeyhint="search"
+            placeholder="搜索配置项 · 名称/说明" aria-label="搜索配置项"
+            @input="onSearchInput" @keydown="onSearchKey">
+          <button v-if="search.q" type="button" class="cf-search-clear" title="清空" aria-label="清空搜索" @click="clearSearchInput">
+            <v-icon name="x"/>
+          </button>
+        </div>
+        <div v-if="search.open" class="cf-search-hint">
+          <b class="num">{{ search.hits.length ? (search.idx + 1) + '/' + search.hits.length : '0' }}</b>
+          <span class="mut2">{{ search.hits.length ? '条命中 · Enter 下一个' : '未找到匹配的配置项' }}</span>
+        </div>
+        <nav class="cf-nav">
+          <a v-for="s in sections" :key="s.id" :class="{on: activeSec === s.id}" @click="jump(s.id)">{{ s.name }}</a>
+        </nav>
       </div>
+
+      <!-- 命中清单（fixed 跟随输入框；点一条即定位高亮） -->
+      <Teleport to="body">
+        <div v-if="search.open && search.q">
+          <div class="cf-res-backdrop" @click="search.open = false"></div>
+          <div class="cf-res" role="listbox" aria-label="配置搜索结果"
+            :style="{ top: search.panel.top + 'px', left: search.panel.left + 'px', width: search.panel.width + 'px', maxHeight: search.panel.maxHeight + 'px' }">
+            <div v-if="!search.hits.length" class="cf-res-empty">没有匹配的配置项——换个关键词，或直接清空搜索浏览全部配置。</div>
+            <button v-for="(h, i) in search.hits" :key="i" type="button" class="cf-res-i" role="option"
+              :class="{ on: i === search.idx }" :aria-selected="i === search.idx" @click="pickHit(i)">
+              <span class="n">{{ hitName(h) }}</span>
+              <span class="d">{{ hitDesc(h) }}</span>
+            </button>
+          </div>
+        </div>
+      </Teleport>
 
       <div>
         <!-- ===== §1.1 基础 / 模型 ===== -->

@@ -75,6 +75,7 @@ const HOOKED_STRESS = new Set([
   // 真实 Web router 测试需要 Yunzai 桩（apps/agent.js / lib 解析）
   'model/web/api.tevo.test.mjs',
   'model/web/api.persona-lore.test.mjs',
+  'model/web/api.clearcache.test.mjs', // 清空 Token 缓存统计：真实 router + 真实 UsageStats + 桩 runtime
   // 更新日志转发测试需要 Yunzai 桩（apps/update.js / lib 插件基类 + Bot）
   'apps/update.test.mjs',
   // TTS 路由测试需要桩 Config（写配置不落盘真实 config.yaml）

@@ -163,6 +163,29 @@
         win.value = w
         try { await window.store.loadOverview({ window: w }) } catch { /* 忽略 */ }
       }
+      /* 清空 Token 缓存命中统计：数据源有两处（Redis 日统计 + devLog 日志），后端一次清两处并
+         失效 overview 聚合缓存，前端随后重载 —— 可见结果 = 命中率/趋势/工具统计全部归零。
+         危险动作，先过确认弹窗（说明口径，避免误清日志）。 */
+      const clearing = ref(false)
+      const clearCache = async () => {
+        const ask = await window.UI.confirm({
+          title: '清空 Token 缓存统计',
+          icon: 'warn',
+          danger: true,
+          confirmText: '清空统计',
+          message: '将清空 <b>全部 Token 缓存命中数据</b>：Redis 日统计 + 会话日志（devLog）文件。<br>'
+            + '影响：概览的命中率、Token 趋势、工具统计从零重新累计；<b>日志时间线</b>同时清空。<br>'
+            + '不受影响：记忆 / 人设 / 会话 / 定时 / 配置。此操作不可恢复。',
+        })
+        if (!ask) return
+        clearing.value = true
+        try {
+          const r = await window.api.post('/cache/clear', {})
+          M.cache = null // 先清本地缓存载荷：避免重载间隙仍显示旧命中率
+          await window.store.loadOverview({ window: win.value })
+          toast(`已清空：日统计 ${r?.kvRemoved ?? 0} 天 · 日志 ${r?.logsRemoved ?? 0} 个文件`, 'success')
+        } catch (e) { toast(e.message, 'error') } finally { clearing.value = false }
+      }
 
       /* —— 账目行（账簿语法：序号 + 名称 + 右列数值；点开看明细） —— */
       const open = ref('')
@@ -214,7 +237,7 @@
         try { await window.store.loadSuggestions(null, 'pending') } catch { /* 忽略 */ }
       })
 
-      return { today, conversations, pending, failures, sandbox, todo, todoShown, todoRest, stamping, approve, chart, reqChart, toolTop, toolMax, switches, perceptions, totalTokens, cacheStats, win, setWin, books, open, toggle, fmt, M }
+      return { today, conversations, pending, failures, sandbox, todo, todoShown, todoRest, stamping, approve, chart, reqChart, toolTop, toolMax, switches, perceptions, totalTokens, cacheStats, win, setWin, clearCache, clearing, books, open, toggle, fmt, M }
     },
     template: `
     <div class="lg">
@@ -392,9 +415,12 @@
               <template v-else-if="b.id === 'cache'">
                 <div class="row-b wrap g10">
                   <span class="mut2" style="font-size:12px">观测窗口</span>
-                  <div class="row g6" style="font-size:11.5px">
-                    <button v-for="w in ['1h','24h','7d','new','all']" :key="w" class="btn" :class="win===w?'b-pri':'b-line'" style="padding:4px 9px;font-size:11.5px" @click="setWin(w)">{{ w==='new'?'部署后':(w==='all'?'全部':w) }}</button>
-                  </div>
+                  <button type="button" class="btn b-danger b-sm" :disabled="clearing" @click="clearCache">
+                    <v-icon name="trash"/>{{ clearing ? '清空中…' : '清空统计' }}
+                  </button>
+                </div>
+                <div class="row g6" style="font-size:11.5px;margin-top:10px">
+                  <button v-for="w in ['1h','24h','7d','new','all']" :key="w" class="btn" :class="win===w?'b-pri':'b-line'" style="padding:4px 9px;font-size:11.5px" @click="setWin(w)">{{ w==='new'?'部署后':(w==='all'?'全部':w) }}</button>
                 </div>
                 <template v-if="cacheStats.hasData">
                   <div class="row g10 wrap" style="margin-top:10px;font-size:12px">

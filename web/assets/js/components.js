@@ -243,6 +243,176 @@
     template: `<div class="empty"><span class="empty-ico"><v-icon :name="icon"/></span><div style="font-weight:700">{{ text }}</div><div v-if="sub" style="font-size:12px">{{ sub }}</div><slot/></div>`,
   })
 
+  /* ---------------- 全局确认/输入弹窗（UI.dialog） ----------------
+     取代浏览器原生 confirm/alert/prompt：原生弹窗样式不可控、移动端体验差、
+     且脱离「账册朱批」的深浅两档光。全部交互（删除确认、清空统计、危险操作）走这里。
+     形态：与 <v-modal> 同族（纸面 + 1px 纸边 + 桌面影），语义遵循设计系统的 Named Rules——
+       · 只有「需要主人决定」的动作才用朱砂（danger 时确认钮落印朱砂，其余为靛青主钮）；
+       · 动效沿用既有的 modal 进场淡入 + popIn，不新增动效语言；
+       · Esc = 取消，Enter = 确认（输入框除外），加载中锁关闭，focus 落在输入框/确认钮。
+     用法：
+       await UI.confirm({ title, message, confirmText, cancelText, danger }) → true / 取消时挂起
+       await UI.alert({ title, message })                                  → true / 取消时挂起
+       await UI.dialog({ ...同 confirm/strip, prompt: { label, value, placeholder, mono, multiline, required } })
+                                                                           → 输入串 / 取消时挂起
+       UI.dialog.ask(对象) 为输入弹窗的糖（见下）。 */
+  const dialogState = reactive({
+    open: false, icon: 'info', title: '', message: '', danger: false,
+    input: false, prompt: null, value: '', hint: '',
+    confirmText: '确定', cancelText: '取消', busy: false, action: null,
+  })
+  let _dlgSeq = 0 // 同日多次调用：旧 commit 不得关掉新对话
+
+  const _dlgClose = () => {
+    dialogState.open = false
+    _restoreScroll()
+  }
+  const _dlgShow = () => {
+    dialogState.open = true
+    _lockScroll()
+    const t = setTimeout(_focusDialog, 60) // 等 Teleport + 过渡挂载后聚焦
+    t.unref?.()
+  }
+  const dialogCancel = () => {
+    if (dialogState.busy) return
+    const act = dialogState.action
+    dialogState.action = null
+    _dlgClose()
+    act?.onCancel?.()
+  }
+  const dialogCommit = async () => {
+    const act = dialogState.action
+    if (!act || dialogState.busy) return
+    if (act.kind === 'prompt') {
+      const v = String(dialogState.value ?? '')
+      if (dialogState.prompt?.required && !v.trim()) { dialogState.hint = '不能为空'; return }
+      dialogState.busy = true
+      // 各分支的 onConfirm 负责关栈与决议；旧 seq 的决议不会关掉后开的新弹窗
+      await act.onConfirm(v)
+      return
+    }
+    dialogState.busy = true
+    await act.onConfirm()
+  }
+  const _focusDialog = () => {
+    const el = document.querySelector?.('.dlg-b [data-autofocus], .mdl.dlg .mdl-f [data-dlg-primary]')
+    try { el?.focus?.({ preventScroll: true }) } catch { /* noop */ }
+  }
+  /* 滚动锁：弹窗打开时锁 body，取消后还原位置（原生 confirm 不会跳到页首）。
+     注意用布尔位判「是否在锁中」——不能拿 _scrollLockY 的真值判断：页面恰在顶部（y=0）时
+     旧写法会把锁当成未加，overflow:hidden 永久留在 body 上（页面再也滚不动）。 */
+  let _scrollLocked = false
+  let _scrollLockY = 0
+  const _lockScroll = () => {
+    if (_scrollLocked) return
+    _scrollLocked = true
+    _scrollLockY = window.scrollY || 0
+    document.body.style.overflow = 'hidden'
+  }
+  const _restoreScroll = () => {
+    if (!_scrollLocked) return
+    _scrollLocked = false
+    document.body.style.overflow = ''
+    try { window.scrollTo?.(0, _scrollLockY) } catch { /* noop */ }
+  }
+
+  const DialogHost = defineComponent({
+    name: 'DialogHost',
+    components: { VIcon },
+    setup() {
+      const { onMounted, onUnmounted } = Vue
+      const onKey = (e) => {
+        if (!dialogState.open) return
+        if (e.key === 'Escape') { e.preventDefault(); dialogCancel() }
+        // Enter 提交：输入/多行文本由表单自身回车处理，避免误提交
+        else if (e.key === 'Enter' && document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
+          e.preventDefault(); dialogCommit()
+        }
+      }
+      onMounted(() => document.addEventListener('keydown', onKey))
+      onUnmounted(() => document.removeEventListener('keydown', onKey))
+      return { dialogState, dialogCancel, dialogCommit }
+    },
+    template: `
+    <Teleport to="body">
+      <Transition name="modal" appear>
+        <div v-if="dialogState.open" class="ovl center" @click.self="dialogCancel">
+          <div class="mdl dlg" role="dialog" aria-modal="true" :aria-label="dialogState.title">
+            <div class="mdl-h">
+              <span v-if="dialogState.icon" class="mdl-ico" :class="dialogState.danger ? 'dg' : ''"><v-icon :name="dialogState.icon"/></span>
+              <span class="mdl-t">{{ dialogState.title }}</span>
+              <button class="mdl-x" type="button" title="关闭" aria-label="关闭" @click="dialogCancel"><v-icon name="x"/></button>
+            </div>
+            <div class="mdl-b dlg-b">
+              <div v-if="dialogState.message" class="dlg-msg" v-html="dialogState.message"/>
+              <label v-if="dialogState.input && dialogState.prompt" class="dlg-field">
+                <span v-if="dialogState.prompt.label" class="dlg-lab">{{ dialogState.prompt.label }}<em v-if="dialogState.prompt.required" class="req">必填</em></span>
+                <textarea v-if="dialogState.prompt.multiline" data-autofocus class="txa mono" rows="4" spellcheck="false"
+                  v-model="dialogState.value" :placeholder="dialogState.prompt.placeholder || ''" @keydown.enter.stop/>
+                <input v-else data-autofocus class="inp" :class="{ mono: dialogState.prompt.mono }" v-model="dialogState.value"
+                  :placeholder="dialogState.prompt.placeholder || ''" @keyup.enter="dialogCommit"/>
+              </label>
+              <div v-if="dialogState.hint" class="dlg-hint">{{ dialogState.hint }}</div>
+            </div>
+            <div class="mdl-f">
+              <button v-if="dialogState.cancelText !== false" type="button" class="btn b-line" :disabled="dialogState.busy" @click="dialogCancel">{{ dialogState.cancelText || '取消' }}</button>
+              <button type="button" class="btn" :class="dialogState.danger ? 'b-ok' : 'b-pri'" data-dlg-primary :disabled="dialogState.busy" @click="dialogCommit">
+                <v-icon :name="dialogState.danger ? 'warn' : 'check'"/>{{ dialogState.busy ? '处理中…' : (dialogState.confirmText || '确定') }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>`,
+  })
+
+  /* 底层定制入口（载荷字段见 dialogState 初值）：prompt 时 resolve 收到输入串，其余 resolve true。
+     Esc / ✕ / 取消 → 不 resolve（调用方 await 一直挂起——与原生 confirm 的「取消后什么都不做」等价），
+     故调用方不要用 .finally 做清理：取消时后续动作本就不该执行。 */
+  function dialog(options = {}) {
+    const seq = ++_dlgSeq
+    const isPrompt = !!options.prompt
+    Object.assign(dialogState, {
+      open: false, // _show 统一置位（含滚动锁与聚焦）
+      icon: options.icon || (options.danger ? 'warn' : 'info'),
+      title: options.title || (isPrompt ? '填写' : '确认'),
+      message: options.message || '',
+      danger: !!options.danger,
+      input: isPrompt,
+      prompt: options.prompt || null,
+      value: isPrompt ? String(options.prompt?.value ?? '') : '',
+      hint: '',
+      confirmText: options.confirmText || (options.danger ? '确认执行' : '确定'),
+      cancelText: options.cancelText !== undefined ? options.cancelText : '取消',
+      busy: false,
+      action: null,
+    })
+    return new Promise((resolve) => {
+      // 关栈只在「仍是当前对话」时执行：晚到的决议不得关掉后开的新弹窗
+      const finish = (v) => { if (seq === _dlgSeq) _dlgClose(); resolve(v) }
+      const cancellable = dialogState.cancelText !== false
+      dialogState.action = {
+        id: seq,
+        kind: isPrompt ? 'prompt' : 'confirm',
+        onConfirm: isPrompt ? (v) => finish(String(v ?? '')) : () => finish(true),
+        // 无取消钮（如 alert「知道了」）时 Esc/遮罩/✕ 视为已阅：resolve true，否则一直挂着
+        onCancel: cancellable ? null : () => finish(true),
+      }
+      _dlgShow()
+    })
+  }
+  const dialogAlert = (options) => dialog({
+    title: '提示',
+    icon: 'info',
+    confirmText: '知道了',
+    cancelText: false,
+    ...options,
+  })
+  const dialogConfirm = (options) => dialog({ danger: true, ...options })
+  /** 输入弹窗糖：UI.dialog.ask({ label, title, value, placeholder, mono, multiline, required }) → 输入串 */
+  const dialogAsk = ({ label = '', title = '填写', value = '', placeholder = '', mono = false, multiline = false, required = false, confirmText = '确定' } = {}) =>
+    dialog({ title, icon: 'edit', confirmText, danger: false, prompt: { label, value, placeholder, mono, multiline, required } })
+
   /* ---------------- Toast 服务 ---------------- */
   const toastState = reactive({ list: [], seq: 0 })
   function toast(msg, type = 'success', ms = 2600) {
@@ -361,7 +531,7 @@
         return { show, pos, iconEl, isLong, doShow, doHide, toggle }
       },
       template: `
-      <div class="cf-item" :class="{full: full, dg: danger}">
+      <div class="cf-item" data-cf-row="1" :class="{full: full, dg: danger}">
         <div class="info">
           <div class="name">
             {{ name }}<span v-if="danger" class="pill p-rose" style="margin-left:7px;font-size:10px;padding:3px 8px">高危</span>
@@ -390,9 +560,13 @@
     return Number.isFinite(n) ? n : null
   }
 
+  /* 弹窗服务：代替原生 confirm/alert/prompt（底层入口 = UI.dialog，输入糖 = UI.dialog.ask） */
+  const dialogService = Object.assign(dialog, { ask: dialogAsk, alert: dialogAlert, confirm: dialogConfirm, state: dialogState })
+
   window.UI = {
     fmt, toast, toastState, parseNum,
     makeCfgRow,
+    dialog: dialogService, alert: dialogAlert, confirm: dialogConfirm, dialogState,
     register(app) {
       app.component('VIcon', VIcon)
       app.component('VSwitch', VSwitch)
@@ -405,6 +579,7 @@
       app.component('ToastHost', ToastHost)
       app.component('JsonBlock', JsonBlock)
       app.component('ScopePicker', ScopePicker)
+      app.component('DialogHost', DialogHost)
     },
   }
 })()
