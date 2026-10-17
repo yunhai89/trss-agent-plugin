@@ -4,7 +4,7 @@
  *   实际容灾 = transport-base 单请求重试 + Agent __tries fallback，见 model/agent/Agent.js。）
  */
 import { detectCapabilities } from './capabilities.js'
-import { capsFromModelItem, primeModelCaps, getApiCaps, clearApiCaps } from './caps-source.js'
+import { capsFromModelItem, primeModelCaps, getApiCaps, clearApiCaps, learnThinkingCapability, getLearnedThinking, clearLearnedThinking } from './caps-source.js'
 import { embed } from './embed.js'
 
 let passed = 0
@@ -55,9 +55,45 @@ await test('capabilities：分层判定', async () => {
   // 协议默认：未知模型 openai 仍有 tools
   eq(detectCapabilities({ protocol: 'openai', model: 'totally-unknown' }).tools, true, '未知模型 protocol default tools')
   eq(detectCapabilities({ protocol: 'openai', model: 'totally-unknown' }).source, 'default', 'source=default')
+  // 思考能力：明写 false 的才算「知道」；泛化家族规则未表态 → 乐观假定 true（thinkingAssumed 标注）
+  eq(detectCapabilities({ protocol: 'openai', model: 'gpt-4o' }).thinking, false, 'gpt-4o 明确声明不支持思考')
+  eq(detectCapabilities({ protocol: 'openai', model: 'gpt-4o' }).thinkingAssumed, undefined, '明确声明无假定标记')
+  eq(detectCapabilities({ protocol: 'openai', model: 'deepseek-v4.1-flash' }).thinking, true, '新型号（泛化规则未表态）→ 乐观 thinking')
+  eq(detectCapabilities({ protocol: 'openai', model: 'deepseek-v4.1-flash' }).thinkingAssumed, true, 'thinkingAssumed=true')
+  eq(detectCapabilities({ protocol: 'openai', model: 'totally-unknown-2027' }).thinking, true, '完全未知模型 → 乐观 thinking')
   // 配置覆盖最高
   eq(detectCapabilities({ protocol: 'openai', model: 'gpt-4o', caps: { vision: false } }).vision, false, 'config 覆盖 vision=false')
   eq(detectCapabilities({ protocol: 'openai', model: 'gpt-4o', caps: { vision: false } }).source, 'config', 'source=config')
+})
+
+// ---------- 1b. 运行时学习：思考能力自动纠正 ----------
+await test('caps-source：思考能力学习层（乐观假定 → 厂商拒绝纠正 → 可清除）', async () => {
+  clearLearnedThinking()
+  eq(getLearnedThinking('learn-model'), undefined, '初始无记录')
+  eq(detectCapabilities({ protocol: 'openai', model: 'learn-model' }).thinking, true, '未表态 → 乐观 true')
+
+  learnThinkingCapability('learn-model', false)
+  eq(getLearnedThinking('learn-model'), false, '拒绝后记录 false')
+  const d = detectCapabilities({ protocol: 'openai', model: 'learn-model' })
+  eq(d.thinking, false, '学习层纠正为 false')
+  eq(d.source, 'learned', 'source=learned')
+  eq(d.thinkingAssumed, undefined, '学习记录不是假定')
+
+  // 学习层高于注册表（厂商真实拒绝 > 名单声明），低于配置覆盖
+  learnThinkingCapability('mimo-v2.5-pro', false)
+  eq(detectCapabilities({ protocol: 'openai', model: 'mimo-v2.5-pro' }).thinking, false, '学习层覆盖注册表声明')
+  eq(detectCapabilities({ protocol: 'openai', model: 'mimo-v2.5-pro', caps: { thinking: true } }).thinking, true, 'config 覆盖 > 学习层')
+
+  // 官方数据（api 层）声明 thinking=true 时不算假定
+  clearApiCaps(); clearLearnedThinking()
+  const item = { id: 'omni-reasoner', architecture: { input_modalities: ['text'], supported_parameters: ['reasoning'] } }
+  const fakeFetch = async () => ({ ok: true, status: 200, async json() { return { data: [item] } } })
+  await primeModelCaps({ baseURL: 'https://x/v1', apiKey: 'k', models: ['omni-reasoner'], fetchImpl: fakeFetch })
+  eq(detectCapabilities({ protocol: 'openai', model: 'omni-reasoner' }).thinkingAssumed, undefined, 'api 数据声明后无假定')
+
+  clearLearnedThinking(); clearApiCaps()
+  eq(detectCapabilities({ protocol: 'openai', model: 'mimo-v2.5-pro' }).thinking, true, '清除学习后回到注册表声明')
+  eq(detectCapabilities({ protocol: 'openai', model: 'learn-model' }).thinking, true, '清除学习后回到乐观假定')
 })
 
 // ---------- 2. 官方能力数据源 ----------

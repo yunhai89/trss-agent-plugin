@@ -11,6 +11,7 @@
  */
 import assert from 'node:assert/strict'
 import { Agent, ToolRegistry, OpenAIProvider, AnthropicProvider, GeminiProvider } from '../index.js'
+import { getLearnedThinking, clearLearnedThinking } from '../../llm/caps-source.js'
 
 let passed = 0
 let failed = 0
@@ -229,6 +230,45 @@ await test('结构化输出：Gemini 映射为 response_format{type:text,mime_ty
   await new GeminiProvider({ client }).chat({ model: 'fixture', messages: [{ role: 'user', content: 'x' }], response_format: NEUTRAL_RF })
   assert.deepEqual(captured.response_format, { type: 'text', mime_type: 'application/json', schema: NEUTRAL_SCHEMA }, 'Gemini 原生 response_format')
   assert.equal(Object.hasOwn(captured.response_format || {}, 'json_schema'), false, '不透传 json_schema 包装')
+})
+
+await test('思考参数：兼容端拒绝 → 剥离重试一次并记忆（后续不再下发）+ 能力学习层记录', async () => {
+  clearLearnedThinking()
+  const bodies = []
+  let calls = 0
+  const client = { chat: { completions: { async create(body) {
+    bodies.push(structuredClone(body)); calls++
+    if (calls === 1) throw new Error('400 Unsupported parameter: reasoning_effort is not supported with this model')
+    return { choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }
+  } } } }
+  const p = new OpenAIProvider({ client })
+  const opts = { model: 'no-think-model', messages: [{ role: 'user', content: 'x' }], reasoning_effort: 'high' }
+  await p.chat(opts)
+  await p.chat(opts)
+  assert.equal(bodies.length, 3, '首次失败+剥离重试 2 次 + 第二次直接 1 次')
+  assert.equal(bodies[0].reasoning_effort, 'high', '首次请求带思考参数')
+  assert.equal(Object.hasOwn(bodies[1], 'reasoning_effort'), false, '剥离重试不带思考参数')
+  assert.equal(Object.hasOwn(bodies[2], 'reasoning_effort'), false, '后续调用主动剥离（providers 记忆生效）')
+  assert.equal(getLearnedThinking('no-think-model'), false, '学习层记住该模型不支持思考（detectCapabilities 据此转 false）')
+  clearLearnedThinking()
+})
+
+await test('思考参数：Anthropic 兼容端拒绝 thinking → 剥离重试并记忆', async () => {
+  const bodies = []
+  let calls = 0
+  const client = { messages: { async create(body) {
+    bodies.push(structuredClone(body)); calls++
+    if (calls === 1) throw new Error('400 unsupported parameter: thinking')
+    return { content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }
+  } } }
+  const p = new AnthropicProvider({ client })
+  const opts = { model: 'no-think-claude', messages: [{ role: 'user', content: 'x' }], thinking: { type: 'enabled', budget_tokens: 1024 } }
+  await p.chat(opts)
+  await p.chat(opts)
+  assert.equal(bodies.length, 3, '首次失败+剥离重试 2 次 + 第二次直接 1 次')
+  assert.deepEqual(bodies[0].thinking, { type: 'enabled', budget_tokens: 1024 }, '首次请求带 thinking')
+  assert.equal(Object.hasOwn(bodies[1], 'thinking'), false, '剥离重试不带 thinking')
+  assert.equal(Object.hasOwn(bodies[2], 'thinking'), false, '后续调用主动剥离（记忆生效）')
 })
 
 await test('结构化输出：兼容端拒绝 response_format → 降级一次并记住（不反复原样重试）', async () => {

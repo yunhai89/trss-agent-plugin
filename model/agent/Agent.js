@@ -29,6 +29,7 @@ import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, SEARCH_VERIFICATION, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 import { detectScheduleIntent, isSharedScopeId, SHARED_SCOPE_PREFIX } from './schedule.js'
 import { decideThinkingSmart, classifyComplexity } from '../llm/thinking.js'
+import { detectCapabilities } from '../llm/capabilities.js'
 import { decideThinkingWithJev, selectToolsWithJev, assessShellRiskWithJev, decideReflectWithJev, evaluateShellRisk } from './jev/index.js'
 
 const DEFAULT_IDENTITY = TEMPLATES.agent.system
@@ -250,7 +251,10 @@ export class Agent {
     this.thinking = config.thinking || null
     // 思考自动决策：按提问复杂度决定是否思考与深度/预算（opt-in；见 model/llm/thinking.js）
     this.thinkingAuto = config.thinkingAuto || null
-    this.thinkingCapable = config.thinkingCapable !== false
+    // 思考能力：显式布尔（测试/调用方覆盖）优先；未给则每次 run 实时判定（注册表 + 运行时学习，
+    // 新型号先乐观假定支持，厂商拒绝后自动纠正——见 model/llm/capabilities.js）。
+    this.thinkingCapableOverride = typeof config.thinkingCapable === 'boolean' ? config.thinkingCapable : null
+    this.mediaCaps = config.mediaCaps || null // agent.media.caps 覆盖（config 层优先级最高）
     this.thinkingClassifierLlm = config.thinkingClassifierLlm || null // 小模型判档通道（可选；缺省走规则）
     // Jev（TypeSafe AI）判断模型：opt-in 决策层（thinking/toolSelection/terminalRisk/llmTool）。
     // 形如 { client, decisions, thresholds, toolSelectionMaxTools, allowDestructive }；未配置/失败/低置信一律回退现有方案。
@@ -568,7 +572,12 @@ export class Agent {
     // 思考自动决策：按本轮提问复杂度决定是否思考、深度与预算（opt-in，覆盖静态 this.thinking）
     this._turnReasoning = null
     this.thinkInfo = null
-    if (this.thinkingAuto?.enable && this.thinkingCapable) {
+    // 能力实时判定（含运行时学习；显式传入的 thinkingCapable 优先）：
+    // 模型未明确判过思考能力 → 乐观启用，厂商拒绝后由 provider 自动降级并记忆（下一轮即转 off）
+    const thinkingCapable = this.thinkingCapableOverride ?? detectCapabilities({
+      protocol: this.providerProtocol, model: this.model, caps: this.mediaCaps,
+    }).thinking
+    if (this.thinkingAuto?.enable && thinkingCapable) {
       this.thinkInfo = { auto: true, depth: '-', budget: null, source: '-', style: this.thinkingAuto.style || '' }
       try {
         const thinkOpts = {

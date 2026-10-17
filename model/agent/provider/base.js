@@ -74,6 +74,8 @@ export class Provider {
   constructor(config = {}) {
     this.client = config.client || null
     this.defaultModel = config.model || config.defaultModel || null
+    // 日志通道：`(level, ...args)`（默认吞掉；apps 装配时注入 Log.tag('provider')）
+    this.log = typeof config.log === 'function' ? config.log : (() => {})
   }
 
   /** @returns {Promise<AssistantResult>} */

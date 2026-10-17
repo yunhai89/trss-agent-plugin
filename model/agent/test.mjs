@@ -58,6 +58,7 @@ import { presets as anthropicPresets } from '../anthropic/index.js'
 import { LoopGovernor, fingerprint } from './loop-governor.js'
 import { createKeyedLock } from './store/lock.js'
 import { KnowledgeStore } from './knowledge.js'
+import { learnThinkingCapability, clearLearnedThinking } from '../llm/caps-source.js'
 
 let passed = 0
 let failed = 0
@@ -1249,6 +1250,24 @@ await test('集成：思考自动决策（复杂度 → 厂商原生字段）', 
   await new Agent({ provider: p5, maxTurns: 2, reflect: 'off', thinkingAuto: auto, thinkingCapable: false })
     .run('请设计一个分布式架构', { ctx: { userId: 'u1', groupId: 'g1' } })
   eq(p5.hist[0].thinking, undefined, '模型不支持思考 → 不注入')
+
+  // 未显式传 thinkingCapable：按模型能力实时判定（能力表未表态 → 乐观启用；厂商拒绝学习后 → 关闭）
+  const LEARN_MODEL = 'deepseek-v4.1-flash'
+  const p6 = mk()
+  await new Agent({ provider: p6, model: LEARN_MODEL, maxTurns: 2, reflect: 'off', thinkingAuto: auto })
+    .run('请帮我设计一个分布式系统的架构，分析一致性与容错，并给出完整实现方案', { ctx: { userId: 'u1', groupId: 'g1' } })
+  eq(p6.hist[0].thinking, { type: 'enabled' }, '未表态新型号 → 乐观注入思考参数')
+  learnThinkingCapability(LEARN_MODEL, false) // 模拟厂商拒绝后的学习记录
+  const p7 = mk()
+  await new Agent({ provider: p7, model: LEARN_MODEL, maxTurns: 2, reflect: 'off', thinkingAuto: auto })
+    .run('请帮我设计一个分布式系统的架构，分析一致性与容错，并给出完整实现方案', { ctx: { userId: 'u1', groupId: 'g1' } })
+  eq(p7.hist[0].thinking, undefined, '学习为不支持后 → 同型号不再注入（无需重启）')
+  clearLearnedThinking()
+  // mediaCaps 显式覆盖（config 层最高）：未表态型号也可强关
+  const p8 = mk()
+  await new Agent({ provider: p8, model: LEARN_MODEL, mediaCaps: { thinking: false }, maxTurns: 2, reflect: 'off', thinkingAuto: auto })
+    .run('请帮我设计一个分布式系统的架构，分析一致性与容错，并给出完整实现方案', { ctx: { userId: 'u1', groupId: 'g1' } })
+  eq(p8.hist[0].thinking, undefined, 'agent.media.caps.thinking=false 强制关闭')
 
   // 小模型判档：闲聊文本但模型判 high → 采用模型（覆盖规则）
   const pCls = mk()

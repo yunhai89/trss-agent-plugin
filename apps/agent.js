@@ -1106,13 +1106,13 @@ async function _buildRuntime(scope) {
     }
   }
 
-  // 思考自动决策是否真正生效：开关只是一半——模型还须被判为「支持思考」（能力注册表/官方数据，
-  // 可用 agent.media.caps.thinking 强制覆盖）。不生效时 [chat] 日志显示 thinkingAuto=off，
-  // 这里显式提示原因，避免"面板已开但日志 off"的困惑（gpt-5 缺失曾致此问题）。
+  // 思考自动决策是否真正生效：开关只是一半——模型还须被判为「支持思考」。能力判定对未表态的
+  // 新型号默认乐观启用（厂商拒绝时 provider 自动剥离+记忆，见 model/llm/capabilities.js），
+  // 因此这里的警告只针对「明确判为不支持」的模型（注册表/官方数据/学习记录/配置）。
   const thinkingAutoWanted = !regThinking && (cfg.thinkingAuto?.enable || jev?.decisions?.thinking === true)
-  const thinkingCapable = detectCapabilities({ protocol: cfg.protocol || 'openai', model: cfg.model, caps: cfg.media?.caps }).thinking
-  if (thinkingAutoWanted && !thinkingCapable) {
-    Log.warn(`[thinking] 已开启思考自动决策，但模型 ${cfg.model} 未被识别为支持思考（classifier/预算不会下发）；如确认支持，可设 agent.media.caps.thinking=true 强开`)
+  const thinkingCapsNow = detectCapabilities({ protocol: cfg.protocol || 'openai', model: cfg.model, caps: cfg.media?.caps })
+  if (thinkingAutoWanted && !thinkingCapsNow.thinking) {
+    Log.warn(`[thinking] 已开启思考自动决策，但模型 ${cfg.model} 被判为不支持思考（不会下发思考参数）；如确认支持，可设 agent.media.caps.thinking=true 强制（厂商不接受时会在请求层自动剥离并记忆）`)
   }
 
   const agentConfig = {
@@ -1150,7 +1150,9 @@ async function _buildRuntime(scope) {
       : null,
     thinkingClassifierLlm: thinkingLlm, // 小模型判档通道（classifier=off 时不使用）
     jev, // Jev 判断模型决策层（null=未启用；见 model/agent/jev/）
-    thinkingCapable,
+    // 思考能力不在装配期固化：Agent 每次 run 按「注册表 + 运行时学习」实时判定（含乐观假定/自动纠正），
+    // 只需把 cfg.media.caps 覆盖传下去；显式布尔 thinkingCapable 仍可覆盖（测试用）。
+    mediaCaps: cfg.media?.caps || null,
     protocol: cfg.protocol || 'openai',
     preset: cfg.preset || '',
     // 上下文管理：contextWindow（token 高低水位压缩入口：contextHighRatio 触发压到 contextLowRatio；

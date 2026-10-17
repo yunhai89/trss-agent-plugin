@@ -5,6 +5,7 @@ import { createClient, extractReasoning, splitInlineThink, createThinkStripper, 
 import { Provider, toolsToList, mapToolChoice, clientOpts } from './base.js'
 import { stringifyArgs } from '../messages.js'
 import { toOpenAIContent } from './content-blocks.js'
+import { learnThinkingCapability } from '../../llm/caps-source.js'
 
 export class OpenAIProvider extends Provider {
   constructor(config = {}) {
@@ -14,6 +15,7 @@ export class OpenAIProvider extends Provider {
     this.systemRole = config.systemRole || 'system' // 'system' | 'developer'
     this._modelsNoTemp = new Set() // 自适应记忆：拒绝过 temperature 的模型（推理模型如 kimi-k2.6/r1/o1），后续不传
     this._modelsNoStructuredOutput = new Set() // 自适应记忆：拒绝过 response_format 的模型，后续只靠 prompt，本地校验兜底
+    this._modelsNoThinking = new Set() // 自适应记忆：拒绝过思考字段（thinking/reasoning_effort 等）的模型，后续不再下发（并记入能力学习层）
   }
 
   async chat(opts) {
@@ -53,10 +55,14 @@ export class OpenAIProvider extends Provider {
     if (useTemp) body.temperature = temperature
     if (top_p != null) body.top_p = top_p
     if (max_tokens != null) body.max_tokens = max_tokens
-    if (thinking) body.thinking = thinking
-    if (reasoning_effort != null) body.reasoning_effort = reasoning_effort
-    if (enable_thinking != null) body.enable_thinking = enable_thinking
-    if (thinking_budget != null) body.thinking_budget = thinking_budget
+    // 厂商拒绝过思考字段的模型（记忆）→ 不再下发，避免每轮失败重试；
+    // 能力判定对新型号默认乐观（见 model/llm/capabilities.js），这里就是那个「拒绝」的出口
+    if (!this._modelsNoThinking.has(body.model)) {
+      if (thinking) body.thinking = thinking
+      if (reasoning_effort != null) body.reasoning_effort = reasoning_effort
+      if (enable_thinking != null) body.enable_thinking = enable_thinking
+      if (thinking_budget != null) body.thinking_budget = thinking_budget
+    }
     if (stream) {
       body.stream = true
       body.stream_options = { include_usage: true }
@@ -73,8 +79,12 @@ export class OpenAIProvider extends Provider {
         delete body.temperature
         return await this._create(body, { signal, stream, onDelta, onReasoning, sessionId })
       }
-      // 自适应：厂商不认思考字段（不同兼容端字段名/支持度不一）→ 剥离思考参数重试一次（降级为不思考，不阻断对话）
+      // 自适应：厂商不认思考字段（不同兼容端字段名/支持度不一）→ 剥离思考参数重试一次（降级为不思考，不阻断对话），
+      // 并记忆该模型 + 记入能力学习层（下一轮起 Agent 侧直接判为不支持，日志同步显示 off）
       if (reasoningKeys.length && this._isUnsupportedParam(e)) {
+        this._modelsNoThinking.add(body.model)
+        learnThinkingCapability(body.model, false)
+        this.log('warn', `模型 ${body.model} 拒绝思考参数（${String(e?.message || e).slice(0, 120)}），已剥离重试并记忆为不支持思考`)
         for (const k of reasoningKeys) delete body[k]
         return await this._create(body, { signal, stream, onDelta, onReasoning, sessionId })
       }

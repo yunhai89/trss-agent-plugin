@@ -8,6 +8,9 @@
  *  - capsFromModelItem() 为纯解析函数（可离线测试）。
  *
  * 无官方数据时回退内置 REGISTRY 与 agent.media.caps 覆盖（config 优先级最高）。
+ *
+ * 学习层（learnThinkingCapability）：注册表/官方数据都没有明确表态时，思考能力默认「乐观启用」，
+ * 由 provider 在厂商真实拒绝思考字段时回调这里下调——名单式判定对新型号必然滞后，观察才是真源。
  */
 
 const TTL_MS = 6 * 3600 * 1000
@@ -22,6 +25,40 @@ export function getApiCaps(model) {
 
 /** 清空缓存（测试/诊断用） */
 export function clearApiCaps() { _cache.clear() }
+
+// ───────────────────────── 运行时学习：思考能力 ─────────────────────────
+// 背景：能力注册表靠模型名正则，永远追不上模型迭代（deepseek-v4.1-flash 只命中泛化 /deepseek/ 规则、
+// 未来新命名同理）。因此「没有明确表态」时默认乐观启用思考——由厂商在请求层用真实拒绝来纠正：
+// provider 遇「不认思考字段」错误会剥离重试一次（降级为不思考、不阻断），并把这次观察记到这里；
+// 之后 detectCapabilities 直接返回 false（不再反复失败），[chat] 日志与自动决策同步关闭。
+// 进程内记忆（进程重启/模型换端点后重新试探一次）；与官方数据同 TTL，避免一次性拒绝被永久放大。
+const _learnedThinking = new Map() // modelId -> { capable, at }
+
+/**
+ * 记录一次「思考参数是否被厂商接受」的观察（provider 层调用）。
+ * @param {string} model 模型 id
+ * @param {boolean} capable true=厂商接受思考参数；false=厂商拒绝（已剥离重试）
+ */
+export function learnThinkingCapability(model, capable) {
+  const id = String(model || '').trim()
+  if (!id) return
+  _learnedThinking.set(id, { capable: capable === true, at: Date.now() })
+}
+
+/** 同步读取已学习的思考能力；无记录/过期返回 undefined */
+export function getLearnedThinking(model) {
+  const id = String(model || '')
+  const hit = _learnedThinking.get(id)
+  if (!hit) return undefined
+  if (Date.now() - hit.at >= TTL_MS) {
+    _learnedThinking.delete(id)
+    return undefined
+  }
+  return hit.capable
+}
+
+/** 清空学习记录（测试/诊断用） */
+export function clearLearnedThinking() { _learnedThinking.clear() }
 
 /**
  * 解析 /models 单项 → 正向能力位（无信息返回 null）。

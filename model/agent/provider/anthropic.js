@@ -12,6 +12,7 @@ import { splitInlineThink, createThinkStripper, parseInlineToolCalls } from '../
 import { Provider, toolsToList, mapToolChoice, clientOpts, jsonSchemaOf } from './base.js'
 import { parseArgs } from '../messages.js'
 import { toAnthropicContent } from './content-blocks.js'
+import { learnThinkingCapability } from '../../llm/caps-source.js'
 
 function mergeContent(a, b) {
   const aa = Array.isArray(a) ? a : a ? [{ type: 'text', text: a }] : []
@@ -173,6 +174,7 @@ export class AnthropicProvider extends Provider {
   constructor(config = {}) {
     super(config)
     this.client = config.client || createClient(clientOpts(config))
+    this._modelsNoThinking = new Set() // 自适应记忆：拒绝过 thinking 字段的模型，后续不再下发（并记入能力学习层）
   }
 
   async chat(opts) {
@@ -231,7 +233,8 @@ export class AnthropicProvider extends Provider {
     if (top_p != null) body.top_p = top_p
     if (top_k != null) body.top_k = top_k
     if (stop_sequences) body.stop_sequences = stop_sequences
-    if (thinking) body.thinking = thinking
+    // 厂商拒绝过 thinking 字段的模型（记忆）→ 不下发；能力判定对新型号默认乐观，这里承接自动纠正
+    if (thinking && !this._modelsNoThinking.has(body.model)) body.thinking = thinking
     // Anthropic 扩展思考约束：budget_tokens 必须 < max_tokens（否则 400）。自动预算可能高于默认 4096，需抬高上限。
     if (thinking && thinking.type === 'enabled') {
       const budget = Number(thinking.budget_tokens) || 0
@@ -268,8 +271,11 @@ export class AnthropicProvider extends Provider {
         delete body.output_config
         return this.chat({ ...opts, response_format: undefined })
       }
-      // 兼容端不认 thinking 字段 → 剥离重试一次（降级为不思考，不阻断）
+      // 兼容端不认 thinking 字段 → 剥离重试一次（降级为不思考，不阻断），并记忆该模型 + 记入能力学习层
       if (this._isUnsupportedParam(e) && stripThinking()) {
+        this._modelsNoThinking.add(body.model)
+        learnThinkingCapability(body.model, false)
+        this.log('warn', `模型 ${body.model} 拒绝 thinking 参数（${String(e?.message || e).slice(0, 120)}），已剥离重试并记忆为不支持思考`)
         if (stream) {
           const s = await this.client.messages.create(body, { signal, sessionId })
           const stripper = onDelta ? createThinkStripper() : null
