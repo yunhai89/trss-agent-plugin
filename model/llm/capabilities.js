@@ -18,6 +18,10 @@ const PROTOCOL_DEFAULT = {
 /** 更具体的正则放前面（首匹配胜出） */
 const REGISTRY = [
   // OpenAI
+  // GPT-5：推理模型（reasoning_effort，需 thinking=true 才能启用思考自动决策）；
+  // -chat 变体系非推理模型，不判 thinking（下发 reasoning_effort 会被厂商拒绝）。
+  { match: /^gpt-5(?!.*-chat)/, caps: { vision: true, tools: true, thinking: true, json_mode: true, file: true } },
+  { match: /^gpt-5/, caps: { vision: true, tools: true, json_mode: true, file: true } },
   { match: /^gpt-4o/, caps: { vision: true, tools: true, json_mode: true, file: true } },
   { match: /^gpt-4\.1/, caps: { vision: true, tools: true, json_mode: true, file: true } },
   { match: /^gpt-4-turbo/, caps: { vision: true, tools: true, json_mode: true } },

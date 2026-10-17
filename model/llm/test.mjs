@@ -38,6 +38,12 @@ await test('capabilities：分层判定', async () => {
   eq(detectCapabilities({ protocol: 'openai', model: 'gpt-4o' }).vision, true, 'gpt-4o vision')
   eq(detectCapabilities({ protocol: 'openai', model: 'gpt-4o' }).source, 'registry', 'source=registry')
   eq(detectCapabilities({ protocol: 'anthropic', model: 'claude-sonnet-4-5' }).thinking, true, 'claude thinking')
+  // GPT-5 系：推理模型（reasoning_effort）；-chat 变体不判 thinking（否则思考自动决策被静默跳过，见 v1.26.41）
+  eq(detectCapabilities({ protocol: 'openai', model: 'gpt-5.5' }).thinking, true, 'gpt-5 thinking')
+  eq(detectCapabilities({ protocol: 'openai', model: 'gpt-5.6-luna' }).thinking, true, 'gpt-5.6-luna thinking')
+  eq(detectCapabilities({ protocol: 'openai', model: 'gpt-5.6-luna' }).vision, true, 'gpt-5.6-luna vision')
+  eq(detectCapabilities({ protocol: 'openai', model: 'gpt-5-chat-latest' }).thinking, false, 'gpt-5 -chat 变体不判 thinking')
+  eq(detectCapabilities({ protocol: 'openai', model: 'gpt-5-chat-latest' }).tools, true, 'gpt-5 -chat 变体仍走 gpt-5 规则（tools）')
   eq(detectCapabilities({ protocol: 'anthropic', model: 'claude-sonnet-4-5' }).caching, true, 'claude caching')
   eq(detectCapabilities({ protocol: 'openai', model: 'deepseek-reasoner' }).thinking, true, 'deepseek-reasoner thinking')
   eq(detectCapabilities({ protocol: 'openai', model: 'mimo-v2.5-pro' }).thinking, true, 'mimo thinking')

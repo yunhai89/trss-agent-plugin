@@ -280,7 +280,7 @@ agent:
 | `reply.narrate` | `true` | 中途播报：模型调工具时附带的思路/进展文本自动转发给用户（参考 OpenClaw） |
 | `reply.renderScale` | `3` | 回复图片渲染倍率（deviceScaleFactor，3=超清；越大越清晰但越耗内存/体积） |
 | `thinking` | 空 | 思考模式（手动），如 `{ type: "enabled", budget_tokens: 16000 }` |
-| `thinkingAuto` | 关 | 思考自动决策：`{ enable, classifier, model, timeoutMs, maxBudget, budgets:{low,medium,high}, style }`。判档方式 `classifier`：`auto`=规则不确定时用小模型判（省调用）/`always`=总是小模型/`off`=纯规则/`jev`=由 Jev 判档（需开启 Jev）；小模型带超时、缓存，失败自动回退规则，不阻塞对话。档位→厂商原生字段（MiMo/Kimi/GLM/豆包→`thinking`、DeepSeek→`thinking`+`reasoning_effort`、Qwen→`enable_thinking`+`thinking_budget`、MiniMax→`adaptive`、Anthropic→`budget_tokens`、o/GPT→`reasoning_effort`、Gemini→`thinking_level`）。模型级 `thinking` 显式覆盖仍优先 |
+| `thinkingAuto` | 关 | 思考自动决策：`{ enable, classifier, model, timeoutMs, maxBudget, budgets:{low,medium,high}, style }`。判档方式 `classifier`：`auto`=规则不确定时用小模型判（省调用）/`always`=总是小模型/`off`=纯规则/`jev`=由 Jev 判档（需开启 Jev）；小模型带超时、缓存，失败自动回退规则，不阻塞对话。档位→厂商原生字段（MiMo/Kimi/GLM/豆包→`thinking`、DeepSeek→`thinking`+`reasoning_effort`、Qwen→`enable_thinking`+`thinking_budget`、MiniMax→`adaptive`、Anthropic→`budget_tokens`、o/GPT-5→`reasoning_effort`、Gemini→`thinking_level`）。模型级 `thinking` 显式覆盖仍优先。⚠️ 该开关生效还需**模型被判为支持思考**（能力注册表/厂商官方数据判定，`agent.media.caps.thinking=true` 可强制）——不满足时自动决策静默跳过（`[chat]` 日志显示 `thinkingAuto=off`，启动时有 `[thinking]` 警告提示） |
 | `memoryLimits` | 空 | 声明式记忆字符上限，如 `{ memory: 2200, user: 1375 }` |
 | `systemPrompt` | 空 | 默认身份 system prompt（留空用富默认身份）。**优先级**：人设覆盖 > 进化产出的 agent 提示词 > 本项 > 内置默认（v1.26.30 修：此前注册表里预置的内置模板会被当成「进化产出」，导致本项写了也不生效） |
 | `chatPermission` | `master` | `#ai` 命令权限：`master`/`admin`/`owner`/`all` |
@@ -1135,7 +1135,7 @@ utils/       Config 配置读写（插件目录 + 热加载） · Log 分级日�
 
 ```
 [trigger] user=3891977697 gid=960179589 mode=at inputLen=83
-[chat]    user=3891977697 gid=960179589 conv=3 model=mimo-v2.5-pro persona=default vision=off thinking=off ctx=1116字
+[chat]    user=3891977697 gid=960179589 conv=3 model=mimo-v2.5-pro persona=default vision=off thinkingAuto=off thinking=off ctx=1116字
 [agent]   run start ... inputLen=83 msgs=21 tools=39 maxTurns=50
 [agent]   run end turns=1 stop=stop usage={in:14816,out:808} replyLen=1098 totalMs=19188
 [chat]    reply turns=1 stop=stop usage=in:14816/out:808 replyLen=1098
@@ -1158,7 +1158,7 @@ utils/       Config 配置读写（插件目录 + 热加载） · Log 分级日�
 | `model` | 当前主模型 id |
 | `persona` | 当前人设 id（`default` = 内置默认身份） |
 | `vision` | 主模型视觉能力：`on` = 直发原图 / `off` = 走视觉子模型图转文 |
-| `thinking` | 模型深度思考（reasoning）开关：`on` = 已启用 `agent.thinking` / `off` = 未启用 |
+| `thinking` | 思考状态：`thinkingAuto=on depth=.. budget=.. by=model|rule` = 自动决策已生效（`depth` 档位 / `budget` 预算 / `by` 判档来源：小模型或规则）；`thinkingAuto=off thinking=on/off` = 自动决策未生效，显示静态 `agent.thinking` 开关（面板已开自动决策却显示 off 时，多为模型未判为支持思考，见启动 `[thinking]` 警告） |
 | `ctx` | 注入 system 的「情境感知」文本长度（字）：含时间/发言者/运行能力盘点/近期群聊等；为空则不显示 |
 
 **`[agent] run start`** —— ReAct 主循环开始：

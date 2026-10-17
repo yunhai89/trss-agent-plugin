@@ -1106,6 +1106,15 @@ async function _buildRuntime(scope) {
     }
   }
 
+  // 思考自动决策是否真正生效：开关只是一半——模型还须被判为「支持思考」（能力注册表/官方数据，
+  // 可用 agent.media.caps.thinking 强制覆盖）。不生效时 [chat] 日志显示 thinkingAuto=off，
+  // 这里显式提示原因，避免"面板已开但日志 off"的困惑（gpt-5 缺失曾致此问题）。
+  const thinkingAutoWanted = !regThinking && (cfg.thinkingAuto?.enable || jev?.decisions?.thinking === true)
+  const thinkingCapable = detectCapabilities({ protocol: cfg.protocol || 'openai', model: cfg.model, caps: cfg.media?.caps }).thinking
+  if (thinkingAutoWanted && !thinkingCapable) {
+    Log.warn(`[thinking] 已开启思考自动决策，但模型 ${cfg.model} 未被识别为支持思考（classifier/预算不会下发）；如确认支持，可设 agent.media.caps.thinking=true 强开`)
+  }
+
   const agentConfig = {
     provider,
     model: cfg.model,
@@ -1136,12 +1145,12 @@ async function _buildRuntime(scope) {
     // 思考自动决策（opt-in）：按提问复杂度自动决定是否思考与深度；模型级 thinking 显式覆盖时不启用。
     // 判档方式=jev（jev.decisions.thinking）独立生效：即便未开 thinkingAuto.enable，也启用自动判档路径，
     // 由 Jev 判档、失败/低置信回退「规则+小模型」hybrid（预算取 thinkingAuto 或内置默认）。
-    thinkingAuto: (!regThinking && (cfg.thinkingAuto?.enable || jev?.decisions?.thinking === true))
+    thinkingAuto: thinkingAutoWanted
       ? { ...(cfg.thinkingAuto || {}), enable: true }
       : null,
     thinkingClassifierLlm: thinkingLlm, // 小模型判档通道（classifier=off 时不使用）
     jev, // Jev 判断模型决策层（null=未启用；见 model/agent/jev/）
-    thinkingCapable: detectCapabilities({ protocol: cfg.protocol || 'openai', model: cfg.model, caps: cfg.media?.caps }).thinking,
+    thinkingCapable,
     protocol: cfg.protocol || 'openai',
     preset: cfg.preset || '',
     // 上下文管理：contextWindow（token 高低水位压缩入口：contextHighRatio 触发压到 contextLowRatio；
