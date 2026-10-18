@@ -6,6 +6,7 @@ import {
   Orchestrator,
   SubagentSpec,
   makeSpawnSubagentTools,
+  FOCUS_PROMPTS,
   makeDelegationTool,
   normalizeSubagentResult,
   pipeline,
@@ -615,28 +616,35 @@ await test('F18：spawn 队列满时拒绝（不超并发）', async () => {
   ts.shutdown()
 })
 
-// ---------- 28. v1.29.0：子代理预算默认值（30 分钟默认 / 60 分钟封顶 / 续期调高） ----------
-await test('spawn 预算默认值：30 分钟默认、60 分钟封顶、extend 续期调高', async () => {
+// ---------- 28. v1.30.0：子代理预算默认值（60 分钟默认 / 2 小时封顶 / 结果回传上限） ----------
+await test('spawn 预算默认值：60 分钟默认、2 小时封顶、extend 续期与 resultCap 调高', async () => {
   const slow = { async chat() { await delay(400); return { role: 'assistant', content: 'ok', toolCalls: [], finishReason: 'stop', usage: null } } }
   const [spawn, check, extend] = makeSpawnSubagentTools({ provider: slow, sourceRegistry: null })
   // schema 默认/上限（模型可见的契约）
-  eq(spawn.parameters.properties.timeBudgetMs.default, 1800000, 'spawn 默认 30 分钟')
-  eq(spawn.parameters.properties.timeBudgetMs.maximum, 3600000, 'spawn 上限 60 分钟')
-  eq(check.parameters.properties.waitMs.maximum, 300000, 'check waitMs 上限 5 分钟')
-  eq(extend.parameters.properties.extraMs.default, 300000, 'extend 默认追加 5 分钟')
-  eq(extend.parameters.properties.extraMs.maximum, 1800000, 'extend 单次上限 30 分钟')
+  eq(spawn.parameters.properties.timeBudgetMs.default, 3600000, 'spawn 默认 60 分钟')
+  eq(spawn.parameters.properties.timeBudgetMs.maximum, 7200000, 'spawn 上限 2 小时')
+  eq(check.parameters.properties.waitMs.maximum, 600000, 'check waitMs 上限 10 分钟')
+  eq(check.meta.resultCap, 48000, 'check 结果回传上限 48000 字符（长报告不腰斩）')
+  eq(extend.parameters.properties.extraMs.default, 600000, 'extend 默认追加 10 分钟')
+  eq(extend.parameters.properties.extraMs.maximum, 3600000, 'extend 单次上限 60 分钟')
+  // resultCap 可按配置覆盖（apps 传 multiagent.resultCap）
+  const [, check2] = makeSpawnSubagentTools({ provider: slow, sourceRegistry: null, resultCap: 12345 })
+  eq(check2.meta.resultCap, 12345, 'resultCap 可覆盖')
+  // 子代理提示词带「不许拿过渡话当回答」规则（防"宣布去搜索然后空手结束"）
+  ok(/不要用「我接下来要搜索/.test(FOCUS_PROMPTS.research), 'research 提示词含过渡话禁令')
+  ok(Object.values(FOCUS_PROMPTS).every((p) => /要么继续调用工具，要么给出完整成稿/.test(p)), '全部 focus 提示词都含成稿要求')
   const ctx = { userId: 'u', conversationId: 'c' }
-  // 运行时钳制：不传 → 30 分钟；超上限 → 60 分钟
+  // 运行时钳制：不传 → 60 分钟；超上限 → 2 小时
   const r1 = await spawn.execute({ task: '默认预算' }, ctx)
-  eq(r1.timeBudgetMs, 1800000, '未传 timeBudgetMs → 默认 30 分钟')
+  eq(r1.timeBudgetMs, 3600000, '未传 timeBudgetMs → 默认 60 分钟')
   const r2 = await spawn.execute({ task: '超上限', timeBudgetMs: 99999999 }, ctx)
-  eq(r2.timeBudgetMs, 3600000, '超上限被钳到 60 分钟')
-  // 续期：默认 +5 分钟；超上限钳到 +30 分钟
+  eq(r2.timeBudgetMs, 7200000, '超上限被钳到 2 小时')
+  // 续期：默认 +10 分钟；超上限钳到 +60 分钟
   const r3 = await spawn.execute({ task: '续期', timeBudgetMs: 10000 }, ctx)
   const ex1 = await extend.execute({ taskId: r3.taskId }, ctx)
-  eq(ex1.newBudgetMs, 310000, 'extend 默认追加 5 分钟')
+  eq(ex1.newBudgetMs, 610000, 'extend 默认追加 10 分钟')
   const ex2 = await extend.execute({ taskId: r3.taskId, extraMs: 99999999 }, ctx)
-  eq(ex2.newBudgetMs, 2110000, 'extend 超上限被钳到 +30 分钟')
+  eq(ex2.newBudgetMs, 4210000, 'extend 超上限被钳到 +60 分钟')
   await check.execute({ taskId: r1.taskId, waitMs: 3000 }, ctx)
   await check.execute({ taskId: r2.taskId, waitMs: 3000 }, ctx)
   await check.execute({ taskId: r3.taskId, waitMs: 3000 }, ctx)

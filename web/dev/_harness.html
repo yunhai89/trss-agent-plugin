@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>panel harness (temp)</title>
+  <link rel="stylesheet" href="../assets/css/main.css">
+</head>
+<body>
+  <div id="app"></div>
+  <script src="../vendor/vue.global.prod.js"></script>
+  <script src="../assets/js/mock.js"></script>
+  <script src="../assets/js/components.js"></script>
+  <script src="../assets/js/views/config.js"></script>
+  <script>
+    window.store = { loadConfig: async () => {}, loadTools: async () => {}, loadConfigMeta: async () => ({}) }
+    window.api = { get: async () => [], put: async () => ({ ok: true }), post: async () => ({ ok: true }), del: async () => ({ ok: true }) }
+    const app = Vue.createApp({ components: { ConfigView: window.VIEWS.config }, template: '<config-view/>' })
+    window.UI.register(app)
+    window.__app = app.mount('#app')
+  </script>
+</body>
+</html>

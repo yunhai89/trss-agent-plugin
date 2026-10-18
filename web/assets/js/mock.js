@@ -127,7 +127,7 @@
     stt: { enable: false, apiBase: 'https://api.openai.com/v1', apiKey: '', model: 'whisper-1', language: 'zh' },
     multiagent: {
       enable: true, topology: 'spawn', maxConcurrent: 3, maxSpawnsPerConversation: 5,
-      workerMaxTurns: 200, workerTimeBudgetMs: 1800000, workerMaxTokens: 8192, reserveTokens: 16000,
+      workerMaxTurns: 200, workerTimeBudgetMs: 3600000, workerMaxTokens: 16384, resultCap: 48000, reserveTokens: 32000,
       workerModel: '', defaultTools: ['web_search', 'memory_search'],
     },
     sandbox: {

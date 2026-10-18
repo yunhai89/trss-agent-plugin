@@ -503,7 +503,7 @@ async function _buildRuntime(scope) {
   // 用户跑完 scripts/install-crawl4ai.sh 后发 #agents重载 即可立即启用真浏览器抓取
   try { resetCrawl4aiProbe() } catch { /* noop */ }
   // 显式打印本轮生效的步数上限：便于确认配置是否已随运行时重建生效（出现过"改了配置仍是旧值"的困惑）
-  Log.mark('[limits]', `maxTurns=${cfg.maxTurns ?? 50} · schedule.taskMaxTurns=${cfg.schedule?.taskMaxTurns ?? 200} · multiagent.workerMaxTurns=${cfg.multiagent?.workerMaxTurns ?? 200} · workerTimeBudget=${Math.round((cfg.multiagent?.workerTimeBudgetMs ?? 1800000) / 60000)}min · loop.timeBudget=${cfg.loop ? `${Math.round((cfg.loop.timeBudgetMs ?? 1800000) / 60000)}min` : 'off'}`)
+  Log.mark('[limits]', `maxTurns=${cfg.maxTurns ?? 50} · schedule.taskMaxTurns=${cfg.schedule?.taskMaxTurns ?? 200} · multiagent.workerMaxTurns=${cfg.multiagent?.workerMaxTurns ?? 200} · workerTimeBudget=${Math.round((cfg.multiagent?.workerTimeBudgetMs ?? 3600000) / 60000)}min · workerMaxTokens=${cfg.multiagent?.workerMaxTokens ?? 16384} · resultCap=${cfg.multiagent?.resultCap ?? 48000} · loop.timeBudget=${cfg.loop ? `${Math.round((cfg.loop.timeBudgetMs ?? 1800000) / 60000)}min` : 'off'}`)
   // F14：最先登记——关闭时取消并等待在途 Agent run 退出，再关依赖资源/账本（关库晚于最后写账本者）
   scope.register(async () => { try { const n = await abortAllActiveRuns(); if (n) Log.info(`[runtime] 关闭：已取消并等待 ${n} 个在途任务退出`) } catch { /* noop */ } }, { name: 'active-runs', order: -1 })
   const startupInfo = {} // 运行时构建期采集的摘要信息（供末尾统一面板输出）
@@ -1337,7 +1337,7 @@ async function _buildRuntime(scope) {
         tools: workerGranted.length ? workerReg : null,
         model: workerTarget.model || null,
         provider: workerTarget.provider, maxTurns: cfg.multiagent?.workerMaxTurns ?? 200,
-        maxTokens: cfg.multiagent?.workerMaxTokens ?? 8192,
+        maxTokens: cfg.multiagent?.workerMaxTokens ?? 16384,
       })
       const orch = new Orchestrator({
         provider, model: cfg.model,
@@ -1351,7 +1351,7 @@ async function _buildRuntime(scope) {
         name: 'orchestrate',
         description: '把复杂任务交给编排器：分解为子任务→并行委派给子代理→综合成完整结果。适合需要多路检索/分头处理再汇总的复杂任务（单步查询不必用）。',
         category: 'query',
-        meta: { subagent: true, resultCap: 8000 },
+        meta: { subagent: true, resultCap: cfg.multiagent?.resultCap ?? 48000 }, // 编排结果同样不腰斩（长报告）
         parameters: { type: 'object', required: ['task'], properties: { task: { type: 'string', description: '要编排完成的复杂任务（目标+输出格式+边界）' } }, additionalProperties: false },
         async execute(params = {}, ctx) {
           const task = String(params.task || '').trim()
@@ -1395,10 +1395,11 @@ async function _buildRuntime(scope) {
         sourceRegistry: tools,
         semaphore: new Semaphore(cfg.multiagent?.maxConcurrent ?? 3),
         maxTurns: cfg.multiagent?.workerMaxTurns ?? 200,
-        maxTokens: cfg.multiagent?.workerMaxTokens ?? 8192,
+        maxTokens: cfg.multiagent?.workerMaxTokens ?? 16384,
         defaultTools: cfg.multiagent?.defaultTools || ['web_search', 'memory_search'],
         maxSpawns: cfg.multiagent?.maxSpawnsPerConversation ?? 5,
-        defaultBudgetMs: cfg.multiagent?.workerTimeBudgetMs ?? 1800000, // 子代理时间预算默认 30 分钟（未传 timeBudgetMs 时）
+        defaultBudgetMs: cfg.multiagent?.workerTimeBudgetMs ?? 3600000, // 子代理时间预算默认 60 分钟（未传 timeBudgetMs 时）
+        resultCap: cfg.multiagent?.resultCap ?? 48000, // check_subagent 回传上限（长报告不腰斩）
         // 主循环结束后，未被 check_subagent 取走的子代理结果/失败异步回推给会话（防"后续无反应"）
         onSettle: (info, sctx) => {
           try {
@@ -1408,7 +1409,7 @@ async function _buildRuntime(scope) {
               : (info.status === 'partial' || info.status === 'waiting_input')
                 ? `⚠️ 后台子代理任务未完整完成（${info.status}）${label}：`
                 : `⚠️ 后台子代理任务${info.status === 'timeout' ? '超时' : info.status === 'cancelled' ? '已中止' : '失败'}${label}：${String(info.error || '未知原因').slice(0, 200)}`
-            const body = stripMarkers(redactSecrets((info.status === 'done' || info.status === 'partial' || info.status === 'waiting_input') ? `${head}\n${String(info.result || '').slice(0, 1800)}` : head)).trim()
+            const body = stripMarkers(redactSecrets((info.status === 'done' || info.status === 'partial' || info.status === 'waiting_input') ? `${head}\n${String(info.result || '').slice(0, 4000)}` : head)).trim()
             if (!body) return
             const send = (m) => (sctx?.e?.reply ? sctx.e.reply(m)
               : (sctx?.bot?.pickGroup && sctx.groupId) ? sctx.bot.pickGroup(sctx.groupId).sendMsg(m)

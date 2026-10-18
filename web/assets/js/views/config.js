@@ -317,11 +317,12 @@
         if (form.tempFiles.maxFiles == null) form.tempFiles.maxFiles = 500
         if (!form.multiagent) form.multiagent = {}
         if (!form.multiagent.topology) form.multiagent.topology = 'spawn'
-        // 子代理预算默认值（v1.29.0 起：轮数 200 / 时间 30 分钟；旧配置缺字段时面板显示默认值）
+        // 子代理预算默认值（v1.30.0 起：轮数 200 / 时间 60 分钟 / 单轮输出 16384 / 结果回传 48000；旧配置缺字段时面板显示默认值）
         if (form.multiagent.workerMaxTurns == null) form.multiagent.workerMaxTurns = 200
-        if (form.multiagent.workerTimeBudgetMs == null) form.multiagent.workerTimeBudgetMs = 1800000
-        if (form.multiagent.workerMaxTokens == null) form.multiagent.workerMaxTokens = 8192
-        if (form.multiagent.reserveTokens == null) form.multiagent.reserveTokens = 16000
+        if (form.multiagent.workerTimeBudgetMs == null) form.multiagent.workerTimeBudgetMs = 3600000
+        if (form.multiagent.workerMaxTokens == null) form.multiagent.workerMaxTokens = 16384
+        if (form.multiagent.resultCap == null) form.multiagent.resultCap = 48000
+        if (form.multiagent.reserveTokens == null) form.multiagent.reserveTokens = 32000
         if (!form.stt) form.stt = {}
         if (form.stt.enable == null) form.stt.enable = true
         // 统一模型配置块兜底（recall/selfReview/vision 原有；humanize/groupWorld 为新纳入字段）
@@ -1355,11 +1356,14 @@
             <cfg-row name="工具循环上限" desc="workerMaxTurns：子代理工具往返上限；须 ≥ 默认 200（旧面板 max=50 与默认值冲突，v1.29.0 修）">
               <input type="number" class="inp" style="width:90px" min="1" max="1000" v-model.number="form.multiagent.workerMaxTurns">
             </cfg-row>
-            <cfg-row name="时间预算(ms)" desc="workerTimeBudgetMs：默认 1800000=30 分钟；spawn 未传 timeBudgetMs 时用它，工具侧 60 分钟封顶；根任务预算见「推理参数」">
-              <input type="number" class="inp" style="width:130px" min="10000" max="3600000" step="60000" v-model.number="form.multiagent.workerTimeBudgetMs">
+            <cfg-row name="时间预算(ms)" desc="workerTimeBudgetMs：默认 3600000=60 分钟；spawn 未传 timeBudgetMs 时用它，工具侧 2 小时封顶；根任务预算见「推理参数」">
+              <input type="number" class="inp" style="width:130px" min="10000" max="7200000" step="60000" v-model.number="form.multiagent.workerTimeBudgetMs">
             </cfg-row>
-            <cfg-row name="单轮输出上限" desc="workerMaxTokens：子代理每个工具轮的最大输出 tokens（防报告被截断）">
-              <input type="number" class="inp" style="width:110px" min="256" max="32768" step="256" v-model.number="form.multiagent.workerMaxTokens">
+            <cfg-row name="单轮输出上限" desc="workerMaxTokens：子代理每个工具轮的最大输出 tokens（默认 16384，防长报告被 max_tokens 截断）">
+              <input type="number" class="inp" style="width:110px" min="256" max="65536" step="256" v-model.number="form.multiagent.workerMaxTokens">
+            </cfg-row>
+            <cfg-row name="结果回传上限" desc="resultCap：check_subagent/编排结果回传给主代理的字符上限（默认 48000，防长报告被腰斩）">
+              <input type="number" class="inp" style="width:110px" min="2000" max="200000" step="1000" v-model.number="form.multiagent.resultCap">
             </cfg-row>
             <cfg-row name="编排预留 tokens" desc="reserveTokens：orchestrate 启动前向根任务预留的额度，不足则拒绝启动">
               <input type="number" class="inp" style="width:120px" min="0" step="1000" v-model.number="form.multiagent.reserveTokens">

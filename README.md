@@ -485,13 +485,14 @@ Bot：（时序图图片）用户/Agent/工具 三方消息序列
 | `maxConcurrent` | `3` | 同时运行的子代理数上限（进程级 Semaphore） |
 | `maxSpawnsPerConversation` | `5` | 单次对话最多创建几个子代理（按会话计数） |
 | `workerMaxTurns` | `200` | 子代理工具循环上限 |
-| `workerTimeBudgetMs` | `1800000` | 子代理时间预算（默认 30 分钟）：`spawn_subagent` 未显式传 `timeBudgetMs` 时用它；硬顶 60 分钟，`extend_subagent` 单次最多再 +30 分钟 |
-| `workerMaxTokens` | `8192` | 子代理单轮最大输出 tokens（防报告被截断） |
-| `reserveTokens` | `16000` | `orchestrate` 启动前向根任务预留的 token 额度；不足则拒绝启动 |
+| `workerTimeBudgetMs` | `3600000` | 子代理时间预算（默认 60 分钟）：`spawn_subagent` 未显式传 `timeBudgetMs` 时用它；硬顶 2 小时，`extend_subagent` 单次最多再 +60 分钟 |
+| `workerMaxTokens` | `16384` | 子代理单轮最大输出 tokens（防长报告被 `max_tokens` 拦腰截断） |
+| `resultCap` | `48000` | 结果回传上限（字符）：`check_subagent`/编排结果给主代理的完整度（防长报告被腰斩；默认远超全局 `maxToolResultChars`） |
+| `reserveTokens` | `32000` | `orchestrate` 启动前向根任务预留的 token 额度；不足则拒绝启动 |
 | `workerModel` | 空 | 子代理模型（空=主模型；可跨厂商，填便宜模型降本） |
 | `defaultTools` | `[web_search, memory_search]` | 子代理默认可用工具（模型未指定时；仅 query 类安全工具） |
 
-> 子代理的默认值（v1.29.0 起）：**轮数 200、时间 30 分钟、单轮输出 8192**。根任务整体预算（`agent.loop.timeBudgetMs` 默认 30 分钟 / `agent.loop.tokenBudget` 默认 480000）在「推理参数」调整——想等满一个长跑子代理，根预算要不低于子代理预算。
+> 子代理的默认值（v1.30.0 起）：**轮数 200、时间 60 分钟、单轮输出 16384、结果回传 48000 字符**；任务结束后的结果保留 60 分钟（期间随时 `check_subagent` 取回）。根任务整体预算（`agent.loop.timeBudgetMs` 默认 30 分钟 / `agent.loop.tokenBudget` 默认 480000）在「推理参数」调整——想等满一个长跑子代理，根预算要不低于子代理预算。
 
 ### `agent.mcp` —— MCP 服务端
 

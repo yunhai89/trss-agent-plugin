@@ -534,9 +534,10 @@ agent:
     maxConcurrent: 3            # 同时运行的子代理数上限
     maxSpawnsPerConversation: 5 # 单次对话最多创建几个子代理（topology=spawn 时生效）
     workerMaxTurns: 200          # 子代理工具循环上限（防失控烧 token；200=给足步数，靠 loop.* 智能终止兜底）
-    workerTimeBudgetMs: 1800000  # 子代理时间预算（毫秒，默认 30 分钟；spawn_subagent 未传 timeBudgetMs 时用它，工具侧 60 分钟封顶）
-    workerMaxTokens: 8192        # 子代理单轮最大输出 tokens（防报告被截断/空产出）
-    reserveTokens: 16000         # F13：编排（orchestrate）开始前向根任务预留的 token 额度；不足则拒绝启动
+    workerTimeBudgetMs: 3600000  # 子代理时间预算（毫秒，默认 60 分钟；spawn_subagent 未传 timeBudgetMs 时用它，工具侧 2 小时封顶，可 extend 续期）
+    workerMaxTokens: 16384       # 子代理单轮最大输出 tokens（防长报告被 max_tokens 拦腰截断）
+    resultCap: 48000             # 子代理结果回传上限（字符）：check_subagent/编排结果给主代理的完整度（防长报告被腰斩）
+    reserveTokens: 32000         # F13：编排（orchestrate）开始前向根任务预留的 token 额度；不足则拒绝启动
     workerModel: ""             # 子代理模型（空=复用主模型；可跨厂商，填便宜模型可降本）
     defaultTools:               # 子代理默认可用工具（模型未指定时）
       - web_search
