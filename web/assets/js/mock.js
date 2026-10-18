@@ -37,7 +37,7 @@
     proxy: '',
     reasoningFields: ['reasoning_content'],
     maxTurns: 25,
-    loop: { maxSameAction: 2, maxConsecutiveFailures: 3, noProgressWindow: 4, timeBudgetMs: 300000, tokenBudget: 240000, finalizeGraceMs: 45000 },
+    loop: { maxSameAction: 2, maxConsecutiveFailures: 3, noProgressWindow: 4, timeBudgetMs: 1800000, tokenBudget: 480000, finalizeGraceMs: 45000 },
     temperature: 0.2,
     thinking: { type: 'enabled', budget_tokens: 16000 },
     thinkingAuto: { enable: false, classifier: 'auto', model: '', timeoutMs: 2500, maxBudget: 32768, budgets: { low: 4096, medium: 8192, high: 16384 }, style: '' },
@@ -125,6 +125,11 @@
     },
     document: { soffice: 'soffice' },
     stt: { enable: false, apiBase: 'https://api.openai.com/v1', apiKey: '', model: 'whisper-1', language: 'zh' },
+    multiagent: {
+      enable: true, topology: 'spawn', maxConcurrent: 3, maxSpawnsPerConversation: 5,
+      workerMaxTurns: 200, workerTimeBudgetMs: 1800000, workerMaxTokens: 8192, reserveTokens: 16000,
+      workerModel: '', defaultTools: ['web_search', 'memory_search'],
+    },
     sandbox: {
       mode: 'e2b', apiKey: 'e2b_demo1234567890abcdef', apiUrl: '', domain: '', sandboxUrl: '',
       template: 'base', maxTimeout: 600, defaultCwd: '/home/user',

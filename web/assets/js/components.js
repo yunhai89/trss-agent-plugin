@@ -531,7 +531,7 @@
         return { show, pos, iconEl, isLong, doShow, doHide, toggle }
       },
       template: `
-      <div class="cf-item" data-cf-row="1" :class="{full: full, dg: danger}">
+      <div class="cf-item" data-cf-row="1" :data-cf-name="name" :data-cf-desc="desc" :class="{full: full, dg: danger}">
         <div class="info">
           <div class="name">
             {{ name }}<span v-if="danger" class="pill p-rose" style="margin-left:7px;font-size:10px;padding:3px 8px">高危</span>

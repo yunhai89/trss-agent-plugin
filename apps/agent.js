@@ -503,7 +503,7 @@ async function _buildRuntime(scope) {
   // 用户跑完 scripts/install-crawl4ai.sh 后发 #agents重载 即可立即启用真浏览器抓取
   try { resetCrawl4aiProbe() } catch { /* noop */ }
   // 显式打印本轮生效的步数上限：便于确认配置是否已随运行时重建生效（出现过"改了配置仍是旧值"的困惑）
-  Log.mark('[limits]', `maxTurns=${cfg.maxTurns ?? 50} · schedule.taskMaxTurns=${cfg.schedule?.taskMaxTurns ?? 200} · multiagent.workerMaxTurns=${cfg.multiagent?.workerMaxTurns ?? 200}`)
+  Log.mark('[limits]', `maxTurns=${cfg.maxTurns ?? 50} · schedule.taskMaxTurns=${cfg.schedule?.taskMaxTurns ?? 200} · multiagent.workerMaxTurns=${cfg.multiagent?.workerMaxTurns ?? 200} · workerTimeBudget=${Math.round((cfg.multiagent?.workerTimeBudgetMs ?? 1800000) / 60000)}min · loop.timeBudget=${cfg.loop ? `${Math.round((cfg.loop.timeBudgetMs ?? 1800000) / 60000)}min` : 'off'}`)
   // F14：最先登记——关闭时取消并等待在途 Agent run 退出，再关依赖资源/账本（关库晚于最后写账本者）
   scope.register(async () => { try { const n = await abortAllActiveRuns(); if (n) Log.info(`[runtime] 关闭：已取消并等待 ${n} 个在途任务退出`) } catch { /* noop */ } }, { name: 'active-runs', order: -1 })
   const startupInfo = {} // 运行时构建期采集的摘要信息（供末尾统一面板输出）
@@ -1337,7 +1337,7 @@ async function _buildRuntime(scope) {
         tools: workerGranted.length ? workerReg : null,
         model: workerTarget.model || null,
         provider: workerTarget.provider, maxTurns: cfg.multiagent?.workerMaxTurns ?? 200,
-        maxTokens: cfg.multiagent?.workerMaxTokens ?? 4096,
+        maxTokens: cfg.multiagent?.workerMaxTokens ?? 8192,
       })
       const orch = new Orchestrator({
         provider, model: cfg.model,
@@ -1395,9 +1395,10 @@ async function _buildRuntime(scope) {
         sourceRegistry: tools,
         semaphore: new Semaphore(cfg.multiagent?.maxConcurrent ?? 3),
         maxTurns: cfg.multiagent?.workerMaxTurns ?? 200,
-        maxTokens: cfg.multiagent?.workerMaxTokens ?? 4096,
+        maxTokens: cfg.multiagent?.workerMaxTokens ?? 8192,
         defaultTools: cfg.multiagent?.defaultTools || ['web_search', 'memory_search'],
         maxSpawns: cfg.multiagent?.maxSpawnsPerConversation ?? 5,
+        defaultBudgetMs: cfg.multiagent?.workerTimeBudgetMs ?? 1800000, // 子代理时间预算默认 30 分钟（未传 timeBudgetMs 时）
         // 主循环结束后，未被 check_subagent 取走的子代理结果/失败异步回推给会话（防"后续无反应"）
         onSettle: (info, sctx) => {
           try {

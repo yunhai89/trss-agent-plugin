@@ -41,8 +41,8 @@ agent:
     maxSameAction: 2          # 同工具+相同参数连续允许次数（超出 → duplicate_action 终止，防 ping 死循环）
     maxConsecutiveFailures: 3 # 连续工具失败次数上限（超出 → consecutive_failures 终止）
     noProgressWindow: 4       # 连续 N 步无新事实 → no_progress 终止
-    timeBudgetMs: 300000       # 单次对话工作时间预算（毫秒，超出终止在途调用并进入收尾）
-    tokenBudget: 240000       # 单次对话累计「有效工作 token」上限：未命中输入 + 缓存写 + 输出；缓存命中读按 0.1x 折算。
+    timeBudgetMs: 1800000      # 单次对话工作时间预算（毫秒，超出终止在途调用并进入收尾；30 分钟，给深度研究/子代理等待留量）
+    tokenBudget: 480000       # 单次对话累计「有效工作 token」上限：未命中输入 + 缓存写 + 输出；缓存命中读按 0.1x 折算。
                              # （与真实成本对齐：长上下文整段被缓存时按全价计会几轮就误杀长任务）
                              # 语义：调模型前按「已用有效 token + 最近一轮有效增量」预检，不再启动注定超支的一轮；
                              # 收尾总结调用独立预留（不占本预算）。
@@ -534,8 +534,9 @@ agent:
     maxConcurrent: 3            # 同时运行的子代理数上限
     maxSpawnsPerConversation: 5 # 单次对话最多创建几个子代理（topology=spawn 时生效）
     workerMaxTurns: 200          # 子代理工具循环上限（防失控烧 token；200=给足步数，靠 loop.* 智能终止兜底）
-    workerMaxTokens: 4096        # 子代理单轮最大输出 tokens（防报告被截断/空产出）
-    reserveTokens: 8000         # F13：编排（orchestrate）开始前向根任务预留的 token 额度；不足则拒绝启动
+    workerTimeBudgetMs: 1800000  # 子代理时间预算（毫秒，默认 30 分钟；spawn_subagent 未传 timeBudgetMs 时用它，工具侧 60 分钟封顶）
+    workerMaxTokens: 8192        # 子代理单轮最大输出 tokens（防报告被截断/空产出）
+    reserveTokens: 16000         # F13：编排（orchestrate）开始前向根任务预留的 token 额度；不足则拒绝启动
     workerModel: ""             # 子代理模型（空=复用主模型；可跨厂商，填便宜模型可降本）
     defaultTools:               # 子代理默认可用工具（模型未指定时）
       - web_search

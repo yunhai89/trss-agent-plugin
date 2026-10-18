@@ -317,6 +317,11 @@
         if (form.tempFiles.maxFiles == null) form.tempFiles.maxFiles = 500
         if (!form.multiagent) form.multiagent = {}
         if (!form.multiagent.topology) form.multiagent.topology = 'spawn'
+        // 子代理预算默认值（v1.29.0 起：轮数 200 / 时间 30 分钟；旧配置缺字段时面板显示默认值）
+        if (form.multiagent.workerMaxTurns == null) form.multiagent.workerMaxTurns = 200
+        if (form.multiagent.workerTimeBudgetMs == null) form.multiagent.workerTimeBudgetMs = 1800000
+        if (form.multiagent.workerMaxTokens == null) form.multiagent.workerMaxTokens = 8192
+        if (form.multiagent.reserveTokens == null) form.multiagent.reserveTokens = 16000
         if (!form.stt) form.stt = {}
         if (form.stt.enable == null) form.stt.enable = true
         // 统一模型配置块兜底（recall/selfReview/vision 原有；humanize/groupWorld 为新纳入字段）
@@ -600,6 +605,7 @@
         { id: 'providers', name: '厂商配置', icon: 'tool', grad: 'var(--grad-vio)' },
         { id: 'models', name: '模型列表', icon: 'bot', grad: 'var(--grad-mint)' },
         { id: 'features', name: '功能分配', icon: 'zap', grad: 'var(--grad-honey)' },
+        { id: 'multiagent', name: '子代理', icon: 'bot', grad: 'var(--grad-vio)' },
         { id: 'selfstate', name: '自我状态', icon: 'bot', grad: 'var(--grad-rose)' },
         { id: 'reason', name: '推理参数', icon: 'zap', grad: 'var(--grad-sky)' },
         { id: 'task', name: '任务账本', icon: 'schedule', grad: 'var(--grad-vio)' },
@@ -787,7 +793,9 @@
 
       /* ── 配置搜索：在已渲染的表单里找配置项（名称 + 说明 + 当前值），定位、展开并高亮 ──
          索引不落数据层：直接读 DOM（.cf-item / .mem-row 的可见文字），囊括所有分区/子块/高级参数，
-         新增配置行零维护（无需逐行登记）。回车或「下一个」在结果间循环，命中行加 .cf-hit 由 CSS 高亮。 */
+         新增配置行零维护（无需逐行登记）。回车或「下一个」在结果间循环，命中行加 .cf-hit 由 CSS 高亮。
+         名称/说明优先读 cfg-row 的 data-cf-name/data-cf-desc：长说明（>40 字）只进「?」气泡、
+         不在 DOM 里，若只读 DOM 文字会搜不到（v1.29.0 修）；data-cf-name 同时避开「高危」徽标混进标题。 */
       const search = reactive({ q: '', hits: [], idx: 0, open: false, panel: { top: 0, left: 0, width: 320 } })
       const searchTick = () => {
         const q = String(search.q || '').trim().toLowerCase()
@@ -798,12 +806,12 @@
             const nameEl = el.querySelector('.name') || el.querySelector('b')
             const descEl = el.querySelector('.desc')
             const full = (el.textContent || '').replace(/\s+/g, ' ').trim()
-            // 名称不能含说明/「?」：命中清单标题与「需展开」判定都读它
-            let name = (nameEl?.textContent || '').replace(/\s+/g, ' ').trim()
+            let name = (el.getAttribute?.('data-cf-name') || nameEl?.textContent || '').replace(/\s+/g, ' ').trim()
             name = name.replace(/^高危\s*/, '').replace(/\s*\?+$/, '').trim()
-            // 说明块原文（结果摘要 + 匹配用）；再从全文里去掉说明，剩余即「值」面文字
-            const desc = descEl?.textContent || ''
-            const text = desc ? full.split(desc)[0].trim() : full
+            // 说明块原文（结果摘要 + 匹配用）；长说明取 data-cf-desc，短说明取行内块
+            const desc = (el.getAttribute?.('data-cf-desc') || descEl?.textContent || '').replace(/\s+/g, ' ').trim()
+            // 值面文字 = 全文去掉说明片段后的剩余（用户可搜行内可见的值）
+            const text = desc && full.includes(desc) ? full.replace(desc, ' ').replace(/\s+/g, ' ').trim() : full
             return { el, name, desc, text }
           })
           .filter((r) => (r.name + ' ' + r.desc + ' ' + r.text).toLowerCase().includes(q))
@@ -830,13 +838,14 @@
         const id = String(sec?.id || '').replace(/^cfg-/, '')
         if (id && open[id] === false) open[id] = true
       }
-      /* 高级参数折叠块由 adv.* 控制：el 落在 v-show 隐藏区时 offsetParent 为 null → 展开对应开关 */
+      /* 命中项在「高级参数」折叠块（[data-cf-adv]）里时展开对应开关。
+         不能靠 offsetParent 同步判定：分区刚展开、Vue 还没 flush 时它必然为 null，
+         会把主区的命中行也顺带展开整块高级参数（v1.29.0 修——用户跳转后高级块"自己打开"）。 */
       const expandHidden = (el) => {
         expandFor(el)
-        if (el.offsetParent === null) {
-          const id = String(el.closest('.cf-sec')?.id || '').replace(/^cfg-/, '')
-          if (id && id in adv) adv[id] = true
-        }
+        if (!el.closest('[data-cf-adv]')) return
+        const id = String(el.closest('.cf-sec')?.id || '').replace(/^cfg-/, '')
+        if (id && id in adv) adv[id] = true
       }
       const jumpTo = (i, scroll = true) => {
         const h = search.hits[i]
@@ -853,6 +862,8 @@
       const searchInput = { focus() { try { document.querySelector('#cf-search-input')?.focus?.() } catch { /* noop */ } } }
       const onSearchInput = () => { searchTick() }
       const onSearchKey = (e) => {
+        // 中文输入法组词中的 Enter（选词确认）不得当作「下一个」——否则边打字边跳转（v1.29.0 修）
+        if (e.isComposing || e.keyCode === 229) return
         if (e.key === 'Enter') { e.preventDefault(); nextHit() }
         else if (e.key === 'Escape') { clearSearch() }
       }
@@ -999,6 +1010,8 @@
         // 配置搜索
         search, onSearchInput, onSearchKey, nextHit, pickHit, clearSearchInput, clearSearch,
         hitName, hitDesc, searchInput,
+        // 供离线回归断言（web/dev/config-search-check.mjs）：折叠态与高级参数块的展开行为
+        adv, open,
       }
     },
     template: `
@@ -1316,6 +1329,50 @@
           </div></div>
         </div>
 
+        <!-- ===== 子代理编排（v1.29.0 从「多模态/工具/扩展」拆出独立卡片）===== -->
+        <div :id="'cfg-multiagent'" class="card cf-sec" :class="{open: open.multiagent}">
+          <div class="cf-sh" @click="open.multiagent = !open.multiagent">
+            <span class="ct-ico" style="background:var(--grad-vio)"><v-icon name="bot"/></span>
+            <div><div class="ct-t">子代理编排</div><div class="ct-s">spawn_subagent · 主 Agent 自主委派子任务（独立上下文 + 预算控制）</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
+          </div>
+          <div class="cf-body" v-show="open.multiagent"><div class="cf-grid">
+            <cfg-row name="启用子代理委派" desc="注册 spawn_subagent，主模型自行决定是否创建子代理">
+              <v-switch v-model="form.multiagent.enable"/>
+            </cfg-row>
+            <cfg-row name="编排拓扑" desc="spawn=异步三件套（默认，可轮询/续期）| orchestrator=同步 orchestrate 工具（分解→委派→综合）">
+              <select class="sel" style="width:150px" v-model="form.multiagent.topology">
+                <option value="spawn">spawn（异步三件套）</option>
+                <option value="orchestrator">orchestrator（同步编排）</option>
+              </select>
+            </cfg-row>
+            <cfg-row name="最大并发子代理" desc="同时运行子代理数上限（进程级 Semaphore）">
+              <input type="number" class="inp" style="width:90px" min="1" max="10" v-model.number="form.multiagent.maxConcurrent">
+            </cfg-row>
+            <cfg-row name="单次对话上限" desc="单次对话最多创建几个子代理（防失控）">
+              <input type="number" class="inp" style="width:90px" min="1" max="20" v-model.number="form.multiagent.maxSpawnsPerConversation">
+            </cfg-row>
+            <cfg-row name="工具循环上限" desc="workerMaxTurns：子代理工具往返上限；须 ≥ 默认 200（旧面板 max=50 与默认值冲突，v1.29.0 修）">
+              <input type="number" class="inp" style="width:90px" min="1" max="1000" v-model.number="form.multiagent.workerMaxTurns">
+            </cfg-row>
+            <cfg-row name="时间预算(ms)" desc="workerTimeBudgetMs：默认 1800000=30 分钟；spawn 未传 timeBudgetMs 时用它，工具侧 60 分钟封顶；根任务预算见「推理参数」">
+              <input type="number" class="inp" style="width:130px" min="10000" max="3600000" step="60000" v-model.number="form.multiagent.workerTimeBudgetMs">
+            </cfg-row>
+            <cfg-row name="单轮输出上限" desc="workerMaxTokens：子代理每个工具轮的最大输出 tokens（防报告被截断）">
+              <input type="number" class="inp" style="width:110px" min="256" max="32768" step="256" v-model.number="form.multiagent.workerMaxTokens">
+            </cfg-row>
+            <cfg-row name="编排预留 tokens" desc="reserveTokens：orchestrate 启动前向根任务预留的额度，不足则拒绝启动">
+              <input type="number" class="inp" style="width:120px" min="0" step="1000" v-model.number="form.multiagent.reserveTokens">
+            </cfg-row>
+            <cfg-row name="子代理模型" desc="已移至 模型配置（功能分配）">
+              <span class="mut2 mono" style="font-size:12px">{{ form.multiagent?.workerModel || '(留空=主模型)' }}</span>
+            </cfg-row>
+            <cfg-row full name="子代理默认工具" desc="模型未指定时的默认可用工具（仅 query 类安全）">
+              <tag-editor v-model="form.multiagent.defaultTools" placeholder="如 web_search / memory_search" :mono="true"/>
+            </cfg-row>
+          </div></div>
+        </div>
+
         <!-- ===== 自我状态 SelfState ===== -->
         <div :id="'cfg-selfstate'" class="card cf-sec" :class="{open: open.selfstate}">
           <div class="cf-sh" @click="open.selfstate = !open.selfstate">
@@ -1344,7 +1401,7 @@
             <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.selfstate = !adv.selfstate">
               {{ adv.selfstate ? '▾' : '▸' }} 高级参数
             </div>
-            <div v-show="adv.selfstate" class="full"><div class="cf-grid">
+            <div v-show="adv.selfstate" data-cf-adv class="full"><div class="cf-grid">
               <cfg-row name="群级隔离" desc="scope.isolateByGroup（强制 true 红线）" danger><v-switch v-model="form.selfState.scope.isolateByGroup" :disabled="true"/></cfg-row>
               <cfg-row name="歧义评价模型(可选)" desc="eventDetection.ambiguousIntentModelProfile（留空=主模型）"><input class="inp mono" style="width:180px" v-model="form.selfState.eventDetection.ambiguousIntentModelProfile"></cfg-row>
               <cfg-row name="事件最低置信度"><input type="number" class="inp" style="width:110px" min="0.3" max="0.95" step="0.01" v-model.number="form.selfState.eventDetection.minEventConfidence"></cfg-row>
@@ -1499,7 +1556,7 @@
             <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.reason = !adv.reason">
               {{ adv.reason ? '▾' : '▸' }} 高级参数
             </div>
-            <div v-show="adv.reason" class="full"><div class="cf-grid">
+            <div v-show="adv.reason" data-cf-adv class="full"><div class="cf-grid">
               <cfg-row name="压缩归档目录" desc="compaction.archiveDir（留空=默认 data/context-archive）">
                 <input class="inp mono" style="width:220px" v-model="form.compaction.archiveDir" placeholder="data/context-archive">
               </cfg-row>
@@ -1679,7 +1736,7 @@
             <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.evolution = !adv.evolution">
               {{ adv.evolution ? '▾' : '▸' }} 高级参数
             </div>
-            <div v-show="adv.evolution" class="full"><div class="cf-grid">
+            <div v-show="adv.evolution" data-cf-adv class="full"><div class="cf-grid">
               <cfg-row name="工具进化库路径"><input class="inp mono" style="width:220px" v-model="form.toolEvo.dbPath"></cfg-row>
               <cfg-row name="工具制品目录"><input class="inp mono" style="width:220px" v-model="form.toolEvo.artifactsDir"></cfg-row>
               <cfg-row name="stable 工具超时(ms)"><input type="number" class="inp" style="width:120px" min="100" step="500" v-model.number="form.toolEvo.runnerTimeoutMs"></cfg-row>
@@ -1735,7 +1792,7 @@
             <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.security = !adv.security">
               {{ adv.security ? '▾' : '▸' }} 高级参数
             </div>
-            <div v-show="adv.security" class="full"><div class="cf-grid">
+            <div v-show="adv.security" data-cf-adv class="full"><div class="cf-grid">
               <cfg-row name="日志目录" desc="devLog.dir（留空=默认 data/logs）"><input class="inp mono" style="width:220px" v-model="form.devLog.dir" placeholder="留空=默认"></cfg-row>
               <cfg-row class="full" name="策略类别最低角色" desc="policy.categoryMin（JSON，如 {&quot;mcp_write&quot;:1}；留空=默认）">
                 <textarea class="inp mono" style="width:100%;min-height:54px" :value="JSON.stringify(form.policy.categoryMin || {})" @change="updateJson('policy.categoryMin', $event.target.value)"></textarea>
@@ -1957,39 +2014,10 @@
               </div>
             </div>
 
-            <div class="full" style="margin-top:4px;padding-top:12px;border-top:1px dashed var(--line2)">
-              <div class="mut" style="font-size:12px;font-weight:700;margin-bottom:8px"><v-icon name="bot"/> 子代理编排（spawn_subagent · 主 Agent 自主委派子任务）</div>
-              <div class="cf-grid">
-                <cfg-row name="启用子代理委派" desc="注册 spawn_subagent，主模型自行决定是否创建子代理">
-                  <v-switch v-model="form.multiagent.enable"/>
-                </cfg-row>
-                <cfg-row name="编排拓扑" desc="spawn=异步三件套（默认，可轮询/续期）| orchestrator=同步 orchestrate 工具（分解→委派→综合）">
-                  <select class="sel" style="width:150px" v-model="form.multiagent.topology">
-                    <option value="spawn">spawn（异步三件套）</option>
-                    <option value="orchestrator">orchestrator（同步编排）</option>
-                  </select>
-                </cfg-row>
-                <cfg-row name="最大并发子代理" desc="同时运行子代理数上限（进程级 Semaphore）">
-                  <input type="number" class="inp" style="width:90px" min="1" max="10" v-model.number="form.multiagent.maxConcurrent">
-                </cfg-row>
-                <cfg-row name="单次对话上限" desc="单次对话最多创建几个子代理（防失控）">
-                  <input type="number" class="inp" style="width:90px" min="1" max="20" v-model.number="form.multiagent.maxSpawnsPerConversation">
-                </cfg-row>
-                <cfg-row name="子代理工具循环上限" desc="workerMaxTurns（防烧 token）">
-                  <input type="number" class="inp" style="width:90px" min="1" max="50" v-model.number="form.multiagent.workerMaxTurns">
-                </cfg-row>
-                <cfg-row name="子代理模型" desc="已移至 模型配置（功能分配）">
-                  <span class="mut2 mono" style="font-size:12px">{{ form.multiagent?.workerModel || '(留空=主模型)' }}</span>
-                </cfg-row>
-                <cfg-row full name="子代理默认工具" desc="模型未指定时的默认可用工具（仅 query 类安全）">
-                  <tag-editor v-model="form.multiagent.defaultTools" placeholder="如 web_search / memory_search" :mono="true"/>
-                </cfg-row>
-              </div>
-            </div>
             <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.ext = !adv.ext">
               {{ adv.ext ? '▾' : '▸' }} 高级参数
             </div>
-            <div v-show="adv.ext" class="full">
+            <div v-show="adv.ext" data-cf-adv class="full">
               <div style="font-weight:800;color:var(--ink3);font-size:12px;margin:6px 0">知识库 KB</div>
               <div class="cf-grid">
                 <cfg-row name="启用知识库" desc="kb.enable"><v-switch v-model="form.kb.enable"/></cfg-row>
@@ -2228,7 +2256,7 @@
             <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.sandbox = !adv.sandbox">
               {{ adv.sandbox ? '▾' : '▸' }} 高级参数
             </div>
-            <div v-show="adv.sandbox" class="full"><div class="cf-grid">
+            <div v-show="adv.sandbox" data-cf-adv class="full"><div class="cf-grid">
               <cfg-row name="默认工作目录"><input class="inp mono" style="width:160px" v-model="form.sandbox.defaultCwd"></cfg-row>
               <cfg-row name="沙箱 TTL(ms)"><input type="number" class="inp" style="width:130px" min="10000" step="60000" v-model.number="form.sandbox.sandboxTtlMs"></cfg-row>
               <cfg-row name="等并发名额(ms)"><input type="number" class="inp" style="width:130px" min="0" step="1000" v-model.number="form.sandbox.concurrencyWaitMs"></cfg-row>

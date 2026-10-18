@@ -29,7 +29,7 @@ const FOCUS_PROMPTS = {
 }
 
 const MIN_BUDGET_MS = 10000
-const MAX_BUDGET_MS = 600000
+const MAX_BUDGET_MS = 3600000 // 子代理单次时间预算硬顶 60 分钟（extend_subagent 显式续期可再加，属主代理决策）
 const HARD_GRACE_MS = 30000 // 预算到点（协作取消）后，最多再等这么久；仍不结算就强制判超时并释放并发槽
 const STALE_MS = 10 * 60 * 1000 // 终态任务保留时长 / 会话配额记录过期时长
 
@@ -44,10 +44,10 @@ export function makeSpawnSubagentTools({
   sourceRegistry = null,
   semaphore = null,
   maxTurns = 200,
-  maxTokens = 4096,
+  maxTokens = 8192,
   defaultTools = ['web_search', 'memory_search'],
   maxSpawns = 5,
-  defaultBudgetMs = 600000, // 默认 10 分钟（长任务如大文件处理需要）
+  defaultBudgetMs = 1800000, // 默认 30 分钟（长任务如大文件处理/深度研究需要；apps 侧可经 multiagent.workerTimeBudgetMs 覆盖）
   hardGraceMs = HARD_GRACE_MS, // 测试可调小
   minBudgetMs = MIN_BUDGET_MS,
   onSettle = null, // 任务终态且主循环本轮已结束、结果未被 check 消费时回调（异步回推给会话）
@@ -202,7 +202,7 @@ export function makeSpawnSubagentTools({
         task: { type: 'string', description: '自包含的任务描述（子代理看不到主对话）：目标+输出格式+边界。', maxLength: 2000 },
         focus: { type: 'string', description: '专注方向', enum: ['research', 'analysis', 'writing', 'code'] },
         tools: { type: 'array', items: { type: 'string' }, description: `子代理可指定工具子集；不可用工具会被拒绝并在结果里列出。默认：${_capability.granted.join('、') || '（无）'}` },
-        timeBudgetMs: { type: 'integer', description: '子代理时间预算（毫秒，默认 600000=10 分钟）。超时则 timeout 终止。', default: 600000, minimum: 10000, maximum: 600000 },
+        timeBudgetMs: { type: 'integer', description: '子代理时间预算（毫秒，默认 1800000=30 分钟）。超时则 timeout 终止。', default: 1800000, minimum: 10000, maximum: 3600000 },
       },
       additionalProperties: false,
     },
@@ -345,7 +345,7 @@ export function makeSpawnSubagentTools({
       required: ['taskId'],
       properties: {
         taskId: { type: 'string', description: 'spawn_subagent 返回的 taskId' },
-        waitMs: { type: 'integer', description: '本次等待子代理完成的最长毫秒数（默认 30000；0=不等待立即返回状态，最大 120000）', default: 30000, minimum: 0, maximum: 120000 },
+        waitMs: { type: 'integer', description: '本次等待子代理完成的最长毫秒数（默认 30000；0=不等待立即返回状态，最大 300000）', default: 30000, minimum: 0, maximum: 300000 },
       },
       additionalProperties: false,
     },
@@ -353,7 +353,7 @@ export function makeSpawnSubagentTools({
       const t = _tasks.get(String(params.taskId || ''))
       if (!t) return { error: `未找到任务 ${params.taskId}（可能已过期或不存在）` }
       if (t.scope !== scopeKeyOf(ctx)) return { error: '无权查看该任务（仅发起会话可访问）' }
-      const waitMs = Math.max(0, Math.min(120000, params.waitMs == null ? 30000 : Number(params.waitMs) || 0))
+      const waitMs = Math.max(0, Math.min(300000, params.waitMs == null ? 30000 : Number(params.waitMs) || 0))
       if (waitMs > 0) await _waitFor(t, waitMs, ctx?.signal)
       const now = Date.now()
       const waitingMs = t.startedAt ? t.startedAt - t.createdAt : now - t.createdAt
@@ -381,7 +381,7 @@ export function makeSpawnSubagentTools({
         res.error = t.error
         res.message = `子代理${t.status === 'timeout' ? '超时' : t.status === 'cancelled' ? '已取消' : '失败'}：${t.error}`
       } else if (remaining < 30000) {
-        res.hint = `⚠️ 仅剩 ${Math.round(remaining / 1000)} 秒，如需更多时间请调用 extend_subagent("${params.taskId}", 60000)`
+        res.hint = `⚠️ 仅剩 ${Math.round(remaining / 1000)} 秒，如需更多时间请调用 extend_subagent("${params.taskId}", 300000)`
       }
       return res
     },
@@ -397,7 +397,7 @@ export function makeSpawnSubagentTools({
       required: ['taskId'],
       properties: {
         taskId: { type: 'string', description: 'spawn_subagent 返回的 taskId' },
-        extraMs: { type: 'integer', description: '追加的毫秒数（默认 60000=1 分钟）', default: 60000, minimum: 10000, maximum: 300000 },
+        extraMs: { type: 'integer', description: '追加的毫秒数（默认 300000=5 分钟）', default: 300000, minimum: 10000, maximum: 1800000 },
       },
       additionalProperties: false,
     },
@@ -406,7 +406,7 @@ export function makeSpawnSubagentTools({
       if (!t) return { error: `未找到任务 ${params.taskId}` }
       if (t.scope !== scopeKeyOf(ctx)) return { error: '无权操作该任务（仅发起会话可访问）' }
       if (t.status !== 'queued' && t.status !== 'running') return { taskId: params.taskId, status: t.status, message: '任务已结束，无需续期' }
-      const extra = Math.max(10000, Math.min(300000, Number(params.extraMs) || 60000))
+      const extra = Math.max(10000, Math.min(1800000, Number(params.extraMs) || 300000))
       t.budgetMs += extra
       if (t.status === 'running') _armTimers(String(params.taskId), t) // 运行中才需重排定时器；排队中等到 running 再按新预算起算
       const remaining = t.startedAt ? Math.max(0, t.budgetMs - (Date.now() - t.startedAt)) : t.budgetMs
