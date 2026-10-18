@@ -115,6 +115,24 @@ export function makeSpawnSubagentTools({
   }
 
   /**
+   * 终态原因归一（对齐 DSH「非 completed 结果必带 diagnostic」）：取消/超时永远给出可读原因，
+   * 不再出现"未知原因"。优先级：内部计时器旗标 > 原始 abort 原因 > 异常文本。
+   * @returns {{ status:'timeout'|'cancelled'|'failed', error:string }}
+   */
+  function _describeEnd(t, reason, e) {
+    const raw = (reason && typeof reason === 'object' && typeof reason.message === 'string') ? reason.message : ''
+    const rm = raw && !/aborted/i.test(raw) ? raw : '' // 过滤 AbortController 默认 DOMException 文案
+    const em = e?.message && e.message !== 'aborted' && e.message !== 'This operation was aborted' ? e.message : ''
+    if (t._budgetAborted) {
+      return { status: 'timeout', error: rm || '子代理时间预算耗尽（到时中止；可调高 multiagent.workerTimeBudgetMs 或用 extend_subagent 续期）' }
+    }
+    if (t._hardAborted) return { status: 'timeout', error: '子代理未响应取消（硬超时）' }
+    if (t._parentCancelled) return { status: 'cancelled', error: t._cancelReason || rm || '父任务取消' }
+    if (em) return { status: 'failed', error: em }
+    return { status: 'cancelled', error: rm || '外部取消（运行时关闭/任务取消）' }
+  }
+
+  /**
    * 主/子代理状态同步：任务已终态、发起它的主循环已结束、且结果没有被 check_subagent 取走
    * （consumed=false）时，回调 onSettle 把结果/失败异步回推给会话。
    * 这样即使主循环因预算/轮次先结束，子代理的结果或失败也不会静默丢失（曾导致"后续无反应"）。
@@ -253,15 +271,33 @@ export function makeSpawnSubagentTools({
         budgetMs, abort, _budgetTimer: null, _hardTimer: null, _hardReject: null,
         _waiters: new Set(), result: null, error: null, specName,
         stopReason: null, completion: null, usage: null, turns: 0,
-        _budgetAborted: false, _hardAborted: false, _parentCancelled: false, _unlinkParent: null,
+        _budgetAborted: false, _hardAborted: false, _parentCancelled: false, _cancelReason: null, _unlinkParent: null,
         consumed: false, runEnded: false, _settled: false, deliverCtx,
       }
       _tasks.set(taskId, taskInfo)
 
-      // F12：默认附属任务随父任务取消（detach=true 时不联动，后台跨主轮次继续）。
+      // F12：附属任务随父**取消**联动（detach=true 时完全独立）。
+      // 注意与「父任务预算到点」严格区分：父任务 governor 时间预算到点只是本轮回收尾（正常结束），
+      // 不是取消——曾把 workSignal 的一切 abort 都当父取消，导致根任务预算到点的瞬间把所有在跑子代理
+      // 一起杀掉（实机：子代理"已中止：未知原因"，其实是被父预算到点牵连）。对齐 DSH：取消是显式动作
+      // （authority=user/ancestor 的 interrupt），预算耗尽 ≠ 取消；子代理按自身预算跑完，结果经 onSettle 回推。
       if (!detach && ctx?.signal) {
         const parentSignal = ctx.signal
-        const onParentAbort = () => { taskInfo._parentCancelled = true; try { abort.abort(parentSignal.reason) } catch { /* noop */ } }
+        const onParentAbort = () => {
+          const reason = parentSignal.reason
+          const kind = reason && typeof reason === 'object' ? reason.kind : undefined
+          if (kind === 'time_budget') {
+            taskInfo._parentBudgetExited = true // 仅记录：父任务进收尾，子代理继续
+            return
+          }
+          taskInfo._parentCancelled = true
+          // 只采信自有/可读的原因：AbortController 默认 DOMException（"This operation was aborted"）不进文案
+          const readable = reason instanceof Error && reason.message && !/aborted|abort/i.test(reason.message) ? reason.message : ''
+          taskInfo._cancelReason = kind === 'user'
+            ? '父任务被取消（#取消任务/主动停止）'
+            : readable || '父任务取消（外部中止）'
+          try { abort.abort(parentSignal.reason) } catch { /* noop */ }
+        }
         if (parentSignal.aborted) onParentAbort()
         else parentSignal.addEventListener('abort', onParentAbort, { once: true })
         taskInfo._unlinkParent = () => { try { parentSignal.removeEventListener('abort', onParentAbort) } catch { /* noop */ } }
@@ -301,20 +337,24 @@ export function makeSpawnSubagentTools({
           taskInfo.turns = r?.turns || 0
           taskInfo.result = r?.content || ''
           const st = r?.status || 'completed'
-          if (st === 'cancelled') taskInfo.status = taskInfo._parentCancelled ? 'cancelled' : (taskInfo._budgetAborted || taskInfo._hardAborted ? 'timeout' : 'cancelled')
-          else taskInfo.status = st === 'completed' ? 'done' : st // partial / waiting_input / failed
+          if (st === 'cancelled') {
+            const end = _describeEnd(taskInfo, abort.signal.reason, null)
+            taskInfo.status = end.status
+            taskInfo.error = taskInfo.error || end.error
+          } else {
+            taskInfo.status = st === 'completed' ? 'done' : st // partial / waiting_input / failed
+          }
           if (st === 'failed') taskInfo.error = r?.error || '子代理执行失败'
           trace.emit('delegate:end', { subagent: specName, status: taskInfo.status, stopReason: taskInfo.stopReason, resultLength: (taskInfo.result || '').length })
           Log.mark('[spawn_subagent]', `${taskId} ${taskInfo.status} len=${(taskInfo.result || '').length} stop=${taskInfo.stopReason || '-'}`)
         } catch (e) {
           taskInfo._hardReject = null
-          // 已由 shutdown 等置为终态（cancelled）时不覆盖；否则按取消/超时/失败分类
+          // 已由 shutdown 等置为终态（cancelled）时不覆盖；否则按取消/超时/失败分类（原因必填，不用裸 'aborted'）
           if (taskInfo.status === 'queued' || taskInfo.status === 'running') {
-            const cancelled = taskInfo._parentCancelled
-            const timedOut = !cancelled && (taskInfo._budgetAborted || taskInfo._hardAborted || abort.signal.aborted)
-            taskInfo.status = cancelled ? 'cancelled' : (timedOut ? 'timeout' : 'failed')
-            taskInfo.error = e?.message || String(e)
-            trace.emit('delegate:error', { subagent: specName, error: taskInfo.error, timedOut, cancelled })
+            const end = _describeEnd(taskInfo, abort.signal.reason, e)
+            taskInfo.status = end.status
+            taskInfo.error = end.error
+            trace.emit('delegate:error', { subagent: specName, error: taskInfo.error, timedOut: end.status === 'timeout', cancelled: end.status === 'cancelled' })
             Log.warn('[spawn_subagent]', `${taskId} ${taskInfo.status}:`, String(taskInfo.error || '').slice(0, 80))
           }
         } finally {

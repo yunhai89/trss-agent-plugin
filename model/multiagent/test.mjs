@@ -580,7 +580,7 @@ await test('F11：spawn partial 不标 done，保留 stopReason', async () => {
 })
 
 // ---------- 26. F12：附属子代理随父取消 ----------
-await test('F12：附属子代理随父任务取消', async () => {
+await test('F12：附属子代理随父任务取消（带可读原因，不再是"未知原因"）', async () => {
   const parent = new AbortController()
   let startedResolve
   const started = new Promise((r) => { startedResolve = r })
@@ -592,6 +592,33 @@ await test('F12：附属子代理随父任务取消', async () => {
   parent.abort()
   const r = await ts[1].execute({ taskId: spawned.taskId, waitMs: 3000 }, { userId: 'u', conversationId: 'c' })
   eq(r.status, 'cancelled', '父取消 → 子 cancelled')
+  ok(r.error && r.error.length > 0 && !/未知/.test(r.error), `取消带可读原因（实际：${r.error}）`)
+  ts.shutdown()
+})
+
+// ---------- 26b. 父任务时间预算到点（收尾）不牵连子代理 ----------
+await test('父任务时间预算到点（kind=time_budget）不取消子代理：按自身预算跑完', async () => {
+  const parent = new AbortController()
+  const provider = { async chat() { await delay(80); return { role: 'assistant', content: '完整成稿', toolCalls: [], finishReason: 'stop', usage: null } } }
+  const ts = makeSpawnSubagentTools({ provider })
+  const ctx = { userId: 'u', conversationId: 'c', signal: parent.signal }
+  const spawned = await ts[0].execute({ task: '长跑任务', timeBudgetMs: 10000 }, ctx)
+  parent.abort({ kind: 'time_budget' }) // 复刻 Agent.workCtl.abort({kind:'time_budget'})（根任务 governor 到点）
+  const r = await ts[1].execute({ taskId: spawned.taskId, waitMs: 3000 }, { userId: 'u', conversationId: 'c' })
+  eq(r.status, 'done', '父预算到点 ≠ 取消：子代理继续跑完')
+  eq(r.result, '完整成稿', '结果完整交付')
+  ts.shutdown()
+})
+
+// ---------- 26c. 预算耗尽的子代理带可读超时原因 ----------
+await test('子代理预算耗尽 → timeout 且原因可读', async () => {
+  const provider = { async chat(o) { return new Promise((_, rej) => { o.signal.addEventListener('abort', () => rej(new Error('aborted')), { once: true }) }) } }
+  const ts = makeSpawnSubagentTools({ provider, minBudgetMs: 40 })
+  const ctx = { userId: 'u', conversationId: 'c' }
+  const spawned = await ts[0].execute({ task: '跑不完', timeBudgetMs: 40 }, ctx)
+  const r = await ts[1].execute({ taskId: spawned.taskId, waitMs: 3000 }, ctx)
+  eq(r.status, 'timeout', '预算耗尽 → timeout')
+  ok(/预算/.test(String(r.error)), `超时原因指明预算（实际：${r.error}）`)
   ts.shutdown()
 })
 

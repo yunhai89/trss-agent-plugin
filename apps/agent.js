@@ -1408,7 +1408,7 @@ async function _buildRuntime(scope) {
               ? `🤖 后台子代理任务完成${label}：`
               : (info.status === 'partial' || info.status === 'waiting_input')
                 ? `⚠️ 后台子代理任务未完整完成（${info.status}）${label}：`
-                : `⚠️ 后台子代理任务${info.status === 'timeout' ? '超时' : info.status === 'cancelled' ? '已中止' : '失败'}${label}：${String(info.error || '未知原因').slice(0, 200)}`
+                : `⚠️ 后台子代理任务${info.status === 'timeout' ? '超时' : info.status === 'cancelled' ? '已中止' : '失败'}${label}：${String(info.error || '原因未记录').slice(0, 200)}`
             const body = stripMarkers(redactSecrets((info.status === 'done' || info.status === 'partial' || info.status === 'waiting_input') ? `${head}\n${String(info.result || '').slice(0, 4000)}` : head)).trim()
             if (!body) return
             const send = (m) => (sctx?.e?.reply ? sctx.e.reply(m)
