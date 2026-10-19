@@ -67,7 +67,7 @@ export async function describeImages(vision, mediaList, question, { images = tru
         desc = ''
       }
       const text = desc ? `${label}：${desc}${urlPart}` : `${label}（识别失败/为空）${urlPart}`
-      out.push(toTextMedia(mf, text))
+      out.push(desc ? toTextMedia(mf, text) : toFailedTextMedia(mf, text, vision))
       continue
     }
 
@@ -101,7 +101,7 @@ export async function describeImages(vision, mediaList, question, { images = tru
       desc = ''
     }
     const text = desc ? `${label}：${desc}${urlPart}` : `${label}（识别失败/为空）${urlPart}`
-    out.push(toTextMedia(mf, text))
+    out.push(desc ? toTextMedia(mf, text) : toFailedTextMedia(mf, text, vision))
   }
   return out
 }
@@ -118,6 +118,17 @@ function toTextMedia(mf, text) {
     resolveError: undefined,
     __visionDescribed: true,
   }
+}
+
+/**
+ * 识别失败时的文本载体：占位文案与成功路径一致，但额外带上失败原因。
+ * 原因只进 devLog（apps/agent.js 的 media 事件），不拼进给主模型的占位文本，避免把内部模型名/通道细节渲染到群聊。
+ */
+function toFailedTextMedia(mf, text, vision) {
+  const media = toTextMedia(mf, text)
+  media.__visionEmpty = true
+  media.__visionError = String(vision?.lastError || '空返回')
+  return media
 }
 
 export { VisionService, DEFAULT_DESCRIBE, DEFAULT_VIDEO_DESCRIBE }

@@ -48,6 +48,9 @@ export class VisionService {
     this.videoCapable = videoCapable !== false // 该视觉模型是否支持视频输入（caps.video；未传则保持旧行为=尝试）
     this.timeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 180_000 // 单次调用总预算：视觉通道挂起/代理黑洞时不得无限占用会话（含 provider 内部重试）
     this.logger = logger
+    // 最近一次识别失败的原因（诊断用；成功/未开始调用时清空）。describeImages 会把它带进媒体对象，
+    // 由 apps 层写入 devLog——否则"识别失败/为空"只有一行 console warn，事后无从定位。
+    this.lastError = null
   }
 
   /** 传给 provider.chat 的可选参数（thinking/temperature 仅在显式配置时下发，避免未知字段 400） */
@@ -65,6 +68,7 @@ export class VisionService {
    * @returns {Promise<string>} 描述文本；失败返回空串（调用方自行降级）
    */
   async recognize({ buffer, mime, name } = {}, { question } = {}) {
+    this.lastError = null
     if (!buffer || !mime) return ''
     const media = [{ name: name || 'image', mime, buffer, bytes: buffer.length, kind: 'image' }]
     const userText = question
@@ -83,6 +87,7 @@ export class VisionService {
         ...this._genOpts(),
       })
     } catch (e) {
+      this.lastError = String(e?.message || e)
       this.logger('warn', `[vision] 图片识别失败 ${name || ''}：${e?.message || e}`)
       return ''
     }
@@ -97,16 +102,19 @@ export class VisionService {
    * @returns {Promise<string>} 描述文本；失败返回空串
    */
   async recognizeVideo({ buffer, mime, name } = {}, { question = '', prompt = null, maxTokens = null } = {}) {
+    this.lastError = null
     if (!buffer || !mime) return ''
     // video_url 仅 OpenAI 兼容多模态端（MiMo-V2.5 等）支持；Anthropic 无视频原生块。
     // 非 openai 协议若强发 video_url，会被端点拒收（或被归一为占位文本 → 对着空视频编描述），
     // 因此直接跳过，由调用方降级为"视频（识别失败/为空）"文本占位。
     if (this.protocol !== 'openai') {
+      this.lastError = `协议 ${this.protocol} 不支持 video_url 原生块`
       this.logger('warn', `[vision] 视频识别跳过：协议 ${this.protocol} 不支持 video_url 原生块`)
       return ''
     }
     // 视觉模型本身不支持视频（caps.video=false，如纯图像 VL 模型）：不下发，避免端点拒收或对空视频编描述
     if (this.videoCapable === false) {
+      this.lastError = `视觉模型 ${this.model} 未声明视频能力`
       this.logger('warn', `[vision] 视频识别跳过：视觉模型 ${this.model} 未声明视频能力（media.caps.video / 模型列表）`)
       return ''
     }
@@ -129,6 +137,7 @@ export class VisionService {
         ...this._genOpts(),
       })
     } catch (e) {
+      this.lastError = String(e?.message || e)
       this.logger('warn', `[vision] 视频识别失败 ${name || ''}：${e?.message || e}`)
       return ''
     }
@@ -144,6 +153,7 @@ export class VisionService {
    * @returns {Promise<string>} 模型返回文本；失败返回空串
    */
   async analyze({ buffer, mime, name } = {}, prompt, { maxTokens } = {}) {
+    this.lastError = null
     if (!buffer || !mime || !prompt) return ''
     const media = [{ name: name || 'image', mime, buffer, bytes: buffer.length, kind: 'image' }]
     const content = buildUserContent(prompt, media, { protocol: this.protocol, caps: { vision: true } })
@@ -159,6 +169,7 @@ export class VisionService {
       })
     } catch (e) {
       const msg = String(e?.message || e)
+      this.lastError = msg
       // 常见配置错：视觉模型本身或代理通道不支持 image_url 块（模型可能是多模态的，但中转通道没透传）——给人话提示
       if (/image_url|multimodal|not.*support.*image|image.*input/i.test(msg)) {
         this.logger('warn', `[vision] analyze 失败 ${name || ''}：当前通道/模型拒收图片输入。两种可能：① 模型本身是文本模型；② 模型是多模态但代理通道（如 OpenCode Zen/Go）未透传 image_url——换通道直连或换该通道已验证支持图片的模型（本通道实测 mimo-v2.5 可用）`)
@@ -182,6 +193,7 @@ export class VisionService {
     if (!text) {
       // 区分"仅产出思考"（思考模型 + max_tokens 被推理耗尽，最常见）与"模型/通道根本不处理图片"
       if (reasoning) {
+        this.lastError = `仅产出思考、正文为空（finish=${res?.finishReason || '?'}，max_tokens 被推理耗尽）`
         this.logger('warn', `[vision] ${kind} ${name || ''}：仅产出思考、正文为空（finish=${res?.finishReason || '?'}，思考 ${reasoning.length} 字）——max_tokens 被推理耗尽；请给该视觉模型关思考（模型列表 thinking=off）或提高 agent.vision.maxTokens`)
       } else {
         this._warnEmpty(kind, name)
@@ -189,6 +201,7 @@ export class VisionService {
       return ''
     }
     if (reasoning && reasoning.includes(text)) {
+      this.lastError = `模型只返回了思考内容、未产出结果（finish=${res?.finishReason || '?'}）`
       this.logger('warn', `[vision] ${kind} ${name || ''}：模型只返回了思考内容、未产出结果（finish=${res?.finishReason || '?'}）——多为 max_tokens 被推理耗尽；请提高 agent.vision.maxTokens 或换非思考视觉模型`)
       return ''
     }
@@ -197,6 +210,7 @@ export class VisionService {
 
   /** 模型返回成功但内容为空——最常见的静默失败（图片发给纯文本模型 / 通道吞掉 image_url）。必须留痕。 */
   _warnEmpty(kind, name) {
+    this.lastError = '返回空：视觉模型可能不支持图片输入，或代理通道未透传 image_url'
     this.logger('warn', `[vision] ${kind} 返回空 ${name || ''}——视觉模型可能不支持图片输入，或代理通道未透传 image_url。请检查 agent.vision.model（需支持视觉）与代理/通道配置`)
   }
 }

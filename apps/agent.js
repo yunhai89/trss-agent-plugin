@@ -1276,6 +1276,11 @@ async function _buildRuntime(scope) {
     const vCaps = detectCapabilities({ protocol: vProtocol, model: vModel, caps: cfg.media?.caps })
     if (!vcfg.model && !vCaps.vision) {
       Log.warn(`[vision] 未配置 agent.vision.model，且主模型 ${vModel} 不支持视觉——视觉子模型已禁用（否则图片会被发给纯文本模型、静默失败）。如需识图/表情打标，请把 agent.vision.model 设为支持视觉的模型（如 mimo-v2.6 / qwen-vl-max / glm-4v / gpt-4o）`)
+    } else if (!vCaps.vision) {
+      // 显式配置了视觉模型、但能力判定为非多模态（如把 deepseek 文本模型填进 vision.model）：
+      // 以前只有"未配 vision.model"才告警，显式配置后静默通过——识图照发，被拒后只留 console warn，
+      // 表现为"用户发图，机器人说看不到"。启动即点名，避免再对着纯文本模型排查。
+      Log.warn(`[vision] agent.vision.model=${vModel} 能力判定为非多模态（vision=false）——若该模型/通道不透传图片输入，识图会静默降级为"识别失败/为空"。请改用支持视觉的模型（如 mimo-v2.6-flash / qwen-vl-max / glm-4v）；若该通道确实支持图片，可设 media.caps.vision=true 覆盖判定`)
     } else {
       try {
         if (!vcfg.model && cfg.model) Log.debug('[vision] vision.model 未配，复用支持视觉的主模型', vModel)
@@ -2132,6 +2137,7 @@ export class Chat extends plugin {
           status: f.resolveError || 'ok',  // ok / no_url / download_failed / limit_images / limit_size
           skipReason: f.__skipReason || null,
           visionDescribed: !!f.__visionDescribed, // 图片是否已被 vision 子模型转成文本描述
+          visionError: f.__visionError || null,   // 视觉子模型失败原因（null=成功/未走识别）；用于事后定位"识别失败/为空"
         })) }, traceId, ctx.devScope)
         // 盲媒体判定（问题1）：有图片/视频，主模型无对应能力，且未被 vision 子模型转成文本（__visionDescribed）
         const stillBlind = (pred) => files.some((f) => pred(f) && f.buffer && !f.__visionDescribed)

@@ -95,6 +95,18 @@ await test('describeImages：识别失败保留标注', async () => {
   const v = new VisionService({ provider: { async chat() { throw new Error('x') } }, model: 'v' })
   const out = await describeImages(v, [{ name: 'b.png', mime: 'image/png', buffer: PNG, kind: 'image' }], '')
   ok(out[0].buffer.toString().includes('识别失败'), '失败标注')
+  ok(out[0].__visionEmpty, '标记识别失败')
+  ok(String(out[0].__visionError).includes('x'), '记录抛错原因')
+})
+
+// ---------- 6b. describeImages：模型返回空文本 → 记录空返回原因 ----------
+await test('describeImages：模型返回空文本保留失败原因', async () => {
+  const m = mockProvider('')
+  const v = new VisionService({ provider: m.provider, model: 'v' })
+  const out = await describeImages(v, [{ name: 'c.png', mime: 'image/png', buffer: PNG, kind: 'image' }], '')
+  ok(out[0].buffer.toString().includes('识别失败'), '失败标注')
+  ok(out[0].__visionEmpty, '标记识别失败')
+  ok(String(out[0].__visionError).includes('返回空'), '原因含“返回空”')
 })
 
 // ---------- 7. describeImages：无 vision / 空列表 ----------
