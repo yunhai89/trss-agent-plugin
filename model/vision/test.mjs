@@ -2,7 +2,7 @@
  * 图片识别离线自检 —— mock provider 驱动 VisionService + describeImages。
  * 运行：node model/vision/test.mjs
  */
-import { VisionService, describeImages, DEFAULT_DESCRIBE, DEFAULT_VIDEO_DESCRIBE } from './index.js'
+import { VisionService, describeImages, DEFAULT_DESCRIBE, DEFAULT_VIDEO_DESCRIBE, resolveVisionBaseURL } from './index.js'
 
 let passed = 0
 let failed = 0
@@ -271,6 +271,14 @@ await test('recognizeVideo：自定义指令与 token 上限；默认为视频�
   eq(block2.text, DEFAULT_VIDEO_DESCRIBE, '默认用视频报告指令')
   ok(block2.text.includes('时间顺序') && !block2.text.includes('这张图片'), '含时间线要求、不再误用识图指令')
   eq(m2.received().max_tokens, 111, '未显式覆盖时用服务默认 maxTokens')
+})
+
+// ---------- 8. resolveVisionBaseURL：baseURL 复用主通道（README 承诺） ----------
+await test('resolveVisionBaseURL：默认复用主通道，显式配置优先', async () => {
+  eq(resolveVisionBaseURL({ vcfg: {}, mainBaseURL: 'https://api.commandcode.ai/provider/v1' }), 'https://api.commandcode.ai/provider/v1', '留空复用主通道')
+  eq(resolveVisionBaseURL({ vcfg: { baseURL: 'https://api.xiaomimimo.com/v1' }, mainBaseURL: 'https://api.commandcode.ai/provider/v1' }), 'https://api.xiaomimimo.com/v1', '显式 baseURL 优先')
+  eq(resolveVisionBaseURL({ vcfg: { preset: 'deepseek' }, preset: { baseURL: 'https://api.deepseek.com' }, mainBaseURL: 'https://api.commandcode.ai/provider/v1' }), 'https://api.deepseek.com', '显式 preset 优先于主通道')
+  eq(resolveVisionBaseURL({ vcfg: {}, mainBaseURL: '' }), '', '都为空时交给 provider 默认')
 })
 
 // ---------- 总结 ----------

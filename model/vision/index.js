@@ -106,6 +106,22 @@ export async function describeImages(vision, mediaList, question, { images = tru
   return out
 }
 
+/**
+ * 解析视觉子模型的 baseURL。
+ * README 承诺"默认复用主模型 protocol/baseURL/apiKey，只换 model"；但历史实现只回退 apiKey、
+ * 不回退 baseURL——主通道换过域名（如 commandcode/中转站）而 vision.baseURL 留空时，视觉请求会打到
+ * Client 默认的 https://api.openai.com/v1，用错误 key + 错误端点，必然 401/空返回，表现为"识图没反应"。
+ *
+ * 优先级：vision.baseURL > vision.preset 自带 baseURL > 主通道 baseURL > preset 默认。
+ * @param {object} p { vcfg?:object, preset?:object, mainBaseURL?:string }
+ * @returns {string} baseURL；空串表示交给 provider 默认
+ */
+export function resolveVisionBaseURL({ vcfg = {}, preset = {}, mainBaseURL = '' } = {}) {
+  if (vcfg.baseURL) return vcfg.baseURL
+  if (vcfg.preset && preset?.baseURL) return preset.baseURL
+  return mainBaseURL || preset?.baseURL || ''
+}
+
 /** 替换为文本载体媒体：buildContent 非视觉路径会按 text/plain 抽取为文本 */
 function toTextMedia(mf, text) {
   return {

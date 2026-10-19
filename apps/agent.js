@@ -72,7 +72,7 @@ import {
   groundingText, PERSONA_COMPLETION_SYSTEM, buildCompletionInput,
   parseCompletionOutput, buildLoreDraft, formatDraftSummary,
 } from '../model/persona/index.js'
-import { VisionService, describeImages } from '../model/vision/index.js'
+import { VisionService, describeImages, resolveVisionBaseURL } from '../model/vision/index.js'
 import { getStickerManager } from '../model/sticker/manager.js'
 import { isStickerOnly, stripMarkers } from '../model/sticker/parser.js'
 import { redactSecrets, redactSafeCut } from '../model/agent/redact.js'
@@ -1286,6 +1286,9 @@ async function _buildRuntime(scope) {
         if (!vcfg.model && cfg.model) Log.debug('[vision] vision.model 未配，复用支持视觉的主模型', vModel)
         const vPresetMap = vProtocol === 'anthropic' ? anthropicPresets : openaiPresets
         const vPreset = vcfg.preset ? vPresetMap[vcfg.preset] : preset
+        // 复用主通道：README 承诺"默认复用 protocol/baseURL/apiKey"。只回退 apiKey 会让
+        // vision.baseURL 留空时打到 Client 默认的 api.openai.com（换过域名的通道必失败）。
+        const vBaseURL = resolveVisionBaseURL({ vcfg, preset: vPreset, mainBaseURL: cfg.baseURL })
         // 视觉模型参数覆盖：vision.model 若在「模型列表」登记且设了 thinking/温度/maxTokens，则同样生效。
         // 否则在模型列表里给视觉模型关掉思考，视觉调用仍会按默认思考（烧推理预算、易导致判定超预算）。
         const vReg = (cfg.llmModels || []).find((m) => m && String(m.model) === String(vModel))
@@ -1298,7 +1301,7 @@ async function _buildRuntime(scope) {
         const vProvider = createProvider({
           protocol: vProtocol,
           ...vPreset,
-          ...(vcfg.baseURL ? { baseURL: vcfg.baseURL } : {}),
+          ...(vBaseURL ? { baseURL: vBaseURL } : {}),
           apiKey: vcfg.apiKey || cfg.apiKey,
           model: vModel,
           log: providerLog,
