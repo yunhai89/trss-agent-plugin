@@ -379,8 +379,7 @@ agent:
     replyMaxChars: 300     # 自动语音的最大字符数（超长按句截断，防合成出几分钟语音；0=不限）
     hdVoice: true          # 发送前高清化：响度标准化 + 存在感补偿（需宿主 ffmpeg，失败自动回退原始音频）
     indextts:
-      endpoint: ""         # 接口地址（如 http://127.0.0.1:7860；v1.2 起该端口由鉴权网关承接）
-      apiKey: ""           # 网关 API Key（可选，itts_xxx；通过网关访问必填，官方无鉴权时留空）
+      endpoint: ""         # 接口地址（如 http://127.0.0.1:7860；直连 IndexTTS 本体，无需鉴权）
       lang: ZH             # 合成语言：ZH/EN/JA/AR/ES
       timeoutMs: 300000    # 单次合成超时（毫秒；情绪描述模式每段约 10~12 秒）
       voice: ""            # 默认音色参考名（上传参考音频时命名；留空=最新上传的音色）

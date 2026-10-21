@@ -329,27 +329,27 @@ await test('TtsService：合成入口统一讲稿清洗（点播文本同样剥 
   ok(!pure.ok && /清洗后无可朗读内容/.test(pure.error), '纯代码 → 明确报错不空合成')
 })
 
-await test('IndexTtsClient：API Key（网关鉴权）——全部请求带 X-API-Key；401/429/503 提示可读', async () => {
+await test('IndexTtsClient：直连本体不带鉴权头；401/429/503 提示可读', async () => {
   const { fetchImpl, calls } = fakeGradio()
-  const client = new IndexTtsClient({ endpoint: 'http://127.0.0.1:7860', apiKey: 'itts_test_123', fetchImpl })
+  const client = new IndexTtsClient({ endpoint: 'http://127.0.0.1:7860', fetchImpl })
   await client.configInfo()
   const ref = await client.upload(Buffer.from('x'), 'a.wav')
   await client.synthesize({ text: '你好', refRemotePath: ref, mode: 'same' })
   ok(calls.reqHeaders.length >= 5, `覆盖 config/upload/join/SSE/下载（${calls.reqHeaders.length} 次请求）`)
-  ok(calls.reqHeaders.every((c) => c.headers['X-API-Key'] === 'itts_test_123'), '全部请求携带 X-API-Key')
+  ok(calls.reqHeaders.every((c) => !c.headers['X-API-Key'] && !c.headers.Authorization), '全部请求不带鉴权头')
 
   const bad = fakeGradio({ status: 401 })
   const c2 = new IndexTtsClient({ endpoint: 'http://127.0.0.1:7860', fetchImpl: bad.fetchImpl })
   const r = await c2.check()
-  ok(r.ok === false && /401/.test(r.error) && /API Key/.test(r.error), `401 提示可读（${r.error}）`)
-  ok(httpHint(429).includes('限流') && httpHint(503).includes('网关配置') && httpHint(502).includes('上游'), '错误码提示映射')
+  ok(r.ok === false && /401/.test(r.error) && /拒绝访问/.test(r.error), `401 提示可读（${r.error}）`)
+  ok(httpHint(429).includes('限流') && httpHint(503).includes('暂不可用') && httpHint(502).includes('上游'), '错误码提示映射')
 })
 
-await test('TtsService：indextts.apiKey 透传到客户端（网关鉴权链路）', async () => {
-  const { svc, calls } = makeService({ cfg: { indextts: { apiKey: 'itts_svc_key' } } })
+await test('TtsService：旧配置残留 indextts.apiKey 也不再发送鉴权头', async () => {
+  const { svc, calls } = makeService({ cfg: { indextts: { apiKey: 'itts_legacy_key' } } })
   await svc.refs.add({ name: '甲', kind: 'voice', filename: 'v.wav', buffer: Buffer.from('RIFFvoice') })
-  const r = await svc.synthesize({ text: '鉴权透传。', voice: '甲', emotionMode: 'same' })
-  ok(r.ok && calls.reqHeaders.every((c) => c.headers['X-API-Key'] === 'itts_svc_key'), '服务层请求带 apiKey')
+  const r = await svc.synthesize({ text: '直连本体。', voice: '甲', emotionMode: 'same' })
+  ok(r.ok && calls.reqHeaders.every((c) => !c.headers['X-API-Key'] && !c.headers.Authorization), '服务层请求不带 apiKey')
 })
 
 // ─────────────────────── 5.5 高清增强（发送前） ───────────────────────

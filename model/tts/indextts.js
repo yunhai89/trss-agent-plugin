@@ -1,5 +1,5 @@
 /**
- * IndexTTS-2.5 HTTP 客户端（Gradio 5.45 原生协议 + 鉴权网关，零第三方依赖）。
+ * IndexTTS-2.5 HTTP 客户端（Gradio 5.45 原生协议，零第三方依赖）。
  *
  * 协议流程（详见 /root/IndexTTS-2.5/IndexTTS-2.5_API_接入文档.md v1.3）：
  *   1) POST /gradio_api/upload            —— multipart（字段名 files）上传参考音频 → 服务端临时路径
@@ -7,10 +7,7 @@
  *   3) GET  /gradio_api/queue/data?session_hash=  —— SSE，等 process_completed（按 event_id 过滤）
  *   4) GET  /gradio_api/file=<path>       —— 下载合成结果（wav 22050Hz 单声道）
  *
- * 鉴权（v1.2 起）：对外端口由鉴权网关承接，所有请求需 API Key（可选，官方无鉴权时留空）：
- *   - 请求头 `X-API-Key: itts_xxx`（或 Authorization: Bearer，本客户端用 X-API-Key）；
- *   - 401=未授权（缺/错 key）、429=鉴权失败限流、503=网关配置故障、502/504=上游未就绪；
- *   - 不支持 URL 查询参数传 key。
+ * 直连官方本体（127.0.0.1:7860/7862）无需鉴权，本客户端不发送任何鉴权头。
  *
  * 关键约定（文档实测踩坑）：
  *  - fn_index 与情绪选项文案随服务重启/界面语言变化，**必须从 GET /config 动态解析**，不能写死；
@@ -89,12 +86,12 @@ export function vectorToObject(arr) {
   return o
 }
 
-/** 网关错误码 → 可读提示（v1.3 文档 2.1/12 节） */
+/** HTTP 错误码 → 可读提示 */
 export function httpHint(status) {
-  if (status === 401) return '鉴权失败：未带或错误的 API Key —— 在 Web 面板「语音合成 → IndexTTS」填写 itts_xxx（官方无鉴权网关时可留空）'
-  if (status === 429) return '鉴权失败次数过多被网关限流，请稍后重试'
-  if (status === 503) return '网关配置故障（keys.yaml/gateway.yaml 缺失或损坏），需在服务器修复后自动恢复'
-  if (status === 502 || status === 504) return '网关上游不可用（IndexTTS 本体未就绪或超时），请确认 indextts-p40 服务正常'
+  if (status === 401 || status === 403) return '服务拒绝访问：请确认接口地址直连 IndexTTS 本体（官方本体无需鉴权）'
+  if (status === 429) return '请求过于频繁被限流，请稍后重试'
+  if (status === 503) return '服务暂不可用（IndexTTS 本体未就绪或正在启动）'
+  if (status === 502 || status === 504) return '上游不可用（IndexTTS 本体未就绪或超时），请确认 indextts-p40 服务正常'
   return ''
 }
 
@@ -102,14 +99,12 @@ export class IndexTtsClient {
   /**
    * @param {object} opts
    *   endpoint  服务地址，如 http://127.0.0.1:7860（自动去尾部 /）
-   *   apiKey    网关 API Key（可选，itts_xxx；留空=请求不加鉴权头）
    *   timeoutMs 单次合成总超时（默认 300s；文本情绪模式每段约 10~12s）
    *   fetchImpl 注入 fetch（离线自检用）
    *   logger    (level, ...args) => void
    */
-  constructor({ endpoint, apiKey, timeoutMs = 300000, fetchImpl, logger } = {}) {
+  constructor({ endpoint, timeoutMs = 300000, fetchImpl, logger } = {}) {
     this.base = String(endpoint || '').trim().replace(/\/+$/, '')
-    this.apiKey = String(apiKey || '').trim()
     this.timeoutMs = Number(timeoutMs) || 300000
     this.fetch = fetchImpl || fetch
     this.logger = logger || (() => {})
@@ -117,13 +112,6 @@ export class IndexTtsClient {
   }
 
   get endpoint() { return this.base }
-
-  /** 鉴权头（仅配置了 key 时附加；网关文档：X-API-Key 或 Bearer 二选一） */
-  _authHeaders(extra = {}) {
-    const h = { ...extra }
-    if (this.apiKey) h['X-API-Key'] = this.apiKey
-    return h
-  }
 
   /** 动态解析 fn_index 与情绪选项文案（缓存 10 分钟；失败不缓存，下次重试） */
   async configInfo({ force = false } = {}) {
@@ -182,7 +170,7 @@ export class IndexTtsClient {
     fd.append('files', new Blob([buffer]), String(filename))
     let r
     try {
-      r = await this.fetch(`${this.base}/gradio_api/upload`, { method: 'POST', body: fd, headers: this._authHeaders(), signal: this._signal() })
+      r = await this.fetch(`${this.base}/gradio_api/upload`, { method: 'POST', body: fd, signal: this._signal() })
     } catch (e) {
       throw new Error(`IndexTTS 上传失败（网络错误）：${e?.message || e}`)
     }
@@ -233,7 +221,7 @@ export class IndexTtsClient {
     try {
       const r = await this.fetch(`${this.base}/gradio_api/queue/join`, {
         method: 'POST',
-        headers: this._authHeaders({ 'Content-Type': 'application/json' }),
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ data, fn_index: fnIndex, session_hash: sessionHash, event_data: null, trigger_id: null, batched: false }),
         signal: this._signal(),
       })
@@ -265,7 +253,7 @@ export class IndexTtsClient {
   _signal() { return AbortSignal.timeout(this.timeoutMs) }
 
   async _getJson(url) {
-    const r = await this.fetch(url, { signal: AbortSignal.timeout(Math.min(this.timeoutMs, 15000)), headers: this._authHeaders() })
+    const r = await this.fetch(url, { signal: AbortSignal.timeout(Math.min(this.timeoutMs, 15000)) })
     if (!r.ok) throw new Error(`HTTP ${r.status}${httpHint(r.status) ? ` —— ${httpHint(r.status)}` : ''}`)
     return r.json()
   }
@@ -279,7 +267,7 @@ export class IndexTtsClient {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
     try {
-      const r = await this.fetch(`${this.base}/gradio_api/queue/data?session_hash=${encodeURIComponent(sessionHash)}`, { signal: controller.signal, headers: this._authHeaders() })
+      const r = await this.fetch(`${this.base}/gradio_api/queue/data?session_hash=${encodeURIComponent(sessionHash)}`, { signal: controller.signal })
       if (!r.ok || !r.body) throw new Error(`结果流不可用（HTTP ${r.status}）${httpHint(r.status) ? ` —— ${httpHint(r.status)}` : ''}`)
       const reader = r.body.getReader()
       const dec = new TextDecoder()
@@ -324,7 +312,7 @@ export class IndexTtsClient {
     const url = out.url && /^https?:\/\//.test(out.url)
       ? out.url
       : `${this.base}/gradio_api/file=${out.path}`
-    const r = await this.fetch(url, { signal: this._signal(), headers: this._authHeaders() })
+    const r = await this.fetch(url, { signal: this._signal() })
     if (!r.ok) throw new Error(`IndexTTS 结果下载失败（HTTP ${r.status}）${httpHint(r.status) ? ` —— ${httpHint(r.status)}` : ''}`)
     return Buffer.from(await r.arrayBuffer())
   }

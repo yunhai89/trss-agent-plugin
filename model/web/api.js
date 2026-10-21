@@ -1037,6 +1037,9 @@ const ttsRefs = () => new RefLibrary({ dir: Config.path.tts })
 /** 面板展示用 TTS 现状（provider 列表/字段 schema 由 model/tts/providers.js 单一来源下发） */
 function ttsPayload() {
   const cfg = normalizeTtsConfig(Config.get().agent?.tts || {})
+  // IndexTTS 直连本体无需 key；旧配置里若残留 apiKey 也不下发给面板
+  const indexttsCfg = { ...cfg.indextts }
+  delete indexttsCfg.apiKey
   return {
     enable: cfg.enable === true,
     provider: PROVIDER_IDS.includes(cfg.provider) ? cfg.provider : 'indextts',
@@ -1049,7 +1052,7 @@ function ttsPayload() {
       const st = providerConfigured(p.id, cfg)
       return { id: p.id, name: p.name, desc: p.desc, docs: p.docs, fields: p.fields, configured: st.configured, missing: st.missing }
     }),
-    indextts: cfg.indextts,
+    indextts: indexttsCfg,
     doubao: cfg.doubao,
     minimax: cfg.minimax,
     mimo: cfg.mimo,
@@ -1068,6 +1071,7 @@ router.put('/tts/config', asyncHandler(async (req, res) => {
   const SAFE_KEY = (key) => {
     const parts = String(key).split('.')
     if (parts.some((s) => ['__proto__', 'constructor', 'prototype'].includes(s))) return false
+    if (key === 'indextts.apiKey') return false // IndexTTS 直连本体无需鉴权，配置项已移除
     return TOP_KEYS.includes(key) || /^(indextts|doubao|minimax|mimo)(\.[a-zA-Z0-9_]+)+$/.test(key)
   }
   const BOOL_KEYS = new Set(['autoReply', 'hdVoice', 'doubao.autoEmotion', 'doubao.useTagParser', 'minimax.autoEmotion', 'mimo.autoEmotion', 'indextts.autoEmotion'])
@@ -1156,10 +1160,8 @@ router.post('/tts/test', asyncHandler(async (req, res) => {
   const provider = PROVIDER_IDS.includes(req.body?.provider) ? req.body.provider : 'indextts'
   if (provider === 'indextts') {
     const endpoint = String(req.body?.endpoint || cfg.indextts.endpoint || '').trim()
-    // apiKey 显式传空字符串=按"无 key"测试（面板草稿未填时）；未传=用已保存配置
-    const apiKey = String(req.body?.apiKey != null ? req.body.apiKey : (cfg.indextts.apiKey || '')).trim()
     if (!endpoint) return fail(res, CODE.BAD, '请先填写接口地址')
-    const client = new IndexTtsClient({ endpoint, apiKey, timeoutMs: 15000 })
+    const client = new IndexTtsClient({ endpoint, timeoutMs: 15000 })
     const r = await client.check()
     if (!r.ok) return fail(res, CODE.INTERNAL, r.error || '连接失败')
     return ok(res, r, `连接成功（fn_index=${r.fnIndex}）`)

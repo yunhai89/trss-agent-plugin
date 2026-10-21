@@ -117,7 +117,6 @@ await test('PUT /api/tts/config：白名单点路径写入（enable/provider/ind
     autoReply: false,
     replyMaxChars: 123,
     hdVoice: false,
-    'indextts.apiKey': 'itts_stored_key',
   } })
   ok(r.status === 200 && r.body.code === 0, `保存成功（${r.status}/${r.body.code}）`)
   const cfg = __state.config.agent.tts
@@ -127,12 +126,11 @@ await test('PUT /api/tts/config：白名单点路径写入（enable/provider/ind
   ok(cfg.autoReply === false, '自动语音开关写入')
   ok(cfg.replyMaxChars === 123, '自动语音上限写入（数值化）')
   ok(cfg.hdVoice === false, '高清语音开关写入')
-  ok(cfg.indextts.apiKey === 'itts_stored_key', 'API Key 写入')
   const payload = await get('/api/tts')
   ok(payload.body.data.providers[0].configured === true, 'configured 状态随配置刷新')
   ok(payload.body.data.autoReply === false && payload.body.data.replyMaxChars === 123, 'payload 回读一致')
   ok(payload.body.data.hdVoice === false, 'payload 高清语音回读一致')
-  ok(payload.body.data.indextts.apiKey === 'itts_stored_key', 'payload API Key 回读一致')
+  ok(!('apiKey' in payload.body.data.indextts), 'indextts 不再下发 apiKey')
 
   // 云服务商点路径 + 数值/布尔归一 + provider 合法性
   const cloud = await put('/api/tts/config', { changes: {
@@ -163,16 +161,16 @@ await test('PUT /api/tts/config：白名单点路径写入（enable/provider/ind
   const evil = await put('/api/tts/config', { changes: { 'indextts.__proto__.x': 1, 'agent.apiKey': 'hack' } })
   ok(evil.status === 400 && evil.body.code === 4001, '越权路径被拒（4001）')
   ok(__state.config.agent.apiKey === undefined, '未写入 agent.apiKey')
+  const ixKey = await put('/api/tts/config', { changes: { 'indextts.apiKey': 'legacy' } })
+  ok(ixKey.status === 400 && ixKey.body.code === 4001, 'IndexTTS 已移除 apiKey，写入被拒')
 })
 
-await test('POST /api/tts/test：真实 HTTP 探活（成功解析 fn_index / 不可达返回 5000 / 透传 API Key）', async () => {
+await test('POST /api/tts/test：真实 HTTP 探活（成功解析 fn_index / 不可达返回 5000 / 不发鉴权头）', async () => {
   const okRes = await postJson('/api/tts/test', { endpoint: `http://127.0.0.1:${fakePort}` })
   ok(okRes.status === 200 && okRes.body.code === 0, `连通成功（${okRes.status}/${okRes.body.code}）`)
   ok(okRes.body.data?.fnIndex === 0, 'fn_index 从假服务解析')
   const keyRes = await postJson('/api/tts/test', { endpoint: `http://127.0.0.1:${fakePort}`, apiKey: 'itts_test_123' })
-  ok(keyRes.status === 200 && fakeTts.lastAuthHeader === 'itts_test_123', '测试连接透传 X-API-Key（草稿优先）')
-  const emptyKeyRes = await postJson('/api/tts/test', { endpoint: `http://127.0.0.1:${fakePort}`, apiKey: '' })
-  ok(emptyKeyRes.status === 200 && fakeTts.lastAuthHeader === '', '显式空 key=按无鉴权测试（不误用已保存 key）')
+  ok(keyRes.status === 200 && fakeTts.lastAuthHeader === '', '即使传 apiKey 也不发鉴权头（IndexTTS 直连本体）')
   const bad = await postJson('/api/tts/test', { endpoint: 'http://127.0.0.1:1' })
   ok(bad.status === 500 && bad.body.code === 5000, '不可达 5000')
 

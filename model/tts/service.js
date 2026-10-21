@@ -64,7 +64,6 @@ export const TTS_DEFAULTS = {
   hdVoice: true,          // 发送前高清化：响度标准化 + 存在感补偿（失败自动回退原始音频）
   indextts: {
     endpoint: '',
-    apiKey: '',             // 网关 API Key（可选，itts_xxx；官方无鉴权时留空）
     lang: 'ZH',
     timeoutMs: 300000,
     voice: '',              // 默认音色参考名（留空=取最新上传的 voice）
@@ -182,7 +181,7 @@ export class TtsService {
     const ix = this.cfg.indextts
     // 各服务商客户端（构造无网络请求；只在实际调用时才出网，未配置的服务商不会产生任何流量）
     this.clients = {
-      indextts: new IndexTtsClient({ endpoint: ix.endpoint, apiKey: ix.apiKey, timeoutMs: ix.timeoutMs, fetchImpl, logger: this.logger }),
+      indextts: new IndexTtsClient({ endpoint: ix.endpoint, timeoutMs: ix.timeoutMs, fetchImpl, logger: this.logger }),
       doubao: new DoubaoTtsClient({ ...this.cfg.doubao, fetchImpl, logger: this.logger }),
       minimax: new MinimaxTtsClient({ ...this.cfg.minimax, fetchImpl, logger: this.logger }),
       mimo: new MimoTtsClient({ ...this.cfg.mimo, fetchImpl, logger: this.logger }),

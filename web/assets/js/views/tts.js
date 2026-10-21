@@ -146,7 +146,7 @@
         const providerId = modal.service?.id || 'indextts'
         try {
           const body = providerId === 'indextts'
-            ? { endpoint: form.endpoint, apiKey: form.apiKey }
+            ? { endpoint: form.endpoint }
             : { provider: providerId, ...JSON.parse(JSON.stringify(form)) }
           const r = await window.api.post('/tts/test', body)
           testState.result = {
@@ -300,14 +300,11 @@
         <v-modal v-if="modal.show" :title="(modal.service?.name || 'TTS 服务') + ' · 配置'" icon="music" width="min(780px,94vw)" @close="modal.show = false">
           <div v-if="modal.service?.id === 'indextts'" class="cf-grid">
             <div class="cf-sub full"><v-icon name="link"/> 接口</div>
-            <cfg-row full name="接口地址" desc="IndexTTS 服务地址（如 http://127.0.0.1:7860；v1.2 起该端口由鉴权网关承接）">
+            <cfg-row full name="接口地址" desc="IndexTTS 服务地址（如 http://127.0.0.1:7860；直连官方本体，无需鉴权）">
               <div class="row g6">
                 <input class="inp mono" style="width:320px" v-model="form.endpoint" placeholder="http://127.0.0.1:7860">
                 <button class="btn b-line b-sm" @click="testConn" :disabled="testState.running">{{ testState.running ? '测试中…' : '测试连接' }}</button>
               </div>
-            </cfg-row>
-            <cfg-row full name="API Key" desc="鉴权网关的 API Key（itts_xxx）——请求头 X-API-Key；官方无鉴权网关时留空">
-              <input class="inp mono" style="width:320px" v-model="form.apiKey" placeholder="itts_xxx（可留空）" autocomplete="off">
             </cfg-row>
             <cfg-row full name="连接状态" desc="测试只读取服务 /config 并动态解析 fn_index 与情绪选项（不做真实合成）">
               <span v-if="testState.result" class="pill" :class="testState.result.ok ? 'p-green' : 'p-rose'">{{ testState.result.msg }}</span>
