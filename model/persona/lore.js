@@ -31,8 +31,10 @@ function looksLikeCron(s) {
 const CAP = { facts: 12000, systemPromptPatch: 4000, rawNotes: 20000, summary: 300 }
 
 /** 资料安全闸：拒绝把越狱/提示注入指令写进人设资料（会被注入身份层）。
- *  覆盖所有最终会被 groundingText 渲染进 system 的字段（含 sources/canonical）。 */
-export function assertSafeLore(lore) {
+ *  覆盖所有最终会被 groundingText 渲染进 system 的字段（含 sources/canonical）。
+ *  skip=true 为高危免检（配置 agent.persona.skipInjectionCheck），仅用于用户完全信任的资料。 */
+export function assertSafeLore(lore, { skip = false } = {}) {
+  if (skip) return
   const canon = lore?.canonical || {}
   const srcText = (lore?.sources || []).map((s) => `${s?.title || ''} ${s?.ref || ''}`).join('\n')
   const text = [
@@ -43,7 +45,7 @@ export function assertSafeLore(lore) {
   const { allowed, score, hits } = assessPersonaPrompt(text)
   if (allowed) return
   const cats = [...new Set(hits.map((h) => h.cat))].join(',')
-  const err = new Error('人设资料包含疑似越狱/提示注入指令（要求忽略安全、禁止拒答或绕过审批等），已拒绝保存；请检查来源后重试。')
+  const err = new Error('人设资料包含疑似越狱/提示注入指令（要求忽略安全、禁止拒答或绕过审批等），已拒绝保存；请检查来源后重试。如确认内容可信，可在 Web 配置中心 → 权限/安全 开启「人设注入检测免检」（agent.persona.skipInjectionCheck，高危）。')
   err.code = 'persona_injection'
   err.score = score
   err.categories = cats
@@ -128,11 +130,13 @@ export function groundingText(lore) {
 }
 
 export class PersonaLore {
-  constructor({ dir, kv = null, embedFn = null } = {}) {
+  constructor({ dir, kv = null, embedFn = null, skipInjectionCheck = false } = {}) {
     if (!dir) throw new Error('PersonaLore 需要 dir')
     this.dir = dir
     this.kv = kv
     this.embedFn = embedFn
+    // 与人设库共用 agent.persona.skipInjectionCheck：资料同样会被注入身份层
+    this.skipInjectionCheck = skipInjectionCheck === true
     this.scheduler = null
     this._onRefresh = null
     this._jobs = new Map() // id -> scheduler job（定时刷新补齐）
@@ -189,7 +193,7 @@ export class PersonaLore {
       updatedAt: Date.now(),
     }
     const lore = normalizeLore(sid, merged)
-    assertSafeLore(lore)
+    assertSafeLore(lore, { skip: this.skipInjectionCheck })
     fs.writeFileSync(this._file(sid), JSON.stringify(lore, null, 2))
     return lore
   }
@@ -211,7 +215,7 @@ export class PersonaLore {
         createdAt: prev?.createdAt || Date.now(),
         updatedAt: Date.now(),
       })
-      assertSafeLore(draft)
+      assertSafeLore(draft, { skip: this.skipInjectionCheck })
       fs.writeFileSync(this._draftFile(sid), JSON.stringify(draft, null, 2))
       return draft
     }

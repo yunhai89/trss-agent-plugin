@@ -12,7 +12,7 @@
  * 人设作为 Agent 的"身份层"替换默认 systemPrompt；工具/记忆/防护仍照常追加。
  */
 
-import { PersonaStore, slugify, normalizePersona } from './store.js'
+import { PersonaStore, slugify, normalizePersona, PERSONA_MAX_NAME_LEN, PERSONA_MAX_PROMPT_LEN } from './store.js'
 import { PersonaService } from './service.js'
 import { BUILTIN_PERSONAS } from './defaults.js'
 import { PersonaLore, normalizeLore, normalizeCanonical, normalizeSources, groundingText, assertSafeLore } from './lore.js'
@@ -26,6 +26,8 @@ export {
   PersonaAdoptionQueue,
   slugify,
   normalizePersona,
+  PERSONA_MAX_NAME_LEN,
+  PERSONA_MAX_PROMPT_LEN,
   normalizeLore,
   normalizeCanonical,
   normalizeSources,

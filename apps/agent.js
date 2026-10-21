@@ -69,6 +69,7 @@ import { loadToolPacks } from '../model/toolkit/index.js'
 import { createSearchManager, makeSearchTools } from '../model/search/index.js'
 import {
   PersonaStore, PersonaService, PersonaLore, PersonaAdoptionQueue,
+  PERSONA_MAX_NAME_LEN, PERSONA_MAX_PROMPT_LEN,
   groundingText, PERSONA_COMPLETION_SYSTEM, buildCompletionInput,
   parseCompletionOutput, buildLoreDraft, formatDraftSummary,
 } from '../model/persona/index.js'
@@ -599,7 +600,10 @@ async function _buildRuntime(scope) {
     scan: threatScanFn, // 声明式记忆写入注入扫描
   })
   const personaDir = Config.path.personas
-  const personaStore = new PersonaStore({ dir: personaDir })
+  // 高危免检开关（默认关）：开启后新建/编辑人设、人设资料不再做越狱/注入检测
+  const skipPersonaInjectionCheck = cfg.persona?.skipInjectionCheck === true
+  if (skipPersonaInjectionCheck) Log.warn('[persona] 已开启人设注入检测免检（agent.persona.skipInjectionCheck=true）：人设/资料内容将不做越狱/注入校验，请确认来源可信')
+  const personaStore = new PersonaStore({ dir: personaDir, skipInjectionCheck: skipPersonaInjectionCheck })
   const K = getKv()
   // 用量统计采集器：对话/工具用量按本地日聚合写 KV（Web 端 overview 趋势主数据源，替代读日志的不稳定路径）
   const usageStats = createUsageStats({ kv: K, logger: Log })
@@ -670,6 +674,7 @@ async function _buildRuntime(scope) {
   const personaLore = new PersonaLore({
     dir: path.resolve(PLUGIN_ROOT, cfg.personaLore?.dir || 'data/persona-lore'),
     kv: K, embedFn,
+    skipInjectionCheck: skipPersonaInjectionCheck,
   })
   personaLore.attachScheduler(scheduler) // 长尾/资料定时刷新复用 KB 同一 scheduler
   scope.register(() => { try { personaLore?.shutdown?.() } catch { /* noop */ } }, { name: 'personaLore', order: 25 })
@@ -3780,7 +3785,7 @@ export class Chat extends plugin {
     if (!name || systemPrompt.length < 2) return this.e.reply('名称或人设内容过短'), true
     // 配额（2026-10-17 审计 M4）：命令无 permission（README 就这么写的：任何人可建自己的人设），
     // 但 add() 原先只查重不设上限 —— 单用户可无限刷盘，且 list()/resolve() 每轮全目录解析会被拖慢。
-    const MAX_NAME = 40, MAX_PROMPT = 8000, MAX_PER_USER = 20
+    const MAX_NAME = PERSONA_MAX_NAME_LEN, MAX_PROMPT = PERSONA_MAX_PROMPT_LEN, MAX_PER_USER = 20
     if (name.length > MAX_NAME) return this.e.reply(`人设名称过长（${name.length} > ${MAX_NAME} 字）`), true
     if (systemPrompt.length > MAX_PROMPT) return this.e.reply(`人设内容过长（${systemPrompt.length} > ${MAX_PROMPT} 字），请精简后重试`), true
     const rt = await getRuntime()

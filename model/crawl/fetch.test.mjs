@@ -130,7 +130,7 @@ await test('Cookie Jar：跳转逐跳携带 Set-Cookie（跨跳会话保持）�
     if (opts.headers?.Cookie) return resp({ body: HTML })
     return resp({
       status: 302, headers: { location: '/x' },
-      combined: 'a=1; Path=/, b=2; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=/',
+      combined: 'a=1; Path=/, b=2; Expires=Wed, 21 Oct 2037 07:28:00 GMT; Path=/',
     })
   }
   const r2 = await crawlWithFetch('https://y.test/', { fetcher: f2, retries: 1, jar: jar2 })

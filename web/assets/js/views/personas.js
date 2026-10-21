@@ -200,8 +200,8 @@
           </div>
           <div class="field" style="grid-column:1/-1"><label class="f-label">开场白</label><input class="inp" v-model="editor.form.greeting"></div>
           <div class="field" style="grid-column:1/-1">
-            <label class="f-label">systemPrompt</label>
-            <textarea class="txa" style="min-height:130px" v-model="editor.form.systemPrompt"></textarea>
+            <label class="f-label">systemPrompt（≤20000 字）</label>
+            <textarea class="txa" style="min-height:130px" v-model="editor.form.systemPrompt" maxlength="20000"></textarea>
           </div>
         </div>
         <template #foot>

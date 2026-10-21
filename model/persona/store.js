@@ -16,17 +16,22 @@ import { assessPersonaPrompt } from '../agent/guard.js'
 // 第 7 轮 M4：人设原本无任何条数/长度上限 —— 单用户可无限刷盘，list()/resolve() 每轮全目录解析
 // 也会被越拖越慢。这里在 store 层补纵深防御（命令层另有每次创建的配额检查）。
 const MAX_CUSTOM_PERSONAS = 500
-const MAX_NAME_LEN = 40
-const MAX_PROMPT_LEN = 8000
+export const PERSONA_MAX_NAME_LEN = 40
+// v1.32.0：自建角色卡正文上限 8000 → 20000（长设定/世界观角色卡常超 8k；仍保留写盘上限防刷盘）
+export const PERSONA_MAX_PROMPT_LEN = 20000
 const MAX_TEXT_LEN = 500
 const LIST_TTL_MS = 5000 // list() 缓存窗口（写入即失效）
 
-/** 人设内容安全闸：拒绝把用于解除限制 / 抑制拒答 / 绕过审批的指令写进身份层 */
-export function assertSafePersonaPrompt(systemPrompt) {
+/**
+ * 人设内容安全闸：拒绝把用于解除限制 / 抑制拒答 / 绕过审批的指令写进身份层。
+ * skip=true 为高危免检（配置 agent.persona.skipInjectionCheck），仅用于用户完全信任的自建角色卡。
+ */
+export function assertSafePersonaPrompt(systemPrompt, { skip = false } = {}) {
+  if (skip) return
   const { allowed, score, hits } = assessPersonaPrompt(systemPrompt)
   if (allowed) return
   const cats = [...new Set(hits.map((h) => h.cat))].join(',')
-  const err = new Error('人设内容包含疑似越狱/提示注入指令（要求忽略安全、禁止拒答或绕过审批等），已拒绝保存；请移除相关指令后重试。')
+  const err = new Error('人设内容包含疑似越狱/提示注入指令（要求忽略安全、禁止拒答或绕过审批等），已拒绝保存；请移除相关指令后重试。如确认内容可信，可在 Web 配置中心 → 权限/安全 开启「人设注入检测免检」（agent.persona.skipInjectionCheck，高危）。')
   err.code = 'persona_injection'
   err.score = score
   err.categories = cats
@@ -38,8 +43,8 @@ export function assertSafePersonaPrompt(systemPrompt) {
  * 读取路径（_readFile）保持宽容，否则历史遗留的超长文件会被判非法而"从列表里消失"。
  */
 export function assertPersonaSize(p) {
-  if (String(p.name || '').length > MAX_NAME_LEN) throw new Error(`人设名称过长（${String(p.name).length} > ${MAX_NAME_LEN} 字）`)
-  if (String(p.systemPrompt || '').length > MAX_PROMPT_LEN) throw new Error(`人设内容过长（${String(p.systemPrompt).length} > ${MAX_PROMPT_LEN} 字），请精简后重试`)
+  if (String(p.name || '').length > PERSONA_MAX_NAME_LEN) throw new Error(`人设名称过长（${String(p.name).length} > ${PERSONA_MAX_NAME_LEN} 字）`)
+  if (String(p.systemPrompt || '').length > PERSONA_MAX_PROMPT_LEN) throw new Error(`人设内容过长（${String(p.systemPrompt).length} > ${PERSONA_MAX_PROMPT_LEN} 字），请精简后重试`)
   if (String(p.description || '').length > MAX_TEXT_LEN) throw new Error(`人设简介过长（> ${MAX_TEXT_LEN} 字）`)
   if (String(p.greeting || '').length > MAX_TEXT_LEN) throw new Error(`人设问候语过长（> ${MAX_TEXT_LEN} 字）`)
   if (String(p.avatar || '').length > MAX_TEXT_LEN) throw new Error(`人设头像地址过长（> ${MAX_TEXT_LEN} 字）`)
@@ -80,9 +85,11 @@ export function normalizePersona(input, { builtin = false, creator } = {}) {
 }
 
 export class PersonaStore {
-  constructor({ dir } = {}) {
+  constructor({ dir, skipInjectionCheck = false } = {}) {
     if (!dir) throw new Error('PersonaStore 需要 dir')
     this.dir = dir
+    // 高危免检开关（agent.persona.skipInjectionCheck）：仅关闭「越狱/注入」闸，长度/条数闸照常
+    this.skipInjectionCheck = skipInjectionCheck === true
     this._listCache = null // { at, items }：短 TTL 缓存，写路径立即失效（第 7 轮 M4）
     try { fs.mkdirSync(dir, { recursive: true }) } catch { /* noop */ }
   }
@@ -174,7 +181,7 @@ export class PersonaStore {
   /** 新增自定义人设；id 与内置/已有冲突则报错 */
   add(input, { creator } = {}) {
     const p = normalizePersona(input, { builtin: false, creator })
-    assertSafePersonaPrompt(p.systemPrompt)
+    assertSafePersonaPrompt(p.systemPrompt, { skip: this.skipInjectionCheck })
     assertPersonaSize(p)
     if (this._customFiles().length >= MAX_CUSTOM_PERSONAS) {
       throw new Error(`自定义人设数量已达上限（${MAX_CUSTOM_PERSONAS} 个），请先 #删除人设 再新建`)
@@ -194,7 +201,7 @@ export class PersonaStore {
     if (!existing) throw new Error(`人设「${id}」不存在`)
     if (existing.builtin) throw new Error(`内置人设「${existing.name}」不可修改`)
     const merged = normalizePersona({ ...existing, ...patch, id: existing.id, createdAt: existing.createdAt }, { builtin: false })
-    assertSafePersonaPrompt(merged.systemPrompt)
+    assertSafePersonaPrompt(merged.systemPrompt, { skip: this.skipInjectionCheck })
     assertPersonaSize(merged)
     fs.writeFileSync(this._fileOf(existing.id), JSON.stringify(merged, null, 2))
     this._invalidate()

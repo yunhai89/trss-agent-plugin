@@ -378,7 +378,10 @@ perception:
 ```yaml
 persona:
   dir: ""   # 自定义人设目录（默认 data/agents-plugin/personas）
+  skipInjectionCheck: false   # ⚠️ 高危：跳过人设/人设资料落盘前的「越狱/提示注入」检测（默认关）
 ```
+
+> 自建人设正文（systemPrompt）上限 **20000 字**。默认会拒绝含「忽略安全 / 禁止拒答 / 绕过审批」等越狱/注入指令的角色卡（报错 `persona_injection`）；若确认是自建可信内容且被误判，可临时开启 `skipInjectionCheck` 保存后再关闭——已保存内容不会再次扫描。开启期间内容会原样进入 system 身份层，风险自负。
 
 ### `agent.search` —— 统一搜索 🧪早期
 

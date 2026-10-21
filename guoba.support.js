@@ -203,6 +203,7 @@ export function supportGuoba() {
         { field: 'agent.guardAction', label: '注入防御动作', component: 'Select', componentProps: { options: OPT.guardAction } },
         { field: 'agent.guardSensitivity', label: '防御灵敏度', component: 'Select', componentProps: { options: OPT.guardSensitivity } },
         { field: 'agent.untrustedGuard', label: '外部内容注入扫描', bottomHelpMessage: '工具结果/网页/MCP/记忆等外部内容命中注入特征时加边界标注（不阻断）；默认开，关闭会削弱间接注入防御', component: 'Switch' },
+        { field: 'agent.persona.skipInjectionCheck', label: '人设注入检测免检【高危】', helpMessage: '⚠️ 高危！开启后新建/编辑人设、人设资料不再校验「疑似越狱/提示注入」，内容会原样进入 system 身份层。', bottomHelpMessage: '默认关。仅在你完全信任自建角色卡时开启；命中误报时可临时开启保存后再关闭（已保存内容不会再次扫描）。', component: 'Switch' },
         { field: 'agent.contextHighRatio', label: '压缩高水位比例', bottomHelpMessage: '历史占 contextWindow 的比例超过它触发压缩（默认 0.65；256K 窗口建议 0.8）。越晚压越省缓存，命中率公式见 README「缓存经济性」', component: 'InputNumber', componentProps: { min: 0.3, max: 0.95, step: 0.05 } },
         { field: 'agent.contextLowRatio', label: '压缩低水位比例', bottomHelpMessage: '压缩后保留到该比例（默认 0.45，须小于高水位）。压得越深则每轮新增相对越少、稳态命中率越高', component: 'InputNumber', componentProps: { min: 0.05, max: 0.9, step: 0.05 } },
         { field: 'agent.redactSecrets', label: '回复脱敏(屏蔽 API Key)', bottomHelpMessage: '发送前屏蔽回复里的密钥/token；默认开', component: 'Switch' },

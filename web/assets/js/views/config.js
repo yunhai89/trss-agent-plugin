@@ -183,6 +183,9 @@
         if (!form.search.searxng) form.search.searxng = {}
         if (form.search.searxng.url == null) form.search.searxng.url = ''
         if (form.privateChat == null) form.privateChat = false
+        // 人设注入检测免检（旧配置无此块时防 v-model 报错）
+        if (!form.persona) form.persona = {}
+        if (form.persona.skipInjectionCheck == null) form.persona.skipInjectionCheck = false
         // 无损压缩 + 网页抓取引擎兜底（旧 config 无此字段时 v-model 不报错）
         if (!form.compaction) form.compaction = {}
         if (form.compaction.enable == null) form.compaction.enable = true
@@ -1776,6 +1779,9 @@
             </cfg-row>
             <cfg-row name="回复脱敏" desc="发送前屏蔽密钥/token">
               <v-switch v-model="form.redactSecrets"/>
+            </cfg-row>
+            <cfg-row name="人设注入检测免检" desc="新建/编辑人设或人设资料时跳过越狱/注入检测,内容将原样进入身份层" danger>
+              <v-switch v-model="form.persona.skipInjectionCheck"/>
             </cfg-row>
             <cfg-row name="全链路日志 devLog" desc="每会话一个日志文件">
               <v-switch v-model="form.devLog.enable"/>
