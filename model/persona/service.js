@@ -7,12 +7,14 @@
  */
 
 export class PersonaService {
-  constructor({ store, kv, prefix = 'persona:active' } = {}) {
+  constructor({ store, kv, prefix = 'persona:active', defaultId = null } = {}) {
     if (!store) throw new Error('PersonaService 需要 store')
     if (!kv) throw new Error('PersonaService 需要 kv')
     this.store = store
     this.kv = kv
     this.prefix = prefix
+    // 全局默认人设（agent.persona.defaultId）：用户未单独绑定 / 绑定失效时生效；空=用 Agent 默认身份
+    this.defaultId = defaultId ? String(defaultId).trim() : null
   }
 
   _key(userId) {
@@ -38,6 +40,18 @@ export class PersonaService {
     await this.kv.del(this._key(userId))
   }
 
+  /** 全局默认人设（配置 id 不存在/已删除时返回 null） */
+  getDefaultPersona() {
+    if (!this.defaultId) return null
+    return this.store.getExact(this.defaultId)
+  }
+
+  /** 未绑定/绑定失效时的回落：全局默认人设 → Agent 默认身份 */
+  _fallback() {
+    const persona = this.getDefaultPersona()
+    return { persona, activeId: persona?.id ?? null, isDefault: true }
+  }
+
   /** 按 id 或名称（模糊）取人设 */
   resolveRef(input) {
     const s = String(input ?? '').trim()
@@ -58,12 +72,12 @@ export class PersonaService {
    */
   async resolve(userId) {
     const activeId = await this.getActiveId(userId)
-    if (!activeId) return { persona: null, activeId: null, isDefault: true }
+    if (!activeId) return this._fallback()
     const persona = this.store.get(activeId)
-    // 绑定的人设被删除 → 自动回落默认
+    // 绑定的人设被删除 → 自动回落（全局默认人设 / Agent 默认身份）
     if (!persona) {
       await this.kv.del(this._key(userId))
-      return { persona: null, activeId: null, isDefault: true }
+      return this._fallback()
     }
     return { persona, activeId, isDefault: false }
   }

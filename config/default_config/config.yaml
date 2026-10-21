@@ -213,7 +213,8 @@ agent:
   guardSensitivity: medium
   untrustedGuard: true         # 间接注入防御：工具结果/网页/MCP/记忆/情境等外部内容命中注入特征时加 <untrusted_data> 边界标注（默认开）
   redactSecrets: true          # 发送前脱敏：屏蔽回复中的 API Key/token 等敏感信息（默认开）
-  persona:                     # 人设内容（自建人设 + 人设资料）落盘前的注入检测
+  persona:                     # 人设配置（全局默认人选 + 落盘注入检测）
+    defaultId: ""              # 全局默认人设 id（未单独 #人设 切换的用户生效；留空=用 systemPrompt/内置默认身份）
     skipInjectionCheck: false  # ⚠️ 高危：跳过「疑似越狱/提示注入」检测（默认关）。开启后人设内容原样进入 system 身份层，仅用于完全信任的自建角色卡
   devLog:
     enable: true             # 生产环境默认开：记录 AI 全链路(缩进 JSON 人工可读)，方便 #上报错误 排查

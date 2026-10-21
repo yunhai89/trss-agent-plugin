@@ -669,7 +669,10 @@ async function _buildRuntime(scope) {
   const schedule = new ScheduleStore({ kv: K, scheduler, logger: Log.tag('schedule') })
   scope.register(() => { try { schedule?.shutdown?.() } catch { /* noop */ } }, { name: 'schedule', order: 10 })
   knowledge.attachScheduler(scheduler) // KB URL 定时刷新复用同一 scheduler（注册/恢复 refresh job）
-  const persona = new PersonaService({ store: personaStore, kv: K })
+  const persona = new PersonaService({ store: personaStore, kv: K, defaultId: cfg.persona?.defaultId || null })
+  if (cfg.persona?.defaultId && !personaStore.getExact(cfg.persona.defaultId)) {
+    Log.warn(`[persona] 默认人设 id「${cfg.persona.defaultId}」不存在（可能已被删除），将回落 Agent 默认身份`)
+  }
   // 人设资料库（按 id 独立，内置人设也可叠加补丁）：核心事实静态接地 + 长尾知识检索
   const personaLore = new PersonaLore({
     dir: path.resolve(PLUGIN_ROOT, cfg.personaLore?.dir || 'data/persona-lore'),
@@ -3710,7 +3713,9 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     const ctx = ctxOf(this.e)
     const personas = rt.personaStore.list()
-    const activeId = await rt.persona.getActiveId(ctx.userId)
+    const boundId = await rt.persona.getActiveId(ctx.userId)
+    // 未单独切换时，全局默认人设同样标星，避免「列表里没一个人设是当前生效的」
+    const activeId = boundId || rt.persona.getDefaultPersona()?.id || null
     const html = buildPersonaListHtml({ user: ctx.userId, personas, activeId })
     const img = await screenshot('agents-plugin/persona-list', html)
     if (img) return this.e.reply(img), true

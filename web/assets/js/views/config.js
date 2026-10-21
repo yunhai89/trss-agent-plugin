@@ -185,6 +185,7 @@
         if (form.privateChat == null) form.privateChat = false
         // 人设注入检测免检（旧配置无此块时防 v-model 报错）
         if (!form.persona) form.persona = {}
+        if (form.persona.defaultId == null) form.persona.defaultId = ''
         if (form.persona.skipInjectionCheck == null) form.persona.skipInjectionCheck = false
         // 无损压缩 + 网页抓取引擎兜底（旧 config 无此字段时 v-model 不报错）
         if (!form.compaction) form.compaction = {}
@@ -643,6 +644,8 @@
       }
       /* 常驻工具勾选：从已注册工具列表（/tools）按类别选，避免用户手输工具名 */
       const allTools = computed(() => M.tools || [])
+      // 现有人设（内置 + 自定义）：用于「默认人设」下拉
+      const personas = computed(() => M.personas || [])
       const toolCats = computed(() => [...new Set(allTools.value.map((t) => t.category))].sort())
       const toolsByCat = (cat) => allTools.value.filter((t) => t.category === cat)
       const toggleAlwaysOn = (id) => {
@@ -660,6 +663,7 @@
           if (M.config) { syncForm(JSON.parse(JSON.stringify(M.config))); formReady.value = true }
           else loadError.value = '未取到配置数据（/api/config 返回为空）'
           window.store.loadTools().catch(() => {}) // 工具列表（失败不阻塞配置加载）
+          window.store.loadPersonas().catch(() => {}) // 默认人设下拉（失败不阻塞）
         } catch (e) { loadError.value = e?.message || String(e); toast(e.message, 'error') }
       })
       onUnmounted(() => {
@@ -1004,7 +1008,7 @@
         mcpServersToUi, delMcp, mcpModal, openNewMcp, confirmNewMcp,
         thinkingOn, tempPct, thinkingBudget, memoryLimitMemory, memoryLimitUser,
         orModels, orSearch, orLoading, loadOrModels, orFiltered, pickOrModel, orKey, loadOrKey,
-        allTools, toolCats, toolsByCat, toggleAlwaysOn,
+        allTools, toolCats, toolsByCat, toggleAlwaysOn, personas,
         // 厂商/模型注册表 + 功能分配
         delProvider, testProvider, testing, provById, provName, provModal, openProvView, openProvEdit, saveProv,
         delModel, modelModal, openModelView, openModelEdit, saveModel, THK_ZH, knownModels, provSameAsMain, onProvPreset,
@@ -1795,6 +1799,13 @@
                 <input class="inp" style="width:130px;padding:4px 9px;font-size:12px" v-model="masterInput" placeholder="输入 QQ 回车添加" @keydown.enter.prevent.stop="addMaster">
                 <button type="button" class="btn b-soft b-sm" @click="addMaster" style="padding:4px 10px;font-size:12px">添加</button>
               </div>
+            </cfg-row>
+            <cfg-row name="默认人设" desc="未单独 #人设 切换的用户生效；留空=用下方 systemPrompt / 内置默认身份">
+              <select class="sel" style="width:240px" v-model="form.persona.defaultId">
+                <option value="">不使用（用 systemPrompt / 内置默认）</option>
+                <option v-for="p in personas" :key="p.id" :value="p.id">{{ p.name }}（{{ p.id }}）</option>
+                <option v-if="form.persona.defaultId && !personas.some(p => p.id === form.persona.defaultId || p.name === form.persona.defaultId)" :value="form.persona.defaultId">当前：{{ form.persona.defaultId }}</option>
+              </select>
             </cfg-row>
             <cfg-row class="full" name="默认身份 systemPrompt" desc="留空用富默认身份;被人设覆盖时失效">
               <textarea class="txa" style="min-height:64px" v-model="form.systemPrompt" placeholder="留空=使用内置默认身份"></textarea>

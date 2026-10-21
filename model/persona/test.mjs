@@ -182,6 +182,35 @@ await test('PersonaService：激活绑定 + resolve', async () => {
   ok((await svc.resolve('u4')).isDefault, '绑定人设删除后自动回落默认')
 })
 
+await test('PersonaService：全局默认人设 defaultId', async () => {
+  const dir = tmpDir()
+  const store = new PersonaStore({ dir })
+  const kv = memoryKv()
+  const svc = new PersonaService({ store, kv, defaultId: 'cat' })
+  const r0 = await svc.resolve('u1')
+  eq(r0.persona?.id, 'cat', '未绑定时回落到全局默认')
+  ok(r0.isDefault, '全局默认仍标记 isDefault')
+  eq(r0.activeId, 'cat', 'activeId 返回默认人设 id')
+  eq(svc.getDefaultPersona()?.id, 'cat', 'getDefaultPersona 命中')
+  // 用户单独切换优先
+  await svc.setActive('u1', 'butler')
+  eq((await svc.resolve('u1')).persona?.id, 'butler', '用户绑定优先于全局默认')
+  // 重置 → 回全局默认
+  await svc.resetActive('u1')
+  eq((await svc.resolve('u1')).persona?.id, 'cat', '#重置人设后回全局默认')
+  // 绑定的人设被删 → 回全局默认
+  store.add({ name: '临时全局默认', systemPrompt: '临时' })
+  await svc.setActive('u2', '临时全局默认')
+  store.remove('临时全局默认')
+  eq((await svc.resolve('u2')).persona?.id, 'cat', '绑定人设删除后回落全局默认')
+  // 配置的默认人设不存在 → Agent 默认身份
+  const svc2 = new PersonaService({ store, kv, defaultId: '不存在的人设' })
+  const r2 = await svc2.resolve('u3')
+  eq(r2.persona, null, '默认人设失效 → null（用 Agent 默认身份）')
+  ok(r2.isDefault, '失效时仍 isDefault')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 // ---------- 4. Agent 接入语义：systemPrompt 覆盖 ----------
 await test('Agent 接入：resolve → systemPrompt 覆盖', async () => {
   const store = new PersonaStore({ dir: tmpDir() })

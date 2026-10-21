@@ -161,6 +161,7 @@
         try {
           await window.store.loadConfig()
           if (M.config) syncForm(M.config.humanize)
+          window.store.loadPersonas().catch(() => {}) // 复用人设下拉（失败不阻塞）
         } catch (e) { toast(e.message, 'error') }
       })
       // 监听器在 onMounted 里注册，卸载时移除；路由切换会真正卸载并重建视图组件（app.js 的 :key="route"），
@@ -174,10 +175,12 @@
       const initiativePct = computed(() => (form.behaviorPolicy?.initiative ?? 0) * 100 + '%')
       /* enable=true 但白名单空 → 不生效提示 */
       const enableWarn = computed(() => form.enable === true && !(form.groups || []).length)
+      // 现有人设（内置 + 自定义）：用于「复用人设」下拉
+      const personas = computed(() => M.personas || [])
 
       return {
         form, dirty, save, reset, sections, open, activeSec, jump, adv,
-        talkPct, tempPlannerPct, tempReplyerPct, humorPct, initiativePct, enableWarn,
+        talkPct, tempPlannerPct, tempReplyerPct, humorPct, initiativePct, enableWarn, personas,
       }
     },
     template: `
@@ -240,8 +243,12 @@
             <cfg-row name="角色名" desc="留空=用上方「机器人群内名字」">
               <input class="inp" style="width:170px" v-model="form.persona.name" placeholder="留空=自动">
             </cfg-row>
-            <cfg-row name="复用人设 id" desc="角色卡为空时，按 id/名复用 PersonaStore 已建人设（如 raiden-ei）；留空=不复用">
-              <input class="inp" style="width:170px" v-model="form.persona.fromPersonaId" placeholder="如 raiden-ei">
+            <cfg-row name="复用人设" desc="角色卡为空时，复用 PersonaStore 已建人设的 systemPrompt；留空=不复用">
+              <select class="sel" style="width:220px" v-model="form.persona.fromPersonaId">
+                <option value="">不复用（用角色卡 / 内置默认）</option>
+                <option v-for="p in personas" :key="p.id" :value="p.id">{{ p.name }}（{{ p.id }}）</option>
+                <option v-if="form.persona.fromPersonaId && !personas.some(p => p.id === form.persona.fromPersonaId || p.name === form.persona.fromPersonaId)" :value="form.persona.fromPersonaId">当前：{{ form.persona.fromPersonaId }}</option>
+              </select>
             </cfg-row>
             <cfg-row full name="角色卡（角色设定正文）" desc="自由多段，MaiBot 式：身份/性格/【语气】【口癖】【距离感】【偏好】等。留空且未复用 → 用内置默认人设（去 AI 味、尊重看人，开箱即用）">
               <textarea class="inp mono" style="width:100%;min-height:180px;font-size:12px;line-height:1.6;resize:vertical" v-model="form.persona.prompt" placeholder="你是「小汐」，群里一个爱聊天的技术宅。性格随和有点皮，喜欢接梗。&#10;【语气】轻松口语，偶尔用「哈」「确实」，不端着。&#10;【口癖】赞同爱说「确实是」；遇到有意思的回「有点东西」。&#10;【偏好】对 AI/编程/数码话题兴致高；八卦闲聊也会接，但不主动挑起。&#10;【不做】不发长篇大论、不列要点清单。"></textarea>

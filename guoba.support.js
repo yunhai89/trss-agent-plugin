@@ -13,14 +13,37 @@
  */
 import Config from './utils/Config.js'
 import Log from './utils/Log.js'
+import fs from 'node:fs'
+import path from 'node:path'
 import { setPath } from './utils/path.js'
 import { JEV_KEY_MASK } from './model/web/redact.js'
+import { BUILTIN_PERSONAS } from './model/persona/defaults.js'
 
 /** setPath 已提取到 utils/path.js（web 路由与 guoba 共用） */
 
 /** 解包 { mcpServers: {...} }（用户常贴 Claude Desktop 标准包装） */
 function unwrapServers(s) {
   return s && typeof s === 'object' && s.mcpServers ? s.mcpServers : s
+}
+
+/** 默认人设下拉选项：内置 + data/personas 自定义（锅巴面板不支持异步选项，启动时快照） */
+function personaOptions() {
+  const out = [{ label: '不使用（用 systemPrompt / 内置默认身份）', value: '' }]
+  const seen = new Set()
+  const push = (p) => {
+    if (!p?.id || seen.has(p.id)) return
+    seen.add(p.id)
+    out.push({ label: `${p.name || p.id}（${p.id}）`, value: p.id })
+  }
+  for (const p of BUILTIN_PERSONAS) push(p)
+  try {
+    const dir = Config.path.personas
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.json')) continue
+      try { push(JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))) } catch { /* 跳过坏文件 */ }
+    }
+  } catch { /* 目录不存在=只有内置 */ }
+  return out
 }
 
 // 常用选项集
@@ -203,6 +226,7 @@ export function supportGuoba() {
         { field: 'agent.guardAction', label: '注入防御动作', component: 'Select', componentProps: { options: OPT.guardAction } },
         { field: 'agent.guardSensitivity', label: '防御灵敏度', component: 'Select', componentProps: { options: OPT.guardSensitivity } },
         { field: 'agent.untrustedGuard', label: '外部内容注入扫描', bottomHelpMessage: '工具结果/网页/MCP/记忆等外部内容命中注入特征时加边界标注（不阻断）；默认开，关闭会削弱间接注入防御', component: 'Switch' },
+        { field: 'agent.persona.defaultId', label: '默认人设', bottomHelpMessage: '未单独 #人设 切换的用户生效；留空=用「默认身份 systemPrompt」/内置默认身份。选项=内置+自定义人设（新增人设后重载插件刷新）', component: 'Select', componentProps: { options: personaOptions() } },
         { field: 'agent.persona.skipInjectionCheck', label: '人设注入检测免检【高危】', helpMessage: '⚠️ 高危！开启后新建/编辑人设、人设资料不再校验「疑似越狱/提示注入」，内容会原样进入 system 身份层。', bottomHelpMessage: '默认关。仅在你完全信任自建角色卡时开启；命中误报时可临时开启保存后再关闭（已保存内容不会再次扫描）。', component: 'Switch' },
         { field: 'agent.contextHighRatio', label: '压缩高水位比例', bottomHelpMessage: '历史占 contextWindow 的比例超过它触发压缩（默认 0.65；256K 窗口建议 0.8）。越晚压越省缓存，命中率公式见 README「缓存经济性」', component: 'InputNumber', componentProps: { min: 0.3, max: 0.95, step: 0.05 } },
         { field: 'agent.contextLowRatio', label: '压缩低水位比例', bottomHelpMessage: '压缩后保留到该比例（默认 0.45，须小于高水位）。压得越深则每轮新增相对越少、稳态命中率越高', component: 'InputNumber', componentProps: { min: 0.05, max: 0.9, step: 0.05 } },
