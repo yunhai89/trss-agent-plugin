@@ -606,7 +606,8 @@ router.get('/models', asyncHandler(async (req, res) => {
   if (!baseURL) return fail(res, CODE.BAD, '未配置 baseURL，且无法从厂商预设解析（请在表单填接口地址）')
   if (!apiKey) return fail(res, CODE.BAD, '未配置 apiKey，无法拉取模型列表')
 
-  const timeout = () => AbortSignal.timeout(15000)
+  // Cloudflare 线路偶发 30~60s 才返回模型列表，commandcode 单独放宽；其余保持 15s 快速失败
+  const timeout = () => AbortSignal.timeout(/commandcode/i.test(`${preset} ${baseURL}`) ? 60000 : 15000)
   try {
     let list = []
     if (protocol === 'gemini') {

@@ -7,12 +7,22 @@
  */
 
 import fs from 'node:fs'
+import net from 'node:net'
+import dns from 'node:dns'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import Config from './utils/Config.js'
 import Log from './utils/Log.js'
 import { isPluginClass } from './utils/plugin-class.js'
+
+// 部分云主机 IPv6 不可达、到 Cloudflare 的 IPv4 握手又偶发超过 Node Happy Eyeballs 的 250ms
+// 单族尝试预算，默认策略会直接 AggregateError[ETIMEDOUT]（commandcode 等站点表现为「网络错误」）。
+// 这里关闭自动选族并优先 IPv4；纯 IPv6 主机仍会走 DNS 返回的唯一 AAAA 记录。
+try {
+  net.setDefaultAutoSelectFamily(false)
+  dns.setDefaultResultOrder('ipv4first')
+} catch { /* 旧版 Node 无此 API，保持默认 */ }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const appsDir = path.join(__dirname, 'apps')
