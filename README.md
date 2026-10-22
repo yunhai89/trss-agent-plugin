@@ -224,7 +224,7 @@ agent:
     - id: pmain
       name: DeepSeek
       protocol: openai              # 或 anthropic / gemini
-      preset: deepseek              # 厂商预设：openai/deepseek/gemini/dashscope/zhipu/moonshot/mimo/minimax 等
+      preset: deepseek              # 厂商预设：openai/deepseek/gemini/dashscope/zhipu/moonshot/mimo/minimax/anthropic/openrouter/opencode/opencode-go/commandcode 等
       baseURL: ""
       apiKey: "sk-xxx"              # ★必填
   llmModels:                        # 模型列表（挂在某厂商下）
@@ -235,6 +235,8 @@ agent:
   providerId: pmain                 # ← 基础模型选哪个厂商
   modelId: mchat                    # ← 基础模型选哪个模型
 ```
+
+> **Command Code（`preset: commandcode`）**：OpenAI + Anthropic 双兼容聚合网关。Web 面板「厂商配置」选该预设后会自动填好地址（OpenAI 协议 `https://api.commandcode.ai/provider/v1`，Anthropic 协议 `https://api.commandcode.ai/provider`）；Key 在 [commandcode.ai/settings/keys](https://commandcode.ai/settings/keys) 生成。模型 ID 形如 `deepseek/deepseek-v4-flash`、`claude-sonnet-4-6`；Claude 系列只能走 Anthropic 协议，其余模型走 OpenAI 协议即可。
 
 > 老配置（只有 `protocol`/`preset`/`baseURL`/`apiKey`/`model` 五个扁平字段）**首次加载会自动迁移**：按原接入信息生成一条厂商 + 一条模型条目，并让上面两个引用指向它们，无需手工重配。迁移后这五个字段变成只读镜像（由上层引用解析回填），手改会在下次加载被覆盖。
 

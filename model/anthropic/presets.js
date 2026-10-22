@@ -86,6 +86,18 @@ export const presets = {
     headers: { 'User-Agent': `trss-agent-plugin/${VERSION}` },
     sessionHeader: 'x-opencode-session',
   },
+
+  /** Command Code（Anthropic 兼容 /messages：Claude / Qwen / MiniMax 等）。
+   *  ⚠️ baseURL 不带 /v1 —— Anthropic client 会自动拼 /v1/messages。
+   *  认证 x-api-key（官方文档：/messages 端点 x-api-key 或 Bearer 均可）。
+   *  模型：claude-sonnet-4-6 等；OpenAI/开源模型走 model/openai/presets.js 的 commandcode。 */
+  commandcode: {
+    name: 'commandcode',
+    thinkingStyle: 'auto',
+    baseURL: 'https://api.commandcode.ai/provider',
+    version: '2023-06-01',
+    authHeader: 'x-api-key',
+  },
 }
 
 export function getPreset(name) {

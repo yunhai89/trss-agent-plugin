@@ -175,6 +175,18 @@ export const presets = {
     headers: { 'User-Agent': `trss-agent-plugin/${VERSION}` },
     sessionHeader: 'x-opencode-session',
   },
+
+  /** Command Code（OpenAI + Anthropic 双兼容聚合网关；Provider 计划 $15/月，按量无加价）。
+   *  baseURL: https://api.commandcode.ai/provider/v1；Bearer apiKey（控制台 commandcode.ai/settings/keys）。
+   *  模型 ID 形如 deepseek/deepseek-v4-flash、claude-sonnet-4-6；模型列表 /models 每条带 supported_endpoints。
+   *  端点 /chat/completions、/responses；Claude 系列只能走 Anthropic 协议（见 model/anthropic/presets.js 的 commandcode）。 */
+  commandcode: {
+    name: 'commandcode',
+    thinkingStyle: 'auto',
+    baseURL: 'https://api.commandcode.ai/provider/v1',
+    // 网关透传底层模型：开源模型常回 reasoning_content，闭源/聚合网关常回 reasoning
+    reasoningFields: ['reasoning_content', 'reasoning'],
+  },
 }
 
 export function getPreset(name) {

@@ -12,7 +12,7 @@ agent:
   # ↓ 以下 5 项是上面引用的解析结果（只读镜像，每次加载自动回填，勿手改；
   #   它们是给老兼容读点用的快照，改厂商 Key / 改模型都会自动跟随）
   protocol: openai  # openai | anthropic | gemini（gemini=原生官方 @google/genai SDK + Interactions API，填 apiKey 即用，无需 baseURL/preset）
-  preset: deepseek  # 厂商预设（openai/deepseek/gemini/dashscope/zhipu/moonshot/mimo/minimax/openrouter/opencode=按量 /opencode-go=月付订阅$5起）；gemini 原生协议时仅占位
+  preset: deepseek  # 厂商预设（openai/deepseek/gemini/dashscope/zhipu/moonshot/mimo/minimax/doubao/anthropic/openrouter/opencode=按量 /opencode-go=月付订阅$5起 /commandcode=OpenAI+Anthropic 双兼容网关）；gemini 原生协议时仅占位
   baseURL: ""
   apiKey: ""               # API Key（OpenAI/Anthropic 兼容或 Gemini 原生均填此）；★必填：留空则插件不初始化
   model: "deepseek-chat"

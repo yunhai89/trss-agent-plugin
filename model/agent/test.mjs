@@ -2263,7 +2263,18 @@ await test('model-router：功能模型解析到对应厂商（不再局限主�
   eq(r.resolve('').model, null, '空引用 → model null（调用方自行回落）')
 })
 
-// ---------- 21. provider 会话头：OpenCode Go 要求 x-opencode-session + 自报 UA ----------
+// ---------- 21b. provider 预设：Command Code 双协议 ----------
+await test('provider：Command Code 双协议预设', async () => {
+  eq(openaiPresets.commandcode.baseURL, 'https://api.commandcode.ai/provider/v1', 'OpenAI 兼容根地址带 /v1')
+  eq(anthropicPresets.commandcode.baseURL, 'https://api.commandcode.ai/provider', 'Anthropic 根地址不带 /v1（client 自动拼）')
+  eq(openaiPresets.commandcode.thinkingStyle, 'auto', 'OpenAI 网关按模型回退思考风格')
+  eq(anthropicPresets.commandcode.thinkingStyle, 'auto', 'Anthropic 网关按模型回退思考风格')
+  eq(anthropicPresets.commandcode.authHeader, 'x-api-key', 'Anthropic 协议用 x-api-key')
+  ok(openaiPresets.commandcode.reasoningFields.includes('reasoning_content'), '兼容开源模型 reasoning_content')
+  ok(openaiPresets.commandcode.reasoningFields.includes('reasoning'), '兼容闭源模型 reasoning')
+})
+
+// ---------- 22. provider 会话头：OpenCode Go 要求 x-opencode-session + 自报 UA ----------
 await test('provider：x-opencode-session / UA 头部下发（OpenCode Go）', async () => {
   // 预设带会话头与 UA（OpenAI / Anthropic 两条协议都要）
   eq(openaiPresets['opencode-go'].sessionHeader, 'x-opencode-session', 'openai 预设带会话头')
