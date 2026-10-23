@@ -2,7 +2,7 @@
  * 发送前高清化（HD voice）—— TTS 输出"偏轻"是普遍现象（实测比参考音频低 4~6dB），
  * 而"偏闷"因音色而异（有的参考克隆出来 4~8kHz 存在感低 ~9dB，有的基本正常）。
  * 因此：
- *   1) loudnorm 响度标准化到 I=-15 LUFS / 真峰 -1.5dB（语音聊天通用响度）——固定执行；
+ *   1) loudnorm 响度标准化到 I=-15 LUFS / 真峰 -2dB（语音聊天通用响度）——固定执行；
  *   2) 存在感补偿 —— **自适应**：先测 4~8kHz 相对 0~4kHz 的倾斜，只把不足的部分补到目标
  *      （-12dB 为自然语音典型值），增益夹在 0~+6dB（已经明亮的音色不叠加，避免刺耳/齿音）；
  *   3) 重采样对齐 24kHz 单声道 s16le（QQ/NapCat 语音目标参数，避免二次重采样）。
@@ -13,20 +13,37 @@ import fs from 'node:fs'
 import { runFfmpeg } from './audio.js'
 
 /** 固定响度段（导出供测试断言） */
-export const HD_LOUDNORM = 'loudnorm=I=-15:TP=-1.5:LRA=11'
+export const HD_LOUDNORM = 'loudnorm=I=-15:TP=-2:LRA=11'
 /** 存在感补偿目标（4~8k 相对 0~4k 的自然语音典型倾斜）与上限 */
 export const PRESENCE_TARGET_DB = -12
 export const PRESENCE_MAX_DB = 6
 
-/** 按存在感增益构造滤镜链（g=0 时等效不加色彩） */
-export function hdFilter(presenceDb = 0) {
+/** EQ 段（存在感补偿）；g=0 时等效不加色彩 */
+export function presenceFilter(presenceDb = 0) {
   const g = Math.round((Number(presenceDb) || 0) * 10) / 10
+  if (!g) return ''
   const shelf = Math.round(g * 0.8 * 10) / 10
-  return `${HD_LOUDNORM},equalizer=f=4000:t=q:w=1.2:g=${g},highshelf=f=6000:g=${shelf}`
+  return `equalizer=f=4000:t=q:w=1.2:g=${g},highshelf=f=6000:g=${shelf}`
 }
 
-export function buildEnhanceArgs(inputPath, outputPath, presenceDb = 0) {
-  return ['-y', '-i', String(inputPath), '-af', hdFilter(presenceDb), '-ar', '24000', '-ac', '1', '-c:a', 'pcm_s16le', String(outputPath)]
+/** 响度段：拿到两遍测量值时走 linear（保动态、不抽气），否则退回单遍 */
+export function loudnormFilter(loud) {
+  if (!loud) return HD_LOUDNORM
+  const f = (v) => Number(v).toFixed(2)
+  return `${HD_LOUDNORM}:measured_I=${f(loud.i)}:measured_TP=${f(loud.tp)}:measured_LRA=${f(loud.lra)}:measured_thresh=${f(loud.thresh)}:offset=${f(loud.offset)}:linear=true`
+}
+
+/**
+ * 按存在感增益 + 响度测量构造滤镜链：**先 EQ 后响度**。
+ * 顺序很关键：旧实现把 EQ 放在 loudnorm 之后，补偿 +4dB 会把真峰从 -1.5dB 顶到 -0.9dBFS，
+ * 近削顶的齿音听起来发炸/发塑料 —— 这正是「高清增强后更奇怪」的主因。
+ */
+export function hdFilter(presenceDb = 0, loud = null) {
+  return [presenceFilter(presenceDb), loudnormFilter(loud)].filter(Boolean).join(',')
+}
+
+export function buildEnhanceArgs(inputPath, outputPath, presenceDb = 0, loud = null) {
+  return ['-y', '-i', String(inputPath), '-af', hdFilter(presenceDb, loud), '-ar', '24000', '-ac', '1', '-c:a', 'pcm_s16le', String(outputPath)]
 }
 
 /** 增强输出路径：<原名>.hd.wav（与源文件同目录，便于统一清理） */
@@ -53,6 +70,25 @@ export async function measurePresenceRatio(inputPath, { runner = runFfmpeg, time
   return high - low
 }
 
+/** 用 loudnorm 的 json 输出测当前响度，供第二遍 linear 归一化用；失败返回 null */
+export async function measureLoudness(inputPath, { runner = runFfmpeg, timeout = 20 } = {}) {
+  try {
+    const r = await runner(['-hide_banner', '-nostats', '-i', String(inputPath), '-af', `${HD_LOUDNORM}:print_format=json`, '-f', 'null', '-'], { timeout })
+    const text = String(r?.stderr || '')
+    const m = text.match(/\{[\s\S]*"input_i"[\s\S]*\}/)
+    if (!m) return null
+    const j = JSON.parse(m[0])
+    const num = (k) => {
+      const v = Number(j[k])
+      return Number.isFinite(v) && v > -1e9 ? v : null
+    }
+    const out = { i: num('input_i'), tp: num('input_tp'), lra: num('input_lra'), thresh: num('input_thresh'), offset: num('target_offset') }
+    return Object.values(out).every((v) => v != null) ? out : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * 高清化音频；成功返回 { ok:true, path, presenceDb }，失败/未启用由调用方回退。
  * @param {string} inputPath 已合成的音频（wav/mp3）
@@ -62,12 +98,15 @@ export async function enhanceVoice(inputPath, { runner = runFfmpeg, timeout = 90
   const out = hdOutputPath(inputPath)
   try {
     let gain = presenceDb
+    const [ratio, loud] = await Promise.all([
+      gain == null ? measurePresenceRatio(inputPath, { runner }) : Promise.resolve(null),
+      measureLoudness(inputPath, { runner }),
+    ])
     if (gain == null) {
-      const ratio = await measurePresenceRatio(inputPath, { runner })
       gain = presenceGainFor(ratio)
       logger?.('debug', `[tts] 高清增强：存在感倾斜 ${ratio == null ? '未知' : ratio.toFixed(1) + 'dB'} → 补偿 +${gain}dB`)
     }
-    const r = await runner(buildEnhanceArgs(inputPath, out, gain), { timeout })
+    const r = await runner(buildEnhanceArgs(inputPath, out, gain, loud), { timeout })
     if (r?.ok && fs.existsSync(out) && fs.statSync(out).size > 44) return { ok: true, path: out, presenceDb: gain }
     logger?.('warn', '[tts] 高清增强失败（回退原始音频）', String(r?.stderr || r?.error || '输出无效').slice(-160))
     try { fs.unlinkSync(out) } catch { /* noop */ }

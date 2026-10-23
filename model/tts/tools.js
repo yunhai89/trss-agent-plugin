@@ -68,6 +68,20 @@ function cloudTool(service, id) {
     tier: { type: 'string', enum: ['pro', 'max'], description: '档位：pro=整段一次合成（默认，快）；max=按语义分段、逐段判定情绪分别合成后合并（更细腻，长文本更慢）' },
   }
   let emotionHint = ''
+  if (id === 'sovits') {
+    // GPT-SoVITS 没有音色 ID / 情绪参数：音色与语气由服务端那条参考音频决定，少传参数就少出错
+    delete props.voice
+    delete props.tier
+    return {
+      description: [
+        `把文字合成为语音并发送到当前聊天（TTS / ${name}）。仅在需要点播一段语音时调用：普通回复在开启自动语音（agent.tts.autoReply）时会自动出声，本工具调用后本轮不再自动补发。`,
+        '音色与语气由服务端配置的参考音频决定，本工具没有音色/情绪参数可调。',
+        '文本会先自动清洗成讲稿（剥除 md/代码/链接/表情，破折号转停顿）再合成，无需自己处理格式。',
+        '重复要求、闲聊式的短句别用语音；生成失败会把错误如实告诉你，不要编造已发送。',
+      ].join(''),
+      parameters: { type: 'object', properties: props, required: ['text'] },
+    }
+  }
   if (id === 'doubao') {
     props.emotion = { type: 'string', enum: EMOTION_LABELS.doubao, description: '固定情感标签（1.0 音色）；省略=由 LLM 结合文本与上下文自动判定' }
     emotionHint = '情绪由 LLM 判定后自动下发（2.0 音色→自然语言语音指令；1.0 音色→多情感标签），无需手填。'

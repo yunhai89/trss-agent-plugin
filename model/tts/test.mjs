@@ -10,7 +10,8 @@ import {
   IndexTtsClient, clampVector, vectorToObject, fileData, VECTOR_KEYS,
   RefLibrary, normalizeTtsConfig, parseVectorParam, TtsService, makeTtsSpeakTool,
   planEmotion, parsePlan, splitByPunctuation, buildConcatListContent, buildConcatArgs, concatSegments,
-  stripForSpeech, enhanceVoice, buildEnhanceArgs, presenceGainFor, measurePresenceRatio, HD_LOUDNORM, httpHint,
+  stripForSpeech, stripForSovits, enhanceVoice, buildEnhanceArgs, presenceGainFor, measurePresenceRatio, httpHint,
+  SovitsClient, SOVITS_LANG,
 } from './index.js'
 
 let passed = 0
@@ -372,17 +373,23 @@ await test('enhanceVoice：响度标准化固定 + 存在感补偿自适应（0~
   fs.mkdirSync(dir, { recursive: true })
   const src = path.join(dir, 'v.wav'); fs.writeFileSync(src, Buffer.alloc(100, 1))
   const seen = []
+  const LOUD_JSON = '{"input_i":"-18.0","input_tp":"-3.0","input_lra":"1.0","input_thresh":"-28.0","target_offset":"0.1"}'
   const runner = async (a) => {
     seen.push(a)
     if (a.some((x) => String(x).includes('volumedetect'))) return measureRunner(a)
+    if (a.some((x) => String(x).includes('print_format=json'))) return { ok: true, stderr: LOUD_JSON }
     fs.writeFileSync(a[a.length - 1], Buffer.alloc(80, 2))
     return { ok: true, stderr: '' }
   }
   const r1 = await enhanceVoice(src, { runner })
   ok(r1.ok && r1.path.endsWith('.hd.wav') && fs.existsSync(r1.path), '成功产出 .hd.wav')
   eq(r1.presenceDb, 2, '自适应增益写入结果（-14dB 倾斜 → +2dB）')
-  const enc = seen.find((a) => !a.some((x) => String(x).includes('volumedetect')))
-  ok(/g=2\b/.test(enc[enc.indexOf('-af') + 1]), '编码滤镜使用自适应增益')
+  const enc = seen.find((a) => a.some((x) => String(x).includes('equalizer')))
+  const encAf = enc[enc.indexOf('-af') + 1]
+  ok(/g=2\b/.test(encAf), '编码滤镜使用自适应增益')
+  // 回归：EQ 必须在 loudnorm **之前**。放在后面会把真峰从 -2dBFS 顶到 -0.9dBFS，齿音发炸
+  ok(encAf.indexOf('equalizer') < encAf.indexOf('loudnorm'), `EQ 先于响度（${encAf}）`)
+  ok(/linear=true/.test(encAf) && /measured_I=-18\.00/.test(encAf), '两遍测量走 linear 归一化')
 
   const r2 = await enhanceVoice(src, { runner: async () => ({ ok: false, stderr: 'no ffmpeg' }), logger: () => {} })
   ok(!r2.ok && r2.path === src, '失败回退原始文件（不阻断发送）')
@@ -523,6 +530,7 @@ await test('TtsService：hdVoice 开启 → 发送前高清增强（输出 .hd.w
   const seen = []
   const hdRunner = async (args) => {
     seen.push(args)
+    if (args[args.length - 1] === '-') return { ok: true, stderr: '{"input_i":"-20.0","input_tp":"-2.0","input_lra":"1.0","input_thresh":"-30.0","target_offset":"0.0"}' }
     if (args.some((x) => String(x).includes('volumedetect'))) return { ok: true, stderr: 'mean_volume: -20.0 dB' }
     fs.writeFileSync(args[args.length - 1], Buffer.alloc(88, 3))
     return { ok: true, stderr: '' }
@@ -634,6 +642,67 @@ await test('normalizeTtsConfig：缺省字段回落默认（旧配置安全）',
   eq(c.indextts.emotionMode, 'same', '情绪模式默认 same')
   eq(c.indextts.tier, 'pro', '档位默认 pro')
   eq(c.indextts.autoEmotion, true, '自动调节默认开')
+})
+
+// ─────────────────────── 6.5 GPT-SoVITS 文本过滤（英文/符号剥离） ───────────────────────
+await test('stripForSovits：只留汉字+数字+中文标点，英文单词与符号整体剥离', async () => {
+  eq(stripForSovits('主人，GPT-SoVITS v2 已经跑起来了！'), '主人，已经跑起来了！', '拉丁词连同紧跟的数字一起剥掉')
+  eq(stripForSovits('价格是 3 天 200 块'), '价格是3天200块。', '独立数字保留，补句号')
+  eq(stripForSovits('收到（#1）@你 **重要**'), '收到1你重要。', '括号井号星号剥掉')
+  eq(stripForSovits('Hello world'), '', '纯英文 → 空')
+  eq(stripForSovits('今日温度 28 度。'), '今日温度28度。', '已有句号不重复补')
+  ok(!/[A-Za-z#@*()（）]/.test(stripForSovits('A#b@c(1) 你好')), '输出不含拉丁字母与符号')
+  eq(stripForSovits('你好，world。'), '你好。', '剥离后不留悬空逗号')
+})
+
+await test('SovitsClient：api_v2 请求体、语言回落与错误摘要', async () => {
+  const calls = []
+  const client = new SovitsClient({
+    endpoint: 'http://s:1/', refAudioPath: '/r.wav', promptText: '收到', promptLang: 'zh', textLang: 'zh', timeoutMs: 5000,
+    fetchImpl: async (url, init) => {
+      calls.push({ url, body: JSON.parse(init.body) })
+      return new Response(Buffer.alloc(64, 1), { status: 200, headers: { 'Content-Type': 'audio/wav' } })
+    },
+  })
+  const r = await client.synthesize({ text: '你好，Fairy。', lang: 'AR' })
+  eq(calls[0].url, 'http://s:1/tts', 'endpoint 去尾部斜杠 + 请求 /tts')
+  eq(calls[0].body.text_lang, 'zh', 'AR 不受支持 → 回落 textLang（不把 400 语言码发给服务端）')
+  eq(calls[0].body.prompt_text, '收到', '参考文本透传')
+  eq(calls[0].body.text_split_method, 'cut5', '切段方式透传')
+  ok(r.ext === 'wav' && r.buffer.length === 64, '返回 wav buffer')
+  ok(!('AR' in SOVITS_LANG) && !('ES' in SOVITS_LANG), 'SOVITS_LANG 不再映射 AR/ES')
+
+  const bad = new SovitsClient({
+    endpoint: 'http://s:1', refAudioPath: '/r.wav',
+    fetchImpl: async () => new Response(JSON.stringify({ message: 'tts failed', Exception: 'ref audio not found\nstack' }), { status: 400 }),
+  })
+  let err = ''
+  try { await bad.synthesize({ text: '你好' }) } catch (e) { err = e.message }
+  ok(/HTTP 400/.test(err) && /ref audio not found/.test(err) && /参考音频路径/.test(err), `400 带服务端摘要与排查提示（${err}）`)
+
+  const noRef = await new SovitsClient({ endpoint: 'http://s:1' }).check()
+  ok(noRef.ok === false && /参考音频/.test(noRef.error), '缺参考音频时 check() 直接报错（不出网）')
+})
+
+await test('TtsService(sovits)：filterNonChinese 打开时才剥离英文；默认原样透传', async () => {
+  const seen = []
+  const dir = fs.mkdtempSync(path.join(tmp, 'sov-'))
+  const svc = new TtsService(
+    { provider: 'sovits', hdVoice: false, sovits: { endpoint: 'http://s:1', refAudioPath: '/r.wav', promptText: '收到', filterNonChinese: true } },
+    { dataDir: dir, logger: () => {}, fetchImpl: async (url, init) => { seen.push(JSON.parse(init.body)); return { ok: true, arrayBuffer: async () => Buffer.alloc(128, 1) } } },
+  )
+  const r = await svc.synthesize({ text: '**GPT-4o** 已经上线，主人。' })
+  ok(r.ok, 'filterNonChinese=true：过滤后仍有中文 → 正常合成')
+  eq(seen[0].text, '已经上线，主人。', '发给服务端的文本已剥离英文与 md 符号')
+  // 英文不做客户端改写：模型自带英文 g2p，罗马数字/符号由服务端 clean_text 处理
+  const seen2 = []
+  const svc2 = new TtsService(
+    { provider: 'sovits', hdVoice: false, sovits: { endpoint: 'http://s:1', refAudioPath: '/r.wav', promptText: '收到' } },
+    { dataDir: fs.mkdtempSync(path.join(tmp, 'sov2-')), logger: () => {}, fetchImpl: async (url, init) => { seen2.push(JSON.parse(init.body)); return { ok: true, arrayBuffer: async () => Buffer.alloc(128, 1) } } },
+  )
+  const r3 = await svc2.synthesize({ text: 'Fairy。Ⅲ型总序式集成泛用人工智能。' })
+  ok(r3.ok, '中英混排正常合成')
+  eq(seen2[0].text, 'Fairy。Ⅲ型总序式集成泛用人工智能。', '文本原样透传（不转写英文、不动罗马数字）')
 })
 
 console.log('\n========================================')

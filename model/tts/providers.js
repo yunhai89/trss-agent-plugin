@@ -17,7 +17,7 @@
  */
 import { VECTOR_KEYS, VECTOR_ZH } from './indextts.js'
 
-export const PROVIDER_IDS = ['indextts', 'doubao', 'minimax', 'mimo']
+export const PROVIDER_IDS = ['indextts', 'sovits', 'doubao', 'minimax', 'mimo']
 
 /** 服务商可选离散情绪标签（豆包为 1.0 音色支持范围；MiniMax 为 2.6/2.8 支持范围） */
 export const EMOTION_LABELS = {
@@ -91,6 +91,13 @@ export const MIMO_VOICES = ['mimo_default', '冰糖', '茉莉', '苏打', '白�
 /** 各服务商是否已配置到可用状态（面板/启动日志用） */
 export function providerConfigured(id, cfg = {}) {
   if (id === 'indextts') return { configured: !!String(cfg.indextts?.endpoint || '').trim(), missing: cfg.indextts?.endpoint ? [] : ['接口地址'] }
+  if (id === 'sovits') {
+    const c = cfg.sovits || {}
+    const missing = []
+    if (!String(c.endpoint || '').trim()) missing.push('接口地址')
+    if (!String(c.refAudioPath || '').trim()) missing.push('参考音频路径')
+    return { configured: missing.length === 0, missing }
+  }
   if (id === 'doubao') {
     const c = cfg.doubao || {}
     const missing = []
@@ -129,6 +136,24 @@ export const PROVIDERS = [
     docs: 'https://github.com/index-tts/index-tts',
     caps: { refs: true, emotions: 'vector' },
     fields: null, // 视图内自定义表单（含参考音频库与向量滑块）
+  },
+  {
+    id: 'sovits',
+    name: 'GPT-SoVITS',
+    desc: '本地/自托管 api_v2（默认 9880）· 音色与语气由参考音频决定，服务端自己切段并整段返回',
+    docs: 'https://github.com/RVC-Boss/GPT-SoVITS',
+    // 没有音色库上传、也没有情绪参数：音色=服务端读的那条参考音频，语气跟着它走
+    caps: { refs: false, emotions: 'none' },
+    fields: [
+      { key: 'endpoint', label: '接口地址', type: 'text', placeholder: 'http://127.0.0.1:9880', desc: 'api_v2 地址（不是 WebUI 的 9874）；服务端会自己读参考音频，不走上传' },
+      { key: 'refAudioPath', label: '参考音频路径', type: 'text', placeholder: '/root/.dsh/fairy-voice/reference/fairy_ref.wav', desc: '【服务端本地绝对路径】，3~10 秒；音色与语气完全由此决定' },
+      { key: 'promptText', label: '参考文本', type: 'text', desc: '参考音频的逐字文本（必须与音频内容一致，否则音色会漂）' },
+      { key: 'promptLang', label: '参考音频语种', type: 'select', options: [['zh', 'zh 中文'], ['en', 'en 英文'], ['ja', 'ja 日文'], ['ko', 'ko 韩文'], ['yue', 'yue 粤语']], desc: 'prompt_lang' },
+      { key: 'textLang', label: '默认合成语种', type: 'select', options: [['zh', 'zh 中文'], ['en', 'en 英文'], ['ja', 'ja 日文'], ['ko', 'ko 韩文'], ['yue', 'yue 粤语']], desc: 'text_lang；调用时显式传 lang 则以此为准' },
+      { key: 'textSplitMethod', label: '切段方式', type: 'select', options: [['cut0', 'cut0 不切段'], ['cut1', 'cut1 按句号'], ['cut2', 'cut2 按问号'], ['cut3', 'cut3 按逗号'], ['cut4', 'cut4 按标点+句号'], ['cut5', 'cut5 按标点+长度（推荐）']], desc: '长文本靠服务端切段；cut0 长文本容易韵律漂' },
+      { key: 'filterNonChinese', label: '只读中文（排障用）', type: 'switch', desc: '默认关。英文由模型自带的英文 g2p 发音（Fairy→F EH1 R IY0），罗马数字/符号由服务端 clean_text 改写，客户端不需要过滤' },
+      { key: 'timeoutMs', label: '超时(ms)', type: 'number', min: 10000, max: 600000, step: 5000, desc: '8 GB 卡 30 秒长文本约 7 秒合成' },
+    ],
   },
   {
     id: 'doubao',

@@ -27,7 +27,7 @@ import { RuntimeScope } from '../agent/runtime-scope.js'
 import {
   RefLibrary, IndexTtsClient, normalizeTtsConfig,
   PROVIDERS, PROVIDER_IDS, providerConfigured,
-  DoubaoTtsClient, MinimaxTtsClient, MimoTtsClient,
+  DoubaoTtsClient, MinimaxTtsClient, MimoTtsClient, SovitsClient,
 } from '../tts/index.js'
 
 const router = express.Router()
@@ -1054,6 +1054,7 @@ function ttsPayload() {
       return { id: p.id, name: p.name, desc: p.desc, docs: p.docs, fields: p.fields, configured: st.configured, missing: st.missing }
     }),
     indextts: indexttsCfg,
+    sovits: cfg.sovits,
     doubao: cfg.doubao,
     minimax: cfg.minimax,
     mimo: cfg.mimo,
@@ -1073,11 +1074,12 @@ router.put('/tts/config', asyncHandler(async (req, res) => {
     const parts = String(key).split('.')
     if (parts.some((s) => ['__proto__', 'constructor', 'prototype'].includes(s))) return false
     if (key === 'indextts.apiKey') return false // IndexTTS 直连本体无需鉴权，配置项已移除
-    return TOP_KEYS.includes(key) || /^(indextts|doubao|minimax|mimo)(\.[a-zA-Z0-9_]+)+$/.test(key)
+    return TOP_KEYS.includes(key) || /^(sovits|indextts|doubao|minimax|mimo)(\.[a-zA-Z0-9_]+)+$/.test(key)
   }
-  const BOOL_KEYS = new Set(['autoReply', 'hdVoice', 'doubao.autoEmotion', 'doubao.useTagParser', 'minimax.autoEmotion', 'mimo.autoEmotion', 'indextts.autoEmotion'])
+  const BOOL_KEYS = new Set(['autoReply', 'hdVoice', 'sovits.filterNonChinese', 'doubao.autoEmotion', 'doubao.useTagParser', 'minimax.autoEmotion', 'mimo.autoEmotion', 'indextts.autoEmotion'])
   const NUM_KEYS = new Set([
     'judgeTimeoutMs', 'indextts.timeoutMs', 'indextts.judgeTimeoutMs',
+    'sovits.timeoutMs',
     'doubao.timeoutMs', 'doubao.speechRate', 'doubao.loudnessRate', 'doubao.emotionScale', 'doubao.sampleRate',
     'doubao.segmentGapMs', 'doubao.maxSegmentChars',
     'minimax.timeoutMs', 'minimax.speed', 'minimax.vol', 'minimax.pitch', 'minimax.sampleRate', 'minimax.bitrate',
@@ -1111,7 +1113,7 @@ router.put('/tts/config', asyncHandler(async (req, res) => {
     setPath(cfg, 'agent.tts.' + key, val)
     n++
   }
-  if (!n) return fail(res, CODE.BAD, '没有可应用的字段（支持 enable/provider/autoReply/replyMaxChars/hdVoice/judgeModel/judgeTimeoutMs 与 indextts|doubao|minimax|mimo 前缀）')
+  if (!n) return fail(res, CODE.BAD, '没有可应用的字段（支持 enable/provider/autoReply/replyMaxChars/hdVoice/judgeModel/judgeTimeoutMs 与 sovits|indextts|doubao|minimax|mimo 前缀）')
   Config.save(cfg)
   Config.reload(true)
   return ok(res, { applied: n }, '已保存（已热加载）')
@@ -1167,16 +1169,18 @@ router.post('/tts/test', asyncHandler(async (req, res) => {
     if (!r.ok) return fail(res, CODE.INTERNAL, r.error || '连接失败')
     return ok(res, r, `连接成功（fn_index=${r.fnIndex}）`)
   }
-  // 云端服务商：草稿字段（面板当前弹窗内容）优先，未传的用已保存配置；测试会真实合成 2 个字
+  // 云端/自托管服务商：草稿字段（面板当前弹窗内容）优先，未传的用已保存配置；测试会真实合成 2 个字
   const meta = PROVIDERS.find((p) => p.id === provider)
   const merged = { ...(cfg[provider] || {}) }
   for (const f of meta?.fields || []) {
     if (req.body?.[f.key] !== undefined) merged[f.key] = req.body[f.key]
   }
-  merged.timeoutMs = 15000
-  const client = provider === 'doubao' ? new DoubaoTtsClient(merged)
-    : provider === 'minimax' ? new MinimaxTtsClient(merged)
-      : new MimoTtsClient(merged)
+  // SoVITS 首次合成要加载模型，15s 在慢卡上不够；其余云服务商维持 15s
+  merged.timeoutMs = provider === 'sovits' ? 30000 : 15000
+  const client = provider === 'sovits' ? new SovitsClient(merged)
+    : provider === 'doubao' ? new DoubaoTtsClient(merged)
+      : provider === 'minimax' ? new MinimaxTtsClient(merged)
+        : new MimoTtsClient(merged)
   const r = await client.check()
   if (!r.ok) return fail(res, CODE.INTERNAL, r.error || '连接失败')
   return ok(res, r, `连接成功（${provider}，${r.tookMs}ms）`)

@@ -2,7 +2,7 @@
  * TTS 服务编排层 —— 面向 Agent 的唯一入口（合成→分段/情绪→合并→返回文件）。
  *
  * 职责：
- *  - 配置归一（agent.tts.*，多服务商预留 provider 字段；当前实现 indextts）；
+ *  - 配置归一（agent.tts.*，多服务商：GPT-SoVITS / IndexTTS / 豆包 / MiniMax / MiMo）；
  *  - 音色/情绪参考解析（RefLibrary 按名字引用）；
  *  - 情绪模式：same=沿用参考情绪 / audio=情绪参考音频 / vector=8 维向量（默认 LLM 结合上下文自动调节）；
  *  - 档位：pro=整段一套情绪一次合成；max=LLM 按需拆分逐段情绪 → 逐段合成 → ffmpeg 合并（发送由工具层负责）；
@@ -16,11 +16,12 @@ import { IndexTtsClient, clampVector, vectorToObject, VECTOR_ZH } from './indext
 import { DoubaoTtsClient, DOUBAO_ENDPOINT } from './doubao.js'
 import { MinimaxTtsClient, MINIMAX_ENDPOINT } from './minimax.js'
 import { MimoTtsClient, MIMO_ENDPOINT } from './mimo.js'
+import { SovitsClient, SOVITS_ENDPOINT, SOVITS_LANG } from './sovits.js'
 import {
   PROVIDER_IDS, providerCaps, providerConfigured, labelFor, doubaoScaleFor, styleInstructionFor, langFor,
 } from './providers.js'
 import { planEmotion, splitByPunctuation, normalizeContext, MAX_SEGMENTS, MAX_SEGMENT_CHARS } from './emotion.js'
-import { stripForSpeech } from './speech-text.js'
+import { stripForSpeech, stripForSovits } from './speech-text.js'
 import { RefLibrary } from './refs.js'
 import { concatSegments, runFfmpeg } from './audio.js'
 import { enhanceVoice } from './enhance.js'
@@ -81,6 +82,17 @@ export const TTS_DEFAULTS = {
     maxTextTokensPerSegment: 100,
   },
   // 云服务商（默认关闭/未配置状态；enable 总开关 + provider 选中 + 密钥/音色齐全才会真正出网）
+  // GPT-SoVITS（api_v2）：无音色库、无情绪参数，音色由服务端读到的那条参考音频决定
+  sovits: {
+    endpoint: SOVITS_ENDPOINT,        // http://127.0.0.1:9880
+    refAudioPath: '',                 // 服务端本地绝对路径（3~10 秒）
+    promptText: '',                   // 参考音频逐字文本（要与音频一致）
+    promptLang: 'zh',                 // prompt_lang
+    textLang: 'zh',                   // text_lang
+    textSplitMethod: 'cut5',          // cut0~cut5，长文本靠服务端切段
+    filterNonChinese: false,          // true = 只把汉字送去合成（排障用）；默认原样透传，英文由模型自己发音
+    timeoutMs: 120000,
+  },
   doubao: {
     endpoint: DOUBAO_ENDPOINT,
     apiKey: '',
@@ -145,7 +157,7 @@ const _isObj = (v) => v && typeof v === 'object' && !Array.isArray(v)
 export function normalizeTtsConfig(cfg = {}) {
   const src = cfg || {}
   const out = { ...TTS_DEFAULTS, ...src }
-  for (const id of ['indextts', 'doubao', 'minimax', 'mimo']) {
+  for (const id of ['indextts', 'sovits', 'doubao', 'minimax', 'mimo']) {
     out[id] = { ...TTS_DEFAULTS[id], ...(src[id] || {}) }
   }
   return out
@@ -182,6 +194,7 @@ export class TtsService {
     // 各服务商客户端（构造无网络请求；只在实际调用时才出网，未配置的服务商不会产生任何流量）
     this.clients = {
       indextts: new IndexTtsClient({ endpoint: ix.endpoint, timeoutMs: ix.timeoutMs, fetchImpl, logger: this.logger }),
+      sovits: new SovitsClient({ ...this.cfg.sovits, fetchImpl, logger: this.logger }),
       doubao: new DoubaoTtsClient({ ...this.cfg.doubao, fetchImpl, logger: this.logger }),
       minimax: new MinimaxTtsClient({ ...this.cfg.minimax, fetchImpl, logger: this.logger }),
       mimo: new MimoTtsClient({ ...this.cfg.mimo, fetchImpl, logger: this.logger }),
@@ -255,6 +268,7 @@ export class TtsService {
     if (text.length > TTS_TEXT_MAX) return fail(`文本过长（${text.length} 字，上限 ${TTS_TEXT_MAX}）；请分段调用或多轮发送`)
     if (!text) return fail('文本清洗后无可朗读内容（仅符号/代码/链接？）')
 
+    if (this.provider === 'sovits') return this._synthesizeSovits(text, p, { fail, notes })
     if (this.provider !== 'indextts') return this._synthesizeCloud(text, p, { fail, notes })
     return this._synthesizeIndexTts(text, p, { fail, notes })
   }
@@ -468,6 +482,48 @@ export class TtsService {
     return Math.max(1000, Number(this.cfg.judgeTimeoutMs) || Number(this.cfg.indextts.judgeTimeoutMs) || TTS_DEFAULTS.judgeTimeoutMs)
   }
 
+  /**
+   * GPT-SoVITS 专属路径。
+   * 与 IndexTTS/云服务商都不同：没有音色库、没有情绪参数，音色与语气完全由服务端读到的那条
+   * 参考音频决定；长文本由服务端 text_split_method 自己切段并整段返回，因此这里不跑 LLM 情绪判定、
+   * 也不做 pro/max 分段（省一次 LLM 调用 + 省 ffmpeg 拼接）。
+   */
+  async _synthesizeSovits(text, p, { fail, notes }) {
+    const sv = this.cfg.sovits
+    const st = providerConfigured('sovits', this.cfg)
+    if (!st.configured) {
+      return fail(`GPT-SoVITS 未配置（缺少：${st.missing.join('、')}）；请到 Web 面板「语音合成 → GPT-SoVITS」补全`)
+    }
+    const lang = SOVITS_LANG[String(p.lang || sv.textLang || 'zh').toUpperCase()] || sv.textLang || 'zh'
+    const refName = path.basename(String(sv.refAudioPath || '')) || '参考音频'
+    // 文本原样交给 GPT-SoVITS：罗马数字/符号的改写已经放到服务端 text/cleaner.py 里做了，
+    // 英文也不需要客户端转写——模型自带英文 g2p（Fairy -> F EH1 R IY0）。
+    // filterNonChinese 只是排障用的「只留汉字」开关，正常不打开。
+    const speak = sv.filterNonChinese ? stripForSovits(text, { maxChars: 0 }) : text
+    if (!speak.trim()) {
+      return fail('文本里没有可朗读的内容')
+    }
+    const t0 = this.now()
+    this.logger('info', `[tts] 合成开始：GPT-SoVITS 语种=${lang} 参考音频=${refName} 文本=${text.length}字${speak !== String(text || '').trim() ? `（清洗后 ${speak.length} 字）` : ''}`)
+    try {
+      const r = await this.clients.sovits.synthesize({ text: speak, lang })
+      const outDir = path.join(this.dataDir, 'out')
+      fs.mkdirSync(outDir, { recursive: true })
+      this._pruneOut(outDir)
+      const file = path.join(outDir, `tts_${this.now()}_${Math.random().toString(36).slice(2, 6)}.${r.ext || 'wav'}`)
+      fs.writeFileSync(file, r.buffer)
+      const hd = await this._applyHd(file)
+      this.logger('info', `[tts] 合成完成：sovits/pro 参考音频=${refName} ${speak.length}字 用时=${Date.now() - t0}ms${hd.enhanced ? '（已高清增强）' : ''}`)
+      return {
+        ok: true, file: hd.file, rawFile: file, enhanced: hd.enhanced,
+        tier: 'pro', mode: 'sovits', voice: refName, chars: speak.length, notes,
+      }
+    } catch (e) {
+      this.logger('warn', '[tts] 合成失败：', e?.message || e)
+      return { ok: false, error: e?.message || String(e) }
+    }
+  }
+
   async _synthesizeCloud(text, p, { fail, notes }) {
     const id = this.provider
     const cfgProv = this.cfg[id] || {}
@@ -659,7 +715,7 @@ export class TtsService {
 
   /** 服务商中文名（错误信息用） */
   _providerName(id) {
-    return { indextts: 'IndexTTS', doubao: '豆包语音合成', minimax: 'MiniMax 语音', mimo: '小米 MiMo TTS' }[id] || id
+    return { indextts: 'IndexTTS', sovits: 'GPT-SoVITS', doubao: '豆包语音合成', minimax: 'MiniMax 语音', mimo: '小米 MiMo TTS' }[id] || id
   }
 
   /** 高清化（agent.tts.hdVoice）：响度标准化 + 存在感补偿；失败回退原始文件（不阻断发送） */

@@ -850,7 +850,11 @@ async function _buildRuntime(scope) {
       tools.register(makeTtsSpeakTool(tts))
       const st = tts.status()
       const voiceCount = tts.voices('voice').length
-      startupInfo.tts = { provider: st.provider, configured: st.configured, missing: st.missing, voices: voiceCount, judgeModel: ttsTarget.model || cfg.model }
+      // sovits 没有音色库：面板里的「音色」恒为 0，启动横幅改用参考音频名字，免得看着像没配好
+      const sovitsRef = st.provider === 'sovits'
+        ? (path.basename(String(tts.cfg.sovits?.refAudioPath || '')) || '未配置')
+        : ''
+      startupInfo.tts = { provider: st.provider, configured: st.configured, missing: st.missing, voices: voiceCount, sovitsRef, judgeModel: ttsTarget.model || cfg.model }
       if (!st.configured) Log.debug(`[tts] tts_speak 已注册（服务商 ${st.provider}），但配置未齐全：${st.missing.join('、')}（Web 面板 → 语音合成）`)
     } catch (e) { Log.warn('[tts] 初始化失败（tts_speak 不注册）', e?.message || e) }
   }
@@ -1457,7 +1461,7 @@ async function _buildRuntime(scope) {
   if (startupInfo.diagram) extras.push(`示意图(${startupInfo.diagram})`)
   if (cfg.sticker?.enable) extras.push('表情包')
   if (cfg.stt?.enable !== false) extras.push('STT')
-  if (startupInfo.tts) extras.push(`TTS(${startupInfo.tts.provider}${startupInfo.tts.configured ? '' : `·待配置${startupInfo.tts.missing?.length ? ':' + startupInfo.tts.missing.join('/') : ''}`}·音色${startupInfo.tts.voices})`)
+  if (startupInfo.tts) extras.push(`TTS(${startupInfo.tts.provider}${startupInfo.tts.configured ? '' : `·待配置${startupInfo.tts.missing?.length ? ':' + startupInfo.tts.missing.join('/') : ''}`}${startupInfo.tts.sovitsRef ? `·参考音频 ${startupInfo.tts.sovitsRef}` : `·音色${startupInfo.tts.voices}`})`)
   if (cfg.multiagent?.enable !== false) extras.push(`多代理(${startupInfo.multiagent || 'spawn'})`)
   const mcpNames = Object.keys(cfg.mcp?.servers || {})
   Log.panel(`运行时就绪 · ${cfg.model}`, [

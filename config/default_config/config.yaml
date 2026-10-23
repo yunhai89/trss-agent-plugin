@@ -375,12 +375,21 @@ agent:
     apiKey: ""              # STT API Key（OpenAI/Groq/Azure 等）
     model: "whisper-1"     # 模型名
     language: ""            # 语言提示（如 zh/en，留空自动检测）
-  tts:                     # 语音合成（tts_speak 工具）：IndexTTS 2.5（本地）/ 豆包 / MiniMax / MiMo 四家
+  tts:                     # 语音合成（tts_speak 工具）：GPT-SoVITS（本地）/ IndexTTS 2.5（本地）/ 豆包 / MiniMax / MiMo
     enable: false          # 总开关（默认关，opt-in）：开=注册 tts_speak 并允许自动语音；关=完全静默（不注册、不合成）
-    provider: indextts     # 当前服务商：indextts | doubao | minimax | mimo（云服务商仅在选中且配置齐全时才出网）
+    provider: indextts     # 当前服务商：sovits | indextts | doubao | minimax | mimo（云服务商仅在选中且配置齐全时才出网）
     autoReply: true        # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
     replyMaxChars: 300     # 自动语音的最大字符数（超长按句截断，防合成出几分钟语音；0=不限）
     hdVoice: true          # 发送前高清化：响度标准化 + 存在感补偿（需宿主 ffmpeg，失败自动回退原始音频）
+    sovits:                 # GPT-SoVITS（api_v2，默认 http://127.0.0.1:9880）：音色=参考音频，无音色库/无情绪参数
+      endpoint: "http://127.0.0.1:9880" # 接口地址（api_v2；不是 WebUI 的 9874）
+      refAudioPath: ""      # 参考音频的【服务端本地绝对路径】，3~10 秒（如 /root/.dsh/fairy-voice/reference/fairy_ref.wav）
+      promptText: ""        # 参考音频的逐字文本（必须与音频一致，否则音色会漂）
+      promptLang: zh        # 参考音频语种：zh/en/ja/ko/yue
+      textLang: zh          # 默认合成语种：zh/en/ja/ko/yue（调用时显式传 lang 则以此为准）
+      textSplitMethod: cut5 # 切段方式 cut0~cut5；长文本靠服务端切段，cut0 长文本韵律容易漂
+      filterNonChinese: false # 排障用：true 时只送汉字+数字+中文标点。默认 false —— 英文由模型自带英文 g2p 发音，罗马数字/符号由服务端 clean_text 改写
+      timeoutMs: 120000     # 单次合成超时（毫秒；8 GB 卡 30 秒长文本约 7 秒）
     indextts:
       endpoint: ""         # 接口地址（如 http://127.0.0.1:7860；直连 IndexTTS 本体，无需鉴权）
       lang: ZH             # 合成语言：ZH/EN/JA/AR/ES
@@ -451,7 +460,7 @@ agent:
       segmentGapMs: 300    # max 档段间静音（毫秒；0=不留空隙）
       maxSegmentChars: 140 # max 档单段字符上限（LLM 分段/标点回退）
       timeoutMs: 120000
-    judgeModel: ""         # 情绪判定模型（对四家服务商统一生效；留空=indextts.model→utilityModel→主模型）
+    judgeModel: ""         # 情绪判定模型（对 IndexTTS/豆包/MiniMax/MiMo 统一生效；留空=indextts.model→utilityModel→主模型）
     judgeTimeoutMs: 300000 # 情绪判定总预算（毫秒，默认 5 分钟，统一生效）
   sandbox:                # E2B Firecracker 沙箱：terminal 工具的唯一执行面 + toolEvo 的隔离面
     # 命令在独立 microVM 内执行，宿主**不再有任何 shell 执行面**（旧 agent.terminal 已废弃，可直接删除）。

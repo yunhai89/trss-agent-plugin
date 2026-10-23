@@ -5,7 +5,7 @@
  * 情绪模式与 pro/max 档位见 service.js / emotion.js，面向 Agent 的说明见 skills/tts.md。
  */
 export { TtsService, normalizeTtsConfig, TTS_DEFAULTS, TTS_LANGS, TTS_TEXT_MAX, parseVectorParam } from './service.js'
-export { stripForSpeech } from './speech-text.js'
+export { stripForSpeech, stripForSovits } from './speech-text.js'
 export { makeTtsSpeakTool } from './tools.js'
 export { RefLibrary, REF_KINDS, AUDIO_EXTS, normalizeRefName, extOf } from './refs.js'
 export {
@@ -16,6 +16,7 @@ export {
 export { DoubaoTtsClient, parseDoubaoNdjson, doubaoHint, doubaoHttpHint, DOUBAO_ENDPOINT, DOUBAO_RESOURCE_IDS, DOUBAO_MODELS } from './doubao.js'
 export { MinimaxTtsClient, minimaxHint, minimaxHttpHint, MINIMAX_ENDPOINT, MINIMAX_MODELS } from './minimax.js'
 export { MimoTtsClient, mimoHttpHint, MIMO_ENDPOINT, MIMO_MODELS } from './mimo.js'
+export { SovitsClient, sovitsHttpHint, SOVITS_ENDPOINT, SOVITS_SPLIT_METHODS, SOVITS_LANG } from './sovits.js'
 export {
   IndexTtsClient, clampVector, vectorToObject, fileData, VECTOR_KEYS, VECTOR_ZH,
   VECTOR_ALIASES, normalizeVectorKeys, httpHint,

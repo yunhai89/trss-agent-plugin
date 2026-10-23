@@ -226,7 +226,7 @@
           <v-icon name="music"/>
           <div>
             <b>语音合成（TTS）</b>：总开关<strong>默认关闭（opt-in）</strong>——开启后 Agent 才注册 <code>tts_speak</code>，且<strong>每条最终回复都会自动追加语音</strong>（文字/图片照常发；合成内容为剥除 md/代码后的正文）。Agent 工具 <code>tts_speak</code> 用于指定音色/情绪的点播（本轮已点播则不再自动补发）。
-            <span class="mut2">四家服务商：<strong>IndexTTS 2.5</strong>（本地，音色/情绪参考 + 8 维向量）、<strong>豆包</strong>（Seed-TTS，语音指令/多情感标签）、<strong>MiniMax</strong>（9 种情绪标签）、<strong>MiMo</strong>（自然语言风格指令）。情绪判定四家共用一条 LLM 链路（8 维向量自动判定）；pro=整段一套情绪，max=按需拆分逐段情绪后合成拼接。云服务商仅在「总开关开 + 选中该服务商 + 密钥/音色配置齐全」时才会把讲稿发往对应平台。详细说明见技能 <code>tts</code>。</span>
+            <span class="mut2">五家服务商：<strong>GPT-SoVITS</strong>（本地 api_v2，音色/语气由参考音频决定，无情绪参数）、<strong>IndexTTS 2.5</strong>（本地，音色/情绪参考 + 8 维向量）、<strong>豆包</strong>（Seed-TTS，语音指令/多情感标签）、<strong>MiniMax</strong>（9 种情绪标签）、<strong>MiMo</strong>（自然语言风格指令）。IndexTTS/豆包/MiniMax/MiMo 共用一条 LLM 情绪判定链路；GPT-SoVITS 不参与情绪判定、也没有 pro/max 档位。云服务商仅在「总开关开 + 选中该服务商 + 密钥/音色配置齐全」时才会把讲稿发往对应平台。详细说明见技能 <code>tts</code>。</span>
           </div>
         </div>
 
@@ -257,7 +257,7 @@
                 <option v-for="p in (data?.providers || [])" :key="p.id" :value="p.id">{{ p.name }}</option>
               </select>
             </cfg-row>
-            <cfg-row name="情绪判定模型" desc="四家服务商共用的情绪判定小模型（模型条目 id/模型名）；留空=IndexTTS 情绪判定模型 → utilityModel → 主模型">
+            <cfg-row name="情绪判定模型" desc="IndexTTS/豆包/MiniMax/MiMo 共用的情绪判定小模型（GPT-SoVITS 不用）；留空=IndexTTS 情绪判定模型 → utilityModel → 主模型">
               <input class="inp mono" style="width:200px" :value="data?.judgeModel || ''" placeholder="留空=utilityModel→主模型" @change="saveJudgeModel($event.target.value)">
             </cfg-row>
             <cfg-row name="情绪判定超时(ms)" desc="情绪判定单次调用总预算（默认 30000；超时中止请求并按配置回退，不影响出语音）">
@@ -270,7 +270,7 @@
         <div id="tts-services" class="card cf-sec" :class="{open: open.services}">
           <div class="cf-sh" @click="open.services = !open.services">
             <span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="layers"/></span>
-            <div><div class="ct-t">TTS 服务</div><div class="ct-s">点击服务卡片打开对应配置（本地 IndexTTS / 云服务商密钥与音色 / 情绪化支持）</div></div>
+            <div><div class="ct-t">TTS 服务</div><div class="ct-s">点击服务卡片打开对应配置（本地 GPT-SoVITS / IndexTTS、云服务商密钥与音色）</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.services">
@@ -286,7 +286,8 @@
                 </div>
                 <div class="row g6" style="margin-top:10px;align-items:center">
                   <span v-if="p.id === 'indextts'" class="mut2" style="font-size:11.5px"><v-icon name="user"/> 音色参考 {{ voiceRefs.length }} 条 · 情绪参考 {{ emoRefs.length }} 条</span>
-                  <span v-else class="mut2" style="font-size:11.5px">API Key / 音色 ID 在配置弹窗中设置{{ p.missing?.length ? '（缺少：' + p.missing.join('、') + '）' : '' }}</span>
+                  <span v-else-if="p.id === 'sovits'" class="mut2" style="font-size:11.5px">参考音频路径在配置弹窗中设置{{ p.missing?.length ? '（缺少：' + p.missing.join('、') + '）' : '' }}</span>
+                  <span v-else class="mut2" style="font-size:11.5px">接口地址 / 密钥 / 音色在配置弹窗中设置{{ p.missing?.length ? '（缺少：' + p.missing.join('、') + '）' : '' }}</span>
                   <button class="btn b-soft b-sm" style="margin-left:auto">配置 <v-icon name="arrowr"/></button>
                 </div>
               </div>
@@ -416,9 +417,9 @@
             </cfg-row>
           </div>
 
-          <!-- 云服务商：按后端 fields schema 渲染（text/secret/select/number/switch） -->
+          <!-- 云服务商/GPT-SoVITS：按后端 fields schema 渲染（text/secret/select/number/switch） -->
           <div v-else class="cf-grid">
-            <div class="cf-sub full"><v-icon name="link"/> 接口与密钥</div>
+            <div class="cf-sub full"><v-icon name="link"/> 接口与参数</div>
             <cfg-row v-for="f in (modal.service?.fields || [])" :key="f.key" :full="f.type !== 'number' && f.type !== 'switch' && (f.desc || '').length > 26" :name="f.label" :desc="f.desc">
               <input v-if="f.type === 'text' || f.type === 'secret'" class="inp" :class="{mono: f.type === 'secret'}" :type="f.type === 'secret' ? 'password' : 'text'" style="width:320px" v-model="form[f.key]" :placeholder="f.placeholder || ''" autocomplete="off">
               <select v-else-if="f.type === 'select'" class="sel" style="width:300px" v-model="form[f.key]">
@@ -428,7 +429,7 @@
               <v-switch v-else-if="f.type === 'switch'" :model-value="!!form[f.key]" @update:modelValue="form[f.key] = !!$event"/>
               <span v-else class="mut2" style="font-size:12px">{{ f.desc }}</span>
             </cfg-row>
-            <cfg-row full name="连接状态" desc="测试会真实合成 2 个字（消耗极少字符；这是官方唯一可探活方式），成功即代表密钥/音色/网络均可用">
+            <cfg-row full name="连接状态" desc="测试会真实合成 2 个字（GPT-SoVITS 首次加载模型可能稍慢），成功即代表接口地址、参考音频/密钥与网络均可用">
               <div class="row g6">
                 <button class="btn b-line b-sm" @click="testConn" :disabled="testState.running">{{ testState.running ? '测试中…' : '测试连接' }}</button>
                 <span v-if="testState.result" class="pill" :class="testState.result.ok ? 'p-green' : 'p-rose'">{{ testState.result.msg }}</span>

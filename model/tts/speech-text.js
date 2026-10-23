@@ -91,3 +91,45 @@ export function stripForSpeech(text, { maxChars = 300 } = {}) {
   }
   return s
 }
+
+/**
+ * 回复文本 → GPT-SoVITS 朗读文本（stripForSovits）。
+ *
+ * 为什么单独再洗一遍：GPT-SoVITS 对拉丁字母/特殊符号非常敏感——混进英文单词会被
+ * 逐字母拼读（"GPT" 读成 G-P-T），井号、星号、括号、斜杠会被念出名字，混着中文时
+ * 语调还会被拉平。所以走白名单：**只留汉字、数字、中文标点**，其余一律剥掉。
+ *
+ * 先复用 stripForSpeech 清掉 md/代码/URL/emoji，再做白名单，最后修补剥离留下的标点碎片。
+ * 数字默认保留（"3 天"能正常读）；keepDigits=false 可连数字一起剥。
+ */
+export function stripForSovits(text, { maxChars = 300, keepDigits = true } = {}) {
+  let s = stripForSpeech(text, { maxChars: 0 })
+  if (!s.trim()) return ''
+
+  // 先把「拉丁词 + 紧随其后的数字」整体摘掉（v2 / GPT4 / SoVITS2 这类残留数字单念会怪）
+  s = s.replace(/\p{Script=Latin}+[\p{Nd}]*|[\p{Nd}]+\p{Script=Latin}+/gu, '')
+
+  // 白名单：汉字 + 数字 + 中文标点（顿号/逗号/句号/问叹/分号/冒号/省略号/间隔号）
+  s = s.replace(/[^\p{Script=Han}\p{Nd}，。！？、；：…·]/gu, '')
+  if (!keepDigits) s = s.replace(/\p{Nd}+/gu, '')
+
+  // 剥离后常见碎片：'，，' '。，' '，。' 以及首尾悬空标点
+  s = s.replace(/[，、；：]{2,}/g, '，')
+  s = s.replace(/[，、；：…·]+(?=[。！？])/g, '')
+  s = s.replace(/(?<=[。！？])[，、；：…·]+/g, '')
+  s = s.replace(/^[，、；：。！？…·\s]+/, '')
+  s = s.replace(/[，、；：…·\s]+$/, '')
+  if (!s) return ''
+
+  // 句子以标点收尾，避免 TTS 尾音被截断
+  if (!/[。！？]$/.test(s)) s += '。'
+
+  const max = Number(maxChars) || 0
+  if (max > 0 && s.length > max) {
+    const cut = s.slice(0, max)
+    let idx = -1
+    for (const p of ['。', '！', '？', '；', '，', '、']) idx = Math.max(idx, cut.lastIndexOf(p))
+    s = idx >= Math.floor(max * 0.5) ? cut.slice(0, idx + 1) : cut.replace(/[，、；：\s]+$/, '') + '。'
+  }
+  return s
+}

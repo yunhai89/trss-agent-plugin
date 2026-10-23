@@ -63,7 +63,9 @@ await test('GET /api/tts：默认配置 + 服务商列表 + 空参考库', async
   ok(r.body.data.hdVoice === true, '高清语音默认开')
   ok(r.body.data.provider === 'indextts', '默认服务商 indextts')
   const ids = (r.body.data.providers || []).map((p) => p.id)
-  ok(ids.join(',') === 'indextts,doubao,minimax,mimo', `四家服务商卡片：${ids.join(',')}`)
+  ok(ids.join(',') === 'indextts,sovits,doubao,minimax,mimo', `五家服务商卡片：${ids.join(',')}`)
+  ok(r.body.data.providers.find((p) => p.id === 'sovits')?.configured === false, 'GPT-SoVITS 默认未配置')
+  ok(r.body.data.providers.find((p) => p.id === 'sovits')?.fields?.find((f) => f.key === 'filterNonChinese')?.type === 'switch', 'SoVITS 布尔字段用 switch 类型（面板可渲染）')
   ok(r.body.data.providers.find((p) => p.id === 'doubao')?.configured === false, '豆包默认未配置')
   ok(r.body.data.providers.find((p) => p.id === 'minimax')?.fields?.some((f) => f.key === 'voiceId'), 'MiniMax 字段 schema 下发')
   ok(r.body.data.providers.find((p) => p.id === 'mimo')?.fields?.some((f) => f.key === 'style'), 'MiMo 字段 schema 下发')
@@ -146,6 +148,22 @@ await test('PUT /api/tts/config：白名单点路径写入（enable/provider/ind
   ok(cfg2.minimax.voiceId === 'male-qn-qingse' && cfg2.mimo.apiKey === 'mimo_key', 'MiniMax/MiMo 写入')
   ok(cfg2.judgeModel === 'm-judge' && cfg2.judgeTimeoutMs === 20000, '情绪判定全局字段写入')
 
+  // GPT-SoVITS：点路径写入 + 布尔/数值归一 + payload 回读
+  const sov = await put('/api/tts/config', { changes: {
+    'sovits.endpoint': 'http://127.0.0.1:9880',
+    'sovits.refAudioPath': '/root/.dsh/fairy-voice/reference/fairy_ref.wav',
+    'sovits.promptText': '收到指令，主人。',
+    'sovits.promptLang': 'zh', 'sovits.textLang': 'zh', 'sovits.textSplitMethod': 'cut5',
+    'sovits.filterNonChinese': 1, 'sovits.timeoutMs': '90000',
+  } })
+  ok(sov.status === 200 && sov.body.code === 0, 'GPT-SoVITS 配置写入成功')
+  const cfg3 = __state.config.agent.tts
+  ok(cfg3.sovits.refAudioPath.endsWith('fairy_ref.wav') && cfg3.sovits.promptLang === 'zh', 'SoVITS 路径/语种写入')
+  ok(cfg3.sovits.filterNonChinese === true && cfg3.sovits.timeoutMs === 90000, 'SoVITS 布尔/数值归一')
+  const payload3 = await get('/api/tts')
+  ok(payload3.body.data.sovits?.textLang === 'zh' && payload3.body.data.sovits?.filterNonChinese === true, 'SoVITS payload 回读')
+  ok(payload3.body.data.providers.find((p) => p.id === 'sovits')?.configured === true, 'SoVITS configured 状态刷新（endpoint+参考音频）')
+
   const badProv = await put('/api/tts/config', { changes: { provider: 'evil' } })
   ok(badProv.status === 400 && badProv.body.code === 4001, '非法 provider 被拒')
   const badEndpoint = await put('/api/tts/config', { changes: { 'doubao.endpoint': 'javascript:alert(1)' } })
@@ -173,6 +191,10 @@ await test('POST /api/tts/test：真实 HTTP 探活（成功解析 fn_index / �
   ok(keyRes.status === 200 && fakeTts.lastAuthHeader === '', '即使传 apiKey 也不发鉴权头（IndexTTS 直连本体）')
   const bad = await postJson('/api/tts/test', { endpoint: 'http://127.0.0.1:1' })
   ok(bad.status === 500 && bad.body.code === 5000, '不可达 5000')
+
+  // SoVITS 缺参考音频：在发请求前就返回可读错误（不出网）
+  const sovBad = await postJson('/api/tts/test', { provider: 'sovits', endpoint: 'http://127.0.0.1:1', refAudioPath: '' })
+  ok(sovBad.status === 500 && sovBad.body.code === 5000 && /参考音频/.test(sovBad.body.msg || ''), `SoVITS 缺参考音频 → 5000 且不出网（${sovBad.status}/${sovBad.body.code}/${sovBad.body.msg}）`)
 
   // 云服务商连通性：草稿覆盖保存配置，真实合成 2 字
   const db = await postJson('/api/tts/test', {
