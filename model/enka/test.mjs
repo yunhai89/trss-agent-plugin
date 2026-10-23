@@ -96,7 +96,7 @@ const HSR = {
 }
 
 const ZZZ = {
-  uid: '100000000',
+  uid: '45968357',
   ttl: 60,
   PlayerInfo: {
     SocialDetail: { Desc: '新艾利都', ProfileDetail: { Nickname: '绳匠', Level: 60 } },
@@ -123,15 +123,19 @@ const ZZZ = {
   },
 }
 
-await test('assertUid：9~10 位，拒绝非法值', async () => {
-  eq(assertUid('618285856'), '618285856', '9 位')
-  eq(assertUid('1000000000'), '1000000000', '10 位')
+await test('assertUid：原神/星铁 9~10 位，绝区零 8~10 位', async () => {
+  eq(assertUid('618285856', 'genshin'), '618285856', '原神 9 位')
+  eq(assertUid('1000000000', 'hsr'), '1000000000', '星铁 10 位')
+  eq(assertUid('45968357', 'zzz'), '45968357', '绝区零国服 8 位')
   let threw = null
-  try { assertUid('123') } catch (e) { threw = e }
+  try { assertUid('123', 'zzz') } catch (e) { threw = e }
   ok(threw instanceof EnkaError && threw.code === 'bad_uid', '短 UID → bad_uid')
   let threw2 = null
-  try { assertUid('012345678') } catch (e) { threw2 = e }
+  try { assertUid('012345678', 'zzz') } catch (e) { threw2 = e }
   ok(threw2 instanceof EnkaError, '0 开头被拒')
+  let threw3 = null
+  try { assertUid('45968357', 'genshin') } catch (e) { threw3 = e }
+  ok(threw3 instanceof EnkaError && threw3.code === 'bad_uid', '8 位仅绝区零可用')
 })
 
 await test('原神：请求 URL/UA 与归一化', async () => {
@@ -170,8 +174,8 @@ await test('星铁：detailInfo 归一化', async () => {
 await test('绝区零：PlayerInfo 归一化', async () => {
   clearEnkaCache()
   const f = mockJson(ZZZ)
-  const r = await fetchShowcase('zzz', '100000000', { fetcher: f })
-  eq(f.calls[0].url, 'https://enka.network/api/zzz/uid/100000000/', '绝区零端点')
+  const r = await fetchShowcase('zzz', '45968357', { fetcher: f })
+  eq(f.calls[0].url, 'https://enka.network/api/zzz/uid/45968357/', '绝区零端点')
   eq(r.player.nickname, '绳匠', '昵称')
   eq(r.player.level, 60, '绳网等级')
   eq(r.characters[0].name, '安比', '代理人名映射')
@@ -250,11 +254,22 @@ await test('配装详情：武器/圣遗物主副词条与 ZZZ 主词条缩放',
   eq(hc.relics[0].main, { name: '生命值', value: 705, percent: false }, '遗器主词条')
   eq(hc.relics[0].subs[0], { name: '暴击率', value: 3.2, percent: true }, '遗器副词条比例换算')
 
-  const zzz = await fetchShowcase('zzz', '100000000', { fetcher: mockJson(ZZZ) })
+  const zzz = await fetchShowcase('zzz', '45968357', { fetcher: mockJson(ZZZ) })
   const zc = zzz.characters[0]
   eq(zc.relics[0].setName, '啄木鸟电音', '驱动盘套装中文名')
   eq(zc.relics[0].main, { name: '生命值', value: 2200, percent: false }, '驱动盘主词条按等级/稀有度放大')
   eq(zc.relics[0].subs[0], { name: '暴击率', value: 2.4, percent: true }, '驱动盘副词条换算')
+})
+
+await test('绝区零：国服 8 位 UID 与空展柜提示', async () => {
+  clearEnkaCache()
+  const empty = { ...ZZZ, PlayerInfo: { ...ZZZ.PlayerInfo, ShowcaseDetail: { AvatarList: [] } } }
+  const r = await fetchShowcase('zzz', '45968357', { fetcher: mockJson(empty) })
+  eq(r.uid, '45968357', '8 位 UID 请求成功')
+  eq(r.characters.length, 0, '空展柜角色数为 0')
+  ok(formatShowcase(r).includes('展柜为空'), '展柜列表提示为空')
+  const build = await enkaBuildTool.execute({ uid: '45968357', game: 'zzz' }, { fetcher: mockJson(empty) })
+  ok(build.includes('展柜为空') && build.includes('公开'), '配装工具提示空展柜与开启方式')
 })
 
 await test('enka_build：角色选择与提示', async () => {
@@ -287,7 +302,7 @@ await test('formatShowcase：中文摘要与截断', async () => {
 
   const hsrText = formatShowcase(normalizeHsr(HSR, '600123456'))
   ok(hsrText.includes('光锥「锋镝」Lv.80 叠影1') && hsrText.includes('星魂2'), '星铁术语')
-  const zzzText = formatShowcase(normalizeZzz(ZZZ, '100000000'))
+  const zzzText = formatShowcase(normalizeZzz(ZZZ, '45968357'))
   ok(zzzText.includes('音擎「月相」-望') && zzzText.includes('影画2') && zzzText.includes('A级'), '绝区零术语与 A 级稀有度')
 
   const many = normalizeGenshin({ ...GI, avatarInfoList: Array.from({ length: 25 }, () => GI.avatarInfoList[0]) }, '618285856')

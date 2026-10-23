@@ -11,7 +11,7 @@ priority: 9
 
 ## 1. 先拿数据
 
-- 需要 **游戏 + UID + 角色名**。缺 UID 就问，不要猜。
+- 需要 **游戏 + UID + 角色名**。缺 UID 就问，不要猜；绝区零国服 UID 是 8 位。
 - 不知道展柜里有哪些角色：先 `enka_genshin` / `enka_hsr` / `enka_zzz`。
 - 再 `enka_build`：`uid`、`game`（genshin/hsr/zzz）、`character`（角色名或 ID）。
 - 工具会返回逐件主副词条、套装、武器、命座/星魂/影画，以及副词条合计和双暴分。

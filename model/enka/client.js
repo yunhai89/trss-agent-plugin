@@ -43,10 +43,15 @@ export class EnkaError extends Error {
 
 export function clearEnkaCache() { cache.clear() }
 
-export function assertUid(uid) {
+export function assertUid(uid, game = '') {
   const s = String(uid ?? '').trim()
-  if (!/^[1-9]\d{8,9}$/.test(s)) {
-    throw new EnkaError('UID 应为 9~10 位数字（原神/星铁通常 9 位，绝区零 10 位）', { code: 'bad_uid', status: 400 })
+  // 绝区零国服 UID 为 8 位、国际服 10 位；原神/星铁 9~10 位
+  const minDigits = game === 'zzz' ? 8 : 9
+  if (!new RegExp(`^[1-9]\\d{${minDigits - 1},9}$`).test(s)) {
+    const hint = game === 'zzz'
+      ? '绝区零 UID 应为 8~10 位数字（国服 8 位，国际服 10 位）'
+      : 'UID 应为 9~10 位数字（原神/星铁通常 9 位）'
+    throw new EnkaError(hint, { code: 'bad_uid', status: 400 })
   }
   return s
 }
@@ -291,7 +296,7 @@ export const NORMALIZERS = { genshin: normalizeGenshin, hsr: normalizeHsr, zzz: 
 export async function fetchShowcase(game, uid, opts = {}) {
   const meta = ENKA_GAMES[game]
   if (!meta) throw new EnkaError(`不支持的游戏：${game}`, { code: 'bad_game', status: 400 })
-  const id = assertUid(uid)
+  const id = assertUid(uid, game)
   const fetcher = opts.fetcher || globalThis.fetch
   if (typeof fetcher !== 'function') throw new EnkaError('当前运行环境没有可用的 fetch', { code: 'no_fetch' })
 

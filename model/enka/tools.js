@@ -74,7 +74,7 @@ function makeTool(game, description) {
     parameters: {
       type: 'object',
       properties: {
-        uid: { type: 'string', pattern: '^[1-9]\\d{8,9}$', description: '游戏 UID（9~10 位数字）' },
+        uid: { type: 'string', pattern: '^[1-9]\\d{7,9}$', description: '游戏 UID（8~10 位数字；绝区零国服 8 位）' },
       },
       required: ['uid'],
     },
@@ -98,7 +98,7 @@ export const enkaHsrTool = makeTool('hsr',
   '通过 UID 查询《崩坏：星穹铁道》玩家的公开角色展柜（Enka.Network）。返回昵称、开拓等级、签名，以及展示角色的名称/等级/稀有度/属性/命途/星魂/光锥/遗器数量。只含公开展柜角色；UID 为 9~10 位数字。')
 
 export const enkaZzzTool = makeTool('zzz',
-  '通过 UID 查询《绝区零》玩家的公开代理人展柜（Enka.Network）。返回昵称、绳网等级、签名，以及展示代理人的名称/等级/稀有度/属性/职业/影画/音擎/驱动盘数量。只含公开展柜角色；UID 为 9~10 位数字。')
+  '通过 UID 查询《绝区零》玩家的公开代理人展柜（Enka.Network）。返回昵称、绳网等级、签名，以及展示代理人的名称/等级/稀有度/属性/职业/影画/音擎/驱动盘数量。只含公开展柜角色；UID 为 8~10 位数字（国服 8 位，国际服 10 位）。')
 
 function fmtStat(s) {
   if (!s) return '—'
@@ -208,13 +208,13 @@ export function formatBuild(result, char) {
 
 export const enkaBuildTool = {
   name: 'enka_build',
-  description: '查看指定角色的完整配装（武器/光锥/音擎、逐件圣遗物/遗器/驱动盘的主副词条、命座/星魂/影画），用于诊断练度并让 LLM 给出优化方案。先用 enka_genshin/hsr/zzz 查看展柜角色名；character 传角色名或 ID。',
+  description: '查看指定角色的完整配装（武器/光锥/音擎、逐件圣遗物/遗器/驱动盘的主副词条、命座/星魂/影画），用于诊断练度并让 LLM 给出优化方案。先用 enka_genshin/hsr/zzz 查看展柜角色名；character 传角色名或 ID；UID 为 8~10 位数字（绝区零国服 8 位）。',
   category: 'query',
   meta: { resultCap: 18000 },
   parameters: {
     type: 'object',
     properties: {
-      uid: { type: 'string', pattern: '^[1-9]\\d{8,9}$', description: '游戏 UID（9~10 位数字）' },
+      uid: { type: 'string', pattern: '^[1-9]\\d{7,9}$', description: '游戏 UID（8~10 位数字；绝区零国服 8 位）' },
       game: { type: 'string', enum: ['genshin', 'hsr', 'zzz'], description: '游戏：genshin=原神，hsr=星穹铁道，zzz=绝区零' },
       character: { type: 'string', description: '角色名或 ID；展柜只有一名角色时可省略' },
     },
@@ -227,9 +227,13 @@ export const enkaBuildTool = {
       const result = await fetchShowcase(game, uid, { fetcher: ctx?.fetcher })
       const char = pickCharacter(result, params?.character)
       if (!char) {
-        const names = (result.characters || []).map((c) => c.name).join('、') || '（空展柜）'
+        const chars = result.characters || []
+        if (!chars.length) {
+          return '该玩家公开角色展柜为空，无法分析配装；需要玩家在游戏内把角色放进展示柜并确认公开。'
+        }
+        const names = chars.map((c) => c.name).join('、')
         if (params?.character) return `未找到角色「${params.character}」。该玩家展柜可选：${names}`
-        return `该玩家展柜有 ${result.characters?.length || 0} 名角色：${names}。请用 character 参数指定要分析的角色。`
+        return `该玩家展柜有 ${chars.length} 名角色：${names}。请用 character 参数指定要分析的角色。`
       }
       return formatBuild(result, char)
     } catch (e) {
