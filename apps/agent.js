@@ -65,6 +65,7 @@ import { CompactionArchive } from '../model/agent/compact/archive.js' // 无损�
 import { makeContextRecallTool } from '../model/agent/compact/recall.js' // context_recall：取回归档原文
 import { groupInfoTools, groupManageTools, groupHistoryTools, groupNoticeTools, groupFileTools, aiVoiceTools, forwardTools } from '../model/group/index.js'
 import { miyousheTools } from '../model/miyoushe/index.js'
+import { enkaTools } from '../model/enka/index.js'
 import { loadToolPacks } from '../model/toolkit/index.js'
 import { createSearchManager, makeSearchTools } from '../model/search/index.js'
 import {
@@ -145,6 +146,9 @@ const PROGRESS_LABELS = {
   group_set_admin: '⚙️ 群操作',
   group_set_name: '⚙️ 群操作',
   miyoushe_search: '🎮 查米游社',
+  enka_genshin: '🎮 查原神展柜',
+  enka_hsr: '🚂 查星铁展柜',
+  enka_zzz: '📺 查绝区零展柜',
   memory: '📝 更新记忆',
   memory_search: '🧠 检索记忆',
   // 群公告
@@ -183,6 +187,7 @@ function extractArgHint(args, name) {
   if (!a || typeof a !== 'object') return null
   const fields = {
     web_search: 'query', miyoushe_search: 'keyword', memory_search: 'query',
+    enka_genshin: 'uid', enka_hsr: 'uid', enka_zzz: 'uid',
     calculate: 'code', terminal: 'command', create_excel: 'filename', file_to_pdf: 'path',
     read_pdf: 'path', read_excel: 'path', transcribe_media: 'path',
     send_file: 'path', get_chat_history: 'count', get_group_file: 'name',
@@ -765,6 +770,7 @@ async function _buildRuntime(scope) {
       .register(...aiVoiceTools) // AI 语音：角色列表/文字转语音/群内发送
       .register(...forwardTools) // 合并转发：发送/获取
       .register(...miyousheTools)
+      .register(...enkaTools) // Enka 角色展柜：原神/星铁/绝区零（公开接口，无需 key）
       .register(reminderSetTool) // reminder_set：对话设提醒（到时间 fireReminder 主动发消息）
       .register(reminderListTool) // reminder_list：查看当前用户提醒/定时任务
       .register(reminderCancelTool) // reminder_cancel：取消指定 id 的提醒/定时任务
