@@ -5,8 +5,8 @@
 import {
   fetchShowcase, assertUid, clearEnkaCache, EnkaError, formatShowcase,
   normalizeGenshin, normalizeHsr, normalizeZzz,
-  enkaGenshinTool, enkaHsrTool, enkaZzzTool,
-  GI_CHARACTERS, HSR_CHARACTERS, ZZZ_CHARACTERS,
+  enkaGenshinTool, enkaHsrTool, enkaZzzTool, enkaBuildTool, formatBuild,
+  GI_CHARACTERS, HSR_CHARACTERS, ZZZ_CHARACTERS, GI_SETS, HSR_SETS, ZZZ_SUITS,
 } from './index.js'
 
 let passed = 0
@@ -39,8 +39,27 @@ const GI = {
     propMap: { 4001: { val: '90' } },
     talentIdList: [1],
     equipList: [
-      { itemId: 11509, weapon: { level: 90, affixMap: { 0: 0 } } },
-      { reliquary: {} },
+      {
+        itemId: 11509,
+        weapon: { level: 90, affixMap: { 0: 0 } },
+        flat: { weaponStats: [
+          { appendPropId: 'FIGHT_PROP_BASE_ATTACK', statValue: 674 },
+          { appendPropId: 'FIGHT_PROP_CRITICAL', statValue: 22.1 },
+        ] },
+      },
+      {
+        itemId: 82543,
+        reliquary: { level: 20, mainPropId: 14001 },
+        flat: {
+          equipType: 'EQUIP_BRACER', setId: 15008, rankLevel: 5,
+          reliquaryMainstat: { mainPropId: 'FIGHT_PROP_HP', statValue: 4780 },
+          reliquarySubstats: [
+            { appendPropId: 'FIGHT_PROP_CRITICAL', statValue: 3.9 },
+            { appendPropId: 'FIGHT_PROP_CRITICAL_HURT', statValue: 18.7 },
+            { appendPropId: 'FIGHT_PROP_ATTACK_PERCENT', statValue: 11.1 },
+          ],
+        },
+      },
       { reliquary: {} },
     ],
   }],
@@ -53,8 +72,25 @@ const HSR = {
     nickname: '开拓者', level: 70, worldLevel: 6, signature: '星穹列车',
     avatarDetailList: [{
       avatarId: 1001, level: 80, rank: 2,
-      equipment: { tid: 20000, level: 80, rank: 1 },
-      relicList: [{}, {}],
+      equipment: {
+        tid: 20000, level: 80, rank: 1,
+        _flat: { props: [
+          { type: 'BaseAttack', value: 582 },
+          { type: 'CriticalChance', value: 0.18 },
+        ] },
+      },
+      relicList: [{
+        tid: 51051, type: 1, level: 15, mainAffixId: 1,
+        _flat: {
+          setID: 105,
+          props: [
+            { type: 'HPDelta', value: 705 },
+            { type: 'CriticalChance', value: 0.032 },
+            { type: 'CriticalDamage', value: 0.064 },
+            { type: 'AttackAddedRatio', value: 0.043 },
+          ],
+        },
+      }, {}],
     }],
   },
 }
@@ -68,7 +104,20 @@ const ZZZ = {
       AvatarList: [{
         Id: 1011, Level: 60, TalentLevel: 2,
         Weapon: { Id: 12001, Level: 60, BreakLevel: 1 },
-        EquippedList: [{}, {}, {}, {}, {}, {}],
+        EquippedList: [
+          {
+            Slot: 1,
+            Equipment: {
+              Id: 31041, Level: 15, BreakLevel: 5,
+              MainPropertyList: [{ PropertyId: 11103, PropertyLevel: 1, PropertyValue: 550 }],
+              RandomPropertyList: [
+                { PropertyId: 20103, PropertyLevel: 2, PropertyValue: 240 },
+                { PropertyId: 13103, PropertyLevel: 2, PropertyValue: 15 },
+              ],
+            },
+          },
+          {}, {}, {}, {}, {},
+        ],
       }],
     },
   },
@@ -180,6 +229,52 @@ await test('缓存：ttl 内命中、ttl=0 不缓存', async () => {
   eq(f0.calls.length, 2, 'ttl=0 不缓存')
 })
 
+await test('配装详情：武器/圣遗物主副词条与 ZZZ 主词条缩放', async () => {
+  clearEnkaCache()
+  const gi = await fetchShowcase('genshin', '618285856', { fetcher: mockJson(GI) })
+  const gc = gi.characters[0]
+  eq(gc.weapon.stats[0], { name: '基础攻击力', value: 674, percent: false }, '原神武器基础攻击')
+  eq(gc.relics[0].setName, '染血的骑士道', '圣遗物套装中文名')
+  eq(gc.relics[0].main, { name: '生命值', value: 4780, percent: false }, '圣遗物主词条')
+  eq(gc.relics[0].subs[0], { name: '暴击率', value: 3.9, percent: true }, '圣遗物副词条')
+  const giText = formatBuild(gi, gc)
+  ok(giText.includes('### 武器') && giText.includes('精1'), '配装武器段')
+  ok(giText.includes('套装：') && giText.includes('主词条：') && giText.includes('副词条合计'), '配装汇总段')
+  ok(giText.includes('副词条双暴分：26.5'), '双暴分（3.9×2+18.7）')
+  ok(giText.includes('逐件：') && giText.includes('**生之花**'), '逐件列出')
+
+  const hsr = await fetchShowcase('hsr', '600123456', { fetcher: mockJson(HSR) })
+  const hc = hsr.characters[0]
+  eq(hc.weapon.stats[0], { name: '基础攻击力', value: 582, percent: false }, '星铁光锥基础攻击')
+  eq(hc.relics[0].setName, '街头出身的拳王', '遗器套装中文名')
+  eq(hc.relics[0].main, { name: '生命值', value: 705, percent: false }, '遗器主词条')
+  eq(hc.relics[0].subs[0], { name: '暴击率', value: 3.2, percent: true }, '遗器副词条比例换算')
+
+  const zzz = await fetchShowcase('zzz', '100000000', { fetcher: mockJson(ZZZ) })
+  const zc = zzz.characters[0]
+  eq(zc.relics[0].setName, '啄木鸟电音', '驱动盘套装中文名')
+  eq(zc.relics[0].main, { name: '生命值', value: 2200, percent: false }, '驱动盘主词条按等级/稀有度放大')
+  eq(zc.relics[0].subs[0], { name: '暴击率', value: 2.4, percent: true }, '驱动盘副词条换算')
+})
+
+await test('enka_build：角色选择与提示', async () => {
+  clearEnkaCache()
+  const f = mockJson(GI)
+  const text = await enkaBuildTool.execute({ uid: '618285856', game: 'genshin', character: '神里绫华' }, { fetcher: f })
+  ok(text.includes('神里绫华') && text.includes('逐件：'), '指定角色输出配装')
+
+  const noChar = await enkaBuildTool.execute({ uid: '618285856', game: 'genshin' }, { fetcher: f })
+  ok(noChar.includes('神里绫华') && noChar.includes('### 武器'), '单角色自动选中')
+
+  const two = { ...GI, avatarInfoList: [GI.avatarInfoList[0], GI.avatarInfoList[0]] }
+  clearEnkaCache()
+  const multi = await enkaBuildTool.execute({ uid: '618285856', game: 'genshin' }, { fetcher: mockJson(two) })
+  ok(multi.includes('请用 character 参数'), '多角色要求指定')
+
+  const missing = await enkaBuildTool.execute({ uid: '618285856', game: 'genshin', character: '不存在' }, { fetcher: mockJson(GI) })
+  ok(missing.includes('未找到角色'), '角色不存在提示')
+})
+
 await test('formatShowcase：中文摘要与截断', async () => {
   const r = normalizeGenshin(GI, '618285856')
   const text = formatShowcase(r)
@@ -209,6 +304,8 @@ await test('工具：execute 返回 markdown / 失败降级为文案', async () 
   eq(enkaGenshinTool.category, 'query', 'category=query')
   eq(enkaHsrTool.name, 'enka_hsr', '工具名')
   eq(enkaZzzTool.parameters.required[0], 'uid', '参数 uid 必填')
+  eq(enkaBuildTool.name, 'enka_build', '配装工具名')
+  eq(enkaBuildTool.parameters.required.join(','), 'uid,game', '配装工具必填参数')
 
   const bad = await enkaGenshinTool.execute({ uid: 'abc' }, { fetcher: f })
   ok(bad.startsWith('查询失败：') && bad.includes('UID'), '非法 UID 返回可读文案')
@@ -219,6 +316,9 @@ await test('内置数据：三游戏角色表可用', async () => {
   ok(Object.keys(HSR_CHARACTERS).length >= 90, `星铁角色 ${Object.keys(HSR_CHARACTERS).length}`)
   eq(HSR_CHARACTERS['8001']?.n, '开拓者', '开拓者占位名已替换')
   ok(Object.keys(ZZZ_CHARACTERS).length >= 60, `绝区零角色 ${Object.keys(ZZZ_CHARACTERS).length}`)
+  ok(Object.keys(GI_SETS).length >= 60, `原神圣遗物套装 ${Object.keys(GI_SETS).length}`)
+  ok(Object.keys(HSR_SETS).length >= 55, `星铁遗器套装 ${Object.keys(HSR_SETS).length}`)
+  ok(Object.keys(ZZZ_SUITS).length >= 25, `绝区零驱动盘套装 ${Object.keys(ZZZ_SUITS).length}`)
 })
 
 console.log('\n========================================')

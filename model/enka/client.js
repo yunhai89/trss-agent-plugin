@@ -14,9 +14,9 @@
 
 import { VERSION } from '../../utils/version.js'
 import {
-  GI_CHARACTERS, GI_WEAPONS, GI_ELEMENTS, GI_WEAPON_TYPES,
-  HSR_CHARACTERS, HSR_LIGHT_CONES, HSR_ELEMENTS, HSR_PATHS,
-  ZZZ_CHARACTERS, ZZZ_W_ENGINES, ZZZ_ELEMENTS, ZZZ_PROFESSIONS,
+  GI_CHARACTERS, GI_WEAPONS, GI_ELEMENTS, GI_WEAPON_TYPES, GI_STATS, GI_SETS, GI_SLOTS,
+  HSR_CHARACTERS, HSR_LIGHT_CONES, HSR_ELEMENTS, HSR_PATHS, HSR_STATS, HSR_SETS, HSR_SLOTS,
+  ZZZ_CHARACTERS, ZZZ_W_ENGINES, ZZZ_ELEMENTS, ZZZ_PROFESSIONS, ZZZ_STATS, ZZZ_SUITS, ZZZ_ITEMS,
   GAME_LABELS,
 } from './data.js'
 
@@ -80,6 +80,37 @@ function makeSignal(timeoutMs, outer) {
   return outer || signal
 }
 
+
+const round = (n, d = 0) => Math.round(Number(n) * 10 ** d) / 10 ** d
+
+/** Genshin 响应里的属性值已是最终值（百分比为 11.1 这种点数） */
+function giStat(key, value) {
+  const [name, percent] = GI_STATS[key] || [String(key || '未知'), false]
+  return { name, value: round(value, 1), percent }
+}
+
+/** HSR 的百分比是 0.111 这种比例，统一换成点数 */
+function hsrStat(type, value) {
+  const [name, percent] = HSR_STATS[type] || [String(type || '未知'), false]
+  return { name, value: percent ? round(Number(value) * 100, 1) : round(value, 0), percent }
+}
+
+/**
+ * ZZZ 驱动盘主词条是「基础值」，需按等级/稀有度放大；副词条已是最终值。
+ * 百分比属性在 API 里是 ×100 的整数，这里统一换成点数。
+ */
+function zzzStat(prop, { main = false, level = 0, rarity = 4 } = {}) {
+  const id = String(prop?.PropertyId ?? '')
+  const [name, percent] = ZZZ_STATS[id] || [id || '未知', false]
+  let value = Number(prop?.PropertyValue) || 0
+  if (main) {
+    const scale = rarity >= 4 ? 0.2 : rarity === 3 ? 0.25 : rarity === 2 ? 0.3 : 0.2
+    value *= 1 + Number(level) * scale
+  }
+  if (percent) value /= 100
+  return { name, value: round(value, 1), percent }
+}
+
 function pickChar(map, id) { return map[String(id)] || {} }
 
 export function normalizeGenshin(data, uid) {
@@ -90,6 +121,19 @@ export function normalizeGenshin(data, uid) {
     const weaponEq = equip.find((x) => x?.weapon)
     const weaponInfo = weaponEq ? pickChar(GI_WEAPONS, weaponEq.itemId) : {}
     const affix = weaponEq?.weapon?.affixMap ? Object.values(weaponEq.weapon.affixMap)[0] : null
+    const relics = equip.filter((x) => x?.reliquary).map((e) => {
+      const f = e.flat || {}
+      const r = e.reliquary || {}
+      return {
+        slot: GI_SLOTS[f.equipType] || f.equipType || '圣遗物',
+        setName: GI_SETS[f.setId] || (f.setId ? `套装#${f.setId}` : '未知套装'),
+        level: Number(r.level) || 0,
+        rarity: Number(f.rankLevel) || 0,
+        main: f.reliquaryMainstat ? giStat(f.reliquaryMainstat.mainPropId, f.reliquaryMainstat.statValue) : null,
+        subs: (Array.isArray(f.reliquarySubstats) ? f.reliquarySubstats : [])
+          .map((x) => giStat(x.appendPropId, x.statValue)),
+      }
+    })
     return {
       id: String(a.avatarId),
       name: info.n || `角色#${a.avatarId}`,
@@ -102,8 +146,11 @@ export function normalizeGenshin(data, uid) {
         name: weaponInfo.n || `武器#${weaponEq.itemId}`,
         level: Number(weaponEq.weapon?.level) || 0,
         refine: affix == null ? 0 : Number(affix) + 1,
+        stats: (Array.isArray(weaponEq.flat?.weaponStats) ? weaponEq.flat.weaponStats : [])
+          .map((x) => giStat(x.appendPropId, x.statValue)),
       } : null,
-      relicCount: equip.filter((x) => x?.reliquary).length,
+      relicCount: relics.length,
+      relics,
     }
   })
   return {
@@ -130,6 +177,18 @@ export function normalizeHsr(data, uid) {
     const info = pickChar(HSR_CHARACTERS, a.avatarId)
     const lc = a.equipment
     const lcInfo = lc ? pickChar(HSR_LIGHT_CONES, lc.tid) : {}
+    const relics = (Array.isArray(a.relicList) ? a.relicList : []).map((r) => {
+      const props = Array.isArray(r._flat?.props) ? r._flat.props : []
+      const setID = r._flat?.setID ?? r.setID
+      return {
+        slot: HSR_SLOTS[r.type] || `遗器${r.type || ''}`,
+        setName: HSR_SETS[String(setID)] || (setID ? `套装#${setID}` : '未知套装'),
+        level: Number(r.level) || 0,
+        rarity: 0,
+        main: props[0] ? hsrStat(props[0].type, props[0].value) : null,
+        subs: props.slice(1).map((x) => hsrStat(x.type, x.value)),
+      }
+    })
     return {
       id: String(a.avatarId),
       name: info.n || `角色#${a.avatarId}`,
@@ -142,8 +201,11 @@ export function normalizeHsr(data, uid) {
         name: lcInfo.n || `光锥#${lc.tid}`,
         level: Number(lc.level) || 0,
         refine: Number(lc.rank) || 0,
+        stats: (Array.isArray(lc._flat?.props) ? lc._flat.props : [])
+          .map((x) => hsrStat(x.type, x.value)),
       } : null,
-      relicCount: Array.isArray(a.relicList) ? a.relicList.length : 0,
+      relicCount: relics.length,
+      relics,
     }
   })
   return {
@@ -170,6 +232,21 @@ export function normalizeZzz(data, uid) {
     const info = pickChar(ZZZ_CHARACTERS, a.Id)
     const w = a.Weapon
     const wInfo = w ? pickChar(ZZZ_W_ENGINES, w.Id) : {}
+    const relics = (Array.isArray(a.EquippedList) ? a.EquippedList : []).map((e) => {
+      const eq = e.Equipment || {}
+      const item = ZZZ_ITEMS[String(eq.Id)] || {}
+      const level = Number(eq.Level) || 0
+      const rarity = Number(item.r) || 0
+      const main = Array.isArray(eq.MainPropertyList) ? eq.MainPropertyList[0] : null
+      return {
+        slot: `驱动盘${e.Slot || ''}`,
+        setName: ZZZ_SUITS[String(item.s)] || (item.s ? `套装#${item.s}` : '未知套装'),
+        level,
+        rarity,
+        main: main ? zzzStat(main, { main: true, level, rarity }) : null,
+        subs: (Array.isArray(eq.RandomPropertyList) ? eq.RandomPropertyList : []).map((x) => zzzStat(x)),
+      }
+    })
     return {
       id: String(a.Id),
       name: info.n || `代理人#${a.Id}`,
@@ -182,8 +259,10 @@ export function normalizeZzz(data, uid) {
         name: wInfo.n || `音擎#${w.Id}`,
         level: Number(w.Level) || 0,
         refine: Number(w.BreakLevel) || 0,
+        stats: [],
       } : null,
-      relicCount: Array.isArray(a.EquippedList) ? a.EquippedList.length : 0,
+      relicCount: relics.length,
+      relics,
     }
   })
   return {

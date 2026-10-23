@@ -100,4 +100,143 @@ export const enkaHsrTool = makeTool('hsr',
 export const enkaZzzTool = makeTool('zzz',
   '通过 UID 查询《绝区零》玩家的公开代理人展柜（Enka.Network）。返回昵称、绳网等级、签名，以及展示代理人的名称/等级/稀有度/属性/职业/影画/音擎/驱动盘数量。只含公开展柜角色；UID 为 9~10 位数字。')
 
-export const enkaTools = [enkaGenshinTool, enkaHsrTool, enkaZzzTool]
+function fmtStat(s) {
+  if (!s) return '—'
+  return `${s.name} ${s.percent ? `${s.value}%` : s.value}`
+}
+
+function fmtRarity(game, rarity) {
+  if (!rarity) return ''
+  if (game === 'zzz') return rarity >= 4 ? 'S级' : rarity === 3 ? 'A级' : `${rarity}★`
+  return `${rarity}★`
+}
+
+function setSummary(relics) {
+  const counts = new Map()
+  for (const r of relics) counts.set(r.setName, (counts.get(r.setName) || 0) + 1)
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, n]) => `${n}×${name}`)
+    .join(' + ')
+}
+
+function substatSummary(relics) {
+  const sums = new Map()
+  for (const r of relics) {
+    for (const s of r.subs || []) {
+      const key = `${s.name}${s.percent ? '%' : ''}`
+      const cur = sums.get(key) || { name: s.name, percent: s.percent, value: 0, count: 0 }
+      cur.value += Number(s.value) || 0
+      cur.count += 1
+      sums.set(key, cur)
+    }
+  }
+  const order = ['暴击率', '暴击伤害', '攻击力', '生命值', '防御力', '元素精通', '元素充能效率',
+    '速度', '效果命中', '效果抵抗', '击破特攻', '穿透率', '穿透值', '异常精通', '异常掌控',
+    '能量自动回复', '冲击力', '治疗加成', '治疗量加成']
+  const rank = (name) => { const i = order.indexOf(name); return i < 0 ? 99 : i }
+  return [...sums.values()]
+    .sort((a, b) => rank(a.name) - rank(b.name) || b.value - a.value)
+    .map((s) => `${s.name} +${Math.round(s.value * 10) / 10}${s.percent ? '%' : ''}×${s.count}`)
+}
+
+function critValue(relics) {
+  let cv = 0
+  let has = false
+  for (const r of relics) {
+    for (const s of r.subs || []) {
+      if (!s.percent) continue
+      if (s.name === '暴击率') { cv += Number(s.value) * 2; has = true }
+      if (s.name === '暴击伤害') { cv += Number(s.value); has = true }
+    }
+  }
+  return has ? Math.round(cv * 10) / 10 : null
+}
+
+/** 选择要分析的角色；不传 character 时仅在展柜只有一名角色时自动选中 */
+function pickCharacter(result, query) {
+  const chars = result.characters || []
+  const q = String(query || '').trim()
+  if (!q) return chars.length === 1 ? chars[0] : null
+  const lower = q.toLowerCase()
+  return chars.find((c) => c.id === q || c.name.toLowerCase() === lower || c.name.toLowerCase().includes(lower)) || null
+}
+
+export function formatBuild(result, char) {
+  const meta = ENKA_GAMES[result.game]
+  const lines = [`## ${meta.label} · ${char.name} Lv.${char.level || '?'} · ${meta.conLabel}${char.constellation || 0}`, '']
+  lines.push(`玩家：${fmtPlayer(result.player, meta)}（UID ${result.uid}）`)
+  if (result.player.signature) lines.push(`> ${result.player.signature}`)
+  lines.push('')
+
+  lines.push('### 武器')
+  if (char.weapon?.name) {
+    const refine = char.weapon.refine ? ` ${REFINE_LABELS[result.game]}${char.weapon.refine}` : ''
+    lines.push(`- ${char.weapon.name}${refine} · Lv.${char.weapon.level || '?'}`)
+    if (char.weapon.stats?.length) lines.push(`  - ${char.weapon.stats.map(fmtStat).join(' / ')}`)
+  } else {
+    lines.push('- 展柜中没有武器数据')
+  }
+  lines.push('')
+
+  const relics = char.relics || []
+  lines.push(`### ${meta.relicLabel}`)
+  if (!relics.length) {
+    lines.push('- 展柜中没有圣遗物/遗器/驱动盘数据')
+  } else {
+    lines.push(`- 套装：${setSummary(relics)}`)
+    lines.push(`- 主词条：${relics.map((r) => `${r.slot} ${fmtStat(r.main)}`).join(' / ')}`)
+    const subs = substatSummary(relics)
+    if (subs.length) lines.push(`- 副词条合计：${subs.join(' · ')}`)
+    const cv = critValue(relics)
+    if (cv != null) lines.push(`- 副词条双暴分：${cv}（暴击率×2 + 暴击伤害）`)
+    lines.push('')
+    lines.push('逐件：')
+    relics.forEach((r, i) => {
+      const rarity = fmtRarity(result.game, r.rarity)
+      const lv = result.game === 'genshin' ? Math.min(20, r.level || 0) : (r.level || 0)
+      lines.push(`${i + 1}. **${r.slot}** · ${r.setName}${rarity ? ` ${rarity}` : ''} +${lv}`)
+      lines.push(`   - 主：${fmtStat(r.main)}`)
+      if (r.subs?.length) lines.push(`   - 副：${r.subs.map(fmtStat).join(' · ')}`)
+    })
+  }
+
+  lines.push('')
+  lines.push('> 以上是公开展柜快照，仅供配装分析；请结合角色定位、队伍与当前版本主流配装，给出需要替换的部件、目标主词条、副词条优先级与刷取顺序。')
+  return lines.join('\n')
+}
+
+export const enkaBuildTool = {
+  name: 'enka_build',
+  description: '查看指定角色的完整配装（武器/光锥/音擎、逐件圣遗物/遗器/驱动盘的主副词条、命座/星魂/影画），用于诊断练度并让 LLM 给出优化方案。先用 enka_genshin/hsr/zzz 查看展柜角色名；character 传角色名或 ID。',
+  category: 'query',
+  meta: { resultCap: 18000 },
+  parameters: {
+    type: 'object',
+    properties: {
+      uid: { type: 'string', pattern: '^[1-9]\\d{8,9}$', description: '游戏 UID（9~10 位数字）' },
+      game: { type: 'string', enum: ['genshin', 'hsr', 'zzz'], description: '游戏：genshin=原神，hsr=星穹铁道，zzz=绝区零' },
+      character: { type: 'string', description: '角色名或 ID；展柜只有一名角色时可省略' },
+    },
+    required: ['uid', 'game'],
+  },
+  async execute(params, ctx) {
+    const uid = String(params?.uid ?? '').trim()
+    const game = String(params?.game ?? '').trim()
+    try {
+      const result = await fetchShowcase(game, uid, { fetcher: ctx?.fetcher })
+      const char = pickCharacter(result, params?.character)
+      if (!char) {
+        const names = (result.characters || []).map((c) => c.name).join('、') || '（空展柜）'
+        if (params?.character) return `未找到角色「${params.character}」。该玩家展柜可选：${names}`
+        return `该玩家展柜有 ${result.characters?.length || 0} 名角色：${names}。请用 character 参数指定要分析的角色。`
+      }
+      return formatBuild(result, char)
+    } catch (e) {
+      Log.warn(`[enka] build ${game} ${uid || '?'} 查询失败：${e?.message || e}`)
+      return `查询失败：${e?.message || e}`
+    }
+  },
+}
+
+export const enkaTools = [enkaGenshinTool, enkaHsrTool, enkaZzzTool, enkaBuildTool]

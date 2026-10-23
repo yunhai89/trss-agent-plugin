@@ -149,6 +149,7 @@ const PROGRESS_LABELS = {
   enka_genshin: '🎮 查原神展柜',
   enka_hsr: '🚂 查星铁展柜',
   enka_zzz: '📺 查绝区零展柜',
+  enka_build: '🛠️ 分析配装',
   memory: '📝 更新记忆',
   memory_search: '🧠 检索记忆',
   // 群公告
@@ -187,7 +188,7 @@ function extractArgHint(args, name) {
   if (!a || typeof a !== 'object') return null
   const fields = {
     web_search: 'query', miyoushe_search: 'keyword', memory_search: 'query',
-    enka_genshin: 'uid', enka_hsr: 'uid', enka_zzz: 'uid',
+    enka_genshin: 'uid', enka_hsr: 'uid', enka_zzz: 'uid', enka_build: 'character',
     calculate: 'code', terminal: 'command', create_excel: 'filename', file_to_pdf: 'path',
     read_pdf: 'path', read_excel: 'path', transcribe_media: 'path',
     send_file: 'path', get_chat_history: 'count', get_group_file: 'name',
