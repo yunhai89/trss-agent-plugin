@@ -705,6 +705,21 @@ await test('TtsService(sovits)：filterNonChinese 打开时才剥离英文；默
   eq(seen2[0].text, 'Fairy。Ⅲ型总序式集成泛用人工智能。', '文本原样透传（不转写英文、不动罗马数字）')
 })
 
+await test('TtsService(sovits)：超过 maxChars 按句截断并写 note（防长文本超时）', async () => {
+  const seen = []
+  const svc = new TtsService(
+    { provider: 'sovits', hdVoice: false, sovits: { endpoint: 'http://s:1', refAudioPath: '/r.wav', promptText: '收到', maxChars: 30 } },
+    { dataDir: fs.mkdtempSync(path.join(tmp, 'sov3-')), logger: () => {}, fetchImpl: async (url, init) => { seen.push(JSON.parse(init.body)); return { ok: true, arrayBuffer: async () => Buffer.alloc(128, 1) } } },
+  )
+  const long = '第一句话先说明背景。第二句话继续补充细节。第三句话给出最终结论，本来还有更多内容。'
+  const r = await svc.synthesize({ text: long })
+  ok(r.ok, '截断后仍正常合成')
+  ok(r.chars <= 30, `返回字数受上限约束（${r.chars}）`)
+  ok(seen[0].text.length <= 30, `发给服务端的文本不超过上限（${seen[0].text.length} 字）`)
+  ok(seen[0].text.endsWith('。'), '截断落在句末')
+  ok((r.notes || []).some((n) => /上限 30 字/.test(n)), 'note 说明已按句截断')
+})
+
 console.log('\n========================================')
 console.log(`通过 ${passed}，失败 ${failed}`)
 console.log('========================================')

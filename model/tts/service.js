@@ -91,6 +91,7 @@ export const TTS_DEFAULTS = {
     textLang: 'zh',                   // text_lang
     textSplitMethod: 'cut5',          // cut0~cut5，长文本靠服务端切段
     filterNonChinese: false,          // true = 只把汉字送去合成（排障用）；默认原样透传，英文由模型自己发音
+    maxChars: 200,                    // 单次朗读上限（按句截断；本地卡长文本会超时）
     timeoutMs: 120000,
   },
   doubao: {
@@ -499,7 +500,14 @@ export class TtsService {
     // 文本原样交给 GPT-SoVITS：罗马数字/符号的改写已经放到服务端 text/cleaner.py 里做了，
     // 英文也不需要客户端转写——模型自带英文 g2p（Fairy -> F EH1 R IY0）。
     // filterNonChinese 只是排障用的「只留汉字」开关，正常不打开。
-    const speak = sv.filterNonChinese ? stripForSovits(text, { maxChars: 0 }) : text
+    // 本地卡上长文本是线性变慢的（8 GB 卡约 0.3~0.4 秒/字），超过 maxChars 按句截断，
+    // 否则自动语音的 replyMaxChars（默认 300，可到 600）会直接把 120s 超时打满。
+    const cap = Math.max(20, Math.min(TTS_TEXT_MAX, Number(sv.maxChars) || 200))
+    let speak = sv.filterNonChinese ? stripForSovits(text, { maxChars: cap }) : text
+    if (speak.length > cap) {
+      speak = stripForSpeech(speak, { maxChars: cap })
+      notes.push(`文本超过 GPT-SoVITS 单次上限 ${cap} 字，已按句截断`)
+    }
     if (!speak.trim()) {
       return fail('文本里没有可朗读的内容')
     }

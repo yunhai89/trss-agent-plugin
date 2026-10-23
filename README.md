@@ -567,6 +567,7 @@ tts:
     textLang: zh           # 默认合成语种：zh/en/ja/ko/yue（GPT-SoVITS 不支持 AR/ES）
     textSplitMethod: cut5  # cut0~cut5；长文本由服务端切段
     filterNonChinese: false # 排障用：true 时只送汉字+数字+中文标点
+    maxChars: 200          # 单次朗读上限（超出按句截断；本地卡约 0.3~0.4 秒/字）
     timeoutMs: 120000      # 单次合成超时（毫秒）
   indextts:
     endpoint: "http://127.0.0.1:7860"   # IndexTTS 服务地址（Web 面板「语音合成」可测试连接）

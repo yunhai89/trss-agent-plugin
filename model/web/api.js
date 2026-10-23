@@ -1079,7 +1079,7 @@ router.put('/tts/config', asyncHandler(async (req, res) => {
   const BOOL_KEYS = new Set(['autoReply', 'hdVoice', 'sovits.filterNonChinese', 'doubao.autoEmotion', 'doubao.useTagParser', 'minimax.autoEmotion', 'mimo.autoEmotion', 'indextts.autoEmotion'])
   const NUM_KEYS = new Set([
     'judgeTimeoutMs', 'indextts.timeoutMs', 'indextts.judgeTimeoutMs',
-    'sovits.timeoutMs',
+    'sovits.timeoutMs', 'sovits.maxChars',
     'doubao.timeoutMs', 'doubao.speechRate', 'doubao.loudnessRate', 'doubao.emotionScale', 'doubao.sampleRate',
     'doubao.segmentGapMs', 'doubao.maxSegmentChars',
     'minimax.timeoutMs', 'minimax.speed', 'minimax.vol', 'minimax.pitch', 'minimax.sampleRate', 'minimax.bitrate',

@@ -152,6 +152,7 @@ export const PROVIDERS = [
       { key: 'textLang', label: '默认合成语种', type: 'select', options: [['zh', 'zh 中文'], ['en', 'en 英文'], ['ja', 'ja 日文'], ['ko', 'ko 韩文'], ['yue', 'yue 粤语']], desc: 'text_lang；调用时显式传 lang 则以此为准' },
       { key: 'textSplitMethod', label: '切段方式', type: 'select', options: [['cut0', 'cut0 不切段'], ['cut1', 'cut1 按句号'], ['cut2', 'cut2 按问号'], ['cut3', 'cut3 按逗号'], ['cut4', 'cut4 按标点+句号'], ['cut5', 'cut5 按标点+长度（推荐）']], desc: '长文本靠服务端切段；cut0 长文本容易韵律漂' },
       { key: 'filterNonChinese', label: '只读中文（排障用）', type: 'switch', desc: '默认关。英文由模型自带的英文 g2p 发音（Fairy→F EH1 R IY0），罗马数字/符号由服务端 clean_text 改写，客户端不需要过滤' },
+      { key: 'maxChars', label: '单次朗读上限', type: 'number', min: 20, max: 1000, step: 10, desc: '超出按句截断，默认 200；8 GB 卡约 0.3~0.4 秒/字，太长会打满 120s 超时' },
       { key: 'timeoutMs', label: '超时(ms)', type: 'number', min: 10000, max: 600000, step: 5000, desc: '8 GB 卡 30 秒长文本约 7 秒合成' },
     ],
   },

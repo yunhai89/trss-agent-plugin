@@ -389,6 +389,7 @@ agent:
       textLang: zh          # 默认合成语种：zh/en/ja/ko/yue（调用时显式传 lang 则以此为准）
       textSplitMethod: cut5 # 切段方式 cut0~cut5；长文本靠服务端切段，cut0 长文本韵律容易漂
       filterNonChinese: false # 排障用：true 时只送汉字+数字+中文标点。默认 false —— 英文由模型自带英文 g2p 发音，罗马数字/符号由服务端 clean_text 改写
+      maxChars: 200         # 单次朗读上限（超出按句截断；本地卡约 0.3~0.4 秒/字，太长会超时）
       timeoutMs: 120000     # 单次合成超时（毫秒；8 GB 卡 30 秒长文本约 7 秒）
     indextts:
       endpoint: ""         # 接口地址（如 http://127.0.0.1:7860；直连 IndexTTS 本体，无需鉴权）
