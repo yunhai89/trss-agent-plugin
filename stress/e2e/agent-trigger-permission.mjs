@@ -67,6 +67,22 @@ cfgMod.__setConfig(baseCfg())
 
 console.log('\n[chatPermission=master：@机器人不受限 / 私聊默认禁用]')
 {
+  // 引用图片 + @机器人：e.msg 为空（图片/at/reply 都不写入 msg），catch-all 必须匹配空串
+  const { bot } = makeBot({ user_id: 'u13b', msg: '', atBot: true, reply_id: 'm1' })
+  const catchAll = (bot.rule || []).find((r) => r.fnc === 'onTrigger')
+  ok(catchAll && new RegExp(catchAll.reg).test(''), 'catch-all 匹配空消息（纯引用+@机器人能进入 onTrigger）')
+}
+{
+  const { bot, replies } = makeBot({ user_id: 'u13c', msg: '', atBot: true, reply_id: 'm1' })
+  await bot.onTrigger()
+  ok(allowed(replies), '纯引用 + @机器人（无文字）→ 放行到 Agent')
+}
+{
+  const { bot, replies } = makeBot({ user_id: 'u13d', msg: '', atBot: true })
+  const r = await bot.onTrigger()
+  ok(r === false && replies.length === 0, '裸 @机器人（无文字/无引用/无媒体）→ 不触发')
+}
+{
   const { bot, replies } = makeBot({ user_id: 'u14', msg: '你好', atBot: true })
   await bot.onTrigger()
   ok(allowed(replies), '普通成员 @机器人 → 放行')

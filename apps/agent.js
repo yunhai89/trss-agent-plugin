@@ -1882,7 +1882,10 @@ export class Chat extends plugin {
         // —— 错误上报 ——
         { reg: '^#上报错误(?:\\s+([\\s\\S]+))?$', fnc: 'reportBug' },
         // —— AI 触发（catch-all，最后匹配；@或自定义触发词）——
-        { reg: '^[\\s\\S]+$', fnc: 'onTrigger', log: false },
+        // 必须匹配空串：引用图片 + @机器人 时 e.msg 里没有 text 段（图片/at/reply 都不进 msg），
+        // 旧规则 `+` 要求至少一个字符 → 消息根本进不到 onTrigger，表现就是"只引用图片不触发"。
+        // 真正的空消息拦截放在 onTrigger 里（裸 @、无媒体时返回 false）。
+        { reg: '^[\\s\\S]*$', fnc: 'onTrigger', log: false },
       ],
     })
     // 运行时装配完成后会自动恢复定时调度（见 getRuntime 的 .then）；此处只预热运行时并处理初始化失败提示。
