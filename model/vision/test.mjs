@@ -2,7 +2,7 @@
  * 图片识别离线自检 —— mock provider 驱动 VisionService + describeImages。
  * 运行：node model/vision/test.mjs
  */
-import { VisionService, describeImages, DEFAULT_DESCRIBE, DEFAULT_VIDEO_DESCRIBE, resolveVisionBaseURL } from './index.js'
+import { VisionService, describeImages, DEFAULT_DESCRIBE, DEFAULT_VIDEO_DESCRIBE, resolveVisionBaseURL, resolveVisionRoute } from './index.js'
 
 let passed = 0
 let failed = 0
@@ -18,8 +18,8 @@ function mockProvider(reply, { protocol = 'openai' } = {}) {
   return {
     received: () => received,
     provider: {
-      async chat({ messages, model, max_tokens }) {
-        received = { messages, model, max_tokens }
+      async chat({ messages, model, max_tokens, timeout }) {
+        received = { messages, model, max_tokens, timeout }
         return { content: reply, toolCalls: [], finishReason: 'stop', usage: null }
       },
     },
@@ -37,6 +37,7 @@ await test('VisionService.recognize：发图+指令 → 返回描述', async () 
   ok(Array.isArray(recv.messages[0].content), 'OpenAI content 为数组')
   ok(recv.messages[0].content.some((b) => b.type === 'image_url'), '含 image_url 块')
   ok(recv.messages[0].content.some((b) => b.type === 'text' && b.text.includes('描述')), '含描述指令')
+  eq(recv.timeout, 180_000, 'provider 请求沿用视觉超时（不被默认 60s 截断）')
 })
 
 // ---------- 2. question 注入 ----------
@@ -279,6 +280,30 @@ await test('resolveVisionBaseURL：默认复用主通道，显式配置优先', 
   eq(resolveVisionBaseURL({ vcfg: { baseURL: 'https://api.xiaomimimo.com/v1' }, mainBaseURL: 'https://api.commandcode.ai/provider/v1' }), 'https://api.xiaomimimo.com/v1', '显式 baseURL 优先')
   eq(resolveVisionBaseURL({ vcfg: { preset: 'deepseek' }, preset: { baseURL: 'https://api.deepseek.com' }, mainBaseURL: 'https://api.commandcode.ai/provider/v1' }), 'https://api.deepseek.com', '显式 preset 优先于主通道')
   eq(resolveVisionBaseURL({ vcfg: {}, mainBaseURL: '' }), '', '都为空时交给 provider 默认')
+})
+
+// ---------- 9. resolveVisionRoute：按已注册模型路由到对应厂商 ----------
+await test('resolveVisionRoute：视觉模型跨厂商路由（连接字段留空时）', async () => {
+  const provider = { tag: 'mimo' }
+  const router = {
+    resolve: (ref) => ref === 'mimo-v2.6-pro'
+      ? { matched: true, provider, model: 'mimo-v2.6-pro', prov: { name: 'MIMO', protocol: 'openai', preset: 'mimo', baseURL: 'https://api.xiaomimimo.com/v1', apiKey: 'sk-mimo' } }
+      : { matched: false, provider: null, model: ref },
+  }
+  const r = resolveVisionRoute({ vcfg: { model: 'mimo-v2.6-pro' }, router, mainProtocol: 'openai' })
+  eq(r.matched, true, '已注册模型 → 命中厂商')
+  eq(r.provider, provider, '复用注册厂商 provider')
+  eq(r.model, 'mimo-v2.6-pro', '模型名透传')
+  eq(r.protocol, 'openai', '协议取注册厂商')
+  eq(r.baseURL, 'https://api.xiaomimimo.com/v1', 'baseURL 取注册厂商')
+  eq(r.apiKey, 'sk-mimo', 'apiKey 取注册厂商')
+  eq(r.providerName, 'MIMO', '厂商名用于启动日志')
+  eq(resolveVisionRoute({ vcfg: { model: 'mimo-v2.6-pro' }, router }).matched, true, '未传 mainProtocol 也能命中')
+  eq(resolveVisionRoute({ vcfg: { model: 'mimo-v2.6-pro', baseURL: 'https://relay.example/v1' }, router }).matched, false, '显式 baseURL → 尊重手工配置')
+  eq(resolveVisionRoute({ vcfg: { model: 'mimo-v2.6-pro', apiKey: 'sk-x' }, router }).matched, false, '显式 apiKey → 不自动路由')
+  eq(resolveVisionRoute({ vcfg: { model: 'unknown' }, router }).matched, false, '未注册模型 → 回退主通道')
+  eq(resolveVisionRoute({ vcfg: {}, router }).matched, false, '未配 vision.model → 不路由')
+  eq(resolveVisionRoute({ vcfg: { model: 'mimo-v2.6-pro' } }).matched, false, '无 router → 安全回退')
 })
 
 // ---------- 总结 ----------

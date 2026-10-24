@@ -74,7 +74,7 @@ import {
   groundingText, PERSONA_COMPLETION_SYSTEM, buildCompletionInput,
   parseCompletionOutput, buildLoreDraft, formatDraftSummary,
 } from '../model/persona/index.js'
-import { VisionService, describeImages, resolveVisionBaseURL } from '../model/vision/index.js'
+import { VisionService, describeImages, resolveVisionBaseURL, resolveVisionRoute } from '../model/vision/index.js'
 import { getStickerManager } from '../model/sticker/manager.js'
 import { isStickerOnly, stripMarkers } from '../model/sticker/parser.js'
 import { redactSecrets, redactSafeCut } from '../model/agent/redact.js'
@@ -1284,12 +1284,22 @@ async function _buildRuntime(scope) {
   let vision = null
   if (cfg.vision?.enable === true) {
     const vcfg = cfg.vision
-    const vProtocol = vcfg.protocol || protocol
-    const vModel = vcfg.model || cfg.model
+    // 视觉模型可落在任意已注册厂商：connection 字段全空时按视觉模型名路由到其 provider，
+    // 避免「主通道 commandcode + vision.model=mimo-v2.6-pro」这种模型名发错端点。
+    const vRoute = resolveVisionRoute({ vcfg, router: modelRouter, mainProtocol: protocol })
+    const vProtocol = vRoute.matched ? vRoute.protocol : (vcfg.protocol || protocol)
+    const vModel = vRoute.matched ? vRoute.model : (vcfg.model || cfg.model)
     // 视觉模型也可能来自另一厂商：按其 baseURL/apiKey 再 prime 一次官方能力
     if (cfg.media?.capsFromApi !== false) {
       try {
-        await primeModelCaps({ protocol: vProtocol, baseURL: vcfg.baseURL || cfg.baseURL, apiKey: vcfg.apiKey || cfg.apiKey, preset: vcfg.preset || cfg.preset, models: [vModel], fetchImpl: proxyFetch || undefined })
+        await primeModelCaps({
+          protocol: vProtocol,
+          baseURL: vRoute.matched ? vRoute.baseURL : (vcfg.baseURL || cfg.baseURL),
+          apiKey: vRoute.matched ? vRoute.apiKey : (vcfg.apiKey || cfg.apiKey),
+          preset: vRoute.matched ? vRoute.preset : (vcfg.preset || cfg.preset),
+          models: [vModel],
+          fetchImpl: proxyFetch || undefined,
+        })
       } catch { /* 忽略：回退注册表 */ }
     }
     const vCaps = detectCapabilities({ protocol: vProtocol, model: vModel, caps: cfg.media?.caps })
@@ -1304,10 +1314,10 @@ async function _buildRuntime(scope) {
       try {
         if (!vcfg.model && cfg.model) Log.debug('[vision] vision.model 未配，复用支持视觉的主模型', vModel)
         const vPresetMap = vProtocol === 'anthropic' ? anthropicPresets : openaiPresets
-        const vPreset = vcfg.preset ? vPresetMap[vcfg.preset] : preset
+        const vPreset = vRoute.matched ? {} : (vcfg.preset ? vPresetMap[vcfg.preset] : preset)
         // 复用主通道：README 承诺"默认复用 protocol/baseURL/apiKey"。只回退 apiKey 会让
         // vision.baseURL 留空时打到 Client 默认的 api.openai.com（换过域名的通道必失败）。
-        const vBaseURL = resolveVisionBaseURL({ vcfg, preset: vPreset, mainBaseURL: cfg.baseURL })
+        const vBaseURL = vRoute.matched ? '' : resolveVisionBaseURL({ vcfg, preset: vPreset, mainBaseURL: cfg.baseURL })
         // 视觉模型参数覆盖：vision.model 若在「模型列表」登记且设了 thinking/温度/maxTokens，则同样生效。
         // 否则在模型列表里给视觉模型关掉思考，视觉调用仍会按默认思考（烧推理预算、易导致判定超预算）。
         const vReg = (cfg.llmModels || []).find((m) => m && String(m.model) === String(vModel))
@@ -1317,7 +1327,7 @@ async function _buildRuntime(scope) {
         const vThinking = vReg?.thinking === 'on' ? { type: 'enabled' } : { type: 'disabled' }
         const vTemperature = Number.isFinite(Number(vReg?.temperature)) ? Number(vReg.temperature) : null
         const vMaxTokens = Number.isFinite(Number(vReg?.maxTokens)) && Number(vReg.maxTokens) > 0 ? Number(vReg.maxTokens) : (vcfg.maxTokens || 1024)
-        const vProvider = createProvider({
+        const vProvider = vRoute.matched ? vRoute.provider : createProvider({
           protocol: vProtocol,
           ...vPreset,
           ...(vBaseURL ? { baseURL: vBaseURL } : {}),
@@ -1338,7 +1348,8 @@ async function _buildRuntime(scope) {
           logger: Log.tag('vision'),
         })
         startupInfo.visionModel = vModel
-        Log.debug(`[vision] 视觉子模型 ${vModel}${vThinking ? `（thinking: ${vThinking.type}）` : ''}${vTemperature != null ? `（temperature: ${vTemperature}）` : ''}`)
+        const routeNote = vRoute.matched ? `（厂商 ${vRoute.providerName || vRoute.baseURL || '已注册 provider'}）` : ''
+        Log.debug(`[vision] 视觉子模型 ${vModel}${routeNote}${vThinking ? `（thinking: ${vThinking.type}）` : ''}${vTemperature != null ? `（temperature: ${vTemperature}）` : ''}`)
       } catch (e) {
         Log.warn('[vision] 视觉子模型装配失败，主模型不支持视觉时图片将降级', e?.message || e)
       }

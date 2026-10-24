@@ -122,6 +122,37 @@ export function resolveVisionBaseURL({ vcfg = {}, preset = {}, mainBaseURL = '' 
   return mainBaseURL || preset?.baseURL || ''
 }
 
+/**
+ * 视觉模型的路由决策：agent.vision.model 若指向「模型列表」里已注册的模型，则复用其厂商连接，
+ * 而不是盲目沿用主通道。典型场景：主通道是 commandcode，vision.model 却填了 MIMO 的
+ * mimo-v2.6-pro——旧逻辑把 MIMO 模型名发到 commandcode，报 unsupported_model。
+ *
+ * 显式写了 protocol/preset/baseURL/apiKey 时尊重手工配置（可能是临时中转/自建端点）；
+ * 只有这些连接字段全空时才自动按模型注册表路由。
+ *
+ * @param {object} p { vcfg, router, mainProtocol }
+ * @returns {{matched:boolean, provider?:object, model?:string, protocol?:string, preset?:string, baseURL?:string, apiKey?:string, providerName?:string}}
+ */
+export function resolveVisionRoute({ vcfg = {}, router = null, mainProtocol = 'openai' } = {}) {
+  const explicitConn = Boolean(vcfg.protocol || vcfg.preset || vcfg.baseURL || vcfg.apiKey)
+  const ref = String(vcfg.model || '').trim()
+  if (explicitConn || !ref || !router?.resolve) return { matched: false }
+  let r = null
+  try { r = router.resolve(ref) } catch { return { matched: false } }
+  if (!r?.matched || !r.provider) return { matched: false }
+  const prov = r.prov || {}
+  return {
+    matched: true,
+    provider: r.provider,
+    model: r.model || ref,
+    protocol: prov.protocol || mainProtocol,
+    preset: prov.preset || '',
+    baseURL: prov.baseURL || '',
+    apiKey: prov.apiKey || '',
+    providerName: prov.name || '',
+  }
+}
+
 /** 替换为文本载体媒体：buildContent 非视觉路径会按 text/plain 抽取为文本 */
 function toTextMedia(mf, text) {
   return {

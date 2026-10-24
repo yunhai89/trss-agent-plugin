@@ -83,6 +83,7 @@ export class VisionService {
         messages: [{ role: 'user', content }],
         max_tokens: this.maxTokens,
         stream: false,
+        timeout: this.timeoutMs,
         signal: AbortSignal.timeout(this.timeoutMs),
         ...this._genOpts(),
       })
@@ -133,6 +134,7 @@ export class VisionService {
         messages: [{ role: 'user', content }],
         max_tokens: Number(maxTokens) > 0 ? Number(maxTokens) : this.maxTokens,
         stream: false,
+        timeout: this.timeoutMs,
         signal: AbortSignal.timeout(this.timeoutMs),
         ...this._genOpts(),
       })
@@ -164,6 +166,7 @@ export class VisionService {
         messages: [{ role: 'user', content }],
         max_tokens: maxTokens || this.maxTokens,
         stream: false,
+        timeout: this.timeoutMs,
         signal: AbortSignal.timeout(this.timeoutMs),
         ...this._genOpts(),
       })
