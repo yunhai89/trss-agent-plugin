@@ -174,6 +174,20 @@ await test('scorer：followup_to_bot 需窗口含 self（修复死代码）+ pre
   ok(d3.components.pressure === pressureScore(8, pendingThreshold) && d3.bypassBackoff === true, 'pendingCount=8 → 压力升高 + 绕过退避')
 })
 
+await test('scorer：第二人称接话视为追问，且不被在场惩罚压掉', async () => {
+  const bot = mkMsg('主人，我什么时候坏过。倒是您，修我的手法需要我记录在案吗……', true, { seq: 1 }, 'b2')
+  const reply = mkMsg('你肯定不知道啊！你坏了就等于人死了一样，这个过程对于你来说就是空白的', false, { userId: 'u1' }, 'r1', '蛋黄酥')
+  // 群里 bot 刚发过言、presence 占比高：followup 必须能压过在场惩罚，否则连续对话被误杀
+  const d = evaluate({ messages: [bot, reply], candidates: [reply], pendingCount: 1, presence: { bot: 6, other: 4, total: 10 }, cfg: { threshold: 40, talkValue: 0.35 } })
+  ok(d.components.relevance === 55 && d.positiveReasons.includes('followup_to_bot'), '第二人称陈述 → followup_to_bot(+55)')
+  ok(d.components.presencePenalty === 0, '直接追问豁免 presence 惩罚')
+  ok(d.shouldPlan, `连续对话应进入 Planner（score=${d.finalScore}）`)
+  // 「你们」是复数，不能当成对 bot 单独说
+  const plural = mkMsg('你们俩别吵了', false, { userId: 'u2' }, 'r2', '路人')
+  const d2 = evaluate({ messages: [bot, plural], candidates: [plural], pendingCount: 1, presence: { bot: 6, other: 4, total: 10 }, cfg: { threshold: 40, talkValue: 0.35 } })
+  ok(d2.components.relevance === 0, '「你们」不触发 followup_to_bot')
+})
+
 await test('scorer：bot 焦点信号（近窗 @/引用/提及/自言 → ambient 也给 +30）', async () => {
   // 近窗有人 @bot → ambient 后续消息拿到 focusBonus
   const atMe = mkMsg('@bot 在吗', false, { atBot: true }, 'a1')

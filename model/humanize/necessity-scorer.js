@@ -131,11 +131,13 @@ function pickTargetAndRelevance(candidates, lookback) {
 }
 
 /**
- * 紧接机器人发言的明确追问：在完整序列里目标消息的上一条是 isSelf，且当前是疑问/请求。
+ * 紧接机器人发言的明确追问：在完整序列里目标消息的上一条是 isSelf，且当前是疑问/请求，
+ * 或直接用第二人称「你/您」接着 bot 说（如「你肯定不知道啊…」这类陈述式接话）。
  * 必须传入含 isSelf 的完整序列（rolling window），否则 prev.isSelf 恒为 false（曾为死代码）。
  * 回复链归属修正（A说B误判主病灶）：消息若明确在回复某条**非 bot** 消息（replyToId 指向他人），
  * 即使时间上紧跟 bot 发言也不算对 bot 的追问——之前只看时间相邻，A 回复 B 但 B 恰在 bot 后发言时误 +55。
  */
+const ADDRESS_BOT_TEXT = /(?:^|[，。！？、；：\s])[你您](?!们)/
 function isFollowupToBot(msg, messages) {
   const idx = messages.indexOf(msg)
   if (idx <= 0) return false
@@ -148,6 +150,7 @@ function isFollowupToBot(msg, messages) {
   }
   const t = String(msg.text || '')
   return /[?？]/.test(t) || QUESTION_TERMS.some((w) => t.includes(w)) || DIRECT_REQUEST_TERMS.some((w) => t.includes(w))
+    || ADDRESS_BOT_TEXT.test(t)
 }
 
 /** 从窗口提取"其他成员名"表（≥2 字、去重、排除发言人自己）——供指向判定/歧义降级。 */
@@ -256,7 +259,9 @@ export function evaluate({ messages = [], candidates, pendingCount, presence = {
   if (idleBonus > 0) positive.push('idle_bonus')
 
   // —— penalties ——
-  const presencePen = presencePenalty(presence.bot || 0, presence.total || 0)
+  // 紧跟 bot 的追问/第二人称接话属于直接对话：在场惩罚不该把「被点名后接话」压成沉默。
+  // 只对 followup 豁免；@/引用/昵称等强信号仍保留原有在场约束（强制候选本身已绕过倍率）。
+  const presencePen = reason === 'followup_to_bot' ? 0 : presencePenalty(presence.bot || 0, presence.total || 0)
   if (presencePen > 0) negative.push(`presence(${((presence.bot || 0) / Math.max(1, presence.total || 1) * 100).toFixed(0)}%)`)
   const cdPen = cfg.cooldownUntil ? cooldownPenalty(cfg.cooldownUntil, now) : 0
   if (cdPen > 0) negative.push('cooldown')
