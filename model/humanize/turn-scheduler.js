@@ -468,17 +468,21 @@ export class TurnScheduler {
 
     // Replyer 生成可见文本（内部含输出校验/泄漏拦截）
     let text = ''
+    const replyStartedAt = Date.now()
     try {
       Log.info('[humanize] Replyer 开始生成回复', `${ANSI.c}群${rt.groupId}${ANSI.R}`)
       // 上下文用 ctxWindow（缺失时退回 batch）；markObserved 仍走 batch（见 _applyAction 注释）
       const ctxBatch = (Array.isArray(replyBatch) && replyBatch.length) ? replyBatch : batch
       const res = await this.replyer.generate({ action, batch: ctxBatch, decision, target, runtime: rt, signal: rt.signal, cfg: c, scene: rt.currentScene || null })
-      if (!rt.isCurrent(gen)) { Log.info('[humanize] Replyer 完成但代已过期，取消'); return }
+      const elapsed = Date.now() - replyStartedAt
+      if (!rt.isCurrent(gen)) { Log.info('[humanize] Replyer 完成但代已过期，取消', `${elapsed}ms`); return }
       text = (res?.text || '').trim()
-      Log.mark('[humanize] Replyer 完成', `${ANSI.g}len=${text.length}${ANSI.R}`, res?.cancelReason ? `${ANSI.y}取消:${res.cancelReason}${ANSI.R}` : `${ANSI.g}"${text.slice(0, 60)}"${ANSI.R}`)
+      Log.mark('[humanize] Replyer 完成', `${ANSI.g}len=${text.length}${ANSI.R}`, `${ANSI.gry}${elapsed}ms${ANSI.R}`, res?.cancelReason ? `${ANSI.y}取消:${res.cancelReason}${ANSI.R}` : `${ANSI.g}"${text.slice(0, 60)}"${ANSI.R}`)
+      rt.trace?.record('replyer_done', { turnId, ms: elapsed, chars: text.length })
     } catch (e) {
-      Log.warn('[humanize] Replyer 失败', e?.message || e)
-      rt.trace?.record('replyer_error', { turnId, msg: String(e?.message || e) })
+      const elapsed = Date.now() - replyStartedAt
+      Log.warn('[humanize] Replyer 失败', `${elapsed}ms`, e?.message || e)
+      rt.trace?.record('replyer_error', { turnId, ms: elapsed, msg: String(e?.message || e) })
       rt.backoff.recordNoAction()
       rt.setPhase('idle')
       return

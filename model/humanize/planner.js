@@ -34,10 +34,12 @@ function looksLikeLeak(text) {
 const DEC_COLOR = { human_reply: ANSI.g, human_react: ANSI.m, human_wait: ANSI.b, human_ignore: ANSI.y }
 function logDecision(runtime, action, violations = []) {
   const col = DEC_COLOR[action.type] || ANSI.c
-  const tail = action.targetMessageId ? ' 目标#' + String(action.targetMessageId).slice(-6) : ''
+  const tail = action.targetMessageId ? ' 目标#' + String(action.targetMessageId) : ''
   const viol = violations.length ? ` ${ANSI.r}违规${violations.length}${ANSI.R}` : ''
-  const why = String(action.reason || action.replyGuide || action.intent || '').trim()
-  const whyStr = why ? ` ${ANSI.gry}· ${why.slice(0, 100)}${ANSI.R}` : ''
+  // 理由/回复指引是排查决策的核心上下文，此前截断 100 字导致用户只能看到半句；放宽到 500 字并压成单行
+  const why = String(action.reason || action.replyGuide || action.intent || '').replace(/\s+/g, ' ').trim()
+  const whyText = why.length > 500 ? `${why.slice(0, 500)}…` : why
+  const whyStr = whyText ? ` ${ANSI.gry}· ${whyText}${ANSI.R}` : ''
   Log.mark('[humanize] 决策', `${col}群${runtime?.groupId} → ${action.type}${tail}${viol}${ANSI.R}${whyStr}`)
 }
 
