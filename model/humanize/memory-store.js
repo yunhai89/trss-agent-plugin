@@ -541,4 +541,13 @@ export class HumanizeMemoryStore {
     const r = await this.dao.get('SELECT COUNT(*) n, SUM(hit_count) hits FROM hm_memories WHERE group_id=?', [String(groupId)]).catch(() => null)
     return r ? { total: Number(r.n) || 0, hits: Number(r.hits) || 0 } : null
   }
+
+  /** 关闭数据库（运行时热重建/退出）；幂等，关闭后可再次 init 重开。 */
+  async close() {
+    const db = this._db
+    this._db = null
+    this.dao = null
+    this._ready = false
+    if (db) { try { db.close?.() } catch { /* noop */ } }
+  }
 }

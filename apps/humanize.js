@@ -27,6 +27,7 @@ import { fetchReply } from '../model/media/collect.js'
 import * as H from '../model/humanize/index.js'
 
 let _humanize = null
+let _humanizeRt = null // 装配时使用的主运行时；Config 热重载后 getRuntime 会重建，据此判断是否需要重新装配
 let _humanizeFailed = null
 let _humanizeFailedAt = 0
 /** 装配失败后的短路窗口（同 apps/groupworld.js 的 GW_RETRY_MS）：窗口内不重复装配，
@@ -374,22 +375,49 @@ async function buildHumanize() {
   })
 
   // 配置热重载：取消所有进行中规划/未发送分段 + 重建信号量上限
-  Config.onChange(() => {
+  const configUnsub = Config.onChange(() => {
     try { manager.reload(); manager.cancelAll(); Log.info('[humanize] 配置热加载，已取消所有进行中规划') } catch (e) { Log.warn('[humanize] 热加载失败', e?.message || e) }
   })
 
   // getPersona：把 rt 闭包在内，供 onAmbient 的 SelfState 感知解析人设（onAmbient 作用域无 rt）
   const getPersona = () => resolvePersona()
-  return { manager, store, trace, cfgFn, ssLazy, getPersona, getGroundingRaw, webSearch, hmem }
+  return { manager, store, trace, cfgFn, ssLazy, getPersona, getGroundingRaw, webSearch, hmem, rt, configUnsub }
+}
+
+/** 释放旧伪人装配体：退订配置监听、取消/回收各群运行时，并延迟关闭独立记忆库。 */
+function disposeHumanize(h) {
+  if (!h) return
+  try { h.configUnsub?.() } catch { /* noop */ }
+  try {
+    for (const g of h.manager?.activeGroups?.() || []) h.manager.disposeGroup(g.groupId)
+  } catch (e) { Log.debug('[humanize] 旧运行时回收失败:', e?.message || e) }
+  // 在途回合可能仍在用旧记忆库，延迟关闭，避免 "database is closed" 打断收尾。
+  try {
+    const t = setTimeout(() => { try { h.hmem?.close?.() } catch { /* noop */ } }, 30_000)
+    t?.unref?.()
+  } catch { /* noop */ }
 }
 
 /** 取伪人装配体（manager/hmem/trace 等；web 与测试用）。 */
 export async function getHumanize() {
-  if (_humanize) return _humanize
+  if (_humanize) {
+    // 主运行时可能因配置热重载被重建：旧闭包里的 provider/modelRouter/persona 会过期，
+    // 继续复用会把新模型名打到旧厂商（400 Model not supported）。运行时换代则重新装配。
+    let rt = null
+    try { rt = await getRuntime() } catch { /* 运行时不健康时保留旧实例，避免伪人整体失效 */ }
+    if (!rt || rt === _humanizeRt) return _humanize
+    Log.info('[humanize] 主运行时已重建，重新装配伪人运行时')
+    const old = _humanize
+    _humanize = null
+    _humanizeRt = null
+    _humanizeFailed = null
+    _humanizeFailedAt = 0
+    disposeHumanize(old)
+  }
   if (_humanizeFailed && Date.now() - _humanizeFailedAt < HUMANIZE_RETRY_MS) throw _humanizeFailed
   if (!_humanizePromise) {
     _humanizePromise = buildHumanize()
-      .then((h) => { _humanize = h; _humanizeFailed = null; return h })
+      .then((h) => { _humanize = h; _humanizeRt = h.rt; _humanizeFailed = null; return h })
       .catch((e) => { _humanizeFailed = e; _humanizeFailedAt = Date.now(); throw e })
       .finally(() => { _humanizePromise = null })
   }
