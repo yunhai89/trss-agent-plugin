@@ -34,3 +34,5 @@ export { DEFAULT_HUMANIZE_CONFIG } from './default-config.js'
 export { validateHumanizeConfig, resolveHumanizeConfig, resolvePersonaIdentity } from './default-config.js'
 /** 内置默认伪人人设（persona 留空时启用，刻意去 AI 味、尊重看人）。 */
 export { DEFAULT_HUMANIZE_PERSONA } from './default-persona.js'
+/** 角色人设解析：人设库优先于自定义角色卡，再回落内置默认。 */
+export { resolveHumanizePersona } from './persona.js'

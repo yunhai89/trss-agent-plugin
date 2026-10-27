@@ -18,10 +18,10 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
   personaName: '',             // 机器人在群里的名字（留空=自动探测 Bot.nickname）
   botId: '',                   // bot 自身账号 id（默认自动取协议端 self_id；显式配置可覆盖，多协议/改名场景用）
 
-  persona: {                  // 群聊角色人设（MaiBot 式，与主 Agent 人设独立）
-    name: '',                 // 角色名（留空=用 personaName）
-    prompt: '',               // 角色卡正文（自由多段）；最高优先级。空则回落 fromPersonaId/旧来源
-    fromPersonaId: '',        // prompt 为空时，按 id/名复用 PersonaStore 人设 systemPrompt
+  persona: {                  // 群聊角色人设（MaiBot 式，与主 Agent 共用 PersonaStore 人设库）
+    name: '',                 // 角色名（人设库模式以库中名为准；留空=用 personaName）
+    prompt: '',               // 自定义角色卡正文；人设库未命中/正文为空时生效
+    fromPersonaId: '',        // 优先复用 PersonaStore 人设（id/名），其 systemPrompt 优先于自定义卡
     aliases: [],              // 角色别名（均参与 @/提及昵称判定；与 name 一同人 identityNames）
   },
 

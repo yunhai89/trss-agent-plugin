@@ -21,6 +21,7 @@ import { validateHumanizeConfig, resolveHumanizeConfig, DEFAULT_HUMANIZE_CONFIG 
 import { DEFAULT_HUMANIZE_PERSONA } from './default-persona.js'
 import { resolveGrounding } from './grounding.js'
 import { resolvePersonaIdentity } from './default-config.js'
+import { resolveHumanizePersona } from './persona.js'
 
 let passed = 0, failed = 0
 function ok(c, m) { if (c) { passed++; console.log('  ✓', m) } else { failed++; console.error('  ✗ FAIL', m) } }
@@ -395,6 +396,36 @@ await test('config：persona 块结构 + prompt 超长裁剪', async () => {
   // 缺 persona 字段时归一为对象（防 v-model/解析报错）
   const r2 = validateHumanizeConfig({})
   ok(r2.config.persona && typeof r2.config.persona === 'object', '无 persona 时归一为对象')
+})
+
+await test('persona：人设库优先于自定义卡，名称/正文同源', async () => {
+  const store = {
+    get: (id) => (id === 'lib1' ? { id: 'lib1', name: '林小汐', systemPrompt: '库里的人设正文' } : null),
+  }
+  const r = resolveHumanizePersona({
+    persona: { name: '旧名', prompt: '自定义正文', fromPersonaId: 'lib1' },
+  }, { personaStore: store, botNickname: '云崽Bot' })
+  ok(r.prompt === '库里的人设正文', '人设库正文优先于自定义卡')
+  ok(r.name === '林小汐', '名称随人设库（不再用旧 persona.name）')
+  ok(r.source === 'persona', '来源标记 persona')
+
+  const r2 = resolveHumanizePersona({
+    persona: { name: '旧名', prompt: '自定义正文', fromPersonaId: 'missing' },
+  }, { personaStore: store, botNickname: '云崽Bot' })
+  ok(r2.prompt === '自定义正文' && r2.name === '旧名' && r2.source === 'custom', '人设未命中回落自定义卡')
+
+  const r3 = resolveHumanizePersona({}, { botNickname: '云崽Bot' })
+  ok(r3.prompt === DEFAULT_HUMANIZE_PERSONA.prompt && r3.name === '云崽Bot' && r3.source === 'default', '全空回落内置默认')
+
+  const r4 = resolveHumanizePersona({
+    persona: { prompt: '自定义正文', fromPersonaId: 'boom' },
+  }, { personaStore: { get: () => { throw new Error('store down') } } })
+  ok(r4.prompt === '自定义正文' && r4.source === 'custom', '人设库读取异常不影响回退')
+
+  const r5 = resolveHumanizePersona({
+    persona: { name: '旧名', prompt: '自定义正文', fromPersonaId: 'empty' },
+  }, { personaStore: { get: () => ({ name: '空正文', systemPrompt: '' }) } })
+  ok(r5.prompt === '自定义正文' && r5.name === '旧名', '人设正文为空时仍走自定义卡')
 })
 
 // ───────── 对话关系消歧（A说B不再误判为说bot；MaiBot关系链+三处升级）─────────

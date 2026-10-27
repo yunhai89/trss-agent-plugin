@@ -101,7 +101,23 @@ async function buildHumanize() {
   // 初次校验（过滤危险 allowedReadTools 等；记录错误但不抛）
   const validation = H.validateHumanizeConfig(rawCfgFn(), rt.tools?.list?.().map((t) => t.name) || null)
   if (validation.errors.length) Log.warn('[humanize] 配置校验提示：', validation.errors.join('； '))
-  const cfgFn = () => H.resolveHumanizeConfig(rawCfgFn())
+  const cfgFn = () => {
+    const cfg = H.resolveHumanizeConfig(rawCfgFn())
+    // 人设库模式：身份名以库中名称为准，保证 @/昵称判定、Planner 与角色正文同源。
+    // 人设缺失/正文为空时保留自定义名，走 prompt 回退。
+    const pid = String(cfg?.persona?.fromPersonaId || '').trim()
+    if (pid && rt.persona?.store) {
+      try {
+        const found = rt.persona.store.get(pid)
+        if (found?.name && String(found.systemPrompt || '').trim()) cfg.persona.name = String(found.name)
+      } catch { /* noop */ }
+    }
+    return cfg
+  }
+  const resolvePersona = (cfg = cfgFn()) => H.resolveHumanizePersona(cfg, {
+    personaStore: rt.persona?.store || null,
+    botNickname: botNickname(),
+  })
 
   const store = new H.HumanizeStore({ kv: rt.kv })
   const trace = new H.Trace({
@@ -292,7 +308,7 @@ async function buildHumanize() {
   const makeReplyer = (gid) => new H.HumanizeReplyer({
     provider: providerForModel(cfgFn().replyer?.model), cfg: cfgFn,
     // 角色人设（prompt / fromPersonaId / 内置默认）；恒有值，不再回落主任务 Agent systemPrompt（AI 味来源）
-    getPersonaVoice: () => H.buildHumanizePersonaBlock(resolveHumanizePersona(cfgFn(), rt)),
+    getPersonaVoice: () => H.buildHumanizePersonaBlock(resolvePersona()),
     getRecentBotText: () => {
       try {
         const ent = manager?.getOrCreate?.(gid)
@@ -363,7 +379,7 @@ async function buildHumanize() {
   })
 
   // getPersona：把 rt 闭包在内，供 onAmbient 的 SelfState 感知解析人设（onAmbient 作用域无 rt）
-  const getPersona = () => resolveHumanizePersona(cfgFn(), rt)
+  const getPersona = () => resolvePersona()
   return { manager, store, trace, cfgFn, ssLazy, getPersona, getGroundingRaw, webSearch, hmem }
 }
 
@@ -404,27 +420,6 @@ function makeSendFn(groupId) {
       return null
     }
   }
-}
-
-/**
- * 解析伪人角色人设（同步）。优先级：persona.prompt > persona.fromPersonaId（复用 PersonaStore）
- * > 内置默认人设（DEFAULT_HUMANIZE_PERSONA，刻意去 AI 味、尊重看人）。
- * 即用户不配置时，也始终有一份「像真人」的人设兜底，绝不回落到主任务 Agent 的 systemPrompt（那是 AI 味来源）。
- * @returns {{name:string, prompt:string}} prompt 恒非空
- */
-function resolveHumanizePersona(cfg, rt) {
-  const persona = (cfg && cfg.persona) || {}
-  // 角色名单一来源（persona.name > 旧 personaName > botNickname）：Normalizer/Planner/Replyer/SelfState 同源
-  const { name } = H.resolvePersonaIdentity(cfg, { botNickname: botNickname() })
-  let prompt = String(persona.prompt || '').trim()
-  if (!prompt && persona.fromPersonaId) {
-    try {
-      const found = rt?.persona?.store?.get?.(persona.fromPersonaId)
-      if (found?.systemPrompt) prompt = String(found.systemPrompt).trim()
-    } catch { /* noop */ }
-  }
-  if (!prompt) return { name, prompt: H.DEFAULT_HUMANIZE_PERSONA.prompt }
-  return { name, prompt }
 }
 
 function formatPolicyBlock(policy) {

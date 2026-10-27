@@ -599,10 +599,10 @@ agent:
     redactSecrets: true            # 伪人回复发送前脱敏（拦截秘钥/Token）。⚠️ 与顶层 agent.redactSecrets 同名不同层：这里管伪人链路，顶层管主 Agent 链路
     personaName: ""                # 机器人在群里的名字（留空=用 Bot.nickname）
     botId: ""                      # 机器人自身 QQ（留空=自动探测 Bot.uin）
-    persona:                       # 群聊角色人设（MaiBot 式，与主 Agent 人设独立）
-      name: ""                     # 角色名（留空=用 personaName）
-      prompt: ""                   # 角色卡正文（自由多段，最高优先级）。示例见下方注释
-      fromPersonaId: ""            # prompt 为空时，按 id/名复用 PersonaStore 人设（如 raiden-ei）
+    persona:                       # 群聊角色人设（MaiBot 式，与主 Agent 共用 PersonaStore 人设库）
+      name: ""                     # 角色名（人设库模式以库中名为准；留空=用 personaName）
+      prompt: ""                   # 自定义角色卡正文（人设库未命中/正文为空时生效）。示例见下方注释
+      fromPersonaId: ""            # 优先复用 PersonaStore 人设（id/名，如 raiden-ei），其正文优先于自定义卡
       aliases: []                  # 角色别名（参与 @/提及昵称判定；与 name 一同构成 identityNames）
       # prompt 示例（MaiBot 式角色卡，取消注释按需改）：
       # prompt: |

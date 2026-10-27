@@ -161,7 +161,7 @@
         try {
           await window.store.loadConfig()
           if (M.config) syncForm(M.config.humanize)
-          window.store.loadPersonas().catch(() => {}) // 复用人设下拉（失败不阻塞）
+          window.store.loadPersonas().catch(() => {}) // 人设库下拉（失败不阻塞）
         } catch (e) { toast(e.message, 'error') }
       })
       // 监听器在 onMounted 里注册，卸载时移除；路由切换会真正卸载并重建视图组件（app.js 的 :key="route"），
@@ -175,12 +175,29 @@
       const initiativePct = computed(() => (form.behaviorPolicy?.initiative ?? 0) * 100 + '%')
       /* enable=true 但白名单空 → 不生效提示 */
       const enableWarn = computed(() => form.enable === true && !(form.groups || []).length)
-      // 现有人设（内置 + 自定义）：用于「复用人设」下拉
+      // 现有人设（内置 + 自定义）：与主 Agent 共用同一 PersonaStore
       const personas = computed(() => M.personas || [])
+      const selectedPersona = computed(() => personas.value.find((p) =>
+        p.id === form.persona.fromPersonaId || p.name === form.persona.fromPersonaId) || null)
+      const personaMissing = computed(() => !!form.persona.fromPersonaId && !selectedPersona.value)
+      // 人设来源：选了人设库 id 即库模式，否则自定义角色卡；切换时不销毁自定义正文，便于来回改
+      const personaMode = computed({
+        get: () => (form.persona.fromPersonaId ? 'library' : 'custom'),
+        set: (v) => {
+          if (v === 'library') {
+            if (!personas.value.length) { toast('人设库为空，请先到「人设库」新建', 'warn'); return }
+            form.persona.fromPersonaId = personas.value[0].id
+          } else {
+            form.persona.fromPersonaId = ''
+          }
+        },
+      })
+      const goPersonas = () => { window.location.hash = '#/personas' }
 
       return {
         form, dirty, save, reset, sections, open, activeSec, jump, adv,
-        talkPct, tempPlannerPct, tempReplyerPct, humorPct, initiativePct, enableWarn, personas,
+        talkPct, tempPlannerPct, tempReplyerPct, humorPct, initiativePct, enableWarn,
+        personas, selectedPersona, personaMissing, personaMode, goPersonas,
       }
     },
     template: `
@@ -236,23 +253,54 @@
         <div :id="'hz-persona'" class="card cf-sec" :class="{open: open.persona}">
           <div class="cf-sh" @click="open.persona = !open.persona">
             <span class="ct-ico" style="background:var(--grad-rose)"><v-icon name="persona"/></span>
-            <div><div class="ct-t">角色人设</div><div class="ct-s">MaiBot 式角色卡——身份/性格/说话风格；注入 Planner 决策 + Replyer 发言（与主 Agent 人设独立）</div></div>
+            <div><div class="ct-t">角色人设</div><div class="ct-s">与主 Agent 共用「人设库」：选已有人设，或写自定义角色卡；注入 Planner 决策 + Replyer 发言</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.persona"><div class="cf-grid">
-            <cfg-row name="角色名" desc="留空=用上方「机器人群内名字」">
-              <input class="inp" style="width:170px" v-model="form.persona.name" placeholder="留空=自动">
+            <cfg-row full name="人设来源" desc="人设库模式优先于自定义角色卡；自定义正文会保留，切回即可继续编辑">
+              <div class="row g10">
+                <select class="sel" style="width:200px" v-model="personaMode">
+                  <option value="custom">自定义角色卡</option>
+                  <option value="library">从人设库选择</option>
+                </select>
+                <button class="btn b-line b-sm" @click="goPersonas">管理人设库</button>
+              </div>
             </cfg-row>
-            <cfg-row name="复用人设" desc="角色卡为空时，复用 PersonaStore 已建人设的 systemPrompt；留空=不复用">
-              <select class="sel" style="width:220px" v-model="form.persona.fromPersonaId">
-                <option value="">不复用（用角色卡 / 内置默认）</option>
-                <option v-for="p in personas" :key="p.id" :value="p.id">{{ p.name }}（{{ p.id }}）</option>
-                <option v-if="form.persona.fromPersonaId && !personas.some(p => p.id === form.persona.fromPersonaId || p.name === form.persona.fromPersonaId)" :value="form.persona.fromPersonaId">当前：{{ form.persona.fromPersonaId }}</option>
-              </select>
-            </cfg-row>
-            <cfg-row full name="角色卡（角色设定正文）" desc="自由多段，MaiBot 式：身份/性格/【语气】【口癖】【距离感】【偏好】等。留空且未复用 → 用内置默认人设（去 AI 味、尊重看人，开箱即用）">
-              <textarea class="inp mono" style="width:100%;min-height:180px;font-size:12px;line-height:1.6;resize:vertical" v-model="form.persona.prompt" placeholder="你是「小汐」，群里一个爱聊天的技术宅。性格随和有点皮，喜欢接梗。&#10;【语气】轻松口语，偶尔用「哈」「确实」，不端着。&#10;【口癖】赞同爱说「确实是」；遇到有意思的回「有点东西」。&#10;【偏好】对 AI/编程/数码话题兴致高；八卦闲聊也会接，但不主动挑起。&#10;【不做】不发长篇大论、不列要点清单。"></textarea>
-            </cfg-row>
+
+            <template v-if="personaMode === 'library'">
+              <cfg-row full name="选择人设" desc="与主 Agent「默认人设」同一库；群内 @ 名字也随人设名">
+                <select class="sel" style="width:280px" v-model="form.persona.fromPersonaId">
+                  <option v-for="p in personas" :key="p.id" :value="p.id">{{ p.name }}（{{ p.id }}）</option>
+                  <option v-if="form.persona.fromPersonaId && !personas.some(p => p.id === form.persona.fromPersonaId)" :value="form.persona.fromPersonaId">{{ selectedPersona ? ('当前：' + selectedPersona.name + '（按名称匹配）') : ('当前：' + form.persona.fromPersonaId + '（未找到）') }}</option>
+                </select>
+              </cfg-row>
+              <div v-if="selectedPersona" class="note" style="grid-column:1/-1;align-items:flex-start;gap:10px">
+                <div class="ps-ava" style="width:42px;height:42px;font-size:22px;flex:0 0 42px;background:var(--grad)">{{ selectedPersona.avatar || '🙂' }}</div>
+                <div style="min-width:0;flex:1">
+                  <div><b>{{ selectedPersona.name }}</b> <span class="mut2">{{ selectedPersona.description || '（无描述）' }}</span></div>
+                  <div v-if="selectedPersona.tags?.length" class="row g6" style="margin-top:5px;flex-wrap:wrap">
+                    <span v-for="t in selectedPersona.tags" :key="t" class="pill p-sky">{{ t }}</span>
+                  </div>
+                  <div class="mut2" style="margin-top:6px">角色正文 {{ (selectedPersona.systemPrompt || '').length }} 字；修改请到「管理人设库」</div>
+                  <details style="margin-top:6px">
+                    <summary class="mut2" style="cursor:pointer">查看角色正文</summary>
+                    <pre class="code" style="white-space:pre-wrap;max-height:220px;overflow:auto;margin-top:6px">{{ selectedPersona.systemPrompt }}</pre>
+                  </details>
+                </div>
+              </div>
+              <div v-else class="note n-rose" style="grid-column:1/-1">
+                <v-icon name="warn"/><div>当前人设 id「{{ form.persona.fromPersonaId }}」不在人设库中，保存后将回退到自定义角色卡 / 内置默认。</div>
+              </div>
+            </template>
+
+            <template v-else>
+              <cfg-row name="角色名" desc="留空=用上方「机器人群内名字」">
+                <input class="inp" style="width:170px" v-model="form.persona.name" placeholder="留空=自动">
+              </cfg-row>
+              <cfg-row full name="角色卡（角色设定正文）" desc="自由多段，MaiBot 式：身份/性格/【语气】【口癖】【距离感】【偏好】等。留空 → 用内置默认人设（去 AI 味、尊重看人，开箱即用）">
+                <textarea class="inp mono" style="width:100%;min-height:180px;font-size:12px;line-height:1.6;resize:vertical" v-model="form.persona.prompt" placeholder="你是「小汐」，群里一个爱聊天的技术宅。性格随和有点皮，喜欢接梗。&#10;【语气】轻松口语，偶尔用「哈」「确实」，不端着。&#10;【口癖】赞同爱说「确实是」；遇到有意思的回「有点东西」。&#10;【偏好】对 AI/编程/数码话题兴致高；八卦闲聊也会接，但不主动挑起。&#10;【不做】不发长篇大论、不列要点清单。"></textarea>
+              </cfg-row>
+            </template>
           </div></div>
         </div>
 

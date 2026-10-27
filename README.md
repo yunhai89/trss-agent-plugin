@@ -762,6 +762,7 @@ tts:
 | `#伪人记忆 +条数` | 伪人独立记忆库（与主 Agent 记忆隔离） |
 
 **易漏配置**（都有代码默认值、但面板不显示，需手改 `config.yaml` 的 `agent.humanize`）：
+- `persona.fromPersonaId` —— 面板「角色人设 → 从人设库选择」；与主 Agent 共用 PersonaStore，人设正文优先于自定义角色卡，角色名/@ 判定也随人设库；自定义卡内容保留，切回即可继续用。
 - `persona.aliases: []` —— 角色别名数组，参与 @/昵称提及判定（与 `persona.name` 一同构成 `identityNames`）。
 - `memory.minConsolidateMessages: 6` —— 睡眠整合所需最少消息数（低于此不跑整合；增量整合另见 `incrementalMinMessages`）。
 - `redactSecrets: true` —— **伪人链路**发送前脱敏。⚠️ 与顶层 `agent.redactSecrets`（主 Agent 链路）同名不同层，改错层不生效。
