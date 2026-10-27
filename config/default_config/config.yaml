@@ -125,6 +125,7 @@ agent:
   reply:
     mode: image             # 回复渲染：image（markdown→精美浅色图片，默认）/ text（纯文本）；渲染失败自动退文本
     atSender: true          # 群聊回复时艾特发言人（私聊不艾特）
+    quote: true             # 群聊回复时引用触发消息（私聊不引用）；人多时便于定位回复对象，可与 atSender 同开
     narrate: true           # 中途播报：模型调工具时附带的思路/进展文本自动转发给用户（OpenClaw 式）
     renderScale: 3          # 回复图片渲染倍率（deviceScaleFactor，3=超清默认；2=高清；1=普通；越大越清晰但越耗内存/体积）
   memoryLimits:             # 声明式记忆字符上限 {memory:2200,user:1375}；留空=默认

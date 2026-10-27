@@ -279,6 +279,7 @@ agent:
 | `progressRecall` | `3` | 进度消息多少秒后自动撤回（适配器不支持则忽略） |
 | `reply.mode` | `image` | 回复渲染：`image`（markdown→浅色图片，默认）/ `text`（纯文本） |
 | `reply.atSender` | `true` | 群聊回复时艾特发言人（私聊不艾特） |
+| `reply.quote` | `true` | 群聊回复时引用触发消息（私聊不引用）；人多时便于定位回复对象，可与 `atSender` 同开 |
 | `reply.narrate` | `true` | 中途播报：模型调工具时附带的思路/进展文本自动转发给用户（参考 OpenClaw） |
 | `reply.renderScale` | `3` | 回复图片渲染倍率（deviceScaleFactor，3=超清；越大越清晰但越耗内存/体积） |
 | `thinking` | 空 | 思考模式（手动），如 `{ type: "enabled", budget_tokens: 16000 }` |

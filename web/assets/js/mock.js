@@ -60,7 +60,7 @@
     reflectMaxIterations: 1,
     progress: true,
     progressRecall: 3,
-    reply: { mode: 'image', atSender: true, narrate: true, renderScale: 3 },
+    reply: { mode: 'image', atSender: true, quote: true, narrate: true, renderScale: 3 },
     memoryLimits: { memory: 2200, user: 1375 },
     memory: { enable: true, threatScan: true },
     recall: {

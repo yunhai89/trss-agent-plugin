@@ -2393,6 +2393,9 @@ export class Chat extends plugin {
       const explicitSticker = /表情包|表情|斗图|贴个表情|发个表情|来个表情|sticker/i.test(text || '')
       const forceSticker = explicitSticker || isStickerOnly(body)
       const acceptMap = (rt.sticker && body) ? rt.sticker.decide(body, ctx, { force: forceSticker }) : null
+      // 群聊回复引用触发消息（agent.reply.quote，默认开；私聊不引用）：人多时靠引用定位回复对象，
+      // @ 仍由 atSender 独立控制，二者可同时生效。只作用于最终正文/图片，不引用进度与旁白。
+      const quoteReply = ctx.isGroup && cfg.reply?.quote !== false
       // 群聊回复艾特发言人（agent.reply.atSender，默认开；私聊不艾特）
       const atSender = (ctx.isGroup && cfg.reply?.atSender !== false && ctx.userId && typeof segment !== 'undefined') ? segment.at(ctx.userId) : null
       // 回复渲染：默认图片（markdown→图片，失败退文本）；replyMode 已在上方 run 前计算
@@ -2437,7 +2440,7 @@ export class Chat extends plugin {
           },
         })
           if (img) {
-            finalOutcome = await replyQueue.enqueue({ msg: atSender ? [atSender, img] : img }, { tag: 'final' })
+            finalOutcome = await replyQueue.enqueue({ msg: atSender ? [atSender, img] : img, quote: quoteReply }, { tag: 'final' })
             delivered = !!finalOutcome.ok
             // 多样性硬闸在图片模式同样要推进（曾只在文本模式 noteSent → recent-3 去重在默认图片回复下永不更新，防线失效）
             try { if (delivered && acceptMap?.size) rt.sticker?.noteSent?.([...acceptMap.keys()]) } catch { /* noop */ }
@@ -2475,7 +2478,7 @@ export class Chat extends plugin {
         let cleanBody = stripMarkers(String(strippedRaw)).replace(/[\s\n]+$/, '')
         if (!cleanBody && !(acceptMap && acceptMap.size)) cleanBody = '(无回复)'
         const txt = `${cleanBody}${suffix ? `\n${suffix}` : ''}`
-        finalOutcome = await replyQueue.enqueue({ msg: atSender ? [atSender, txt] : txt }, { tag: 'final' })
+        finalOutcome = await replyQueue.enqueue({ msg: atSender ? [atSender, txt] : txt, quote: quoteReply }, { tag: 'final' })
         delivered = !!finalOutcome.ok
         if (!delivered) Log.warn('[render] 文本回复发送失败', finalOutcome.error)
         // 表情包：主内容发完后，作为独立消息依次发送

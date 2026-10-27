@@ -1636,6 +1636,9 @@
             <cfg-row name="群聊 @ 发言人" desc="回复时 at 触发者">
               <v-switch v-model="form.reply.atSender"/>
             </cfg-row>
+            <cfg-row name="群聊引用原消息" desc="回复时引用触发消息；人多时便于定位是哪一条，私聊不引用">
+              <v-switch v-model="form.reply.quote"/>
+            </cfg-row>
             <cfg-row name="中途播报" desc="调工具时顺带转发思路/进展">
               <v-switch v-model="form.reply.narrate"/>
             </cfg-row>
