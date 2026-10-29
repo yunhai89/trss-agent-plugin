@@ -125,7 +125,8 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
 
   // 群 @ 消息
   client.emit('message', {
-    type: 'message', scene: 'group', appId: 'APP2', messageId: 'm1', content: '你好', timestamp: '2026-10-29T10:00:00Z',
+    type: 'message', scene: 'group', appId: 'APP2', eventName: 'GROUP_AT_MESSAGE_CREATE', atBot: true,
+    messageId: 'm1', content: '你好', timestamp: '2026-10-29T10:00:00Z',
     userId: 'MO', groupOpenid: 'GO', username: '小明', mentions: [], attachments: [], msgElements: [], raw: {},
   })
   const g = harness.emCalls.pop()
@@ -150,7 +151,8 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
 
   // 私聊
   client.emit('message', {
-    type: 'message', scene: 'c2c', appId: 'APP2', messageId: 'm2', content: 'hi', timestamp: '2026-10-29T10:00:00Z',
+    type: 'message', scene: 'c2c', appId: 'APP2', eventName: 'C2C_MESSAGE_CREATE', atBot: false,
+    messageId: 'm2', content: 'hi', timestamp: '2026-10-29T10:00:00Z',
     userId: 'UO', groupOpenid: null, username: 'u', mentions: [], attachments: [], msgElements: [], raw: {},
   })
   const c2c = harness.emCalls.pop().data
@@ -159,7 +161,8 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
 
   // 频道
   client.emit('message', {
-    type: 'message', scene: 'guild', appId: 'APP2', messageId: 'm3', content: 'hi', timestamp: '2026-10-29T10:00:00Z',
+    type: 'message', scene: 'guild', appId: 'APP2', eventName: 'AT_MESSAGE_CREATE', atBot: true,
+    messageId: 'm3', content: 'hi', timestamp: '2026-10-29T10:00:00Z',
     userId: 'GU', groupOpenid: null, guildId: 'GD', channelId: 'CH', username: 'u', mentions: [], attachments: [], msgElements: [], raw: {},
   })
   const guild = harness.emCalls.pop().data
@@ -167,13 +170,33 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
 
   // 按钮点击 → 当作用户消息
   client.emit('interaction', {
-    type: 'interaction', scene: 'group', appId: 'APP2', interactionId: 'i1', messageId: 'm0',
+    type: 'interaction', scene: 'group', appId: 'APP2', eventName: 'INTERACTION_CREATE', atBot: true, interactionId: 'i1', messageId: 'm0',
     content: '#确认 12', buttonId: 'b1', userId: 'MO', groupOpenid: 'GO', guildId: null, channelId: null,
     timestamp: '2026-10-29T10:00:00Z', username: '', mentions: [], attachments: [], msgElements: [], raw: {},
   })
   const inter = harness.emCalls.pop().data
   eq([inter.message_type, inter.message[1]?.text], ['group', '#确认 12'], '按钮回调文本当作一条用户消息投递')
   eq(inter.message_id, 'm0', '按钮消息沿用原消息 id（可被动回复）')
+
+  // 回归（线上「不管发什么都回复」）：开启全量消息权限后收到的非 @ 群消息不得补 at 段，
+  // 否则框架 trigger=at 会把每条群聊都当 @ 机器人而回复。
+  client.emit('message', {
+    type: 'message', scene: 'group', appId: 'APP2', eventName: 'GROUP_MESSAGE_CREATE', atBot: false,
+    messageId: 'm4', content: '随便聊聊', timestamp: '2026-10-29T10:00:00Z',
+    userId: 'MO', groupOpenid: 'GO', username: '小明', mentions: [], attachments: [], msgElements: [], raw: {},
+  })
+  const plain = harness.emCalls.pop().data
+  ok(!plain.message.some((s) => s.type === 'at'), '非 @ 群消息不补 at 段（不会误触发 AI 回复）')
+  eq(plain.message, [{ type: 'text', text: '随便聊聊' }], '非 @ 群消息只保留正文')
+  eq(plain._qqbot.atBot, false, '_qqbot.atBot 标记可排障')
+
+  client.emit('message', {
+    type: 'message', scene: 'group', appId: 'APP2', eventName: 'GROUP_MESSAGE_CREATE', atBot: true,
+    messageId: 'm5', content: '在吗', timestamp: '2026-10-29T10:00:00Z',
+    userId: 'MO', groupOpenid: 'GO', username: '小明', mentions: [{ is_you: true, id: 'BOTOPENID' }], attachments: [], msgElements: [], raw: {},
+  })
+  const atMsg = harness.emCalls.pop().data
+  eq(atMsg.message[0], { type: 'at', qq: 'APP2' }, '全量消息中被 @ 时补 at 段（正常触发）')
 
   adapter.stopAll()
 }

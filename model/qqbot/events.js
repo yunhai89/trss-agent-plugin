@@ -29,6 +29,27 @@ function textOf(v) {
 }
 
 /**
+ * 判断 mentions 里是否 @ 了机器人自己。
+ *
+ * QQ 群机器人在「开启全量消息权限」后，除了 GROUP_AT_MESSAGE_CREATE 还会收到
+ * GROUP_MESSAGE_CREATE（群内任意消息）。两者必须区分：只有真正被 @ 的才通知上层
+ * 「atBot=true」，否则框架 trigger=at 会把每条群消息都当成在跟机器人说话（线上实测：
+ * 插件曾无条件给群消息补 at 段，导致『不管发什么都回复』）。
+ */
+function mentionsBot(mentions, appId) {
+  if (!Array.isArray(mentions)) return false
+  const self = textOf(appId)
+  for (const m of mentions) {
+    if (!m || typeof m !== 'object') continue
+    if (m.is_you === true) return true // 官方字段：这条 mention 指向机器人自己
+    const ids = [m.id, m.user_openid, m.member_openid].map((x) => textOf(x)).filter(Boolean)
+    if (ids.includes(self)) return true
+    if (m.bot === true && m.scope !== 'all' && ids.length && ids.some((x) => x === self)) return true
+  }
+  return false
+}
+
+/**
  * 归一化一条网关事件。
  * @param {string} t 事件名
  * @param {any} d 事件数据
@@ -58,6 +79,7 @@ function normalizeGroupMessage(d, { appId, eventName }) {
   const groupOpenid = textOf(d.group_openid)
   const memberOpenid = textOf(d.author?.member_openid)
   if (!groupOpenid || !memberOpenid) return null
+  const mentions = Array.isArray(d.mentions) ? d.mentions : []
   return {
     type: 'message',
     scene: 'group',
@@ -69,8 +91,9 @@ function normalizeGroupMessage(d, { appId, eventName }) {
     userId: memberOpenid,
     groupOpenid,
     username: textOf(d.author?.username) || memberOpenid,
-    // 群机器人只在被 @ 时收到消息；带上 mentions 供上层判断（self 号段需要 appId 与 mentions 对比）
-    mentions: Array.isArray(d.mentions) ? d.mentions : [],
+    // GROUP_AT_MESSAGE_CREATE 必然是 @ 机器人；GROUP_MESSAGE_CREATE（全量消息权限）需看 mentions
+    atBot: eventName === GATEWAY_EVENTS.GROUP_AT_MESSAGE_CREATE || mentionsBot(mentions, appId),
+    mentions,
     attachments: Array.isArray(d.attachments) ? d.attachments : [],
     msgElements: Array.isArray(d.msg_elements) ? d.msg_elements : [],
     raw: d,
@@ -91,6 +114,7 @@ function normalizeC2CMessage(d, { appId }) {
     userId: userOpenid,
     groupOpenid: null,
     username: textOf(d.author?.username) || userOpenid,
+    atBot: false, // 私聊无需 @
     mentions: [],
     attachments: Array.isArray(d.attachments) ? d.attachments : [],
     msgElements: Array.isArray(d.msg_elements) ? d.msg_elements : [],
@@ -116,6 +140,7 @@ function normalizeGuildMessage(d, { appId }) {
     guildId,
     channelId,
     username: textOf(d.author?.username) || userId,
+    atBot: true, // 频道侧只订阅 AT_MESSAGE_CREATE（@机器人）与 DIRECT_MESSAGE（私信），此处必为 @
     mentions: Array.isArray(d.mentions) ? d.mentions : [],
     attachments: Array.isArray(d.attachments) ? d.attachments : [],
     msgElements: [],
@@ -140,6 +165,7 @@ function normalizeGuildDirectMessage(d, { appId }) {
     guildId,
     channelId: null,
     username: textOf(d.author?.username) || userId,
+    atBot: false, // 频道私信无需 @
     mentions: [],
     attachments: [],
     msgElements: [],
@@ -204,4 +230,5 @@ export function normalizeAttachments(attachments = []) {
   }))
 }
 
-export default { GATEWAY_EVENTS, normalizeEvent, normalizeAttachments }
+export { mentionsBot }
+export default { GATEWAY_EVENTS, normalizeEvent, normalizeAttachments, mentionsBot }

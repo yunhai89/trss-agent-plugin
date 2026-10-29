@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.45.2-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.45.3-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -301,6 +301,18 @@ agent:
 
 > ⚠️ **与 Yunzai-QQBot-Plugin 二选一**：两个适配器同时连同一条机器人会各收一份事件、各发一份消息（重复回复）。
 > 想切回官方适配器：先停用本插件适配器（`agent.qqBot.enable: false` 并重启），再恢复对方的 token 配置。
+
+### 群聊触发：只对真正 @ 的消息回复
+
+QQ 群机器人在开放平台开启「全量消息」权限后，除了 `GROUP_AT_MESSAGE_CREATE`（@机器人）还会推送
+`GROUP_MESSAGE_CREATE`（群内任意消息）。适配器按**事件类型 + mentions.is_you** 判定是否真的 @ 了机器人：
+
+- 只有真正 @ 的群消息才会补 `at` 段 → 框架 `e.atBot=true` → `trigger=at` 才触发回复；
+- 普通群消息照常投递（供伪人模式/群世界旁听与学习），但**不会触发 AI 回复**；
+- 按钮点击（`INTERACTION_CREATE`）视为定向交互，正常触发；
+- 私聊/频道私信无需 @。
+
+> 若你把 `agent.trigger` 配成 `both`，群里发 `#ai 内容` 也会触发——这是命令模式，不是误触发。
 
 ### 协议差异：ID 不是 QQ 号
 
@@ -1679,6 +1691,9 @@ node scripts/run-tests.mjs --help 2>/dev/null || true
 **Q1：机器人不回话？**
 ① 看日志 `[trigger]` 是否有触发记录；② `agent.trigger=at` 时确认是 @ 且消息含文字或媒体；③ 私聊需要 `agent.privateChat=true`；④ QQ 官方机器人需先 `/uid` 配 `agent.masters`；⑤ `agent.chatPermission` 会限制群内 `#ai` 命令（@ 对话不受限）。
 
+**Q1.5：机器人在群里「不管发什么都回复」？**
+① 确认是官方机器人且开放平台开了「全量消息」权限：该权限下普通群消息也会推送，插件本应按「事件类型 + mentions.is_you」只对 @ 回复（v1.45.3 修复了早前无条件补 `at` 段导致的全量误触发）；② 若 `agent.trigger=both`，`#ai` 命令也会触发，属预期；③ 伪人模式（`agent.humanize`）是另一条独立回复通路，可在配置里关掉。
+
 **Q2：模型报 401/404/网络错误？**
 到 Web 配置中心核对「厂商配置」的 baseURL / apiKey / protocol。国内访问海外模型建议配 `agent.proxy`（仅 HTTP(S)；SOCKS 会提示直连）。日志 `[provider]` 有重试原因。
 
@@ -1712,6 +1727,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.45.3** | 修复 QQ 群机器人「不管发什么都回复」：开启全量消息权限后 `GROUP_MESSAGE_CREATE`（非 @）也被无条件补 `at` 段 → `e.atBot=true` → `trigger=at` 全量触发。现按事件类型 + `mentions.is_you` 判定，只对真正 @ 回复；按钮点击仍正常触发；非 @ 群消息保留投递供伪人/群世界旁听 |
 | **v1.45.2** | 修复 toolEvo seed 全量失败：内置工具 `diagram_render` 的 `sideEffects:['file_write']` 不在枚举内 → 整批内置工具无法入库（埋点/健康检测失效）。现改正为 `write`，并在 seed 入口做副作用归一化（别名纠正 + 未知值剔除告警 + 无版本空壳工具自愈补建） |
 | **v1.45.1** | 修复 QQBot 网关无限重连：`intents: 0` 被原样下发（IDENTIFY intents=0 → 平台 4013）现回落为 33554432；4013/4914 按「只降不升」自动降级 intents 重连（耗尽则停止并给出可执行提示）；同一 socket 重复 close 不再双计重连；INVALID_SESSION 不再提前合成 4006（保留真实 close 码用于判断降级）；默认 intents 改为最小可用集（群@+C2C） |
 | **v1.45.0** | 首次启动即给 Web 默认访问地址（带 token，持久化 + 启动日志 + `data/web/console-url.txt`）：**没有协议端也能进面板配模型**；面板内一键复制；登录只在「认证失败」时清 token（运行时未就绪不再误报登录失败） |

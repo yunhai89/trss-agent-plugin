@@ -232,3 +232,26 @@ qqBot:
 - 启动日志与 `#qqbot状态` 显示当前 `intents`、最近 close code 与中文说明。
 
 **按钮回调**：需要机器人在开放平台开通「交互」能力，并配 `intents: 100663296`（群@+C2C+交互）。默认 `intents: 0` 下卡片可正常展示，但点击不会回调；若填了未开通的位，连接会被 4013 拒绝（此时代码会自动降级，日志会说明）。
+
+
+---
+
+# 附：非 @ 群消息误触发 AI 回复（v1.45.3）
+
+**现象**：QQ 群里发任意消息（未 @ 机器人）也会收到 AI 回复；日志 `mode=at inputLen=2` 却直接 `[agent] run start`。
+
+**原因**：适配器 `_onMessage` 对**所有**群消息无条件补了一个 `{type:'at', qq:appId}` 段——设计时假设
+「QQ 群机器人只能收到 @ 消息」，但开放平台开启「全量消息」权限后会同时推送 `GROUP_MESSAGE_CREATE`
+（群内任意消息）。假的 at 段让框架 `e.atBot=true`，`agent.trigger=at` 于是对每条群消息都触发。
+
+**修复**：
+- `events.js` 归一化时计算 `atBot`：`GROUP_AT_MESSAGE_CREATE` 恒为 true；`GROUP_MESSAGE_CREATE` 看
+  `mentions`（`is_you===true` 或 id/openid 与 appId 相符）；私聊/频道私信恒 false。
+- 适配器只有 `atBot=true` 的群/频道消息才补 `at` 段；非 @ 群消息保留正文与「他人提及」信息投递
+  （供伪人模式/群世界旁听），但不设置 atBot。
+- 按钮点击 `INTERACTION_CREATE` 归一为 `atBot=true`（定向交互必须能触发）。
+- `data._qqbot` 增加 `atBot/eventName`，排障时可直接看出该消息是否被判定为 @。
+
+**验证**：`model/qqbot/test.mjs` 144 断言（新增 GROUP_AT/GROUP_MESSAGE±mentions/C2C/频道私信 atBot 判定与
+mentionsBot 单元）；`stress/e2e/qqbot-adapter.mjs` 47 断言（新增非 @ 群消息不补 at 段、@ 时补 at 段、
+按钮点击触发）。

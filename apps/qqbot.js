@@ -379,8 +379,20 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
         : ev.scene === 'guild' ? `qg_${ev.guildId}-${ev.channelId}` : null
 
       const message = []
-      // QQ 群机器人只能收到 @ 消息：补一个 at 段，让框架的 atBot 判定成立
-      if (ev.scene === 'group' || ev.scene === 'guild') message.push({ type: 'at', qq: appId })
+      // 只有真正被 @ 的消息才补 at 段（框架据此设置 e.atBot → trigger=at 才触发）。
+      // QQ 群机器人在开启「全量消息」权限后会收到 GROUP_MESSAGE_CREATE（群内任意消息），
+      // 若无条件补 at 段，插件会把每条群聊都当 @ 而回复（线上实测「不管发什么都回复」）。
+      const isGroupAt = ev.scene === 'group' && ev.atBot === true
+      const isGuildAt = ev.scene === 'guild' && ev.atBot === true
+      if (isGroupAt || isGuildAt) message.push({ type: 'at', qq: appId })
+      if (ev.scene === 'group' && ev.atBot !== true) {
+        // 保留原始内容里的提及信息（供群世界/伪人旁听分析），但不影响触发判定
+        for (const m of ev.mentions || []) {
+          if (m?.is_you) continue
+          const qq = m?.user_openid || m?.member_openid || m?.id
+          if (qq) message.push({ type: 'at', qq: String(qq) })
+        }
+      }
       if (ev.content) message.push({ type: 'text', text: ev.content })
       for (const a of ev.attachments || []) {
         if (a.type === 'image') message.push({ type: 'image', url: a.url, file: a.url, name: a.filename })
@@ -405,7 +417,7 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
         // 供本插件识别官方协议（也兼容 adapter 元数据推断）
         adapter_id: ADAPTER_ID,
         adapter_name: ADAPTER_NAME,
-        _qqbot: { scene: ev.scene, appId, openid: ev.userId, groupOpenid: ev.groupOpenid, guildId: ev.guildId, channelId: ev.channelId },
+        _qqbot: { scene: ev.scene, appId, openid: ev.userId, groupOpenid: ev.groupOpenid, guildId: ev.guildId, channelId: ev.channelId, atBot: ev.atBot === true, eventName: ev.eventName },
       }
       data.reply = (msg, quote, opts) => {
         const passive = adapter._passiveMsgId(appId, ev.messageId)
@@ -441,6 +453,8 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
         content: ev.content,
         username: '',
         attachments: [],
+        atBot: true, // 按钮是机器人卡片上的点击，天然是「针对机器人」的交互，应当触发
+        eventName: 'INTERACTION_CREATE',
       })
     },
   }

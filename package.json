@@ -1,6 +1,6 @@
 {
   "name": "trss-agent-plugin",
-  "version": "1.45.2",
+  "version": "1.45.3",
   "description": "基于 TRSS-Yunzai 的 AI Agent 插件框架：LLM 对话 · 工具调用 · 长期记忆 · 人设 · MCP · 工具进化(Tool Evolution) · QQ 官方机器人适配(Markdown/Keyboard) · Web 管理面板",
   "author": "云汐",
   "license": "GPL-3.0",

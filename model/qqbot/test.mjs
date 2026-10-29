@@ -15,7 +15,7 @@
 import { TokenManager, TOKEN_URL, TOKEN_URLS } from './token.js'
 import { QQBotApi, MSG_TYPE, FILE_TYPE, messagePath, mediaPath, explainError, MsgSeqAllocator, API_BASE, API_BASES } from './api.js'
 import { QQBotGateway, INTENTS, DEFAULT_INTENTS, OP, resolveWebSocket, CLOSE_CODE_HINT, nextIntents } from './gateway.js'
-import { normalizeEvent, normalizeAttachments, GATEWAY_EVENTS } from './events.js'
+import { normalizeEvent, normalizeAttachments, GATEWAY_EVENTS, mentionsBot } from './events.js'
 import { buildKeyboard, buildMessageJobs, splitText, markdownPayload, resolveMediaSource } from './payload.js'
 import { QQBotClient, markdownToPlain } from './client.js'
 
@@ -365,14 +365,36 @@ console.log('\n[4] events：事件归一化')
   eq([g.type, g.scene, g.userId, g.groupOpenid, g.username], ['message', 'group', 'MO', 'GO', '小明'], '群 @ 消息归一化')
   eq(g.attachments[0].url, 'https://x/1.png', '附件保留 url')
 
+  eq(g.atBot, true, 'GROUP_AT_MESSAGE_CREATE → atBot=true（必然被 @）')
+  eq(g.eventName, 'GROUP_AT_MESSAGE_CREATE', '保留事件名（排障用）')
+
+  // 全量消息权限下的普通群消息：不能当 @（否则 trigger=at 会回复所有群聊）
+  const plain = normalizeEvent(GATEWAY_EVENTS.GROUP_MESSAGE_CREATE, {
+    id: 'm1b', content: '随便聊聊', group_openid: 'GO', author: { member_openid: 'MO' }, mentions: [],
+  }, { appId: 'A' })
+  eq(plain.atBot, false, 'GROUP_MESSAGE_CREATE 无 mention → atBot=false')
+
+  const mentioned = normalizeEvent(GATEWAY_EVENTS.GROUP_MESSAGE_CREATE, {
+    id: 'm1c', content: '艾特你', group_openid: 'GO', author: { member_openid: 'MO' },
+    mentions: [{ is_you: true, id: 'BOT' }],
+  }, { appId: 'A' })
+  eq(mentioned.atBot, true, 'GROUP_MESSAGE_CREATE mentions.is_you → atBot=true')
+
+  // mentionsBot 单元
+  ok(mentionsBot([{ is_you: true }], 'A'), 'is_you=true 判定为提及机器人')
+  ok(mentionsBot([{ id: 'A' }], 'A'), 'mention.id 等于 appId 也判 true')
+  ok(!mentionsBot([{ id: 'someone' }], 'A'), '提及他人不算')
+  ok(!mentionsBot([], 'A') && !mentionsBot(null, 'A'), '空/缺失 mentions 安全返回 false')
+
   const c2c = normalizeEvent(GATEWAY_EVENTS.C2C_MESSAGE_CREATE, { id: 'm2', content: 'hi', author: { user_openid: 'UO' } }, { appId: 'A' })
-  eq([c2c.scene, c2c.userId, c2c.groupOpenid], ['c2c', 'UO', null], 'C2C 归一化')
+  eq([c2c.scene, c2c.userId, c2c.groupOpenid, c2c.atBot], ['c2c', 'UO', null, false], 'C2C 归一化（私聊无需 at）')
 
   const guild = normalizeEvent(GATEWAY_EVENTS.AT_MESSAGE_CREATE, { id: 'm3', content: 'hi', guild_id: 'G', channel_id: 'C', author: { id: 'U', username: 'u' } }, { appId: 'A' })
   eq([guild.scene, guild.guildId, guild.channelId, guild.userId], ['guild', 'G', 'C', 'U'], '频道消息归一化')
 
   const dm = normalizeEvent(GATEWAY_EVENTS.DIRECT_MESSAGE_CREATE, { id: 'm4', content: 'hi', guild_id: 'G', author: { id: 'U' } }, { appId: 'A' })
-  eq([dm.scene, dm.guildId], ['guild_dm', 'G'], '频道私信归一化')
+  eq([dm.scene, dm.guildId, dm.atBot], ['guild_dm', 'G', false], '频道私信归一化（私聊无需 at）')
+  eq(guild.atBot, true, '频道 AT_MESSAGE_CREATE → atBot=true')
 
   const inter = normalizeEvent(GATEWAY_EVENTS.INTERACTION_CREATE, {
     id: 'i1', chat_type: 1, group_openid: 'GO', group_member_openid: 'MO', timestamp: '2026-10-29T10:00:00Z',
