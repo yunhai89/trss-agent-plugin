@@ -1355,7 +1355,7 @@ await test('_capToolResult：超长工具结果截断', async () => {
   ok(a._capToolResult('短') === '短', '短结果不动')
   ok(a._capToolResult(undefined) === undefined, '非字符串不动')
   const a2 = new Agent({ provider: {} })
-  ok(a2._capToolResult(big) === big, 'maxToolResultChars 默认 4000，500 字符不截断')
+  ok(a2._capToolResult(big) === big, 'maxToolResultChars 默认 8000（与 yaml 对齐），500 字符不截断')
 })
 
 await test('_compactMessages：保留首条意图 + 不孤立 tool 消息', async () => {
@@ -1393,7 +1393,7 @@ await test('_compactMessages：保留首条意图 + 不孤立 tool 消息', asyn
 await test('keepReasoning：默认 false，不回灌 reasoning', async () => {
   const a = new Agent({ provider: {} })
   ok(a.keepReasoning === false, '默认 keepReasoning=false')
-  ok(a.maxToolResultChars === 4000, '默认工具结果上限 4000')
+  ok(a.maxToolResultChars === 8000, '默认工具结果上限 8000（与 yaml 对齐）')
   const a2 = new Agent({ provider: {}, keepReasoning: true })
   ok(a2.keepReasoning === true, '可显式开启')
 })

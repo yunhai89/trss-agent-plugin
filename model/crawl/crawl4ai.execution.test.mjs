@@ -7,7 +7,8 @@
  *     （桩 venv python 真被调用、结果 via=crawl4ai、会话沙箱 0 条命令）——crawl4ai 是与
  *     diagram 本机 Kroki 同类的本地引擎，不随沙箱模式进 E2B；
  *  ② kb.crawl.execution=sandbox + mode=e2b：改在会话沙箱内执行（桩 transport 收命令），宿主桩不再被调用；
- *  ③ kb.crawl.execution=sandbox + mode=off（配置矛盾）：按本地执行 + 可读提示，不静默失败。
+ *  ③ kb.crawl.execution=sandbox + mode=off（配置矛盾）：fail-closed 降级纯 HTTP fetch，
+ *     不回落宿主 crawl4ai（与 yaml「沙箱未就绪即降级纯 HTTP fetch，不改跑宿主 crawl4ai」一致）。
  *
  * 跨平台：宿主桩用 POSIX shell 脚本（Windows 跳过本文件的接线块，纯逻辑断言仍在 crawl4ai.test.mjs）。
  */
@@ -82,7 +83,11 @@ const ctx = (mode) => ({ sandbox: { mode, manager: mode === 'e2b' ? box : null, 
 const readMark = () => { try { return fs.readFileSync(process.env.CRAWL_MARK, 'utf8') } catch { return '' } }
 
 const origGet = Config.get
-const setCfg = (execution) => { Config.get = () => ({ agent: { kb: execution ? { crawl: { execution } } : {} } }) }
+// 关站点记忆/会话持久化：否则 ③ 的降级 fetch 会把该测试 IP 记成「fetch 够用」，
+// 下次运行 ①② 直接命中记忆跳过浏览器 → 用例不幂等（数据目录跨运行保留）。
+const setCfg = (execution) => {
+  Config.get = () => ({ agent: { kb: { crawl: { ...(execution ? { execution } : {}), siteMemory: false, sessionPersist: false } } } })
+}
 const out = {}
 try {
   setCfg(null) // ① 默认
@@ -131,9 +136,10 @@ process.stdout.write('__RESULT__' + JSON.stringify(out) + '\\n')
       ok(out.bySandbox?.via === 'crawl4ai', '沙箱档 via=crawl4ai')
       ok(out.markAfterSandbox === 'HOST\n', '沙箱档不跑宿主 crawl4ai（marker 未增长）')
       ok(out.sandboxRunsAfterSandbox > 0, `沙箱档在沙箱内执行（沙箱命令数 ${out.sandboxRunsAfterSandbox}）`)
-      // ③ execution=sandbox 但 mode=off：按本地（矛盾配置不静默失败）
-      ok(String(out.byModeOff?.text || '').includes('HOST-MARKDOWN'), 'mode=off 时按本地执行（宿主桩命中）')
-      ok(out.markAfterModeOff === 'HOST\nHOST\n', '宿主桩再被调用一次（矛盾配置回落本地且有提示）')
+      // ③ execution=sandbox 但 mode=off（配置矛盾）：fail-closed 降级纯 HTTP fetch，不跑宿主 crawl4ai
+      ok(out.byModeOff?.ok === true && out.byModeOff?.via === 'fetch', `mode=off 时降级 fetch（via=${out.byModeOff?.via}）`)
+      ok(!String(out.byModeOff?.text || '').includes('HOST-MARKDOWN'), '矛盾配置不回落宿主 crawl4ai（宿主桩未命中）')
+      ok(out.markAfterModeOff === 'HOST\n', '宿主桩未被再次调用（marker 未增长）')
       ok(out.sandboxRunsAfterModeOff === out.sandboxRunsAfterSandbox, 'mode=off 不动沙箱')
     }
   } finally {

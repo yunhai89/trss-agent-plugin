@@ -96,7 +96,8 @@ export class RuntimeManager {
       trace: this.trace, holderId: newHolderId(),
       presenceWindowMs: (gcfg.presenceWindowSeconds ?? 300) * 1000,
       cooldownSeconds: gcfg.cooldownSeconds ?? 45,
-      maxRepliesPer10Minutes: gcfg.behaviorPolicy?.maxRepliesPer10Minutes ?? gcfg.maxRepliesPer10Minutes ?? 4,
+      // 频率上限单一真源（C1）：顶层 maxRepliesPer10Minutes 优先；behaviorPolicy 副本仅旧配置兜底
+      maxRepliesPer10Minutes: gcfg.maxRepliesPer10Minutes ?? gcfg.behaviorPolicy?.maxRepliesPer10Minutes ?? 4,
       seqFloor: this.seqFloor,
     })
     // 恢复轻状态（游标/冷却/backoff）：不在此 fire-and-forget——

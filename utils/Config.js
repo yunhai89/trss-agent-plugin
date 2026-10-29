@@ -142,6 +142,10 @@ function migrateBaseModel(agent) {
   if (!isPlainObj(agent) || agent.providerId || !agent.apiKey) return false
   const providers = Array.isArray(agent.llmProviders) ? agent.llmProviders : []
   const models = Array.isArray(agent.llmModels) ? agent.llmModels : []
+  // 注册表已存在时不再从扁平字段自动迁移：否则用户主动清空 providerId（面板「取消选择」）
+  // 会被下一次 save/load 立即重建，表现为「清空无效、只能用旧模型」（2026-10-29 配置互搏审计 F2）。
+  // 旧配置（注册表为空）仍按原逻辑迁移一次，保证老用户升级无感。
+  if (providers.length) return false
   const same = (a, b) => String(a || '').trim().replace(/\/+$/, '').toLowerCase() === String(b || '').trim().replace(/\/+$/, '').toLowerCase()
   let prov = providers.find((p) => p && same(p.baseURL, agent.baseURL) && String(p.protocol || 'openai') === String(agent.protocol || 'openai'))
   if (!prov) {
@@ -155,7 +159,9 @@ function migrateBaseModel(agent) {
   }
   let mod = models.find((m) => m && m.providerId === prov.id && String(m.model) === String(agent.model || ''))
   if (!mod) {
-    mod = { id: genId('m'), name: '', providerId: prov.id, model: String(agent.model || ''), temperature: null, maxTokens: null, thinking: 'inherit', note: '' }
+    // 不写 temperature: null / maxTokens: null —— 运行时 Number(null) === 0 会把 null 当成显式 0，
+    // 导致模型级温度被钉成 0、覆盖全局 agent.temperature（2026-10-29 配置互搏审计 P0/F1）。缺失键即「继承全局」。
+    mod = { id: genId('m'), name: '', providerId: prov.id, model: String(agent.model || ''), thinking: 'inherit', note: '' }
     models.push(mod)
     agent.llmModels = models
   }
@@ -168,7 +174,22 @@ function migrateBaseModel(agent) {
 /** 把引用解析结果回填到扁平镜像字段；返回是否发生了变化 */
 function syncBaseModel(agent) {
   const resolved = resolveBaseModel(agent)
-  if (!resolved) return false
+  if (!resolved) {
+    // 引用未生效且 providerId/modelId 为空、但注册表已存在 → 视为「用户主动取消/未选择基础模型」：
+    // 清空镜像字段，让运行时明确报「未选定可用模型」，而不是静默沿用上一次解析出的旧端点
+    // （面板「清空=停用主模型」，旧版仅打 WARN 造成面板与运行时静默分叉；2026-10-29 配置互搏审计 F2）。
+    const providers = Array.isArray(agent.llmProviders) ? agent.llmProviders : []
+    const explicitlyCleared = !agent.providerId || !agent.modelId
+    if (explicitlyCleared && providers.length) {
+      let changed = false
+      for (const k of BASE_MODEL_MIRROR) {
+        const blank = k === 'protocol' ? 'openai' : ''
+        if ((agent[k] ?? '') !== blank) { agent[k] = blank; changed = true }
+      }
+      return changed
+    }
+    return false
+  }
   let changed = false
   for (const k of BASE_MODEL_MIRROR) {
     if (agent[k] !== resolved[k]) { agent[k] = resolved[k]; changed = true }
@@ -195,7 +216,8 @@ let _danglingWarned = '' // 引用失效告警去重（配置每次 reload 都�
  * 否则面板显示「未选择」而运行时仍在用旧端点，属于静默分叉。
  */
 function warnDanglingBaseRef(agent) {
-  if (!agent.providerId) { _danglingWarned = ''; return }
+  // providerId/modelId 为空 = 用户主动清空（syncBaseModel 已清镜像，运行时会明确报未选定），不属「引用失效」
+  if (!agent.providerId || !agent.modelId) { _danglingWarned = ''; return }
   if (resolveBaseModel(agent)) { _danglingWarned = ''; return }
   const key = `${agent.providerId}/${agent.modelId || ''}`
   if (_danglingWarned === key) return
@@ -248,7 +270,14 @@ function reload(force = false) {
   migrateLegacy() // 自愈：若 config.yaml 缺失但 legacy 在，先拾取
   const def = readYamlDir(defaultDir)
   const prev = JSON.stringify(_data)
-  _data = deepMerge(def, readUser())
+  const user = readUser()
+  const merged = deepMerge(def, user)
+  // 与 load() 同口径自愈：升级新增的默认键补全落盘，否则热加载后内存有默认键、文件里没有，
+  // 形成「内存/文件两套真源」（2026-10-29 配置互搏审计 F16）。
+  if (hasMissingKeys(def, user)) {
+    try { writeUser(merged); Log.mark('[config] 已补全 config.yaml 中缺失的字段') } catch (e) { Log.warn('[config] 补全缺失字段失败', e?.message || e) }
+  }
+  _data = merged
   persistBaseModel() // 引用→镜像归一（幂等；有变化才落盘）
   const changed = JSON.stringify(_data) !== prev
   if (changed || force) {

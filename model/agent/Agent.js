@@ -45,6 +45,9 @@ function shortHash(str) {
 /** 按需发现默认常驻工具（不经过搜索；config.toolDiscovery.alwaysOn 留空时兜底）。tool_search 始终由元工具注入。 */
 const DEFAULT_ALWAYS_ON = ['tool_search', 'clarify', 'memory_search', 'web_search', 'kb_search', 'skill', 'get_chat_history', 'reminder_set', 'schedule_task', 'context_recall', 'diagram_render', 'get_group_file', 'list_group_files'] // context_recall 常驻：压缩档案消息直接引用它恢复原文，不能等 tool_search；diagram_render 常驻：解释流程/架构时随时可用（不等 tool_search 检索）；get_group_file/list_group_files 常驻：否则主代理不知道有此能力，会用 terminal/find/curl 瞎找群文件；schedule_task 常驻：否则"每天/每周"类周期需求只能看到 reminder_set，被当一次性提醒处理（#定时任务列表 里就看不到）
 
+/** contextLowRatio 被静默夹紧的告警只打一次（Agent 每轮可能重建，避免刷屏；进程级） */
+let _lowRatioWarned = false
+
 /** 紧凑用量日志：兼容 per-turn(prompt/completion_tokens) 与 mergeUsage(input/output/total) 两种形态 */
 function fmtUsage(u) {
   if (!u) return null
@@ -245,7 +248,7 @@ export class Agent {
     this.stickers = config.stickers || null // 表情包清单注入（catalog()，无资源时返回空串零影响）
 
     this.systemPrompt = config.systemPrompt || DEFAULT_IDENTITY
-    this.maxTurns = config.maxTurns ?? 90
+    this.maxTurns = config.maxTurns ?? 200 // 与 config.yaml 默认（agent.maxTurns: 200）对齐，避免清空后静默换一套值
     this.temperature = config.temperature
     this.maxTokens = config.max_tokens ?? config.maxTokens ?? null
     this.thinking = config.thinking || null
@@ -292,7 +295,12 @@ export class Agent {
     // 低水位必须严格小于高水位：ratio() 的**默认值分支**不经过 max 夹紧，
     // 若用户只把 contextHighRatio 调到 0.3，默认 0.45 就会出现 low > high（第 9 轮审计 S4）
     const lowCap = Math.max(0.05, this.contextHighRatio - 0.05)
-    this.contextLowRatio = Math.min(ratio(config.contextLowRatio, 0.45, 0.05, lowCap), lowCap)
+    const rawLowRatio = config.contextLowRatio
+    this.contextLowRatio = Math.min(ratio(rawLowRatio, 0.45, 0.05, lowCap), lowCap)
+    // 用户显式写的 low≥high 会被静默夹到 lowCap：记录待告警（logger 在下方装配，届时提示一次；行为不变）
+    const nLow = Number(rawLowRatio)
+    const lowRatioClamped = rawLowRatio != null && rawLowRatio !== ''
+      && Number.isFinite(nLow) && nLow >= this.contextHighRatio && this.contextLowRatio !== nLow
     this.cacheEpoch = 0
     // 无损压缩（Hermes ContextCompressor 可逆化）：compactArchive 注入后压缩 = 原文整块归档
     // （sha256 内容寻址）+ 窗口内结构化台账 + context_recall 恢复；未注入降级为纯台账压缩。
@@ -300,10 +308,15 @@ export class Agent {
     this.compactArchive = config.compactArchive || null
     this._compactLedger = null
     // 上下文管理（解决长对话膨胀 / token 溢出）
-    this.maxToolResultChars = config.maxToolResultChars ?? 4000 // 单条工具结果字符上限，超长截断
+    this.maxToolResultChars = config.maxToolResultChars ?? 8000 // 单条工具结果字符上限（与 yaml 默认 8000 对齐），超长截断
     this.keepReasoning = config.keepReasoning === true // 默认 false：不把 reasoning 回灌历史，省 context
     this.contextKeepRecent = config.contextKeepRecent ?? 8 // 压缩时至少保留的尾部消息数
     this.logger = config.logger || (() => {})
+    // 配置 low≥high 被夹紧时提示一次（进程内只提示一次，避免每轮重建 Agent 刷屏）；行为不变
+    if (lowRatioClamped && !_lowRatioWarned) {
+      _lowRatioWarned = true
+      this.logger('warn', `[config] contextLowRatio(${nLow}) ≥ contextHighRatio(${this.contextHighRatio})，运行时已夹到 ${this.contextLowRatio}`)
+    }
     this.devLog = config.devLog || null // 详细 trace 日志（apps 注入，库零依赖）；null 时为 no-op
 
     // opt-in 运营层

@@ -383,11 +383,13 @@ await test('执行面解析：crawl4ai 默认本地（不随 sandbox.mode 进沙
   const d3 = resolveCrawlExecution({ crawl: { execution: 'sandbox' } }, { sandbox: { mode: 'e2b', manager: null } })
   eq2(d3.sandboxRefused, true, '沙箱未就绪 → 拒绝宿主 crawl4ai')
   ok(String(d3.note).includes('沙箱未就绪'), '拒绝原因可读')
-  // ④ execution=sandbox 但 mode≠e2b（配置矛盾）→ 按本地执行 + 可读提示（不静默失败）
+  // ④ execution=sandbox 但 mode≠e2b（配置矛盾）→ fail-closed：不跑宿主 crawl4ai，降级纯 HTTP fetch
   const d4 = resolveCrawlExecution({ crawl: { execution: 'sandbox' } }, { sandbox: { mode: 'off', manager: null } })
-  eq2(d4.execution, 'local', '矛盾配置按本地执行')
+  eq2(d4.execution, 'sandbox', '保持 sandbox 档位（调用方据此标注降级）')
   eq2(d4.box, null, '无沙箱句柄')
+  eq2(d4.sandboxRefused, true, 'mode≠e2b → 拒绝宿主 crawl4ai')
   ok(String(d4.note).includes('agent.sandbox.mode=e2b'), '给出矛盾配置提示')
+  ok(String(d4.note).includes('纯 HTTP fetch'), '说明降级为纯 HTTP fetch')
   // ⑤ 大小写/空白容错
   eq2(resolveCrawlExecution({ crawl: { execution: '  SANDBOX ' } }, e2bCtx).execution, 'sandbox', 'trim+小写归一')
   eq2(resolveCrawlExecution({ crawl: { execution: 'host' } }, e2bCtx).execution, 'local', '未知取值回退 local')

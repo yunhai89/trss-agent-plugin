@@ -419,12 +419,15 @@ export function resolveCrawlPolicy(cfg = {}, opts = {}) {
  * 走了沙箱反而丢掉已装好的浏览器（沙箱模板缺 crawl4ai 时整条链路恒降级 fetch）。
  * - kb.crawl.execution: 'local'（默认）：宿主 venv crawl4ai；未装自动降级纯 HTTP fetch。
  * - kb.crawl.execution: 'sandbox'（显式选择）：会话沙箱内 crawl4ai（需 agent.sandbox.mode=e2b；
- *   沙箱模板需预装 crawl4ai）；沙箱未就绪时拒绝宿主 crawl4ai、降级纯 HTTP fetch（与旧行为一致）。
- * 配置矛盾（execution=sandbox 但 mode≠e2b）按本地执行并记 note（以可用能力为准，不静默失败）。
+ *   沙箱模板需预装 crawl4ai）；沙箱未就绪（含 mode≠e2b）时**不跑宿主 crawl4ai**，
+ *   降级纯 HTTP fetch 并置 sandboxRefused=true。
+ * 安全语义：execution=sandbox 是「绝不在宿主跑浏览器」的显式选择（与 yaml 注释一致）；
+ * 配置矛盾（execution=sandbox 但 mode≠e2b）也 fail-closed 降级 fetch，绝不静默回落宿主 crawl4ai。
  * @param {object} cfg agent.kb 配置块（execution 在 cfg.crawl.execution）
  * @param {object} ctx 工具上下文（ctx.sandbox 由 apps/agent.js 装配）
  * @returns {{ execution:'local'|'sandbox', box:object|null, sandboxRefused:boolean, note:string|null }}
- *   execution 为**实际生效**的执行面（矛盾配置下是 local，不是配置字面值）。
+ *   execution 为配置档位（sandbox 档降级 fetch 时仍为 'sandbox'，便于调用方标注降级原因）；
+ *   sandboxRefused=true 表示本档拒绝宿主 crawl4ai，调用方应走纯 HTTP fetch。
  */
 export function resolveCrawlExecution(cfg = {}, ctx = {}) {
   const execution = String(cfg?.crawl?.execution || 'local').trim().toLowerCase() === 'sandbox' ? 'sandbox' : 'local'
@@ -437,7 +440,10 @@ export function resolveCrawlExecution(cfg = {}, ctx = {}) {
       note: '沙箱未就绪（kb.crawl.execution=sandbox 且 agent.sandbox.mode=e2b，但沙箱不可用；不跑宿主 crawl4ai）',
     }
   }
-  return { execution: 'local', box: null, sandboxRefused: false, note: 'kb.crawl.execution=sandbox 需要 agent.sandbox.mode=e2b，本次按本地 crawl4ai 执行' }
+  return {
+    execution, box: null, sandboxRefused: true,
+    note: '沙箱未启用（kb.crawl.execution=sandbox 需要 agent.sandbox.mode=e2b）；本次降级纯 HTTP fetch（不跑宿主 crawl4ai）',
+  }
 }
 
 /**
@@ -757,7 +763,8 @@ export const webCrawlTool = {
     if (wait_for && !/^(css:|js:)/.test(String(wait_for).trim())) return { error: 'wait_for 需以 css: 或 js: 开头' }
     // 执行面：crawl4ai 是本地引擎（宿主 venv），默认不受 sandbox.mode 影响——
     // 仅当 kb.crawl.execution=sandbox（且 mode=e2b）时才改在会话沙箱内跑（宿主 python 子进程不启动）；
-    // 该档下沙箱不可用/模板缺 crawl4ai → crawlUrl 自动降级纯 HTTP fetch（非 shell，结果标注 via/degraded）。
+    // 该档下沙箱未就绪/mode≠e2b/模板缺 crawl4ai → fail-closed：不跑宿主 crawl4ai，
+    // crawlUrl 自动降级纯 HTTP fetch（非 shell，结果标注 via/degraded）。
     const exec = resolveCrawlExecution(kbCfg(), ctx)
     if (exec.note) Log.warn(`[crawl] web_crawl ${exec.note}`)
     const engineOverride = {}
@@ -768,7 +775,7 @@ export const webCrawlTool = {
     } else if (exec.sandboxRefused) {
       engineOverride._avail = async () => ({
         ok: false, sandbox: true, reason: exec.note,
-        hint: '修复 E2B 配置后重试；或把 kb.crawl.execution 改回 local 用宿主 crawl4ai',
+        hint: '把 agent.sandbox.mode 设为 e2b 并确保模板预装 crawl4ai 后重试；或把 kb.crawl.execution 改回 local 用宿主 crawl4ai',
       })
     }
     const r = await crawlUrl(u, {

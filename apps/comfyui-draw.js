@@ -21,7 +21,7 @@ import { createMediaService } from '../model/media/index.js'
  *   （附图或引用一张图）= 作为输入图；img2img/修脸/放大/反推类工作流需要它
  *
  * 配置（agent.comfyui，面板可改）：
- *   enable          总开关（关=工具与指令都不响应）
+ *   enable          总开关（关=工具与指令都不响应，指令也不吞消息=零影响）
  *   command.enable  指令开关（默认开）
  *   command.masterOnly  仅主人可用（默认 false）
  *   command.cooldown    同用户冷却秒数（默认 30；0=不限）
@@ -55,10 +55,8 @@ export class ComfyDraw extends plugin {
    */
   async _gate() {
     const c = cfg()
-    if (!c.enable) {
-      await this.reply('ComfyUI 未启用（config agent.comfyui.enable=false）')
-      return 'handled'
-    }
+    // 总开关关=零影响（yaml 承诺）：不回复也不吞消息，交回其它插件/LLM 处理
+    if (!c.enable) return 'skip'
     if (cmdCfg().enable === false) return 'skip'
     if (cmdCfg().masterOnly === true && !this.e.isMaster) {
       await this.reply('该指令仅主人可用（agent.comfyui.command.masterOnly=true）')

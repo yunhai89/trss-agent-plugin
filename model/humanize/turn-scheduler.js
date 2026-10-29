@@ -225,8 +225,8 @@ export class TurnScheduler {
       rt.setPhase('cooldown'); return
     }
 
-    // 回复频率上限
-    const maxRate = c.behaviorPolicy?.maxRepliesPer10Minutes ?? rt.maxRepliesPer10Minutes
+    // 回复频率上限（C1：顶层单一真源优先；behaviorPolicy 副本仅旧配置兜底）
+    const maxRate = c.maxRepliesPer10Minutes ?? c.behaviorPolicy?.maxRepliesPer10Minutes ?? rt.maxRepliesPer10Minutes
     if (maxRate > 0 && rt.replyCountIn(10 * 60 * 1000, now) >= maxRate && !hasStrongSignal) {
       Log.info('[humanize] debounce 跳过：频率上限 ' + rt.replyCountIn(10 * 60 * 1000, now) + '/' + maxRate)
       rt.markObserved(external)

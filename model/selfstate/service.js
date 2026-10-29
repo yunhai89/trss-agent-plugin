@@ -37,7 +37,6 @@ export class SelfStateService {
     this.embedder = embedFn ? makeEmbedder({ embedFn, model: embedModel }) : null
     this._ready = false
     this._initPromise = null
-    this._dbReady = false // 建库（initDb 全量 DDL）是否已成功跑过一次
     this._coreCache = null
   }
 
@@ -46,18 +45,16 @@ export class SelfStateService {
 
   async init() {
     if (this._ready) return true
-    // 关闭态短路：默认 selfState.enabled=false 的部署不该在每条群消息上重跑一遍
-    // Db.initDb 全套建表/索引/迁移 DDL。建库成功过（_dbReady）后关闭态直接返回 false；
-    // 配置可热开启——开启后照旧走下面的装配分支。
-    if (this._dbReady && !this.cfg().enabled) return false
+    // 默认关不预装配（C10）：未启用时不建库/不跑 DDL（关=整层 no-op）；
+    // 配置可热开启——开启后照旧走下面的装配分支（不缓存「关闭」终态）。
+    if (this.cfg().enabled !== true) return false
     if (this._initPromise) return this._initPromise
     this._initPromise = (async () => {
       try {
         await Db.initDb({ dir: this.dataDir })
-        this._dbReady = true
         const dao = Db.dao
         const cFn = () => this.cfg()
-        if (!cFn().enabled) { this._ready = false; return false } // 关闭时不装配
+        if (!cFn().enabled) { this._ready = false; return false } // 初始化期间被关掉：不装配
         const model = cFn().eventDetection?.ambiguousIntentModelProfile || null
         this.dao = dao
         this.core = new SelfCoreCompiler({ dao, provider: this.provider, model })

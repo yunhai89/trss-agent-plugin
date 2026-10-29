@@ -394,8 +394,10 @@ export const reminderSetTool = {
     const isTask = !!(p.prompt && String(p.prompt).trim())
     if (!isTask && !p.message) return { error: '需提供 message（提醒内容）或 prompt（到点任务）' }
     try {
+      // 提醒归属始终按真实用户（与 yaml「提醒/笔记/人设始终按用户」一致，同 notes 工具口径）；
+      // 旧版群共享记录（userId='__group__:*'）仍按 listByUser/ownsScheduleRecord 的兼容分支可见、可取消。
       const rec = await ctx.reminder.add({
-        userId: ctx.scopeUserId,
+        userId: ctx.userId || ctx.scopeUserId,
         groupId: ctx.groupId || null,
         selfId: ctx.selfId || '',
         at: at.getTime(),
@@ -456,8 +458,21 @@ export const reminderListTool = {
   parameters: { type: 'object', properties: {}, additionalProperties: false },
   async execute(_p, ctx) {
     try {
-      // 带上 groupId：群共享作用域迁移后旧记录靠它判定归属（见 listByUser JSDoc）
-      const reminders = ctx?.reminder?.list ? await ctx.reminder.list(ctx.scopeUserId, { groupId: ctx?.groupId || null }) : []
+      // 归属按真实用户（ctx.userId 优先，群共享模式下也不再落到 '__group__' 作用域；与写入端一致）；
+      // 同时兼容查询旧版群共享作用域（__group__:*）里的旧记录，避免升级后「已有提醒」从列表消失。
+      // 带上 groupId：旧版无群号记录靠它判定归属（见 listByUser JSDoc）
+      const uids = [...new Set([ctx?.userId, ctx?.scopeUserId].filter((x) => x != null && x !== '').map(String))]
+      const reminders = []
+      if (ctx?.reminder?.list) {
+        const seen = new Set()
+        for (const u of uids) {
+          const list = await ctx.reminder.list(u, { groupId: ctx?.groupId || null })
+          for (const r of list || []) {
+            const k = String(r?.id)
+            if (!seen.has(k)) { seen.add(k); reminders.push(r) }
+          }
+        }
+      }
       const crons = ctx?.cronTask?.list ? await ctx.cronTask.list() : []
       const items = []
       for (const r of reminders) {

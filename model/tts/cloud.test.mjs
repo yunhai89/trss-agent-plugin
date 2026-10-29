@@ -406,6 +406,27 @@ await test('TtsService：max 档单段字数/段间静音按配置生效（与 I
   ok(r.tier === 'max' && r.segments?.length >= 2, '返回档位/分段信息')
 })
 
+await test('TtsService：云端 max 档 segmentGapMs=0 → 保留 0（不留空隙，不被 || 300 吞掉）', async () => {
+  const runnerArgs = []
+  const fetchImpl = mkFetch({
+    'chat/completions': async () => jsonRes({ choices: [{ message: { audio: { data: Buffer.from('S').toString('base64') } } }] }),
+  })
+  const runner = (args) => {
+    runnerArgs.push(args)
+    const out = args[args.length - 1]
+    if (out && out !== '-') { try { fs.writeFileSync(out, Buffer.from('X')) } catch { /* noop */ } }
+    return Promise.resolve({ ok: true, exitCode: 0, stdout: '', stderr: '' })
+  }
+  const svc = new TtsService({
+    enable: true, provider: 'mimo',
+    mimo: { apiKey: 'k', autoEmotion: false, tier: 'max', maxSegmentChars: 20, segmentGapMs: 0, format: 'wav' },
+  }, { dataDir, logger: () => {}, llm: null, fetchImpl, ffmpegRunner: runner })
+  const r = await svc.synthesize({ text: '甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥。' })
+  ok(r.ok, `合成成功：${r.error || ''}`)
+  ok(runnerArgs.length > 0, '走了 ffmpeg 合并')
+  ok(!runnerArgs.some((a) => a.some((x) => String(x).includes('anullsrc'))), 'gapMs=0 不插段间静音（保留 0）')
+})
+
 await test('TtsService：云服务商未配置 → 可读错误，不发请求', async () => {
   let hit = 0
   const svc = new TtsService({ enable: true, provider: 'doubao', doubao: {} }, {

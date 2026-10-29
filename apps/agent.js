@@ -455,9 +455,29 @@ function migratePluginData() {
   } catch { /* noop */ }
 }
 
+// 配置数值判空：null/''/undefined → null；0 是合法值，必须保留（不要用 Number(x) 判存在：
+// Number(null)===0 会把「留空/继承全局」误判为显式 0，2026-10-29 配置互搏审计 P0/F1）。
+let _chatPermWarned = false // chatPermission 未知取值告警去重（Chat 每事件 new，不能挂在实例上）
+
+function numOrNull(v) {
+  if (v == null || v === '') return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
 // 构造走代理的 fetch（undici ProxyAgent）；undici 未装/地址错则返回 null（直连）。供 provider 访问海外 LLM（GPT/Gemini 等）
 async function makeProxyFetch(proxy) {
   if (!proxy) return null
+  // yaml 注释曾承诺 HTTP/SOCKS 双协议，但 undici ProxyAgent 只认 http(s)：
+  // socks5:// 会在构造时抛错并被下面 catch 静默直连（2026-10-29 配置互搏审计 F28）。显式提示，
+  // 避免用户以为请求已走代理；如需 SOCKS 请改用环境代理/网关。
+  if (/^socks/i.test(String(proxy).trim())) {
+    if (!makeProxyFetch._socksWarned) {
+      makeProxyFetch._socksWarned = true
+      Log.warn('[provider] agent.proxy 不支持 SOCKS 协议（仅 http/https），本次将直连；请改用 http(s) 代理或网关')
+    }
+    return null
+  }
   try {
     const { ProxyAgent, fetch: uFetch } = await import('undici')
     const dispatcher = new ProxyAgent(proxy)
@@ -510,7 +530,7 @@ async function _buildRuntime(scope) {
   // 用户跑完 scripts/install-crawl4ai.sh 后发 #agents重载 即可立即启用真浏览器抓取
   try { resetCrawl4aiProbe() } catch { /* noop */ }
   // 显式打印本轮生效的步数上限：便于确认配置是否已随运行时重建生效（出现过"改了配置仍是旧值"的困惑）
-  Log.mark('[limits]', `maxTurns=${cfg.maxTurns ?? 50} · schedule.taskMaxTurns=${cfg.schedule?.taskMaxTurns ?? 200} · multiagent.workerMaxTurns=${cfg.multiagent?.workerMaxTurns ?? 200} · workerTimeBudget=${Math.round((cfg.multiagent?.workerTimeBudgetMs ?? 3600000) / 60000)}min · workerMaxTokens=${cfg.multiagent?.workerMaxTokens ?? 16384} · resultCap=${cfg.multiagent?.resultCap ?? 48000} · loop.timeBudget=${cfg.loop ? `${Math.round((cfg.loop.timeBudgetMs ?? 1800000) / 60000)}min` : 'off'}`)
+  Log.mark('[limits]', `maxTurns=${cfg.maxTurns ?? 200} · schedule.taskMaxTurns=${cfg.schedule?.taskMaxTurns ?? 200} · multiagent.workerMaxTurns=${cfg.multiagent?.workerMaxTurns ?? 200} · workerTimeBudget=${Math.round((cfg.multiagent?.workerTimeBudgetMs ?? 3600000) / 60000)}min · workerMaxTokens=${cfg.multiagent?.workerMaxTokens ?? 16384} · resultCap=${cfg.multiagent?.resultCap ?? 48000} · loop.timeBudget=${cfg.loop ? `${Math.round((cfg.loop.timeBudgetMs ?? 1800000) / 60000)}min` : 'off'}`)
   // F14：最先登记——关闭时取消并等待在途 Agent run 退出，再关依赖资源/账本（关库晚于最后写账本者）
   scope.register(async () => { try { const n = await abortAllActiveRuns(); if (n) Log.info(`[runtime] 关闭：已取消并等待 ${n} 个在途任务退出`) } catch { /* noop */ } }, { name: 'active-runs', order: -1 })
   const startupInfo = {} // 运行时构建期采集的摘要信息（供末尾统一面板输出）
@@ -753,7 +773,9 @@ async function _buildRuntime(scope) {
     .register(clarifyTool)
     .register(createMemoryTool(memory))
     .register(makeRecallTool(recall)) // memory_search：模型主动检索长期记忆
-    .register(...makeMediaTools())
+    // 被动媒体工具（list_group_files/get_group_file/read_attachment）：受 media.passive 门控。
+    // 此前该配置只算了 passiveEnabled 没人消费，设为 false 也照样注册（配置互搏审计 F11）。
+    .register(...(cfg.media?.passive !== false ? makeMediaTools() : []))
   if (compactArchive) tools.register(makeContextRecallTool({ archiveFor: () => compactArchive })) // context_recall：取回压缩归档原文（常驻）
   // kb_search：知识库检索（默认开；cfg.kb.enable:false 关闭）
   if (cfg.kb?.enable !== false) tools.register(makeKbSearchTool(knowledge))
@@ -1082,8 +1104,10 @@ async function _buildRuntime(scope) {
     ? (cfg.llmModels || []).find((m) => m && m.id === cfg.modelId)
     : (cfg.llmModels || []).find((m) => m && String(m.model) === String(cfg.model))
   const regThinking = regEntry?.thinking === 'on' ? { type: 'enabled' } : regEntry?.thinking === 'off' ? { type: 'disabled' } : null
-  const regTemperature = Number.isFinite(Number(regEntry?.temperature)) ? Number(regEntry.temperature) : null
-  const regMaxTokens = Number.isFinite(Number(regEntry?.maxTokens)) && Number(regEntry.maxTokens) > 0 ? Number(regEntry.maxTokens) : null
+  // 注意：模型条目未填 temperature 时是「键不存在/空」，不是 0；用 numOrNull 判存在，
+  // 否则 Number(null)===0 会把模型级温度钉成 0、覆盖全局 agent.temperature（配置互搏审计 P0/F1）。
+  const regTemperature = numOrNull(regEntry?.temperature)
+  const regMaxTokens = numOrNull(regEntry?.maxTokens) > 0 ? numOrNull(regEntry?.maxTokens) : null
 
   // ── Jev（TypeSafe AI）判断模型：opt-in 决策层（默认关；未配置/失败/低置信一律回退现有方案）──
   // Jev 作为「厂商 + 模型」注册：厂商配置里选 jev 预设（或 OpenRouter 承载 jev 模型），模型列表挂模型，
@@ -1095,7 +1119,9 @@ async function _buildRuntime(scope) {
     const mdl = (cfg.llmModels || []).find((m) => m && m.id === cfg.jev.modelId)
     const apiKey = prov?.apiKey || cfg.jev.apiKey || ''
     const baseURL = prov?.baseURL || cfg.jev.baseURL || ''
-    const model = mdl?.model || cfg.jev.model || ''
+    // yaml 语义是「手填 model 优先，留空才用 modelId 指向的注册条目」；此前反了，
+    // 想用 jev.model 临时钉版本会被注册条目压过（配置互搏审计 P2/A-C09）。
+    const model = String(cfg.jev.model || '').trim() || mdl?.model || ''
     const client = createJevClient({ ...cfg.jev, apiKey, baseURL, model }, { logger: Log.tag('jev') })
     if (client) {
       // 决策点：thinking/reflect/toolSelection 由对应卡片的选择器派生；terminalRisk/llmTool 由 Jev 子块开关。
@@ -1156,7 +1182,7 @@ async function _buildRuntime(scope) {
     masterSkipConfirm: cfg.masterSkipConfirm === true, // 主人任务免确认直执行（高危，仅主人；denylist 仍拦）
     // 留空时由 Agent 用富默认身份（model/prompt TEMPLATES.agent.system）；人设经 run opts.systemPrompt 覆盖
     systemPrompt: cfg.systemPrompt || undefined,
-    maxTurns: cfg.maxTurns ?? 50,
+    maxTurns: cfg.maxTurns ?? 200, // 与 yaml 默认 200 对齐（此前 apps/Agent 两层各有 50/90 两套兜底）
     loop: cfg.loop || undefined, // LoopGovernor 循环智能终止（审计 §2.1）；cfg.loop 假值则 Agent 不启用 governor
     temperature: regTemperature != null ? regTemperature : cfg.temperature,
     maxTokens: regMaxTokens != null ? regMaxTokens : (cfg.maxTokens || null), // 控制输出长度（消除 Anthropic 硬编码 4096 / OpenAI 不发）
@@ -1182,7 +1208,7 @@ async function _buildRuntime(scope) {
     contextHighRatio: cfg.contextHighRatio ?? 0.65,
     contextLowRatio: cfg.contextLowRatio ?? 0.45,
     compactArchive, // 无损压缩归档（null=无归档压缩；见上方装配说明）
-    maxToolResultChars: cfg.maxToolResultChars ?? 4000,
+    maxToolResultChars: cfg.maxToolResultChars ?? 8000, // 与 yaml 默认 8000 对齐
     // 工具受控并发（P0-2/F10）：全局滚动池上限；未声明并发语义的工具默认独占；跨 Agent 共享同一调度器
     toolConcurrency: { maxParallel: Math.max(1, Number(cfg.toolConcurrency?.maxParallel) || 3) },
     toolScheduler: new ToolScheduler({ maxParallel: Math.max(1, Number(cfg.toolConcurrency?.maxParallel) || 3) }),
@@ -1325,7 +1351,7 @@ async function _buildRuntime(scope) {
         // 实测 agent.vision.maxTokens=1024 时思考吃掉全部预算 → 正文为空（finish=length），表现为"图片无法识别"。
         // 需要深度推理的视觉模型，可在「模型列表」把该模型 thinking 显式设为 on。
         const vThinking = vReg?.thinking === 'on' ? { type: 'enabled' } : { type: 'disabled' }
-        const vTemperature = Number.isFinite(Number(vReg?.temperature)) ? Number(vReg.temperature) : null
+        const vTemperature = numOrNull(vReg?.temperature) // 同 P0/F1：null/空不能当 0
         const vMaxTokens = Number.isFinite(Number(vReg?.maxTokens)) && Number(vReg.maxTokens) > 0 ? Number(vReg.maxTokens) : (vcfg.maxTokens || 1024)
         const vProvider = vRoute.matched ? vRoute.provider : createProvider({
           protocol: vProtocol,
@@ -1526,7 +1552,13 @@ const getRuntime = async () => {
         // 新运行时必须重新 restore，否则保存配置后所有定时任务会静默停摆。
         // restore 已幂等：重复调用不会叠加 job（见 ScheduleStore.restore）。
         try { rt.schedule?.restore?.(makeFireDispatch(rt)).catch(() => {}) } catch { /* noop */ }
-        try { rt.knowledge?.restoreRefreshJobs?.((id) => rt.knowledge.refreshDoc(id).catch((e) => Log.warn('[kb] 定时刷新失败', id, e?.message || e))).catch(() => {}) } catch { /* noop */ }
+        // KB 总开关/抓取开关关闭时不恢复定时刷新（否则关了总闸仍会定时抓取，见配置互搏审计 F12）
+        {
+          const kbNow = Config.get().agent?.kb || {}
+          if (kbNow.enable !== false && kbNow.crawlEnable !== false) {
+            try { rt.knowledge?.restoreRefreshJobs?.((id) => rt.knowledge.refreshDoc(id).catch((e) => Log.warn('[kb] 定时刷新失败', id, e?.message || e))).catch(() => {}) } catch { /* noop */ }
+          }
+        }
         // 人设资料定时刷新：重启/热重载后重排 job（周期重跑补齐 → 出新草稿）
         try { rt.personaLore?.restoreRefreshJobs?.((id) => Promise.resolve(rt.completePersona?.(id, { by: 'schedule' })).catch((e) => Log.warn('[persona] 定时刷新失败', id, e?.message || e))).catch(() => {}) } catch { /* noop */ }
         return rt
@@ -1951,8 +1983,8 @@ export class Chat extends plugin {
     if (!(isPrivate || isCmd || (atMode && isAt && (text || hasMedia)))) return false
     // chatPermission：仅约束群内 `#ai` 命令（@机器人/私聊不受限，保持向后兼容）
     if (isCmd && !isPrivate && !this._hasChatPermission(cfg)) {
-      Log.mark('[trigger]', `命令权限不足：user=${this.e.user_id} gid=${this.e.group_id || '-'} need=${cfg.chatPermission || 'all'}`)
-      try { await this.e.reply(`你没有使用「${cmd}」的权限（agent.chatPermission=${cfg.chatPermission || 'all'}）；可直接 @机器人 对话。`) } catch { /* best effort */ }
+      Log.mark('[trigger]', `命令权限不足：user=${this.e.user_id} gid=${this.e.group_id || '-'} need=${cfg.chatPermission || 'master'}`)
+      try { await this.e.reply(`你没有使用「${cmd}」的权限（agent.chatPermission=${cfg.chatPermission || 'master'}）；可直接 @机器人 对话。`) } catch { /* best effort */ }
       return true
     }
     const input = isCmd ? text.replace(cmdRe, '').trim() : text
@@ -1963,10 +1995,20 @@ export class Chat extends plugin {
 
   /**
    * chatPermission：群内 `#ai` 命令的触发权限（master/admin/owner/all；@机器人 与私聊不受限）。
-   * 未知取值一律放行，避免配置笔误把所有人挡在门外。
+   * 兜底 master（yaml 默认），未知取值按 master 处理并留痕——此前是 `|| 'all'` +「未知一律放行」，
+   * 字段被清空/拼错时权限会静默放宽到所有人（配置互搏审计 F6/F8）。
    */
   _hasChatPermission(cfg) {
-    const perm = String(cfg?.chatPermission || 'all').toLowerCase()
+    const raw = String(cfg?.chatPermission ?? '').trim().toLowerCase()
+    const perm = raw || 'master'
+    if (!['master', 'admin', 'owner', 'all'].includes(perm)) {
+      // 模块级去重（Chat 每个事件都 new，实例字段挡不住日志刷屏）
+      if (!_chatPermWarned) {
+        _chatPermWarned = true
+        Log.warn(`[chatPermission] 未知取值「${raw}」，按 master 处理（合法值：master/admin/owner/all）`)
+      }
+      return !!this.e?.isMaster
+    }
     if (perm === 'all') return true
     if (this.e?.isMaster) return true
     const role = this.e?.sender?.role
@@ -1974,8 +2016,7 @@ export class Chat extends plugin {
     const isAdmin = !!(this.e?.member?.is_admin || role === 'admin')
     if (perm === 'owner') return isOwner
     if (perm === 'admin') return isOwner || isAdmin
-    if (perm === 'master') return false
-    return true
+    return false // master：仅主人（isMaster 已在上面放行）
   }
 
   /** 轻量探测：消息是否含图片/文件/音视频/合并转发(聊天记录)段，或引用了某条消息（引用的媒体由 collectActive 兜底拉取）。不发网络请求。 */
@@ -2596,7 +2637,8 @@ export class Chat extends plugin {
     const list = await rt.session.listConversations(ctx.scopeUserId, ctx.groupId)
     const activeId = await rt.session.getActiveConversation(ctx.scopeUserId, ctx.groupId)
     const html = buildChatListHtml({ user: ctx.userId, conversations: list, activeId })
-    const img = await screenshot('agents-plugin/chat-list', html)
+    // render.card=false：弱服务器直接走文本回退（此前只有 #帮助 尊重该开关，列表仍会截图，配置互搏审计 F26）
+    const img = Config.get().agent?.render?.card === false ? null : await screenshot('agents-plugin/chat-list', html)
     if (img) return this.e.reply(img), true
     const lines = list.map((c) => `#${c.id} ${c.title}（${c.count}条）${c.id === activeId ? ' [当前]' : ''}`)
     await this.e.reply(['聊天列表', ...lines].join('\n'))
@@ -3313,6 +3355,10 @@ export class Chat extends plugin {
     const rt = await getRuntime()
     const ctx = ctxOf(this.e)
     if (!ctx.isMaster) return this.e.reply('仅主人可添加知识库'), true
+    // kb.enable 是总开关（yaml：关则不注册 kb_search、不入库）；crawlEnable 额外管「URL 抓取/刷新」。
+    // 此前两个键只 gate 工具注册，命令仍会入库/抓网页（配置互搏审计 F12）。
+    const kbCfgNow = Config.get().agent?.kb || {}
+    if (kbCfgNow.enable === false) return this.e.reply('知识库已关闭（agent.kb.enable=false），不接收入库'), true
     let text = this.e.msg.replace(/^#知识库添加\s*/, '').trim()
     // 回复一条消息入库：命令无文本但有 reply_id → 取被回复消息正文
     if (!text && this.e.reply_id != null) {
@@ -3326,6 +3372,7 @@ export class Chat extends plugin {
     if (!text) return this.e.reply('用法：\n#知识库添加 <文本或网址>\n例：\n#知识库添加 https://example.com\n#知识库添加 一段资料…\n或回复一条消息后发：#知识库添加'), true
     // URL 入库：抓取网页正文（crawl4ai 优先，降级 fetch）→ ingest
     if (/^https?:\/\//i.test(text)) {
+      if (kbCfgNow.crawlEnable === false) return this.e.reply('网页抓取已关闭（agent.kb.crawlEnable=false），URL 不能入库；可改发文本内容'), true
       await this.e.reply(`🌐 抓取入库中（${text}）…`)
       const r = await rt.knowledge.ingestUrl(text)
       if (r.error) return this.e.reply(r.error), true
@@ -3372,6 +3419,7 @@ export class Chat extends plugin {
   async refreshKnowledge() {
     const rt = await getRuntime()
     if (!ctxOf(this.e).isMaster) return this.e.reply('仅主人可操作'), true
+    if (Config.get().agent?.kb?.crawlEnable === false) return this.e.reply('网页抓取已关闭（agent.kb.crawlEnable=false），无法刷新 URL 文档'), true
     const id = (this.e.msg.match(/^#知识库刷新\s+(\S+)/) || [])[1] || ''
     if (!id) return this.e.reply('用法：#知识库刷新 <id>（id 见 #知识库列表，仅 🌐 网页文档可刷新）'), true
     await this.e.reply(`🔄 刷新中（${id}）…`)
@@ -3384,6 +3432,7 @@ export class Chat extends plugin {
   async refreshAllKnowledge() {
     const rt = await getRuntime()
     if (!ctxOf(this.e).isMaster) return this.e.reply('仅主人可操作'), true
+    if (Config.get().agent?.kb?.crawlEnable === false) return this.e.reply('网页抓取已关闭（agent.kb.crawlEnable=false），无法刷新 URL 文档'), true
     const urlDocs = await rt.knowledge.listUrlDocs()
     if (!urlDocs.length) return this.e.reply('知识库暂无网页 URL 文档（#知识库添加 <网址> 入库）'), true
     await this.e.reply(`🔄 开始刷新 ${urlDocs.length} 个网页文档（串行）…`)
@@ -3395,6 +3444,7 @@ export class Chat extends plugin {
   async setKbRefresh() {
     const rt = await getRuntime()
     if (!ctxOf(this.e).isMaster) return this.e.reply('仅主人可操作'), true
+    if (Config.get().agent?.kb?.enable === false || Config.get().agent?.kb?.crawlEnable === false) return this.e.reply('知识库/网页抓取已关闭（agent.kb.enable / agent.kb.crawlEnable），不能设定时刷新'), true
     const m = this.e.msg.match(/^#知识库定时\s+(\S+)\s+([\s\S]+)/) || []
     const id = m[1] || ''
     const when = (m[2] || '').trim()
@@ -3745,7 +3795,7 @@ export class Chat extends plugin {
     // 未单独切换时，全局默认人设同样标星，避免「列表里没一个人设是当前生效的」
     const activeId = boundId || rt.persona.getDefaultPersona()?.id || null
     const html = buildPersonaListHtml({ user: ctx.userId, personas, activeId })
-    const img = await screenshot('agents-plugin/persona-list', html)
+    const img = Config.get().agent?.render?.card === false ? null : await screenshot('agents-plugin/persona-list', html)
     if (img) return this.e.reply(img), true
     const lines = personas.map((p, i) => `${p.id === activeId ? '★' : '·'} ${i + 1}. ${p.name}${p.builtin ? '（内置）' : ''} — ${p.description}`)
     await this.e.reply(['人设列表（#人设 + 序号切换，如 #人设 1）', ...lines].join('\n'))

@@ -671,14 +671,28 @@ router.get('/models', asyncHandler(async (req, res) => {
 // ───────────────── 写操作（9 类，成功触发 Config 热加载或落盘） ─────────────────
 
 // PUT /api/config —— 点路径 changes（对齐锅巴 setConfigData）
+// 基础模型镜像字段（agent.model/protocol/preset/baseURL/apiKey）只读：保存时由 Config.save()
+// 按 agent.providerId/modelId 的解析结果无条件回填，直接写会被覆盖 → 这里拒绝并计入 ignored。
+const BASE_MODEL_MIRROR_PATHS = new Set(['agent.model', 'agent.protocol', 'agent.preset', 'agent.baseURL', 'agent.apiKey'])
 router.put('/config', asyncHandler(async (req, res) => {
   const { changes } = req.body || {}
   if (!changes || typeof changes !== 'object') return fail(res, CODE.BAD, 'changes 必须是对象')
   const cfg = Config.get()
   let n = 0
   const rejected = []
+  const ignored = []
+  let mirrorIgnored = false
   for (const [p, v] of Object.entries(changes)) {
-    if (!p.startsWith('agent.')) continue // 仅允许 agent.* 命名空间
+    // 非 agent.* 命名空间（如顶层 debug 归锅巴/配置文件管）不再静默丢弃：计入 ignored 告知调用方
+    if (!p.startsWith('agent.')) {
+      ignored.push({ path: p, reason: '仅支持 agent.* 命名空间（顶层键请用锅巴/配置文件）' })
+      continue
+    }
+    if (BASE_MODEL_MIRROR_PATHS.has(p)) {
+      mirrorIgnored = true
+      ignored.push({ path: p, reason: '基础模型镜像字段由引用自动回填' })
+      continue
+    }
     // Jev Key 掩码 = 用户未修改：跳过，避免把掩码写进配置（redactConfig 只掩码展示）
     if (p === 'agent.jev.apiKey' && v === JEV_KEY_MASK) continue
     let val = v
@@ -692,9 +706,23 @@ router.put('/config', asyncHandler(async (req, res) => {
     try { setPath(cfg, p, val); n++ } catch (e) { rejected.push({ path: p, reason: e?.message || String(e) }) }
   }
   if (rejected.length && !n) return fail(res, CODE.BAD, `路径非法：${rejected.map((r) => r.path).join('、')}`)
+  // 全部被忽略（无可应用项）时明确报错，避免「已保存 0 项」的假成功
+  if (!n) {
+    const list = ignored.map((r) => r.path).join('、')
+    const base = list ? `没有可应用的改动：${list} 已忽略` : '没有可应用的改动'
+    return fail(res, CODE.BAD, base + (mirrorIgnored ? '（镜像字段由基础模型引用自动回填）' : ''))
+  }
   Config.save(cfg)
   Config.reload(true)
-  return ok(res, { applied: n, ...(rejected.length ? { rejected } : {}) }, rejected.length ? `已保存 ${n} 项，${rejected.length} 项路径非法被拒` : '已保存（已热加载）')
+  const msg = [`已保存 ${n} 项`]
+  if (ignored.length) msg.push(`${ignored.length} 项已忽略`)
+  if (rejected.length) msg.push(`${rejected.length} 项路径非法被拒`)
+  return ok(res, {
+    applied: n,
+    ...(ignored.length ? { ignored } : {}),
+    ...(mirrorIgnored ? { hint: '镜像字段由基础模型引用自动回填（请改 agent.providerId/modelId）' } : {}),
+    ...(rejected.length ? { rejected } : {}),
+  }, msg.join('，'))
 }))
 
 // PUT /api/memories/:scopeId/:target —— 全量替换条目（超限 4001）
@@ -763,7 +791,25 @@ router.delete('/profile/:userId', asyncHandler(async (req, res) => {
 }))
 
 // ── 知识库（Knowledge Base）──
-// GET /api/kb —— 文档列表
+/**
+ * 知识库写操作门禁（与命令侧一致）：kb.enable===false 拒绝一切写操作；
+ * 网页抓取类（URL 入库 / 刷新 / 定时刷新）再判 crawlEnable===false。
+ * 返回 true=放行，false=已写入拒绝响应。
+ */
+function kbGate(res, { crawl = false } = {}) {
+  const kb = Config.get().agent?.kb || {}
+  if (kb.enable === false) {
+    fail(res, CODE.BAD, '知识库未启用（agent.kb.enable=false）：请先在配置中心开启知识库')
+    return false
+  }
+  if (crawl && kb.crawlEnable === false) {
+    fail(res, CODE.BAD, '网页抓取未启用（agent.kb.crawlEnable=false）：无法抓取 URL / 刷新网页文档')
+    return false
+  }
+  return true
+}
+
+// GET /api/kb —— 文档列表（只读，不设门禁：关闭后仍可查看/清理已有文档）
 router.get('/kb', asyncHandler(async (req, res) => {
   const r = await getRt(res); if (!r) return
   return ok(res, await r.knowledge.listDocs().catch(() => []))
@@ -771,6 +817,7 @@ router.get('/kb', asyncHandler(async (req, res) => {
 
 // POST /api/kb —— 文档入库 { title, text }
 router.post('/kb', asyncHandler(async (req, res) => {
+  if (!kbGate(res)) return
   const r = await getRt(res); if (!r) return
   const { title, text } = req.body || {}
   if (!text) return fail(res, CODE.BAD, '缺少 text')
@@ -781,6 +828,7 @@ router.post('/kb', asyncHandler(async (req, res) => {
 
 // DELETE /api/kb/:id —— 删除文档
 router.delete('/kb/:id', asyncHandler(async (req, res) => {
+  if (!kbGate(res)) return
   const r = await getRt(res); if (!r) return
   const n = await r.knowledge.removeDoc(req.params.id)
   return ok(res, { removed: n })
@@ -788,6 +836,7 @@ router.delete('/kb/:id', asyncHandler(async (req, res) => {
 
 // POST /api/kb/rebuild —— 重建向量索引（换 embedding 模型后）
 router.post('/kb/rebuild', asyncHandler(async (req, res) => {
+  if (!kbGate(res)) return
   const r = await getRt(res); if (!r) return
   const result = await r.knowledge.rebuild()
   if (result.error) return fail(res, CODE.BAD, result.error)
@@ -796,6 +845,7 @@ router.post('/kb/rebuild', asyncHandler(async (req, res) => {
 
 // POST /api/kb/url —— 网页 URL 抓取入库 { url, title?, refreshCron? }
 router.post('/kb/url', asyncHandler(async (req, res) => {
+  if (!kbGate(res, { crawl: true })) return
   const r = await getRt(res); if (!r) return
   const { url, title, refreshCron } = req.body || {}
   if (!url) return fail(res, CODE.BAD, '缺少 url')
@@ -806,6 +856,7 @@ router.post('/kb/url', asyncHandler(async (req, res) => {
 
 // POST /api/kb/:id/refresh —— 刷新某网页文档（重新抓取更新 chunks）
 router.post('/kb/:id/refresh', asyncHandler(async (req, res) => {
+  if (!kbGate(res, { crawl: true })) return
   const r = await getRt(res); if (!r) return
   const result = await r.knowledge.refreshDoc(req.params.id)
   if (result.error) return fail(res, CODE.BAD, result.error)
@@ -814,6 +865,7 @@ router.post('/kb/:id/refresh', asyncHandler(async (req, res) => {
 
 // POST /api/kb/:id/schedule —— 设定时刷新 { cron }（cron=null 或省略=取消）
 router.post('/kb/:id/schedule', asyncHandler(async (req, res) => {
+  if (!kbGate(res, { crawl: true })) return
   const r = await getRt(res); if (!r) return
   const { cron } = req.body || {}
   const result = await r.knowledge.setRefresh(req.params.id, cron ? String(cron) : null)
@@ -823,6 +875,7 @@ router.post('/kb/:id/schedule', asyncHandler(async (req, res) => {
 
 // DELETE /api/kb/:id/schedule —— 取消定时刷新
 router.delete('/kb/:id/schedule', asyncHandler(async (req, res) => {
+  if (!kbGate(res)) return
   const r = await getRt(res); if (!r) return
   const result = await r.knowledge.cancelRefresh(req.params.id)
   return ok(res, result)

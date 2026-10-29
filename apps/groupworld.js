@@ -45,6 +45,28 @@ function botSelfIds(e) {
   return [...new Set(ids)]
 }
 
+/**
+ * 功能模型引用归一（F20/C2）：analysis.modelProfile 可能填 `llmModels[].id`（如 mabc123）或裸模型名。
+ * 经 modelRouter 命中条目 → 返回条目里的真实模型名（否则把 id 当模型名下发给上游 → invalid model 400）；
+ * 留空/未命中 → 原样返回（留空维持旧的「主模型/utilityModel」行为）。
+ */
+function resolveModelRef(ref, rt = null) {
+  const v = String(ref ?? '').trim()
+  if (!v) return ''
+  try {
+    const r = rt?.modelRouter?.resolve?.(v)
+    if (r?.matched) return String(r.entry?.model || r.model || v)
+    // 条目命中但 provider 缺失：router 仍把 model 归一条目真名，避免条目 id 被当模型名下发给主厂商
+    if (r?.entry?.model) return String(r.entry.model)
+  } catch { /* noop */ }
+  return v
+}
+
+/** 功能模型引用 → provider（经 modelRouter；留空/未命中回退主 provider）。 */
+function resolveModelProvider(ref, rt = null) {
+  try { return rt?.modelRouter?.resolve?.(ref)?.provider || rt?.provider || null } catch { return rt?.provider || null }
+}
+
 /** 惰性构建 GroupWorldService 单例（带并发去重：预热/接入可能并发首调）。 */
 let _gwPromise = null
 export async function getGroupWorld() {
@@ -55,9 +77,20 @@ export async function getGroupWorld() {
     const rt = await getRuntime()
     const trace = makeTrace()
     const { embedFn, embedModel } = buildEmbed(rt)
+    // 功能模型引用归一（F20/C2）：modelProfile 可填模型条目 id → provider/模型都按真实条目解析；
+    // provider 在装配时按归一后的 ref 解析，cfg 包装层则保证分析调用拿到的也是真实模型名。
+    const modelProfile = () => resolveModelRef(Config.get().agent?.groupWorld?.analysis?.modelProfile, rt)
+    const gwCfgFn = () => {
+      const c = Config.get().agent?.groupWorld || {}
+      const raw = c.analysis?.modelProfile
+      const model = resolveModelRef(raw, rt)
+      return model === String(raw ?? '').trim()
+        ? c
+        : { ...c, analysis: { ...(c.analysis || {}), modelProfile: model } }
+    }
     const svc = new GroupWorldService({
-      provider: rt.modelRouter?.resolve(Config.get().agent?.groupWorld?.analysis?.modelProfile)?.provider || rt.provider,
-      cfg: () => Config.get().agent?.groupWorld || {},
+      provider: resolveModelProvider(modelProfile(), rt),
+      cfg: gwCfgFn,
       dataDir: path.join(Config.path.data, 'groupworld'),
       botId: botSelfIds(null)[0] || null,
       trace,
@@ -134,8 +167,9 @@ export class GroupWorld extends plugin {
       { name: '群世界-每日维护', cron: '30 4 * * *', fnc: this.dailyTask.bind(this) },
       { name: '群世界-每周聚类', cron: '15 3 * * 1', fnc: this.weeklyTask.bind(this) },
     ]
-    // 异步预热
-    getGroupWorld().catch(() => {})
+    // 异步预热（不阻塞构造）：默认关不预装配（C10）——未启用不建库/装配，关=整层 no-op；
+    // 热开启后由消息路径或状态命令首次调用装配。
+    if (cfgNow().enabled === true) getGroupWorld().catch(() => {})
   }
 
   /** 旁听入口：归一化 + 幂等摄入。永远 return false。 */

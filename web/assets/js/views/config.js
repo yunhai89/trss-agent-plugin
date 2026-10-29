@@ -170,8 +170,12 @@
         if (!form.evolution) form.evolution = {}
         if (!form.isolation) form.isolation = {}
         if (form.temperature == null) form.temperature = 1
+        // cacheControl 三态字符串：兼容旧布尔配置（false=off / true=explicit），否则 select 无匹配项显示空白
+        if (form.cacheControl === false) form.cacheControl = 'off'
+        else if (form.cacheControl === true) form.cacheControl = 'explicit'
+        else if (form.cacheControl == null) form.cacheControl = 'off'
         if (!form.stagehand) form.stagehand = {}
-        if (!form.stagehand.permission) form.stagehand.permission = 'all'
+        if (!form.stagehand.permission) form.stagehand.permission = 'master'
         if (form.stagehand.stealth == null) form.stagehand.stealth = true
         if (form.stagehand.maxSessions == null) form.stagehand.maxSessions = 3
         if (form.stagehand.maxCallsPerMinute == null) form.stagehand.maxCallsPerMinute = 10
@@ -388,8 +392,9 @@
       }
 
       /* 点路径 diff:全部字段明文,对象递归、数组/标量整体比较;MCP servers 整体提交(增删改不递归,避免删 server 漏掉)
-         数值归一（第 6 轮审计）：快照里是 number 的路径，空串/不可解析值视为「未修改」不提交，
-         可解析值统一按 Number 提交；'' 只可能来自输入框被清空，故原值非字符串时跳过 ''。 */
+         数值归一（第 6 轮审计）：快照里是 number 的路径，可解析值统一按 Number 提交，不可解析值不提交；
+         输入框原地清空（''）提交 null —— 让「设过」的数值项能清回「未配置」（运行时按 ?? / 默认值兜底）。
+         其余类型维持原语义：'' 只可能来自输入框被清空，故原值非字符串时跳过 ''。 */
       const buildChanges = (orig, frm, prefix = 'agent', out = {}) => {
         for (const k of Object.keys(frm)) {
           const p = prefix + '.' + k, a = orig?.[k], b = frm[k]
@@ -399,6 +404,7 @@
           }
           if (b && typeof b === 'object' && !Array.isArray(b) && a && typeof a === 'object') buildChanges(a, b, p, out)
           else if (typeof a === 'number') {
+            if (b === '') { out[p] = null; continue } // 清空 = 清回未配置（不能跳过，否则旧值永远生效）
             const n = parseNum(b)
             if (n === null) continue
             if (n !== a) out[p] = n
@@ -409,6 +415,9 @@
       }
 
       const save = async () => {
+        // cacheControl 兼容旧布尔配置：保存即归一为三态字符串（false→off / true→explicit）
+        if (form.cacheControl === false) form.cacheControl = 'off'
+        else if (form.cacheControl === true) form.cacheControl = 'explicit'
         mcpServersFromUi()
         if (mcpMissingUrl.value.length) {
           toast(`MCP 服务缺 url：${mcpMissingUrl.value.join('、')}（http 型必须填 url 才能保存）`, 'error')
@@ -439,10 +448,10 @@
       const provById = (id) => form.llmProviders.find((p) => p.id === id)
       const provName = (id) => form.llmProviders.find((p) => p.id === id)?.name || id || '?'
       const _normUrl = (u) => String(u || '').trim().replace(/\/+$/, '').toLowerCase()
-      // 主厂商 = 「基础 / 模型」选中的厂商条目。mainOnly 的判定基准仍是端点：
-      // 与主厂商同端点（协议相同 + baseURL 归一相等）的厂商视同主厂商——运行时主端点类功能
-      // （旁路/记忆/评审/子代理/伪人/群世界）复用主 provider 端点调用，同端点模型完全可用；
-      // 只认 providerId 字符串相等会把用户重复登记的同端点厂商（如主接入 mimo + 另一条目同地址 mimo）全部误禁。
+      // 主厂商 = 「基础 / 模型」选中的厂商条目。provSameAsMain 用于「功能分配」下拉的「同端点 = 主厂商」标签
+      // （mainOnly 历史判定基准：协议相同 + baseURL 归一相等；FEATURES 现已全部 mainOnly:false，
+      //  功能模型支持跨厂商——运行时按注册表解析到各自厂商端点）。
+      // 只认 providerId 字符串相等会把用户重复登记的同端点厂商（如主接入 mimo + 另一条目同地址 mimo）误判为异厂商。
       // form 初值为空对象、loadConfig 失败时 syncForm 不会跑，此处必须容忍 llmProviders 为空（M-051）
       const mainProv = computed(() => (form.llmProviders || []).find((p) => p.id === form.providerId) || null)
       const mainModels = computed(() => (form.llmModels || []).filter((m) => m && mainProv.value && m.providerId === mainProv.value.id))
@@ -471,7 +480,8 @@
       const ensureModelEntry = (pid, modelId) => {
         let m = (form.llmModels || []).find((x) => x && x.providerId === pid && x.model === modelId)
         if (!m) {
-          m = { id: genId('m'), name: '', providerId: pid, model: modelId, temperature: null, maxTokens: null, thinking: 'inherit', note: '' }
+          // 不落 temperature/maxTokens 空值键：运行时读 undefined 即「继承全局 / 功能默认」
+          m = { id: genId('m'), name: '', providerId: pid, model: modelId, thinking: 'inherit', note: '' }
           form.llmModels.push(m)
         }
         return m
@@ -522,15 +532,19 @@
       const openModelView = (i) => { modelModal.show = true; modelModal.mode = 'view'; modelModal.index = i; modelModal.draft = JSON.parse(JSON.stringify(form.llmModels[i] || {})) }
       const openModelEdit = (i) => {
         modelModal.show = true; modelModal.mode = 'edit'
-        if (i === -1) { modelModal.index = -1; modelModal.draft = { id: genId('m'), name: '', providerId: form.providerId || form.llmProviders[0]?.id || '', model: '', temperature: null, maxTokens: null, thinking: 'inherit', note: '' } }
+        if (i === -1) { modelModal.index = -1; modelModal.draft = { id: genId('m'), name: '', providerId: form.providerId || form.llmProviders[0]?.id || '', model: '', thinking: 'inherit', note: '' } }
         else { modelModal.index = i; modelModal.draft = JSON.parse(JSON.stringify(form.llmModels[i] || {})) }
         if (!modelModal.draft.thinking) modelModal.draft.thinking = 'inherit'
       }
       const saveModel = () => {
         const d = modelModal.draft
         if (!String(d.model || '').trim()) { toast('模型 ID 不能为空', 'warn'); return }
-        if (modelModal.index === -1) form.llmModels.push(JSON.parse(JSON.stringify(d)))
-        else form.llmModels.splice(modelModal.index, 1, JSON.parse(JSON.stringify(d)))
+        const entry = JSON.parse(JSON.stringify(d))
+        // 空温度/空 maxTokens 不落键（删键 = 运行时读 undefined，走全局 / 功能默认；避免 null 被当成 0）
+        if (entry.temperature === '' || entry.temperature == null) delete entry.temperature
+        if (entry.maxTokens === '' || entry.maxTokens == null) delete entry.maxTokens
+        if (modelModal.index === -1) form.llmModels.push(entry)
+        else form.llmModels.splice(modelModal.index, 1, entry)
         modelModal.show = false
       }
       const delModel = (i) => {
@@ -1092,20 +1106,20 @@
             </cfg-row>
 
             <div class="cf-sub"><v-icon name="link"/>主接入（对话主模型）</div>
-            <cfg-row full name="厂商" desc="从「厂商配置」选：协议 / 预设 / 接口地址 / Key 都由所选厂商决定（此处不再单独填）">
+            <cfg-row full name="厂商" desc="从「厂商配置」选：协议 / 预设 / 接口地址 / Key 都由所选厂商决定（清空 = 停用主模型，需重新选择）">
               <div class="row g6">
                 <select class="sel" style="width:280px" :value="form.providerId" @change="setBaseProvider($event.target.value)">
-                  <option v-if="form.llmProviders.length" value="">（未选择）</option>
+                  <option v-if="form.llmProviders.length" value="">清空 = 停用主模型（需重新选择）</option>
                   <option v-else disabled>无数据</option>
                   <option v-for="p in form.llmProviders" :key="p.id" :value="p.id">{{ p.name || '（未命名）' }} · {{ p.baseURL || '未填地址' }}</option>
                 </select>
                 <button type="button" class="btn b-line b-sm" @click="jump('providers')"><v-icon name="edit"/>管理厂商</button>
               </div>
             </cfg-row>
-            <cfg-row full name="模型" desc="从「模型列表」选该厂商下的模型条目；条目的思考 / 温度 / maxTokens 随之生效">
+            <cfg-row full name="模型" desc="从「模型列表」选该厂商下的模型条目；条目的思考 / 温度 / maxTokens 随之生效（清空 = 停用主模型）">
               <div class="row g6">
                 <select class="sel" style="width:280px" :value="form.modelId" @change="setBaseModel($event.target.value)" :disabled="!form.providerId">
-                  <option v-if="mainModels.length" value="">（未选择）</option>
+                  <option v-if="mainModels.length" value="">清空 = 停用主模型（需重新选择）</option>
                   <option v-else disabled>无数据</option>
                   <option v-for="m in mainModels" :key="m.id" :value="m.id">{{ m.name ? m.name + ' · ' : '' }}{{ m.model }}</option>
                 </select>
@@ -1120,7 +1134,7 @@
                 <span :style="mainProv.apiKey ? '' : 'color:var(--rose,#e5484d)'">{{ mainProv.apiKey ? 'Key 已填' : 'Key 未填' }}</span>
                 —— 改厂商 Key 或换模型后这里自动跟随。
               </div>
-              <div class="mut2" style="font-size:12px" v-else><v-icon name="info"/> 未选择厂商：请先在<b>厂商配置</b>添加厂商（接口地址 + Key），再在<b>模型列表</b>挂上模型，然后回来选择。</div>
+              <div class="mut2" style="font-size:12px" v-else><v-icon name="info"/> 主模型已停用（清空 = 停用主模型）：请先在<b>厂商配置</b>添加厂商（接口地址 + Key），再在<b>模型列表</b>挂上模型，然后回来重新选择。保存后运行时不再使用上一次解析出的旧端点。</div>
             </div>
             <div class="full" v-if="mainProv?.preset === 'openrouter'" style="margin-top:6px;padding:10px;border:1px dashed var(--line);border-radius:10px">
               <div class="row-b mb8">
@@ -1143,17 +1157,6 @@
                 剩余 $ {{ orKey.limit_remaining ?? '∞' }} / 上限 $ {{ orKey.limit ?? '∞' }} · 已用 $ {{ orKey.usage ?? 0 }}（本月 $ {{ orKey.usage_monthly ?? 0 }}）<span v-if="orKey.is_free_tier"> · 免费层</span>
               </div>
             </div>
-            <cfg-row full name="旁路小模型" desc="进度播报等旁路任务；留空=主模型。只能从当前所选厂商的模型里选（旁路任务走主 provider 端点）">
-              <div class="row g6">
-                <select class="sel" style="width:280px" :value="form.utilityModel" @change="form.utilityModel = $event.target.value" :disabled="!form.providerId || !mainModels.length">
-                  <option v-if="mainModels.length" value="">（留空 = 沿用主模型）</option>
-                  <option v-else disabled>无数据</option>
-                  <option v-for="m in mainModels" :key="m.id" :value="m.model">{{ m.name ? m.name + ' · ' : '' }}{{ m.model }}</option>
-                  <option v-if="form.utilityModel && !mainModels.some((m) => m.model === form.utilityModel)" :value="form.utilityModel">{{ form.utilityModel }}（不在当前厂商下）</option>
-                </select>
-                <span v-if="form.providerId && !mainModels.length" class="mut2" style="font-size:12px">该厂商下还没有模型，请到「模型列表」添加</span>
-              </div>
-            </cfg-row>
 
             <div class="cf-sub"><v-icon name="cpu"/>Jev 判断模型（TypeSafe，opt-in）</div>
             <div class="full note n-rose" style="margin:0 0 6px">
@@ -1315,12 +1318,12 @@
           </div>
           <div class="cf-body" v-show="open.features"><div class="cf-grid">
             <div class="full" style="padding:10px 12px;border:1px dashed var(--line);border-radius:10px;margin-bottom:4px">
-              <div class="mut2" style="font-size:12px">从「模型列表」分区选择；留空=该功能默认回落。主端点类功能（旁路/记忆/评审/子代理/伪人/群世界）只能用<b>与基础模型同端点厂商</b>的模型；视觉 / Embedding 选其它厂商时会自动同步其接入信息；<b>主模型</b>槽位等同于「基础 / 模型」的选择。</div>
+              <div class="mut2" style="font-size:12px">从「模型列表」分区选择；留空=该功能默认回落。所有功能模型都支持<b>跨厂商</b>引用（运行时按注册表解析到对应厂商端点）；视觉 / Embedding 选其它厂商时会自动同步其接入信息；<b>主模型</b>槽位等同于「基础 / 模型」的选择（清空 = 停用主模型，需重新选择）。</div>
             </div>
             <cfg-row v-for="f in FEATURES" :key="f.key" :name="f.label" :desc="(f.hint ? f.hint + '；' : '') + (f.key === 'vision' || f.key === 'embed' ? '可选任意厂商（自动同步端点）' : '可选任意厂商（运行时按注册表解析端点）')">
               <div class="row g6">
                 <select class="sel" style="width:250px" :value="featureSel(f)" @change="onFeatureSel(f, $event.target.value)">
-                  <option v-if="knownModels.length" value="">（留空 = 默认回落）</option>
+                  <option v-if="knownModels.length" value="">{{ f.key === 'main' ? '清空 = 停用主模型（需重新选择）' : '（留空 = 默认回落）' }}</option>
                   <option v-else disabled>无数据</option>
                   <option v-for="m in knownModels" :key="(m.fromRegistry ? m.id : 'raw:' + m.model)" :value="(m.fromRegistry ? m.id : 'raw:' + m.model)" :disabled="f.mainOnly && m.fromRegistry && !m.main">
                     {{ m.label }}{{ m.provName ? '（' + m.provName + '）' : '' }}
@@ -2165,15 +2168,15 @@
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.stagehand">
-            <div class="desc mb10">act/extract/observe 自然语言原语；permission=all 时全部成员可用（act 写动作仍需 <code>#确认</code>）。goto 强制拒绝内网/元数据地址，并按会员限流；会话按「机器人+群/私聊+操作者+对话」隔离 + idle 自动关 + 同会话串行。</div>
+            <div class="desc mb10">act/extract/observe 自然语言原语；permission 默认 master（仅主人），all=全部成员可用（act 写动作仍需 <code>#确认</code>）。goto 强制拒绝内网/元数据地址，并按会员限流；会话按「机器人+群/私聊+操作者+对话」隔离 + idle 自动关 + 同会话串行。</div>
             <div class="cf-grid">
               <cfg-row name="启用浏览器自动化" desc="依赖 @browserbasehq/stagehand+zod-stagehand（云崽根 pnpm install）">
                 <v-switch v-model="form.stagehand.enable"/>
               </cfg-row>
-              <cfg-row name="使用权限" desc="all=全部成员（act 仍需 #确认）| master=仅主人">
+              <cfg-row name="使用权限" desc="master=仅主人（默认）| all=全部成员（act 仍需 #确认）">
                 <select class="sel" style="width:150px" v-model="form.stagehand.permission">
+                  <option value="master">仅主人（默认）</option>
                   <option value="all">全部成员</option>
-                  <option value="master">仅主人</option>
                 </select>
               </cfg-row>
               <cfg-row name="真机化指纹" desc="随机设备 UA/视口/语言/触屏 + 去自动化 flag + 规避脚本（降低被风控拦截概率）">
@@ -2403,11 +2406,11 @@
           <div class="row g6 wrap" style="margin-bottom:10px">
             <label class="row g6" style="font-size:12px">
               <span class="mut2">温度</span>
-              <input type="number" class="inp" style="width:80px" min="0" max="2" step="0.1" v-model.number="modelModal.draft.temperature" placeholder="（空=功能默认）" :disabled="modelModal.mode === 'view'">
+              <input type="number" class="inp" style="width:80px" min="0" max="2" step="0.1" v-model.number="modelModal.draft.temperature" placeholder="留空=继承全局" :disabled="modelModal.mode === 'view'">
             </label>
             <label class="row g6" style="font-size:12px">
               <span class="mut2">maxTokens</span>
-              <input type="number" class="inp" style="width:90px" min="0" step="256" v-model.number="modelModal.draft.maxTokens" placeholder="（空=厂商默认）" :disabled="modelModal.mode === 'view'">
+              <input type="number" class="inp" style="width:90px" min="0" step="256" v-model.number="modelModal.draft.maxTokens" placeholder="留空=功能默认" :disabled="modelModal.mode === 'view'">
             </label>
             <label class="row g6" style="font-size:12px">
               <span class="mut2">思考</span>
@@ -2419,7 +2422,7 @@
             </label>
           </div>
           <input class="inp" style="width:100%;margin-bottom:10px;box-sizing:border-box" v-model="modelModal.draft.note" placeholder="备注 / 用途（可空）" :disabled="modelModal.mode === 'view'">
-          <div class="mut2" style="font-size:11px;margin-bottom:10px">思考/温度/maxTokens 在该模型被主对话链路使用时生效（覆盖全局 agent.thinking 等）。</div>
+          <div class="mut2" style="font-size:11px;margin-bottom:10px">思考/温度/maxTokens 在该模型被主对话链路使用时生效（覆盖全局 agent.thinking 等）；温度留空=继承全局 agent.temperature，maxTokens 留空=功能默认。</div>
           <div class="row g10" style="justify-content:flex-end">
             <button class="btn b-line b-sm" @click="modelModal.show = false">{{ modelModal.mode === 'view' ? '关闭' : '取消' }}</button>
             <button v-if="modelModal.mode === 'edit'" class="btn b-pri b-sm" @click="saveModel"><v-icon name="save"/>保存</button>

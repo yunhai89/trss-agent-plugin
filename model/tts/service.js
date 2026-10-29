@@ -350,7 +350,7 @@ export class TtsService {
             const plan = await planEmotion(this.llm, {
               text, tier: 'pro', voiceName: voice.name, logger: this.logger,
               context: normalizeContext(p.context?.messages),
-              timeoutMs: Number(ix.judgeTimeoutMs) || TTS_DEFAULTS.indextts.judgeTimeoutMs,
+              timeoutMs: this._judgeTimeoutMs(), // 全局 tts.judgeTimeoutMs 优先（历史 indextts 键兜底）
             })
             if (plan?.vector) { vectorArr = clampVector(plan.vector); reason = plan.reason }
             else notes.push('情绪判定不可用，已回退默认向量')
@@ -386,7 +386,7 @@ export class TtsService {
           context: normalizeContext(p.context?.messages),
           // 段数按文本长度推导（同一上限也写进 LLM 提示词），否则长文本必然丢内容
           maxSegments: segCap, maxSegmentChars: Number(ix.maxSegmentChars) || MAX_SEGMENT_CHARS,
-          timeoutMs: Number(ix.judgeTimeoutMs) || TTS_DEFAULTS.indextts.judgeTimeoutMs,
+          timeoutMs: this._judgeTimeoutMs(), // 全局 tts.judgeTimeoutMs 优先（历史 indextts 键兜底）
         })
         if (plan?.segments?.length) {
           segments = plan.segments.map((s) => ({ text: s.text, vector: clampVector(s.vector) }))
@@ -628,7 +628,11 @@ export class TtsService {
             this._pruneOut(outDir)
             const finalFile = path.join(outDir, `tts_${this.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`)
             const merged = await concatSegments(files, finalFile, {
-              gapMs: Number(cfgProv.segmentGapMs) || 300, tempDir: tmpDir, runner: this.ffmpegRunner, logger: this.logger,
+              // 0=不留空隙（yaml 承诺）：不能再用 `|| 300` 吞掉 0；仅空/非法值才回默认 300
+              gapMs: cfgProv.segmentGapMs == null || cfgProv.segmentGapMs === ''
+                ? 300
+                : (Number.isFinite(Number(cfgProv.segmentGapMs)) ? Math.max(0, Number(cfgProv.segmentGapMs)) : 300),
+              tempDir: tmpDir, runner: this.ffmpegRunner, logger: this.logger,
               sampleRate: Number(cfgProv.sampleRate) || 24000,
             })
             if (!merged.ok) return { ok: false, error: `分段合成完成但合并失败：${merged.error}` }

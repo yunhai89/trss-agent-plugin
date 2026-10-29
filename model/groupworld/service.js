@@ -46,9 +46,11 @@ export class GroupWorldService {
 
   cfg() { return resolveGroupWorldConfig(this._cfgFn() || {}) }
 
-  /** 惰性初始化（建 DB + 子组件）。幂等。 */
+  /** 惰性初始化（建 DB + 子组件）。幂等。未启用直接返回 false（C10：不建库/不跑 DDL，关=整层 no-op）。 */
   async init() {
     if (this._ready) return true
+    // 默认关不预装配：只有显式 enabled=true 才建库装配；配置可热开启——开启后照常走下面的装配分支。
+    if (this.cfg().enabled !== true) return false
     if (this._initPromise) return this._initPromise
     this._initPromise = (async () => {
       try {

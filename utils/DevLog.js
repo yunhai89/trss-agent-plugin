@@ -108,7 +108,10 @@ function inferLevel(event, data) {
 
 export default async function devLog(event, data = {}, traceId = null, scope = null, opts = {}) {
   if (_failed) return
-  if (cfg().enable === false) return
+  // debug 是历史公开开关（yaml/锅巴/README 都承诺「开=打印工具入参/每轮 token/搜索词」），
+  // 但真正写全链路日志的是 devLog.enable；此前 debug 零读取、承诺不兑现（配置互搏审计 F10）。
+  // 现在 debug=true 等价于强制开启 devLog；devLog.enable=false 仍是显式关闭（仅 debug 未开时生效）。
+  if (cfg().enable === false && Config.get().debug !== true) return
   // 防御：scope 契约是 {gid,uid,convId,createdAt} 对象。传字符串（历史误用，如 'groupworld'）
   // 会被解构成全 undefined → 产出 private-unknown-0-*.log 落进主 agents 目录污染 web 时间线。
   // 现在显式拒绝并留痕，调用方应改传 opts {dir, filename}。

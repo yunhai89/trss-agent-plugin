@@ -87,12 +87,29 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
 /** 危险工具名黑名单：绝不允许进 allowedReadTools（指南 §15）。 */
 const FORBIDDEN_READ_TOOLS = /^(?:send_|delete_|remove_|group_(kick|mute|set_|notice)|terminal|stagehand|file_to_pdf|upload_|create_group|transfer_|schedule_task|reminder_set|reload_skills|install_skill|memory$)/i
 
+/** 只读工具允许的副作用声明（meta.sideEffects）；其余一律视为写/系统类。 */
+const SAFE_SIDE_EFFECTS = new Set(['none', 'read'])
+
+/**
+ * 只读工具判定（P2 #41）：名字黑名单之外的第二道闸。
+ * category 必须是 query（message/group_manage/system/未知类别一律拒绝）；meta.sideEffects 若声明则只能含 none/read。
+ * @param {object|null} tool 工具对象；仅知道名字（无元数据）时传 null → 无法判定，交由运行期 buildReadTools 再校
+ */
+export function isReadOnlyTool(tool) {
+  if (!tool) return true
+  if (tool.category !== 'query') return false
+  const se = tool.meta?.sideEffects
+  if (Array.isArray(se) && se.length && se.some((s) => !SAFE_SIDE_EFFECTS.has(String(s)))) return false
+  return true
+}
+
 /**
  * 校验并归一化人类化配置。返回 { ok, config, errors[] }。
  * @param {object} raw 用户/默认配置（agent.humanize）
- * @param {object} [runtimeToolNames] 可用工具名集合（用于校验 allowedReadTools 是否存在/合法）
+ * @param {Iterable<string|object>} [runtimeTools] 可用工具（工具名集合，或工具对象数组/迭代器；
+ *   带 category/meta 的工具对象会额外做「只读能力」过滤）
  */
-export function validateHumanizeConfig(raw = {}, runtimeToolNames = null) {
+export function validateHumanizeConfig(raw = {}, runtimeTools = null) {
   const errors = []
   const c = mergeConfig(DEFAULT_HUMANIZE_CONFIG, raw)
 
@@ -154,14 +171,25 @@ export function validateHumanizeConfig(raw = {}, runtimeToolNames = null) {
     errors.push('enable=true 但 groups 为空，人类化模式不开启（需显式白名单）')
   }
 
-  // allowedReadTools 过滤：剔除危险/未知工具
+  // allowedReadTools 过滤：剔除危险/未知/非只读工具
   if (Array.isArray(c.planner?.allowedReadTools) && c.planner.allowedReadTools.length) {
-    const allowed = runtimeToolNames ? new Set(runtimeToolNames) : null
+    // runtimeTools 兼容旧入参（工具名集合/数组）与新入参（工具对象，带 category/meta 才能判只读能力）
+    const known = new Set()
+    const byName = new Map()
+    const list = runtimeTools && typeof runtimeTools[Symbol.iterator] === 'function' ? Array.from(runtimeTools) : []
+    for (const t of list) {
+      if (!t) continue
+      if (typeof t === 'string') { known.add(t); continue }
+      if (t.name) { known.add(String(t.name)); byName.set(String(t.name), t) }
+    }
+    const hasRuntime = runtimeTools != null
     const cleaned = []
     for (const name of c.planner.allowedReadTools) {
       const n = String(name || '')
       if (FORBIDDEN_READ_TOOLS.test(n)) { errors.push(`planner.allowedReadTools 剔除危险工具：${n}`); continue }
-      if (allowed && !allowed.has(n)) { errors.push(`planner.allowedReadTools 剔除未知工具：${n}`); continue }
+      if (hasRuntime && !known.has(n)) { errors.push(`planner.allowedReadTools 剔除未知工具：${n}`); continue }
+      // 名字黑名单之外再按能力拒绝（category !== query 或 meta.sideEffects 声明写副作用）
+      if (!isReadOnlyTool(byName.get(n) || null)) { errors.push(`planner.allowedReadTools 剔除非只读/写副作用工具：${n}`); continue }
       cleaned.push(n)
     }
     c.planner.allowedReadTools = cleaned
@@ -169,6 +197,8 @@ export function validateHumanizeConfig(raw = {}, runtimeToolNames = null) {
 
   // 解析 behaviorPolicy
   c.behaviorPolicy = resolveBehaviorPolicy(c.behaviorPolicy)
+  // 频率上限双真源（C1）：behaviorPolicy 副本与顶层同源钳制 0~60，避免绕过校验成为无界/无效值
+  c.behaviorPolicy.maxRepliesPer10Minutes = clamp(c.behaviorPolicy.maxRepliesPer10Minutes, 0, 60)
 
   return { ok: errors.length === 0, config: c, errors }
 }

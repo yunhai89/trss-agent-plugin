@@ -68,8 +68,10 @@ export function makeTerminalTool({ manager = null } = {}) {
         maxOutput: cfg.maxOutput,
         signal: ctx?.signal || null,
       })
-      if (cfg.audit !== false && (res.timedOut || res.aborted || res.sandboxError || res.ok === false)) {
-        Log.mark('[terminal]', `key=${key} exit=${res.exitCode ?? 'null'}${res.timedOut ? ' timedOut' : ''}${res.aborted ? ' aborted' : ''}${res.sandboxError ? ` ${res.sandboxError.kind}` : ''}`)
+      // 审计：每条命令都记结果行（会话键/退出码/耗时；成功也记），失败再带原因标注——
+      // 兑现 agent.sandbox.audit「每条命令写审计日志（会话键/退出码/命令前 200 字符）」承诺
+      if (cfg.audit !== false) {
+        Log.mark('[terminal]', `key=${key} exit=${res.exitCode ?? 'null'}${res.duration != null ? ` ${res.duration}ms` : ''}${res.timedOut ? ' timedOut' : ''}${res.aborted ? ' aborted' : ''}${res.sandboxError ? ` ${res.sandboxError.kind}` : ''}`)
       }
       return { command: cmd, ...res }
     },

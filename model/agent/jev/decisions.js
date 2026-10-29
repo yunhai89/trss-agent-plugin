@@ -33,6 +33,7 @@ export async function decideThinkingWithJev({
     if (!DEPTHS.includes(depth)) return null
     // 思考非破坏性：低置信保守回退规则（不猜测档位）。
     // lowConfidence 是「通用低置信边界（低→回退）」，与 thinkingMinConfidence 取更严者——两个公开阈值都生效。
+    // 注：通用阈值与专用阈值取更严者（yaml 未声明这个耦合，调小专用键可能被通用键压过）。
     if (!Number.isFinite(confidence) || confidence < Math.max(th.thinkingMinConfidence, th.lowConfidence)) return null
     const decision = buildThinkingDecision(depth, {
       source: 'jev', reasons: ['jev'], confidence, protocol, preset, model, style, budgets, maxBudget,
@@ -132,6 +133,7 @@ export function evaluateShellRisk(result, thresholds = {}, { allowDestructive = 
     }
     // highConfidence（高→才允许破坏性动作）与 terminalRiskFloor 同为下限，取更严者：
     // 两键都是公开可调阈值，任一调高都只会更保守，绝不放宽 fail-closed。
+    // 注：通用阈值与专用阈值取更严者（yaml 未声明这个耦合，调小专用键不产生放宽）。
     const floor = Math.max(th.terminalRiskFloor, th.highConfidence)
     if (!(result.confidence >= floor)) {
       return {

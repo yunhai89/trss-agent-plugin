@@ -70,8 +70,8 @@
 | 🎭 表情包 | 自动发现（群聊被动采集→视觉打标→入库）+ 手动安装 + LLM 自主引用 `[sticker:名称]` | ✅ 稳定 |
 | 🤖 伪人模式 | 群聊环境参与者：旁听→门控→Planner 决策→Replyer 自然回复（参照 MaiBot） | 🧪 早期 |
 | 💬 私聊对话 | 私聊触发对话（默认**关闭**：`agent.privateChat=false`；开启后私聊任何消息直接触发，独立会话与记忆） | ✅ 稳定 |
-| 🌐 代理访问 | HTTP/SOCKS 代理（国内服务器访问 GPT/Gemini 等海外 LLM） | ✅ 稳定 |
-| 🔁 回退模型 | 主模型失败自动依次尝试 `fallbackModels`（同 provider） | ✅ 稳定 |
+| 🌐 代理访问 | HTTP(S) 代理（国内服务器访问 GPT/Gemini 等海外 LLM；SOCKS 暂不支持，见 `agent.proxy`） | ✅ 稳定 |
+| 🔁 回退模型 | 主模型失败自动依次尝试 `fallbackModels`（可跨厂商，每条独立 baseURL/apiKey/protocol） | ✅ 稳定 |
 | 📂 日志分文件 | 按会话分文件 + 图片底部会话/对话id + `#上报错误` 打包发主人 | ✅ 稳定 |
 | 🔍 统一搜索 | Tavily/Exa/Perplexity/Brave → SearXNG → DDG 兜底；`web_search` 多角度并行查询 + 去重合并，内置交叉/对抗验证纪律（防信息茧房） | ✅ 稳定 |
 | 📊 示意图生成 | 流程图/架构图/时序图/状态图/ER/思维导图：LLM 语义结构 → 自托管 Kroki D2 → 高清 PNG（文字/连线精确，非文生图） | ✅ 稳定 |
@@ -136,7 +136,7 @@
 >
 > **升级注意**：旧配置 `agent.terminal.*`（`enable`/`maxTimeout`/`blocklist`/`skipConfirm`）已废弃。Config 的自愈机制只增不删，所以旧键会留在你的 `config/config.yaml` 里但**不再被读取**；启动时会打印一条迁移警告，请手工删除该段并改配 `agent.sandbox`。
 >
-> **升级注意（沙箱网络默认变更）**：`agent.sandbox.network` 的默认值改为**全放通**（与 E2B 自身默认一致，白名单只是可选的收紧手段）。你配置里**显式写过**的 `allowInternet`/`allowOut`/`denyOut` 仍然照旧生效、不会被覆盖；要让沙箱联网请在面板把「允许互联网」打开并清空「出口白名单」。
+> **升级注意（沙箱网络默认变更）**：`agent.sandbox.network` 的默认值改为**全放通**（与 E2B 自身默认一致，白名单只是可选的收紧手段）。你配置里**显式写过**的 `allowInternet`/`allowOut`/`denyOut` 仍然照旧生效、不会被覆盖；要让沙箱联网请在 Web 配置中心把「允许互联网」打开并清空「出口白名单」。
 >
 > **⚠ 老配置的 `denyOut: ['0.0.0.0/0']` 会让沙箱完全断网**（v1.26.1 起自动清理）：v1.24.0 之前的默认值是 `allowInternet:false` + `denyOut:['0.0.0.0/0']` + 域名白名单，那条 `denyOut` 是「兜底拒绝」。新版默认全放通后它变成**唯一的规则 = 拒绝一切出口（含 DNS）**，表现为沙箱里 `curl` 卡满超时后失败、域名解析也失败。启动时若检测到这个**逐字一致的旧默认值**，插件会清除该条并写回 `config.yaml`（只认这一种形状，不会动你手写的其它网段）；其它「denyOut 里含 0.0.0.0/0」的写法只会告警。排查与实测用主人命令 **`#沙箱诊断`**（`预览`=只看实际下发什么；`修复`=清除旧值并写回），或 `node scripts/sandbox-net-diag.mjs`。
 
@@ -207,6 +207,7 @@ pnpm install                   # package.json 有变动时需重跑（#agents更
 > **支持热加载**：改完配置保存即可，**无需重启 Yunzai**——下次对话自动用新配置重建运行时（provider/model/tools/skills/mcp）。也可发 `#agents重载`（主人）立即重建。
 >
 > **锅巴（Guoba）适配**：已支持。安装 [Guoba-Plugin](https://gitee.com/guoba-yunzai/guoba-plugin) 后，`#锅巴登录` 进入 Web 面板即可图形化编辑本插件配置；保存后**自动热加载**。适配文件为插件根 `guoba.support.js`。
+> 锅巴面板只覆盖常用项（约 1/4 配置叶子）；首次模型配置（厂商/模型条目）、私聊/多用户隔离、沙箱出口白名单与审计、devLog 等完整配置请用 Web 配置中心或直接改 `config.yaml`。
 
 ---
 
@@ -239,6 +240,8 @@ agent:
 > **Command Code（`preset: commandcode`）**：OpenAI + Anthropic 双兼容聚合网关。Web 面板「厂商配置」选该预设后会自动填好地址（OpenAI 协议 `https://api.commandcode.ai/provider/v1`，Anthropic 协议 `https://api.commandcode.ai/provider`）；Key 在 [commandcode.ai/settings/keys](https://commandcode.ai/settings/keys) 生成。模型 ID 形如 `deepseek/deepseek-v4-flash`、`claude-sonnet-4-6`；Claude 系列只能走 Anthropic 协议，其余模型走 OpenAI 协议即可。
 
 > 老配置（只有 `protocol`/`preset`/`baseURL`/`apiKey`/`model` 五个扁平字段）**首次加载会自动迁移**：按原接入信息生成一条厂商 + 一条模型条目，并让上面两个引用指向它们，无需手工重配。迁移后这五个字段变成只读镜像（由上层引用解析回填），手改会在下次加载被覆盖。
+>
+> 其中 `agent.apiKey` 只是引用的**解析镜像**：它的「必填」由「厂商配置」条目的 `apiKey` 承担（条目 Key 留空则插件不初始化）；手改镜像字段不会生效。
 
 ---
 
@@ -250,7 +253,7 @@ agent:
 
 | 字段 | 说明 |
 | --- | --- |
-| `debug` | `true` 打开详细日志（工具入参/每轮 token/搜索词等），排查时开启 |
+| `debug` | `true` 等价于**强制开启全链路 devLog**（工具入参/每轮 token/搜索词等）；真正的日志开关是 `agent.devLog.enable`（默认开；仅 `devLog.enable=false` 且 `debug` 未开时才静默） |
 
 ### `agent` —— 对话与模型
 
@@ -264,6 +267,8 @@ agent:
 | `llmModels` | `[]` | 模型清单 `[{ id, name, providerId, model, temperature, maxTokens, thinking, note }]`；`thinking/温度/maxTokens` 在被主对话链路使用时覆盖全局 |
 | `protocol` / `preset` / `baseURL` / `apiKey` / `model` | 镜像 | 上面引用的**解析结果**，加载时自动回填；勿手改，改厂商 Key / 换模型会自动跟随 |
 | `utilityModel` | 空 | 播报等旁路小模型（留空=沿用主模型）；可填任意已注册厂商的模型（运行时按注册表解析端点，不再局限主厂商） |
+| `fallbackModels` | `[]` | 多回退数组（在 yaml 配）：`[{ model, baseURL, apiKey, protocol }]`，主模型失败时按顺序尝试；每条独立端点/协议，**可跨厂商**（如主 DeepSeek、回退 GPT） |
+| `fallbackModel` / `fallbackBaseURL` / `fallbackApiKey` / `fallbackProtocol` | 空 / 空 / 空 / `openai` | 锅巴面板的单回退扁平字段（表单友好）：填 `fallbackModel`+`fallbackApiKey` 即生效；与上面的数组同时存在时**数组先试、本项追加在最后** |
 | `reasoningFields` | `[]` | 推理字段归一化（如 `["reasoning_content"]`），preset 通常已带 |
 | `maxTurns` | `200` | 单次对话工具调用轮次预算（面板上限已放宽到 1000；旧版面板上限 100 会把默认值静默截断） |
 | `temperature` | `0.2` | 采样温度 |
@@ -282,7 +287,7 @@ agent:
 | `reply.quote` | `true` | 群聊回复时引用触发消息（私聊不引用）；人多时便于定位回复对象，可与 `atSender` 同开 |
 | `reply.narrate` | `true` | 中途播报：模型调工具时附带的思路/进展文本自动转发给用户（参考 OpenClaw） |
 | `reply.renderScale` | `3` | 回复图片渲染倍率（deviceScaleFactor，3=超清；越大越清晰但越耗内存/体积） |
-| `thinking` | 空 | 思考模式（手动），如 `{ type: "enabled", budget_tokens: 16000 }` |
+| `thinking` | 空 | 思考模式（手动），provider 原生形状：`{ type: "enabled", budget_tokens: 16000 }`（`type` 可为 `enabled`/`disabled`，留空=不开启）。锅巴面板用「开启深度思考 + 思考预算」两个控件读写同一字段 |
 | `thinkingAuto` | 关 | 思考自动决策：`{ enable, classifier, model, timeoutMs, maxBudget, budgets:{low,medium,high}, style }`。判档方式 `classifier`：`auto`=规则不确定时用小模型判（省调用）/`always`=总是小模型/`off`=纯规则/`jev`=由 Jev 判档（需开启 Jev）；小模型带超时、缓存，失败自动回退规则，不阻塞对话。档位→厂商原生字段（MiMo/Kimi/GLM/豆包→`thinking`、DeepSeek→`thinking`+`reasoning_effort`、Qwen→`enable_thinking`+`thinking_budget`、MiniMax→`adaptive`、Anthropic→`budget_tokens`、o/GPT-5→`reasoning_effort`、Gemini→`thinking_level`）。模型级 `thinking` 显式覆盖仍优先。**能力自适应**：能力表没明确表态的（新）型号默认乐观启用思考——厂商若拒绝思考字段，请求层自动剥离重试一次并记忆（之后自动判为不支持，`[chat]` 日志随之转 off，无需重启）；明确判为不支持的模型（如 gpt-4o）启动时有 `[thinking]` 警告，可设 `agent.media.caps.thinking=true` 强制 |
 | `memoryLimits` | 空 | 声明式记忆字符上限，如 `{ memory: 2200, user: 1375 }` |
 | `systemPrompt` | 空 | 默认身份 system prompt（留空用富默认身份）。**优先级**：人设覆盖 > 进化产出的 agent 提示词 > 本项 > 内置默认（v1.26.30 修：此前注册表里预置的内置模板会被当成「进化产出」，导致本项写了也不生效） |
@@ -312,7 +317,7 @@ policy:
 | --- | --- | --- |
 | `enable` | `true` | 多模态总开关 |
 | `active` | `true` | 主动收集（消息/引用/合并转发/群文件中的图片文件） |
-| `passive` | `true` | 被动工具（`list_group_files`/`get_group_file`/`read_attachment`） |
+| `passive` | `true` | 被动工具（`list_group_files`/`get_group_file`/`read_attachment`）；`false`=不注册这组工具（`read_attachment` 是全员可用的 `query` 类，介意权限面时关掉） |
 | `maxImages` | `4` | 单次随消息发送最大图片数 |
 | `maxFileBytes` | `8388608` | 单文件字节上限 |
 | `degrade` | `note` | 非视觉模型降级：`skip`/`note`/`text` |
@@ -320,14 +325,14 @@ policy:
 
 ### `agent.vision` —— 视觉子模型
 
-主模型不支持视觉时，由视觉子模型识图 → 文本描述 → 主模型回答。主模型支持视觉则直发原图、不走此路径。`vision.model` 若指向「模型列表」里已注册的模型，会自动复用该模型所属厂商的 `protocol/baseURL/apiKey`（避免把 MIMO 模型名发到 commandcode 主通道）；未注册或显式填写了下面任一连接字段时，才回退主通道配置。
+主模型不支持视觉时，由视觉子模型识图 → 文本描述 → 主模型回答。主模型支持视觉则直发原图、不走此路径。`vision.model` 留空时：主模型支持视觉 → 复用主模型；主模型纯文本 → 视觉子模型禁用（此时识图/看视频不可用，必须显式配置）。`vision.model` 若指向「模型列表」里已注册的模型，会自动复用该模型所属厂商的 `protocol/baseURL/apiKey`（避免把 MIMO 模型名发到 commandcode 主通道）；未注册或显式填写了下面任一连接字段时，才回退主通道配置。
 
 **视频也走视觉子模型**（主模型没有视频原生块路径）：用户发送的视频、以及 `bilibili__analyze` 的「看视频」都会把视频字节交给它输出文本报告。看视频要求 **OpenAI 兼容协议 + 模型声明视频能力**（`media.caps.video`，`mimo` 系 omni 已内置；纯图像 VL 模型会明确跳过并回退字幕/转录），视频报告输出上限建议 ≥2048 tokens、思考型模型建议关思考。
 
 ```yaml
 vision:
   enable: true
-  model: "mimo-2.5"     # 视觉模型 ID（必填才启用；看视频需支持 video_url）
+  model: "mimo-2.5"     # 视觉模型 ID：主模型支持视觉时可留空复用主模型；主模型纯文本时必须显式指定（否则视觉子模型禁用；看视频需支持 video_url）
   # 以下可选：覆盖为独立厂商
   protocol:             # 如 anthropic
   preset:
@@ -389,10 +394,11 @@ perception:
 
 ```yaml
 persona:
-  dir: ""   # 自定义人设目录（默认 data/agents-plugin/personas）
   defaultId: ""   # 全局默认人设 id：未单独 #人设 切换的用户生效；留空=用 systemPrompt / 内置默认身份
   skipInjectionCheck: false   # ⚠️ 高危：跳过人设/人设资料落盘前的「越狱/提示注入」检测（默认关）
 ```
+
+> 人设库目录固定为插件内 `data/personas`；真正可配的人设资料目录是 `agent.personaLore.dir`（默认 `data/persona-lore`，默认 config.yaml 里没有该段，需要自定义时手写覆盖）。
 
 > Web 配置中心 / 锅巴的「默认人设」是下拉框，选项来自内置人设 + 自定义人设库；用户发 `#人设` 单独切换后以该用户绑定为准，`#重置人设` 会回到这里的全局默认。
 >
@@ -721,9 +727,11 @@ tts:
 | `#定时任务 +描述` | 用自然语言创建定时任务（如「#定时任务 每天 8 点提醒我喝水」） |
 | `#定时任务列表` | 查看已创建的定时任务 |
 | `#取消定时任务 +id` | 取消定时任务 |
-| `#任务列表` / `#任务状态 +id` | 长任务（token/时间预算中断后落盘）列表 / 状态 |
-| `#继续任务 +id` / `#恢复任务 +id` | 让中断的长任务接着跑 / 从落盘恢复 |
+| `#任务列表` / `#任务状态 +id` | 长任务（token/时间预算中断后落盘）列表 / 状态（需 `agent.taskStore.enable=true`） |
+| `#继续任务 +id` / `#恢复任务 +id` | 让中断的长任务接着跑 / 从落盘恢复（需 `agent.taskStore.enable=true`） |
 | `#取消任务 +id` | 取消长任务 |
+
+> 长任务账本默认关闭（`agent.taskStore.enable: false`，开发阶段开关）；未开启时上述命令只会回「任务账本未启用」。
 
 ### 人设资料（自动补齐）
 | 指令 | 说明 |
@@ -1051,7 +1059,7 @@ kb:
 
 > 基于 [@browserbasehq/stagehand](https://docs.stagehand.dev) v4。Agent 用自然语言驱动真实浏览器：打开页面、点击、填表、抽取动态渲染后的结构化数据（适合多步交互/登录态任务，弥补 `web_crawl` 单页只读抓取的局限）。
 
-**4 个工具**（`permission=master` 时 `category:'system'` 仅框架主人；`permission=all` 时 `category:'query'` 全员可用，`stagehand__act` 写动作始终需 `#确认`）：
+**4 个工具**（访问权限由 `agent.stagehand.permission` 控制，**默认 `master` 仅框架主人**；`permission=all` 时 `category:'query'` 全员可用，`stagehand__act` 写动作始终需 `#确认`）：
 - `stagehand__goto({url})` — 打开 URL（多步任务起点，页面跨调用保持）。成功返回 `{ok:true, url, title, status?}`（同时提供 `data` 别名）
 - `stagehand__observe({instruction?})` — 列出可交互元素（只读）。成功返回 `{ok:true, data, metadata?}`
 - `stagehand__extract({instruction, schema})` — 按自然语言 + JSON Schema 抽结构化数据。成功返回 `{ok:true, data, metadata?}`
@@ -1063,6 +1071,7 @@ kb:
 ```yaml
 stagehand:
   enable: true
+  permission: master   # master(默认，仅框架主人) | all(全部成员可用 goto/observe/extract；act 写动作仍需 #确认)
   mode: local          # local(本地 Playwright+chromium，默认) | cloud(Browserbase)
   headless: true
   executablePath: ""   # 本地 chrome 路径(空=默认/CHROME_PATH；可填复用已装 chrome)
@@ -1094,7 +1103,7 @@ stagehand:
 
 ### 自动发现
 
-开启 `sticker.enable` + `sticker.autoDiscover` 且已配视觉模型（`agent.vision.model`）后，群内图片会被：
+开启 `sticker.enable` + `sticker.autoDiscover`，且主模型支持视觉、或已开 `agent.vision.enable` 并（主模型纯文本时）配好 `agent.vision.model` 后，群内图片会被：
 
 1. sha256 去重 → 2. 视觉判定（拒绝照片/普通图片/文档，只收表情包）→ 3. 打标（名称/标签/语义描述）→ 4. 存 `resources/stickers/images/discovered/` 并写入 `index.json`。
 
@@ -1120,7 +1129,7 @@ sticker:
   cooldown: 300          # 同会话两次带图最小间隔（秒）
   maxPerReply: 2         # 单条回复最多贴纸数（1~5，硬上限 5；0/非法 → 默认 2，不是「不限」）
   antiConsecutive: true  # 防连发
-  autoDiscover: false    # 自动发现总开关（需 enable + agent.vision.model）
+  autoDiscover: false    # 自动发现总开关（需 sticker.enable + agent.vision.enable +（主模型纯文本时）agent.vision.model）
   discoverGroups: []     # 采集群白名单（空=所有群都采集）
   maxDiscovered: 200     # 自动发现条目上限
   discoverMaxSizeMB: 5   # 单张采集大小上限 MB
@@ -1177,7 +1186,7 @@ utils/       Config 配置读写（插件目录 + 热加载） · Log 分级日�
 | `KROKI_INTEGRATION` / `KROKI_ENDPOINT` | 真实 Kroki 容器集成测试开关与端点（默认跳过） |
 | `E2B_INTEGRATION` | E2B 真连接集成测试开关（默认跳过） |
 
-分级日志（`utils/Log.js`）：`mark`（里程碑）/ `info`（研究进度）/ `debug`（工具入参·每轮 token）/ `warn` / `error`。开启 `debug: true` 可看到 AI 每次调用工具的名称、入参、结果与每轮 token 用量，深度研究的迭代轮次与搜索词，便于排查。
+分级日志（`utils/Log.js`）：`mark`（里程碑）/ `info`（研究进度）/ `debug`（工具入参·每轮 token）/ `warn` / `error`。真正的全链路日志开关是 `agent.devLog.enable`（默认开，按会话分文件写 `data/logs/`）；`debug: true` 等价于强制开启 devLog（即使 `devLog.enable=false`）。开启后可看到 AI 每次调用工具的名称、入参、结果与每轮 token 用量，深度研究的迭代轮次与搜索词，便于排查。
 
 ### 日志字段说明
 

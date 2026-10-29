@@ -71,6 +71,48 @@ function extractMsgId(res) {
   return res?.message_id || res?.data?.message_id || res?.seq || null
 }
 
+/**
+ * 功能模型引用归一（F20/C2）：功能模型可能填 `llmModels[].id`（如 mabc123）或裸模型名。
+ * 经 modelRouter 命中条目 → 返回条目里的真实模型名（否则把 id 当模型名下发给上游 → invalid model 400）；
+ * 留空/未命中 → 原样返回（留空由调用方按 yaml 承诺回落，未命中维持旧的裸模型名行为）。
+ */
+function resolveModelRef(ref, rt = null) {
+  const v = String(ref ?? '').trim()
+  if (!v) return ''
+  try {
+    const r = rt?.modelRouter?.resolve?.(v)
+    if (r?.matched) return String(r.entry?.model || r.model || v)
+    // 条目命中但 provider 缺失：router 仍把 model 归一条目真名，避免条目 id 被当模型名下发给主厂商
+    if (r?.entry?.model) return String(r.entry.model)
+  } catch { /* noop */ }
+  return v
+}
+
+/** 功能模型引用 → provider（经 modelRouter；留空/未命中回退主 provider）。 */
+function resolveModelProvider(ref, rt = null) {
+  try { return rt?.modelRouter?.resolve?.(ref)?.provider || rt?.provider || null } catch { return rt?.provider || null }
+}
+
+/** SelfState 配置归一（C2）：service 内部读到的 ambiguousIntentModelProfile 须是真实模型名。 */
+function selfStateCfg(rt = null) {
+  const raw = Config.get().agent?.selfState || {}
+  const ref = raw?.eventDetection?.ambiguousIntentModelProfile
+  const model = resolveModelRef(ref, rt)
+  if (model === String(ref ?? '').trim()) return raw
+  return { ...raw, eventDetection: { ...(raw.eventDetection || {}), ambiguousIntentModelProfile: model } }
+}
+
+/** SelfState 定时反思/维护的群清单（C11）：selfState.groups → groupWorld.groups → humanize.groups 顺序回落。 */
+function selfStateGroups() {
+  const agent = Config.get().agent || {}
+  const pick = (v) => (Array.isArray(v) ? v.map(String).filter(Boolean) : [])
+  const own = pick(agent.selfState?.groups)
+  if (own.length) return own
+  const gw = pick(agent.groupWorld?.groups)
+  if (gw.length) return gw
+  return pick(agent.humanize?.groups)
+}
+
 /** 构造 Planner 可用的白名单只读工具（指南 §11.1：默认不接完整 ToolRegistry）。 */
 function buildReadTools(rt, hcfg) {
   const allowed = new Set(Array.isArray(hcfg?.planner?.allowedReadTools) ? hcfg.planner.allowedReadTools : [])
@@ -81,6 +123,9 @@ function buildReadTools(rt, hcfg) {
     if (!t || typeof t.execute !== 'function') continue
     // 再保险：剔除危险工具名（与 default-config.js FORBIDDEN_READ_TOOLS 对齐；validateHumanizeConfig 已先过滤）
     if (/^(?:send_|delete_|remove_|group_(kick|mute|set_|notice)|terminal|stagehand|file_to_pdf|upload_|create_group|transfer_|schedule_task|reminder_set|reload_skills|install_skill|memory$)/i.test(name)) continue
+    // P2 #41：名字黑名单之外再按能力判定——非 query 类（message/group_manage/system/未知）
+    // 或 meta.sideEffects 声明了写/发送类副作用的工具一律不进 Planner 白名单。
+    if (!H.isReadOnlyTool(t)) continue
     out.push({
       name: t.name, description: t.description, parameters: t.parameters,
       execute: async (args) => {
@@ -98,12 +143,19 @@ async function buildHumanize() {
   const rt = await getRuntime()
   const rawCfgFn = () => Config.get().agent?.humanize || {}
   // 功能模型可落在任意已注册厂商：按引用解析 provider（留空/未命中回退主 provider）
-  const providerForModel = (ref) => (rt.modelRouter?.resolve(ref)?.provider) || rt.provider
-  // 初次校验（过滤危险 allowedReadTools 等；记录错误但不抛）
-  const validation = H.validateHumanizeConfig(rawCfgFn(), rt.tools?.list?.().map((t) => t.name) || null)
+  const providerForModel = (ref) => resolveModelProvider(ref, rt)
+  // 初次校验（过滤危险/非只读 allowedReadTools 等；传工具对象以便按 category/meta.sideEffects 判定）
+  const validation = H.validateHumanizeConfig(rawCfgFn(), rt.tools?.list?.() || null)
   if (validation.errors.length) Log.warn('[humanize] 配置校验提示：', validation.errors.join('； '))
   const cfgFn = () => {
     const cfg = H.resolveHumanizeConfig(rawCfgFn())
+    // 功能模型引用归一（F20/C2）：配置可能填「模型条目 id」→ 这里换成真实模型名再下发。
+    // planner.model 留空按 yaml 承诺回落 agent.utilityModel（仍为空=主模型，由 provider 兜底）。
+    if (cfg.planner) {
+      const util = resolveModelRef(Config.get().agent?.utilityModel, rt)
+      cfg.planner.model = resolveModelRef(cfg.planner.model, rt) || util
+    }
+    if (cfg.replyer) cfg.replyer.model = resolveModelRef(cfg.replyer.model, rt)
     // 人设库模式：身份名以库中名称为准，保证 @/昵称判定、Planner 与角色正文同源。
     // 人设缺失/正文为空时保留自定义名，走 prompt 回退。
     const pid = String(cfg?.persona?.fromPersonaId || '').trim()
@@ -159,9 +211,11 @@ async function buildHumanize() {
     try {
       // 语义检测层 embedder：与 GroupWorld 共用 agent.recall.embedProvider 配置（未配 → 词面/规则兜底）
       const { embedFn, embedModel } = buildEmbed(rt)
+      // 功能模型引用归一（C2）：歧义评价模型可填条目 id；cfgForSs 让 service 内部拿到真实模型名
+      const cfgForSs = () => selfStateCfg(rt)
       const svc = new SelfStateService({
-        provider: providerForModel(Config.get().agent?.selfState?.eventDetection?.ambiguousIntentModelProfile),
-        cfg: () => Config.get().agent?.selfState || {},
+        provider: providerForModel(cfgForSs().eventDetection?.ambiguousIntentModelProfile),
+        cfg: cfgForSs,
         botId: botSelfIdsAll(rt)[0] || 'bot',
         botNames: H.resolvePersonaIdentity(cfgFn(), { botNickname: botNickname() }).identityNames,
         // SS trace 同样写伪人独立目录（按日 ss-*.log；曾字符串 scope → private-unknown-0 落主目录）
@@ -513,8 +567,9 @@ export class Humanize extends plugin {
       cron: '23 * * * *', // 每小时轻整合：梗当天入库（此前每日一次，新梗要隔天才能被理解）
       fnc: this.humanizeMemoryConsolidate.bind(this),
     }]
-    // 异步预热（不阻塞构造）
-    getHumanize().catch(() => {})
+    // 异步预热（不阻塞构造）：默认关不预装配（C10）——未开启不建库/装配，关=整层 no-op；
+    // 热开启（#伪人开关 / 配置保存）后由消息路径或 #伪人状态 首次调用装配。
+    if (Config.get().agent?.humanize?.enable === true) getHumanize().catch(() => {})
   }
 
   /** 压缩归档伪人全链路日志（data/humanize-logs/ 下超过 24h 的 .log） */
@@ -532,6 +587,8 @@ export class Humanize extends plugin {
    */
   async humanizeMemoryConsolidate() {
     try {
+      // 默认关不预装配（C10）：本任务每小时跑，未开启时不建伪人运行时/记忆库
+      if (Config.get().agent?.humanize?.enable !== true) return
       const h = await getHumanize()
       const cfg = h.cfgFn()
       if (cfg.enable !== true || cfg.memory?.enabled === false) return
@@ -578,12 +635,14 @@ export class Humanize extends plugin {
     const cfg = Config.get().agent?.selfState
     if (cfg?.enabled !== true) return
     try {
+      const rt = await getRuntime().catch(() => null)
+      // 功能模型归一（C2）+ 群清单三级回落（C11）：复用同一份归一配置，别再只读 humanize.groups
       const ss = new SelfStateService({
-        provider: (await getRuntime().catch(() => null))?.provider || null,
-        cfg: () => cfg, botId: botNicknameSelfId(), dataDir: Config.path.data + '/groupworld',
+        provider: resolveModelProvider(selfStateCfg(rt).eventDetection?.ambiguousIntentModelProfile, rt),
+        cfg: () => selfStateCfg(rt), botId: botNicknameSelfId(), dataDir: Config.path.data + '/groupworld',
       })
       await ss.init()
-      for (const gid of (Config.get().agent?.humanize?.groups || []).map(String)) await ss.runReflection(gid)
+      for (const gid of selfStateGroups()) await ss.runReflection(gid)
     } catch (e) { Log.warn('[selfstate] 反思任务失败', e?.message || e) }
   }
 
@@ -591,12 +650,13 @@ export class Humanize extends plugin {
     const cfg = Config.get().agent?.selfState
     if (cfg?.enabled !== true) return
     try {
+      const rt = await getRuntime().catch(() => null)
       const ss = new SelfStateService({
-        provider: (await getRuntime().catch(() => null))?.provider || null,
-        cfg: () => cfg, botId: botNicknameSelfId(), dataDir: Config.path.data + '/groupworld',
+        provider: resolveModelProvider(selfStateCfg(rt).eventDetection?.ambiguousIntentModelProfile, rt),
+        cfg: () => selfStateCfg(rt), botId: botNicknameSelfId(), dataDir: Config.path.data + '/groupworld',
       })
       await ss.init()
-      for (const gid of (Config.get().agent?.humanize?.groups || []).map(String)) await ss.runMaintenance(gid)
+      for (const gid of selfStateGroups()) await ss.runMaintenance(gid)
     } catch (e) { Log.warn('[selfstate] 维护任务失败', e?.message || e) }
   }
 
@@ -605,6 +665,11 @@ export class Humanize extends plugin {
     const e = this.e
     // 1. 非群消息：不处理（私聊不在环境模式范围）
     if (!e.isGroup) return false
+
+    // 默认关不预装配（C10）：catch-all 每条群消息都会过这里，先按原始配置判开关/白名单，
+    // 关着时直接返回，不触发 getHumanize()→建库/装配（关=整层 no-op）。
+    const raw = Config.get().agent?.humanize || {}
+    if (raw.enable !== true || !Array.isArray(raw.groups) || !raw.groups.map(String).includes(String(e.group_id))) return false
 
     let h
     try { h = await getHumanize() } catch (e) { Log.warn('[humanize] getHumanize 失败', e?.message || e); return false }

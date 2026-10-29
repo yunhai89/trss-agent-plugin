@@ -95,7 +95,7 @@ export function supportGuoba() {
       schemas: [
         // —— 基础 ——
         { label: '基础设置', component: 'SOFT_GROUP_BEGIN' },
-        { field: 'debug', label: '调试日志', bottomHelpMessage: '打印工具入参/每轮 token/搜索词等，排查时开启', component: 'Switch' },
+        { field: 'debug', label: '调试日志', bottomHelpMessage: '等价于强制开启全链路 devLog（真正日志开关是 agent.devLog.enable）；临时排查时开启', component: 'Switch' },
         { field: 'agent.trigger', label: '触发模式', component: 'Select', componentProps: { options: OPT.trigger } },
         { field: 'agent.triggerCommand', label: '触发词', bottomHelpMessage: 'trigger 为 command/both 时生效，如 #ai', component: 'Input', componentProps: { placeholder: '#ai' } },
         { field: 'agent.chatPermission', label: '#ai 命令权限', component: 'Select', componentProps: { options: OPT.permission } },
@@ -115,7 +115,7 @@ export function supportGuoba() {
         { field: 'agent.providerId', label: '基础厂商 ID', bottomHelpMessage: '「厂商配置」里厂商条目的 id（含接口地址与 Key）；空=未选厂商', component: 'Input', componentProps: { placeholder: '如 pxxxx' } },
         { field: 'agent.modelId', label: '基础模型 ID', bottomHelpMessage: '「模型列表」里模型条目的 id（须挂在上述厂商下）；空=未选模型', component: 'Input', componentProps: { placeholder: '如 mxxxx' } },
         { field: 'agent.utilityModel', label: '播报小模型(可选)', bottomHelpMessage: '进度播报等旁路任务用的小模型；留空=沿用主模型。可填任意已注册厂商的模型（运行时按注册表解析端点，不再局限主厂商）', component: 'Input', componentProps: { placeholder: '留空=主模型' } },
-        { field: 'agent.fallbackModel', label: '回退模型ID(可选)', bottomHelpMessage: '主模型失败时回退到的模型，如 gpt-4o / claude-3-5-sonnet（需配下面的 URL+Key）', component: 'Input', componentProps: { placeholder: '留空=不回退' } },
+        { field: 'agent.fallbackModel', label: '回退模型ID(可选)', bottomHelpMessage: '主模型失败时回退到的模型，如 gpt-4o / claude-3-5-sonnet；可跨厂商（另配下面的 URL+Key/协议）。与 yaml fallbackModels 数组并存时数组先试、本项排最后', component: 'Input', componentProps: { placeholder: '留空=不回退' } },
         { field: 'agent.fallbackBaseURL', label: '回退模型URL', bottomHelpMessage: '回退模型的 baseURL', component: 'Input', componentProps: { placeholder: 'https://api.openai.com/v1' } },
         { field: 'agent.fallbackApiKey', label: '回退模型Key', component: 'Input', componentProps: { placeholder: 'sk-gpt-xxx' } },
         { field: 'agent.fallbackProtocol', label: '回退模型协议', component: 'Select', componentProps: { options: [{ label: 'openai', value: 'openai' }, { label: 'anthropic', value: 'anthropic' }] } },
@@ -126,7 +126,7 @@ export function supportGuoba() {
 
         // —— 上下文与流式 ——
         { label: '上下文与流式', component: 'SOFT_GROUP_BEGIN' },
-        { field: 'agent.contextWindow', label: '上下文窗口(token)', bottomHelpMessage: '如 32000；超 80% 自动压缩历史保留首条意图；留空不压缩', component: 'InputNumber', componentProps: { min: 1000 } },
+        { field: 'agent.contextWindow', label: '上下文窗口(token)', bottomHelpMessage: '请填模型真实窗口（如 32000）：留空=按消息条数 30→18 压缩；填写后按 contextHighRatio（默认 65%）→ contextLowRatio（默认 45%）高低水位压缩（保留首条意图）', component: 'InputNumber', componentProps: { min: 1000 } },
         { field: 'agent.maxToolResultChars', label: '工具结果字符上限', component: 'InputNumber', componentProps: { min: 100 } },
         { field: 'agent.keepReasoning', label: '回灌推理(reasoning)到历史', bottomHelpMessage: '默认关：省 context', component: 'Switch' },
         { field: 'agent.stream', label: '逐字流式输出', bottomHelpMessage: '依赖适配器，不稳；默认关', component: 'Switch' },
@@ -134,7 +134,7 @@ export function supportGuoba() {
         { field: 'agent.progressRecall', label: '进度消息撤回(秒)', bottomHelpMessage: 'N 秒后自动撤回进度消息；0=不撤回；适配器不支持则忽略', component: 'InputNumber', componentProps: { min: 0, max: 120 } },
         { field: 'agent.reply.mode', label: '回复渲染方式', component: 'Select', componentProps: { options: [{ label: '图片（markdown→精美浅色图，默认）', value: 'image' }, { label: '纯文本', value: 'text' }] } },
         { field: 'agent.reply.narrate', label: '中途播报', bottomHelpMessage: '模型调工具时附带的思路/进展自动转发给用户（别埋头苦干）；默认开', component: 'Switch' },
-        { field: 'agent.reply.renderScale', label: '回复图清晰度倍率', bottomHelpMessage: 'deviceScaleFactor：2=高清（默认），1=普通；越大越清晰但越耗内存', component: 'InputNumber', componentProps: { min: 1, max: 4 } },
+        { field: 'agent.reply.renderScale', label: '回复图清晰度倍率', bottomHelpMessage: 'deviceScaleFactor：3=超清（默认）/ 2=高清 / 1=普通；越大越清晰但越耗内存', component: 'InputNumber', componentProps: { min: 1, max: 4 } },
 
         // —— 记忆与召回 ——
         { label: '记忆与召回', component: 'SOFT_GROUP_BEGIN' },
@@ -160,8 +160,8 @@ export function supportGuoba() {
         // —— 在线自进化 ——
         // —— 工具按需发现 ——
         { label: '工具按需发现（Tool Discovery）', component: 'SOFT_GROUP_BEGIN' },
-        { field: 'agent.toolDiscovery.enable', label: '启用按需发现', bottomHelpMessage: 'LLM 只常驻少数核心工具，其余经 tool_search 检索后动态注入（省 token）；默认开，关则回退全量常驻', component: 'Switch' },
-        { field: 'agent.toolDiscovery.alwaysOn', label: '常驻工具(每行一个)', bottomHelpMessage: '不经过搜索、始终可用的工具名；留空用内置默认（含 tool_search / clarify / memory_search / web_search / skill / get_chat_history / reminder_set / schedule_task / 群文件工具等）', component: 'InputTextArea' },
+        { field: 'agent.toolDiscovery.enable', label: '启用按需发现', bottomHelpMessage: '控制 system 工具速查与 tool_search/激活记录；默认开。注意 stableList=true 时 tools schema 仍每轮全量下发（缓存优先），本开关不减少 schema token', component: 'Switch' },
+        { field: 'agent.toolDiscovery.alwaysOn', label: '常驻工具(每行一个)', bottomHelpMessage: '不经过搜索、始终可用的工具名（每行一个）；留空=用内置默认（含 tool_search / clarify / memory_search / web_search / kb_search / skill / get_chat_history / reminder_set / schedule_task / context_recall / diagram_render / 群文件工具等）', component: 'InputTextArea' },
         { field: 'agent.toolDiscovery.topK', label: 'tool_search 返回数', component: 'InputNumber', componentProps: { min: 1, max: 20 } },
         { field: 'agent.toolDiscovery.stableList', label: '工具数组跨轮恒定', bottomHelpMessage: '每轮下发全量工具定义（首轮多付约 1 万 token，之后全部命中缓存）。关掉会随工具激活改变 tools 数组，实测任何变化都会让整段 prompt 缓存归零（命中率 0%）', component: 'Switch' },
         { field: 'agent.toolDiscovery.minScore', label: '最低相似度', bottomHelpMessage: '低于此值不返回；jaccard 下 0.1 较宽松', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
@@ -228,7 +228,7 @@ export function supportGuoba() {
         { field: 'agent.untrustedGuard', label: '外部内容注入扫描', bottomHelpMessage: '工具结果/网页/MCP/记忆等外部内容命中注入特征时加边界标注（不阻断）；默认开，关闭会削弱间接注入防御', component: 'Switch' },
         { field: 'agent.persona.defaultId', label: '默认人设', bottomHelpMessage: '未单独 #人设 切换的用户生效；留空=用「默认身份 systemPrompt」/内置默认身份。选项=内置+自定义人设（新增人设后重载插件刷新）', component: 'Select', componentProps: { options: personaOptions() } },
         { field: 'agent.persona.skipInjectionCheck', label: '人设注入检测免检【高危】', helpMessage: '⚠️ 高危！开启后新建/编辑人设、人设资料不再校验「疑似越狱/提示注入」，内容会原样进入 system 身份层。', bottomHelpMessage: '默认关。仅在你完全信任自建角色卡时开启；命中误报时可临时开启保存后再关闭（已保存内容不会再次扫描）。', component: 'Switch' },
-        { field: 'agent.contextHighRatio', label: '压缩高水位比例', bottomHelpMessage: '历史占 contextWindow 的比例超过它触发压缩（默认 0.65；256K 窗口建议 0.8）。越晚压越省缓存，命中率公式见 README「缓存经济性」', component: 'InputNumber', componentProps: { min: 0.3, max: 0.95, step: 0.05 } },
+        { field: 'agent.contextHighRatio', label: '压缩高水位比例', bottomHelpMessage: '仅填了 contextWindow 后生效：历史占窗口比例超过它触发压缩（默认 0.65；256K 窗口建议 0.8）。越晚压越省缓存，命中率公式见 README「缓存经济性」', component: 'InputNumber', componentProps: { min: 0.3, max: 0.95, step: 0.05 } },
         { field: 'agent.contextLowRatio', label: '压缩低水位比例', bottomHelpMessage: '压缩后保留到该比例（默认 0.45，须小于高水位）。压得越深则每轮新增相对越少、稳态命中率越高', component: 'InputNumber', componentProps: { min: 0.05, max: 0.9, step: 0.05 } },
         { field: 'agent.redactSecrets', label: '回复脱敏(屏蔽 API Key)', bottomHelpMessage: '发送前屏蔽回复里的密钥/token；默认开', component: 'Switch' },
         { field: 'agent.confirmTimeout', label: '审批超时(秒)', component: 'InputNumber', componentProps: { min: 10 } },
@@ -270,11 +270,11 @@ export function supportGuoba() {
         // —— MCP ——
         { label: '网页抓取（抗反爬）', component: 'SOFT_GROUP_BEGIN' },
         { field: 'agent.kb.crawl.engine', label: '抓取引擎', bottomHelpMessage: 'crawl4ai=真浏览器渲染（默认，需 scripts/install-crawl4ai.sh 装好）；fetch=纯 HTTP+cheerio', component: 'Select', componentProps: { options: [{ label: 'crawl4ai 浏览器', value: 'crawl4ai' }, { label: '纯 HTTP fetch', value: 'fetch' }] } },
-        { field: 'agent.kb.crawl.execution', label: '抓取执行位置', bottomHelpMessage: 'host=宿主 venv（默认，与 sandbox.mode 无关）；sandbox=在 E2B 沙箱内跑（需模板预装 crawl4ai，未就绪降级纯 HTTP）', component: 'Select', componentProps: { options: [{ label: '宿主(推荐)', value: 'host' }, { label: '沙箱', value: 'sandbox' }] } },
+        { field: 'agent.kb.crawl.execution', label: '抓取执行位置', bottomHelpMessage: 'local=宿主 venv crawl4ai（默认，与 sandbox.mode 无关）；sandbox=在 E2B 沙箱内跑（需模板预装 crawl4ai，未就绪降级纯 HTTP fetch）', component: 'Select', componentProps: { options: [{ label: '宿主(local，推荐)', value: 'local' }, { label: '沙箱(sandbox)', value: 'sandbox' }] } },
         { field: 'agent.kb.crawl.stealth', label: '反检测', bottomHelpMessage: 'playwright-stealth + 模拟用户行为，默认开', component: 'Switch' },
         { field: 'agent.kb.crawl.retryBlocked', label: '被拦后强化重试', bottomHelpMessage: '403/CF 挑战等被拦时自动 undetected+stealth 再试一轮', component: 'Switch' },
         { field: 'agent.kb.crawl.allowPrivateHosts', label: '允许抓内网', bottomHelpMessage: '允许抓本机/内网/元数据地址（默认禁，防 SSRF）。本机 DNS 把公网域名解析到内网时也需要它', component: 'Switch' },
-        { field: 'agent.kb.crawl.sessionPersist', label: '站点会话持久化', bottomHelpMessage: '按 host 保存 cookie（含 CF 清关凭证）到 data/crawl/sessions.json（0600），12h 内复用', component: 'Switch' },
+        { field: 'agent.kb.crawl.sessionPersist', label: '站点会话持久化', bottomHelpMessage: '按 host 保存 cookie（含 CF 清关凭证）到 data/crawl/sessions.json（0600），按下方「会话有效期」复用（默认 12h）', component: 'Switch' },
         { field: 'agent.kb.crawl.sessionTtlHours', label: '会话有效期(小时)', component: 'InputNumber', componentProps: { min: 0.1, max: 720, step: 1 } },
         { field: 'agent.kb.crawl.sessionProfile', label: '持久浏览器 profile', bottomHelpMessage: '保留完整浏览器 profile（登录态更稳），但浏览器会全局串行、占磁盘；默认关', component: 'Switch' },
         { field: 'agent.kb.crawl.siteMemory', label: '站点难度记忆', bottomHelpMessage: '记住上次哪档有效：fetch 够用就不再起浏览器；被拦过下次直接 undetected', component: 'Switch' },
@@ -291,7 +291,7 @@ export function supportGuoba() {
           field: 'agent.mcp.serversJson',
           label: 'MCP 服务端（粘贴新增 · 自动合并）',
           helpMessage: '粘贴标准 mcpServers JSON（如 { "mcpServers": { "名字": { "command":"npx", "args":[...] } } }），保存时自动合并：新服务加入、同名更新、其它已有服务一律保留。可反复粘贴累积多个。删除某个服务用聊天指令 #停止mcp <名字>。',
-          bottomHelpMessage: '示例（粘一个就加一个，互不覆盖）：\n{\n  "mcpServers": {\n    "moegirl": { "command": "npx", "args": ["-y", "moegirl-wiki-mcp"] }\n  }\n}\n\nstdio：command/args/env；http：type/url/headers。框里默认显示你现有的全部服务，可直接增删键。Docker 精简镜像无 npx 见 README「agent.mcp」排查。',
+          bottomHelpMessage: '示例（粘一个就加一个，互不覆盖）：\n{\n  "mcpServers": {\n    "moegirl": { "command": "npx", "args": ["-y", "moegirl-wiki-mcp"] }\n  }\n}\n\nstdio：command/args/env；http：type/url/headers。框里默认显示你现有的全部服务；保存**只增/改、不删**——删除某个服务请用聊天指令 #停止mcp <名字>。Docker 精简镜像无 npx 见 README「agent.mcp」排查。',
           component: 'InputTextArea',
           componentProps: { placeholder: '{\n  "mcpServers": {\n    "xxx": { "command": "npx", "args": ["-y", "xxx"] }\n  }\n}', autosize: { minRows: 8, maxRows: 24 } },
         },
@@ -302,7 +302,7 @@ export function supportGuoba() {
           field: 'agent.sandbox.mode',
           label: '执行面模式',
           helpMessage: 'off=不注册终端工具（宿主无 shell 执行面）；e2b=命令在 E2B 微虚机内执行。',
-          bottomHelpMessage: '沙箱化后不再有 #确认 审批与命令黑名单：命令跑在独立 Firecracker microVM 里，网络出口默认放通（可按 allowOut 白名单收紧）。连不上 E2B 时一律拒绝执行（绝不回退到本机）。**全员可用**（按会话隔离沙箱，成本由单会话命令数/并发/超时上限兜底，无需认领主人）。',
+          bottomHelpMessage: '沙箱化后不再有 #确认 审批与命令黑名单：命令跑在独立 Firecracker microVM 里，网络出口默认放通。**全员可用**（按会话隔离沙箱，无需认领主人；成本由单会话命令数/并发/超时上限兜底）。要收紧出口请到 yaml / Web 配置中心的 agent.sandbox.network 配 allowOut 白名单，或 allowInternet:false 断网。连不上 E2B 时一律拒绝执行（绝不回退到本机）。',
           component: 'Select',
           componentProps: { options: [{ label: 'off（关闭）', value: 'off' }, { label: 'e2b（沙箱执行）', value: 'e2b' }] },
         },
@@ -318,7 +318,8 @@ export function supportGuoba() {
 
         // —— Stagehand 浏览器自动化 ——
         { label: 'Stagehand 浏览器自动化', component: 'SOFT_GROUP_BEGIN' },
-        { field: 'agent.stagehand.enable', label: '启用浏览器自动化', bottomHelpMessage: 'act/extract/observe 自然语言原语；仅框架主人可用，act 写动作需 #确认。依赖 @browserbasehq/stagehand+zod（云崽根 pnpm install）', component: 'Switch' },
+        { field: 'agent.stagehand.enable', label: '启用浏览器自动化', bottomHelpMessage: 'act/extract/observe 自然语言原语；访问权限由下方「访问权限」控制（默认仅框架主人），act 写动作需 #确认。依赖 @browserbasehq/stagehand+zod（云崽根 pnpm install）', component: 'Switch' },
+        { field: 'agent.stagehand.permission', label: '访问权限', bottomHelpMessage: 'master=仅框架主人（默认）；all=全部成员可用 goto/observe/extract（act 写动作仍需 #确认）。开放给全员意味着群成员可驱动宿主浏览器并消耗 Browserbase/LLM 配额，慎用', component: 'Select', componentProps: { options: [{ label: '仅主人(master)', value: 'master' }, { label: '全部成员(all)', value: 'all' }] } },
         { field: 'agent.stagehand.mode', label: '浏览器模式', component: 'Select', componentProps: { options: [{ label: 'local 本地(默认)', value: 'local' }, { label: 'cloud Browserbase', value: 'cloud' }] } },
         { field: 'agent.stagehand.headless', label: '无头模式(本地)', bottomHelpMessage: '本地模式是否无头；服务器建议开', component: 'Switch' },
         { field: 'agent.stagehand.executablePath', label: 'chrome 路径(可选)', bottomHelpMessage: '本地 chrome 可执行路径（空=Stagehand 自定/CHROME_PATH；可填复用已装 chrome）', component: 'Input', componentProps: { placeholder: '留空=默认' } },

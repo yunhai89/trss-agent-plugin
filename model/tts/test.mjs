@@ -497,22 +497,31 @@ await test('TtsService：max 档 LLM 失败 → 标点分段回退并如实备�
 })
 
 await test('TtsService：judgeTimeoutMs 生效——判定卡死时按预算中止（abort）并回退默认向量，合成继续', async () => {
-  let aborted = false
-  const llm = {
+  const mkLlm = (flag) => ({
     run: (prompt, { signal } = {}) => new Promise((_, rej) => {
-      signal?.addEventListener('abort', () => { aborted = true; rej(Object.assign(new Error('Aborted'), { name: 'AbortError' })) })
+      signal?.addEventListener('abort', () => { flag.aborted = true; rej(Object.assign(new Error('Aborted'), { name: 'AbortError' })) })
     }),
+  })
+  const runCase = async (cfg) => {
+    const flag = { aborted: false }
+    const { svc, calls } = makeService({ cfg, llm: mkLlm(flag) })
+    await svc.refs.add({ name: '甲', kind: 'voice', filename: 'v.wav', buffer: REF })
+    const t0 = Date.now()
+    const r = await svc.synthesize({ text: '你好呀', voice: '甲', emotionMode: 'vector', tier: 'pro' })
+    return { flag, calls, r, ms: Date.now() - t0 }
   }
-  const { svc, calls } = makeService({ cfg: { indextts: { judgeTimeoutMs: 1200, vector: [0, 0, 0, 0, 0, 0, 0, 0.6] } }, llm })
-  await svc.refs.add({ name: '甲', kind: 'voice', filename: 'v.wav', buffer: REF })
-  const t0 = Date.now()
-  const r = await svc.synthesize({ text: '你好呀', voice: '甲', emotionMode: 'vector', tier: 'pro' })
-  const ms = Date.now() - t0
-  ok(r.ok, `回退后合成成功（${r.error || ''}）`)
-  ok(aborted, '到预算中止了判定请求（signal 透传到 provider.chat）')
-  ok(ms < 3000, `预算内继续合成（${ms}ms）`)
-  eq(calls.joins[0].data[13], 0.6, '回退用配置默认向量（calm，data[13]）')
-  ok(r.notes.some((n) => /情绪判定不可用/.test(n)), `备注如实说明回退（${r.notes.join('；')}）`)
+  const VEC = [0, 0, 0, 0, 0, 0, 0, 0.6]
+  // ① 全局 tts.judgeTimeoutMs 优先：IndexTTS 的 pro/max 两条路径都消费全局值（indextts 键此时被覆盖）
+  const a = await runCase({ judgeTimeoutMs: 1200, indextts: { judgeTimeoutMs: 300000, vector: VEC } })
+  ok(a.r.ok, `回退后合成成功（${a.r.error || ''}）`)
+  ok(a.flag.aborted, '到全局预算中止了判定请求（signal 透传到 provider.chat）')
+  ok(a.ms < 3000, `全局预算内继续合成（${a.ms}ms）`)
+  eq(a.calls.joins[0].data[13], 0.6, '回退用配置默认向量（calm，data[13]）')
+  ok(a.r.notes.some((n) => /情绪判定不可用/.test(n)), `备注如实说明回退（${a.r.notes.join('；')}）`)
+  // ② 全局显式清空（null）→ 历史 indextts.judgeTimeoutMs 兜底（旧配置迁移兼容）
+  const b = await runCase({ judgeTimeoutMs: null, indextts: { judgeTimeoutMs: 1200, vector: VEC } })
+  ok(b.r.ok && b.flag.aborted, '全局清空时历史 indextts 键仍生效（兼容旧配置）')
+  ok(b.ms < 3000, `历史键预算内继续合成（${b.ms}ms）`)
 })
 
 await test('TtsService：缺音色参考 / 传错音色名 / 超长文本 → 可读错误，不假装成功', async () => {

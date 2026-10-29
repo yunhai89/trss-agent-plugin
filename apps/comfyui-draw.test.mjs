@@ -248,8 +248,9 @@ await test('边界：编号越界 / 格式错误 / 指令关闭时不处理', as
 
   cfgObj().enable = false
   const o4 = inst({ msg: '#画图1 x', uid: 'u10' })
-  await o4.draw()
-  ok(/ComfyUI 未启用/.test(o4._replies.join('\n')), '总开关关闭 → 明确提示')
+  const r4 = await o4.draw()
+  // 总开关关闭 = 零影响（yaml 承诺）：不回复、不吞消息，返回 false 交回其它插件/LLM
+  ok(r4 === false && o4._replies.length === 0, '总开关关闭 → 不回复不拦截（零影响）')
   cfgObj().enable = true
 })
 

@@ -1,4 +1,4 @@
-debug: false
+debug: false  # 调试日志：true=强制开启全链路 devLog（等价 agent.devLog.enable=true，记录工具入参/每轮 token/搜索词）
 
 agent:
   trigger: at
@@ -14,7 +14,7 @@ agent:
   protocol: openai  # openai | anthropic | gemini（gemini=原生官方 @google/genai SDK + Interactions API，填 apiKey 即用，无需 baseURL/preset）
   preset: deepseek  # 厂商预设（openai/deepseek/gemini/dashscope/zhipu/moonshot/mimo/minimax/doubao/anthropic/openrouter/opencode=按量 /opencode-go=月付订阅$5起 /commandcode=OpenAI+Anthropic 双兼容网关）；gemini 原生协议时仅占位
   baseURL: ""
-  apiKey: ""               # API Key（OpenAI/Anthropic 兼容或 Gemini 原生均填此）；★必填：留空则插件不初始化
+  apiKey: ""               # 解析镜像（勿手改）：由上面 providerId 指向的「厂商配置」条目的 apiKey 自动回填；留空则插件不初始化
   model: "deepseek-chat"
   utilityModel: ""  # 旁路小模型（播报等）：填模型条目 id 或模型名，可来自任意厂商（运行时按注册表解析端点）；留空=沿用主模型
 
@@ -22,6 +22,7 @@ agent:
   llmProviders: []  # [{ id, name, protocol, preset, baseURL, apiKey }] LLM 服务商端点（「厂商配置」区维护）
   llmModels: []     # [{ id, name, providerId, model, temperature, maxTokens, note }] 模型条目（挂在某厂商下，「模型列表」区维护）
   # 回退模型：主模型失败时依次尝试。每条独立 baseURL/apiKey/protocol（可跨厂商）。
+  # 优先级：本数组先试；下面的锅巴扁平字段（fallbackModel*）追加在数组之后，二者可并存。
   # 多回退用数组（在此 yaml 配）：例：主 DeepSeek，回退 GPT
   #   fallbackModels:
   #     - model: "gpt-4o"
@@ -34,21 +35,21 @@ agent:
   fallbackBaseURL: ""      # 回退 baseURL（如 https://api.openai.com/v1）
   fallbackApiKey: ""       # 回退 apiKey
   fallbackProtocol: "openai"  # openai | anthropic
-  proxy: ""  # HTTP/SOCKS 代理（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）；国内服务器访问 GPT/Gemini 等海外 LLM 用，留空=直连
+  proxy: ""  # HTTP(S) 代理（如 http://127.0.0.1:7890）；国内服务器访问 GPT/Gemini 等海外 LLM 用，留空=直连。SOCKS 暂不支持（socks5:// 会被忽略并直连）
   reasoningFields: []
   maxTurns: 200  # 单次对话工具调用轮次预算上限（默认 200；配合下方 loop.* 智能终止，实际很少触顶）
   loop:                       # 循环智能终止（审计 §2.1）：独立于 maxTurns 硬上限，额外检测死循环/停滞/预算耗尽
     maxSameAction: 2          # 同工具+相同参数连续允许次数（超出 → duplicate_action 终止，防 ping 死循环）
     maxConsecutiveFailures: 3 # 连续工具失败次数上限（超出 → consecutive_failures 终止）
     noProgressWindow: 4       # 连续 N 步无新事实 → no_progress 终止
-    timeBudgetMs: 1800000      # 单次对话工作时间预算（毫秒，超出终止在途调用并进入收尾；30 分钟，给深度研究/子代理等待留量）
+    timeBudgetMs: 1800000      # 单次对话工作时间预算（毫秒，超出终止在途调用并进入收尾；30 分钟）。注意默认 < multiagent.workerTimeBudgetMs(60min)：长跑子代理会在根任务收尾后后台继续，结果回推
     tokenBudget: 480000       # 单次对话累计「有效工作 token」上限：未命中输入 + 缓存写 + 输出；缓存命中读按 0.1x 折算。
                              # （与真实成本对齐：长上下文整段被缓存时按全价计会几轮就误杀长任务）
                              # 语义：调模型前按「已用有效 token + 最近一轮有效增量」预检，不再启动注定超支的一轮；
                              # 收尾总结调用独立预留（不占本预算）。
     finalizeGraceMs: 45000   # 收尾宽限：预算/时间耗尽后，收尾总结调用可用的独立时间窗（只受用户取消约束）
   temperature: 0.2  # 工具调用稳定性（建议 0.1~0.3；勿设 0 避免复读式回复）
-  thinking:
+  thinking:                # 手动思考（provider 原生形状，留空=不手动开启）：如 { type: "enabled", budget_tokens: 16000 }；布尔/字符串会被原样下发导致协议错误
   thinkingAuto:            # 思考自动决策（opt-in）：按提问复杂度自动决定是否思考与深度；开启后覆盖上面的手动 thinking（模型级 thinking 覆盖仍优先）
                            # 能力自适应：能力表未明确表态的（新）型号默认乐观启用；厂商拒绝思考字段时自动剥离重试并记忆（之后自动转不支持，无需重启）
     enable: false          # 打开后 Agent 每轮判定：闲聊/简单问题不思考，复杂问题按深度思考
@@ -96,7 +97,7 @@ agent:
   # 配置后启用 token 高低水位压缩（超 contextHighRatio 压到 contextLowRatio、保留首条意图、cacheEpoch 分代），未配置按消息条数水位（30→18）压缩。
   # 请填模型**真实**窗口：填太小会频繁压缩（每次压缩都要重建前缀，命中率下降），填太大可能顶穿上游窗口。
                           # 缓存经济性：稳态 token 命中率 ≈ 1 − 2·d·H/(H²−K²)（d=每轮新增、H=高水位、K=压后目标），同一窗口下「压得深」比「勤压」命中率高得多；压缩无损（原文归档，context_recall 可恢复）
-  contextHighRatio: 0.65  # token 压缩高水位比例（占 contextWindow；0.3~0.95）。想提高缓存命中率可上调（如 0.8），代价是单次请求更长
+  contextHighRatio: 0.65  # token 压缩高水位比例（占 contextWindow；0.3~0.95；仅配置 contextWindow 后生效）。想提高缓存命中率可上调（如 0.8），代价是单次请求更长
   contextLowRatio: 0.45   # token 压缩压后目标比例（占 contextWindow；须小于高水位）。压得更深（如 0.15）能让「新增→再压」的周期更长，命中率更高（无损压缩，历史可用 context_recall 恢复）
   compaction:               # 无损上下文压缩（Hermes 四阶段可逆化）：被移出窗口的原文整块归档（sha256 校验），
     enable: true            # 窗口内留结构化台账 + context_recall 工具按 ref/关键词恢复；false 关闭归档与恢复工具（回滚杠杆）
@@ -113,11 +114,11 @@ agent:
   reflect: auto             # 自我反思/自纠：off=关 | auto=仅多轮/用工具时(默认) | always=每次最终回复都反思 | jev=由 Jev 判断是否需要反思
   finalizeMaxTokens: 2048   # 收尾（finalizer）输出 token 上限：异常停止后最后一次交付；太小会截断总结/子代理报告
   rootTokenBudget: 0        # F13 根任务 token 预算上限（0=不限）：主/编排/子代理/反思合计；嵌套工作开始前预留
-  render:                   # 卡片图渲染（帮助/列表/回复图）
-    card: true              # 帮助等卡片图开关；弱服务器可置 false 直接回文本，避免渲染卡死
+  render:                   # 卡片图渲染（帮助/聊天列表/人设列表；回复图由 reply.mode 控制）
+    card: true              # 帮助/列表卡片图开关；弱服务器可置 false 直接回文本，避免渲染卡死
     timeoutMs: 15000        # 单张卡片图渲染总超时（毫秒）：超时/失败降级文本，不让指令永久卡住
     replyTimeoutMs: 30000   # 回复图渲染总超时（毫秒）
-  cacheControl: false      # Anthropic 协议显式 prompt 缓存断点（tools/system/末消息；OpenAI 兼容端自动前缀缓存无需开）
+  cacheControl: "off"      # Anthropic 协议显式 prompt 缓存断点三态：off | auto（官方端点自动开）| explicit（强制）；OpenAI 兼容端自动前缀缓存无需开
   promptCacheKey: false    # OpenAI 官方 prompt_cache_key 稳定会话路由（仅 OpenAI 官方端点/支持该能力的模型下发，兼容网关绝不发）
   reflectMaxIterations: 1   # 反思回环修正最大次数（封顶防无限循环）
   progress: true            # 工具调用时推送节流进度消息（消除干等，默认开）
@@ -168,7 +169,7 @@ agent:
       retryBlocked: true    # 被反爬拦截（403/CF 挑战等）时自动用 undetected+stealth 强化再试一轮（最坏耗时翻倍）
       allowPrivateHosts: false  # 允许抓取本机/内网/元数据地址（防 SSRF，默认禁）；确需抓内网页面再开
       # proxy 复用 agent.proxy（浏览器路径与 fetch 一致；逐次生效）
-      sessionPersist: true  # 按站点持久化 cookie（含 cf_clearance 等清关凭证，12h 内复用）：抓取不再是「每次都是新访客」；
+      sessionPersist: true  # 按站点持久化 cookie（含 cf_clearance 等清关凭证，按下面 sessionTtlHours 复用，默认 12h）：抓取不再是「每次都是新访客」；
                             # 存于 data/crawl/sessions.json（0600，cookie 值不进日志，可在该目录删除）
       sessionTtlHours: 12   # 会话有效期（小时）：超期视为过期，避免拿早已失效的凭证反复重试
       sessionProfile: false # 是否另用持久浏览器 profile（user_data_dir，落 data/crawl/profile）。
@@ -209,7 +210,7 @@ agent:
   chatPermission: master
   masterSkipConfirm: false   # 主人发起的任务免确认直执行（高危！仅主人；denylist 仍拦）。开启后主人命令不再 #确认，但会发高危提示
   masters: []
-  confirmTimeout: 300
+  confirmTimeout: 300        # 审批超时（秒）；超时自动拒绝
   guardAction: flag
   guardSensitivity: medium
   untrustedGuard: true         # 间接注入防御：工具结果/网页/MCP/记忆/情境等外部内容命中注入特征时加 <untrusted_data> 边界标注（默认开）
@@ -221,14 +222,14 @@ agent:
     enable: true             # 生产环境默认开：记录 AI 全链路(缩进 JSON 人工可读)，方便 #上报错误 排查
     dir: ""                  # 日志目录(留空=默认 <插件>/data/logs)
   policy:
-    categoryMin:
+    categoryMin:            # 覆盖内置类别最低角色，如 { message: 1, mcp_write: 2 }；留空=用内置阶梯（query:0/personal:0/message:1/group_manage:2/system:3）
   media:
     enable: true
     active: true
     passive: true
     maxImages: 4
     maxFileBytes: 8388608
-    degrade: note
+    degrade: note             # 非视觉模型降级：skip（丢弃）| note（占位说明，默认）| text（文本类提取；其它值按 note 处理）
     capsFromApi: true           # 从厂商 /models 拉取模态元数据判定模型能力（OpenRouter 等暴露模态的厂商；MiMo 无此数据→回退内置表）
     caps:                       # 能力覆盖（可选）：vision/file/audio/video/tools/thinking 等；留空按协议+模型名自动判定。
                                 # 原生音频块(OpenAI input_audio/Gemini audio)需 audio:true；视频识别需 video:true（mimo v2.5/v2.6 已内置）
@@ -249,23 +250,11 @@ agent:
     builtin: true
     dir: "tools"
   toolDiscovery:
-    enable: true              # 工具按需发现（默认开）：LLM 只常驻少数核心工具，其余经 tool_search 检索后动态注入。关则回退全量常驻
+    enable: true              # 工具按需发现（默认开）：控制 system 工具速查与 tool_search/activeTools 记录；注意 stableList=true 时 tools schema 仍全量下发（见下）
     method: llm               # 工具选择方法：llm=主 LLM 经 tool_search 自主发现（默认）/ jev=由 Jev 从全量工具目录选择（需开启 Jev）
-    alwaysOn:                 # 常驻核心工具（不经过搜索，始终在下发 tools 数组）；留空用内置默认
-      - tool_search
-      - clarify
-      - memory_search
-      - web_search
-      - skill
-      - get_chat_history
-      - diagram_render
-      - spawn_subagent
-      - check_subagent
-      - extend_subagent
-      - get_group_file
-      - list_group_files
+    alwaysOn: []              # 常驻核心工具（不经过搜索，写入 system 工具速查）；空数组/留空=用内置默认（model/agent/Agent.js DEFAULT_ALWAYS_ON，含 context_recall/schedule_task/kb_search/reminder_set 等 13 项）
     topK: 8                   # tool_search 默认返回数
-    minScore: 0.3             # 最低相似度（query 覆盖率/cosine；0.3=至少 30% 命中，平衡召回与精度）
+    minScore: 0.3             # 最低相似度（query 覆盖率/cosine；0.3=至少 30% 命中，平衡召回与精度）。注意 stableList=true 时工具 schema 仍全量下发，tool_search 只影响目录/记录
     stableList: true          # ★工具数组跨轮恒定（缓存关键，默认开）：实测 tools 数组哪怕只追加一个工具，整段 prompt 前缀缓存立即归零（命中率 97.6%→0%）。开=每轮下发全量工具定义（首轮多付约 1 万 token，之后全部命中）；false=旧的追加式增长
   miyoushe:
     cookie: ""
@@ -280,7 +269,7 @@ agent:
     workflowCacheTtl: 300     # 工作流发现/转换缓存秒数（刚在 ComfyUI 里保存新工作流可让工具带 refresh 刷新）
     confirm: true             # 生成需主人审批（#确认/#拒绝）；false=免审批直接生成（每次生成消耗 GPU，谨慎关闭）
     command:                  # 指令画图（#画图列表 / #画图1 关键字；免 LLM 的快捷入口）
-      enable: true            # 关=不响应 #画图 指令（交给其它插件/LLM）
+      enable: true            # 关=不响应 #画图 指令（交给其它插件/LLM）；仅在 comfyui.enable=true 时有效
       masterOnly: false       # true=仅主人可用
       cooldown: 30            # 同用户两次画图最小间隔（秒；0=不限，防连点刷 GPU）
     timeout: 300              # 单次生成最长等待秒（视频工作流自动放宽到 900）
@@ -378,7 +367,7 @@ agent:
     model: "whisper-1"     # 模型名
     language: ""            # 语言提示（如 zh/en，留空自动检测）
   tts:                     # 语音合成（tts_speak 工具）：GPT-SoVITS（本地）/ IndexTTS 2.5（本地）/ 豆包 / MiniMax / MiMo
-    enable: false          # 总开关（默认关，opt-in）：开=注册 tts_speak 并允许自动语音；关=完全静默（不注册、不合成）
+    enable: false          # 总开关（默认关，opt-in）：开=注册 tts_speak 并允许自动语音；关=完全静默（不注册、不合成）。仅 enable=true 时下面的 autoReply 才生效
     provider: indextts     # 当前服务商：sovits | indextts | doubao | minimax | mimo（云服务商仅在选中且配置齐全时才出网）
     autoReply: true        # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
     replyMaxChars: 300     # 自动语音的最大字符数（超长按句截断，防合成出几分钟语音；0=不限）
@@ -407,7 +396,7 @@ agent:
       segmentGapMs: 300    # max 档段间静音（毫秒）
       maxSegmentChars: 140 # max 档单段字符上限（防拆得过碎）
       model: ""            # 情绪判定用模型（模型条目 id/模型名；留空=tts.judgeModel→utilityModel→主模型）
-      judgeTimeoutMs: 300000 # 情绪判定单次调用总预算（毫秒，默认 5 分钟；超时中止请求并回退默认向量；快失败会在预算内重试一次，慢超时不重试）
+      judgeTimeoutMs: 300000 # 情绪判定单次调用总预算（毫秒；历史 IndexTTS 专用键；全局 tts.judgeTimeoutMs 优先生效）
       durationFactor: 1.0  # 语速/时长系数 0.5~2.0（越小越快）
       maxTextTokensPerSegment: 100  # 服务端内部分段上限（建议 80~120）
     # ── 云服务商：仅在 provider 选中 + 本服务配置齐全时才会把讲稿发到对应平台 ──
@@ -466,9 +455,10 @@ agent:
     judgeModel: ""         # 情绪判定模型（对 IndexTTS/豆包/MiniMax/MiMo 统一生效；留空=indextts.model→utilityModel→主模型）
     judgeTimeoutMs: 300000 # 情绪判定总预算（毫秒，默认 5 分钟，统一生效）
   sandbox:                # E2B Firecracker 沙箱：terminal 工具的唯一执行面 + toolEvo 的隔离面
-    # 命令在独立 microVM 内执行，宿主**不再有任何 shell 执行面**（旧 agent.terminal 已废弃，可直接删除）。
-    # 仅 terminal 主人可用（验证码认领：#agents设置主人 → 控制台打印验证码 → 直接把码发到会话）；
-    # 沙箱化后不再有 #确认 审批与命令黑名单。
+    # terminal 工具的唯一执行面 / toolEvo 的隔离面：命令在独立 microVM 内执行，宿主**不再有任何 shell 执行面**
+    # （旧 agent.terminal 已废弃，可直接删除）。注意：沙箱化后 terminal 为**全员可用**（category=query，
+    # 按会话隔离沙箱，成本由单会话命令数/并发/超时兜底），不再有「仅主人」「#确认」审批与命令黑名单；
+    # 网络出口默认放通，可用 sandbox.network.allowInternet:false 或 allowOut 白名单收紧。
     # mode: off 时 terminal 工具不注册（toolEvo 退回本地 fork 档）；连不上 E2B 一律拒绝执行，绝不回退本地。
     mode: off            # off | e2b
     apiKey: ""           # E2B 云或自托管团队 key（★敏感：已接入 redactSecrets 脱敏）
@@ -499,12 +489,12 @@ agent:
     toolEvoVerifyTimeoutMs: 5000  # toolEvo 候选行为验证：单用例超时（沙箱模式）
   stagehand:
     # Stagehand 浏览器自动化（act/extract/observe 自然语言原语，LLM 把指令映射到页面元素）。
-    # permission=all：全部成员可用 goto/observe/extract，act 写动作仍需主人 #确认；=master：仅主人。
+    # permission=master：仅主人（默认）；=all：全部成员可用 goto/observe/extract，act 写动作仍需主人 #确认。
     # 安全：goto 强制拒绝内网/环回/元数据地址（防 SSRF），并按会员限流；本地浏览器跑在宿主进程，非沙箱。
     # 会话按「机器人+群/私聊+真实操作者+对话」隔离 + idle 自动关 + 全局会话上限；同会话操作串行。
     # 依赖 @browserbasehq/stagehand + zod-stagehand（云崽根 pnpm install 随 workspace 装入插件）；本地模式另需 chromium+系统库。
     enable: false
-    permission: all        # all（全部成员）| master（仅主人）
+    permission: master     # master（仅主人，默认）| all（全部成员）；浏览器跑在宿主，默认收紧
     mode: local            # local（本地 Playwright+chromium，默认）| cloud（Browserbase 云浏览器）
     headless: true         # 本地模式是否无头
     stealth: true          # 真机化：随机设备指纹(UA/视口/语言/触屏)+去自动化 flag+规避脚本，降低被风控拦截概率
@@ -636,7 +626,7 @@ agent:
       humor: 0.4
       answerUnknownQuestions: false
       interruptHumanConversation: false
-      maxRepliesPer10Minutes: 4
+      maxRepliesPer10Minutes: 4   # 兼容旧键（实际生效值取上层 humanize.maxRepliesPer10Minutes）
     safety:
       privateMemoryInGroup: false  # 隐私红线（强制 false，不可改）
       maxConcurrentGroups: 1       # 同时 Planning 的群数上限
@@ -703,6 +693,7 @@ agent:
   selfState:
     enabled: false              # 总开关（关=整层 no-op）
     shadowMode: true            # 计算入库但不影响发言（观察期）；false 才注入 Planner/Replyer
+    groups: []                  # 可选：定时反思/维护的群号白名单；留空=复用 groupWorld.groups → humanize.groups
 
     scope:
       isolateByGroup: true      # 群级隔离（唯一模式）
