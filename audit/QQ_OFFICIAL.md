@@ -101,10 +101,11 @@ TRSS-Yunzai 通过独立的适配器插件接入 QQ 官方机器人（`Yunzai-QQ
 
 TRSS 官方适配器（`Yunzai-QQBot-Plugin` + `qq-group-bot` SDK）的连接串是
 `机器人QQ号:AppID:Token:AppSecret` 四段。其中 **Token（`Bot {appid}.{token}`）是 QQ 频道 v1 时代的鉴权遗留**；
-现行开放平台鉴权只需 **AppID + AppSecret** 换 `access_token`：
+官方文档（`开发文档 → 起步指南 → 接入票据`）明确写 **「Token(已弃用)：可用于调用开放接口的鉴权。Token 的鉴权方式已废弃，请使用更安全的 Access Token 鉴权方式」**，
+现行方案只需 **AppID + AppSecret** 换 `access_token`（2026 文档统一地址 `api.bot.qq.com`，旧域名自动回退）：
 
 ```
-POST https://bots.qq.com/app/getAppAccessToken
+POST https://api.bot.qq.com/app/getAppAccessToken
 Body: { "appId": "...", "clientSecret": "..." }
 Resp: { "access_token": "...", "expires_in": 7200 }
 ```

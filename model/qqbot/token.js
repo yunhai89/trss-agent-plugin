@@ -11,8 +11,16 @@
  * 失败重试由调用方（gateway 重连）兜底。纯依赖注入，可离线测试。
  */
 
-/** 官方 token 端点（可用 tokenUrl 覆盖，如自建代理） */
-export const TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken'
+/**
+ * 官方 token 端点。2026 官方文档（api-call-guide）已迁到 api.bot.qq.com；
+ * 旧文档/SDK 仍用 bots.qq.com，两者都用同一接口 → 主用新域名，失败自动回退旧域名。
+ */
+export const TOKEN_URLS = [
+  'https://api.bot.qq.com/app/getAppAccessToken',
+  'https://bots.qq.com/app/getAppAccessToken',
+]
+/** 主端点（兼容旧引用/测试） */
+export const TOKEN_URL = TOKEN_URLS[0]
 const DEFAULT_TIMEOUT_MS = 10_000
 const DEFAULT_REFRESH_AHEAD_MS = 5 * 60 * 1000
 
@@ -27,8 +35,11 @@ const DEFAULT_REFRESH_AHEAD_MS = 5 * 60 * 1000
 
 export class TokenManager {
   /** @param {TokenManagerOptions} [opts] */
-  constructor({ tokenUrl = TOKEN_URL, fetchImpl = null, logger = () => {}, timeoutMs = DEFAULT_TIMEOUT_MS, refreshAheadMs = DEFAULT_REFRESH_AHEAD_MS } = {}) {
-    this.tokenUrl = tokenUrl
+  constructor({ tokenUrl = '', tokenUrls = TOKEN_URLS, fetchImpl = null, logger = () => {}, timeoutMs = DEFAULT_TIMEOUT_MS, refreshAheadMs = DEFAULT_REFRESH_AHEAD_MS } = {}) {
+    // tokenUrl 显式指定时只用它；否则按 tokenUrls 依次回退（新域名优先）
+    this.tokenUrls = tokenUrl ? [tokenUrl] : (Array.isArray(tokenUrls) && tokenUrls.length ? tokenUrls : TOKEN_URLS)
+    this._goodUrl = ''
+    this.tokenUrl = this.tokenUrls[0]
     this.fetchImpl = fetchImpl
     this.logger = logger
     this.timeoutMs = timeoutMs
@@ -72,7 +83,20 @@ export class TokenManager {
   }
 
   async _request(appId, clientSecret) {
-    const url = this.tokenUrl
+    const urls = this._goodUrl ? [this._goodUrl, ...this.tokenUrls.filter((u) => u !== this._goodUrl)] : [...this.tokenUrls]
+    let lastErr = null
+    for (const url of urls) {
+      try {
+        return await this._requestAt(url, appId, clientSecret)
+      } catch (e) {
+        lastErr = e
+        this.logger('debug', '[qqbot:token] 端点失败，尝试下一个', url, e?.message || e)
+      }
+    }
+    throw lastErr || new Error('获取 access_token 失败：无可用端点')
+  }
+
+  async _requestAt(url, appId, clientSecret) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
     let res
@@ -107,6 +131,7 @@ export class TokenManager {
       throw new Error(`获取 access_token 失败：${code ? `[${code}] ` : ''}${msg || '响应缺少 access_token'}`)
     }
     const ttl = Number(data.expires_in) > 0 ? Number(data.expires_in) * 1000 : 7200 * 1000
+    this._goodUrl = url
     this.cache.set(appId, { token: data.access_token, expiresAt: Date.now() + ttl })
     this.logger('debug', '[qqbot:token] ok', `appId=${appId}`, `ttl=${Math.round(ttl / 1000)}s`)
     return data.access_token

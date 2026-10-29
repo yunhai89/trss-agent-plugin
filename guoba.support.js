@@ -627,8 +627,8 @@ export function supportGuoba() {
         { field: 'agent.qqBot.sandbox', label: '沙箱环境', bottomHelpMessage: '连开放平台沙箱（api 域名 sandbox.）', component: 'Switch' },
         { field: 'agent.qqBot.intents', label: '事件订阅位图(intents)', bottomHelpMessage: '0=默认（群@消息 + C2C + 按钮交互；频道需显式配置 1073741825）；一般不用改', component: 'InputNumber', componentProps: { min: 0 } },
         { field: 'agent.qqBot.accounts', label: '多账号(JSON)', bottomHelpMessage: '数组：[{name,appId,appSecret,sandbox,intents,markdown}]；与上面扁平字段二选一（留空用扁平）', component: 'InputTextArea', componentProps: { autosize: { minRows: 2, maxRows: 8 }, placeholder: '[]' } },
-        { field: 'agent.qqBot.apiBase', label: 'OpenAPI 基址(可选)', bottomHelpMessage: '默认 https://api.sgroup.qq.com；自建代理时填', component: 'Input', componentProps: { placeholder: '留空=官方' } },
-        { field: 'agent.qqBot.tokenUrl', label: 'token 端点(可选)', bottomHelpMessage: '默认 https://bots.qq.com/app/getAppAccessToken', component: 'Input', componentProps: { placeholder: '留空=官方' } },
+        { field: 'agent.qqBot.apiBase', label: 'OpenAPI 基址(可选)', bottomHelpMessage: '默认 https://api.bot.qq.com（失败自动回退 api.sgroup.qq.com）；自建代理时填', component: 'Input', componentProps: { placeholder: '留空=官方' } },
+        { field: 'agent.qqBot.tokenUrl', label: 'token 端点(可选)', bottomHelpMessage: '默认 https://api.bot.qq.com/app/getAppAccessToken（失败自动回退 bots.qq.com）', component: 'Input', componentProps: { placeholder: '留空=官方' } },
 
         { field: 'agent.qqOfficial.markdown.enable', label: 'Markdown 直发', bottomHelpMessage: '仅 QQ 官方机器人适配器生效：回复用原生 Markdown 消息（不再渲染成图片）；平台拒绝时自动降级纯文本。OneBot/ICQQ 不受影响', component: 'Switch' },
         { field: 'agent.qqOfficial.markdown.maxChars', label: 'Markdown 单条上限(字符)', bottomHelpMessage: '超出按行分片发送（官方上限约 4000，默认 3500）', component: 'InputNumber', componentProps: { min: 500, max: 4000, step: 100 } },

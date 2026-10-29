@@ -130,7 +130,8 @@
 
 TRSS 官方 QQBot 适配器（[Yunzai-QQBot-Plugin](https://github.com/TimeRainStarSky/Yunzai-QQBot-Plugin)）的连接串是
 「机器人 QQ 号 : AppID : Token : AppSecret」四段——其中 **Token 是 QQ 频道 v1 时代的遗留鉴权**。
-现行开放平台只需要 **AppID + AppSecret** 换取 access_token（`POST bots.qq.com/app/getAppAccessToken`），
+官方文档已明确标注 **「Token（已弃用）」**：现行开放平台只需 **AppID + AppSecret** 换取 access_token
+（`POST https://api.bot.qq.com/app/getAppAccessToken`，旧域名 `bots.qq.com` 仍可用，插件会自动回退），
 因此本插件内置了一套完整适配器（网关 WebSocket + v2 REST），**填两段密钥即可连**，不依赖第三方适配器插件：
 
 ```yaml
@@ -460,6 +461,7 @@ agent:
 | `qqBot.preferMarkdownText` | `false` | 纯文本回复也走 Markdown 消息 |
 | `qqBot.sandbox` | `false` | 连开放平台沙箱环境 |
 | `qqBot.intents` | `0` | 事件订阅位图（0=默认：群@ + C2C + 按钮交互（频道需配置 1073741825）） |
+| `qqBot.apiBase` / `qqBot.tokenUrl` | 空 | 覆盖 OpenAPI 基址/token 端点（默认 `api.bot.qq.com`，失败自动回退 `api.sgroup.qq.com` / `bots.qq.com`） |
 | `thinking` | 空 | 思考模式（手动），provider 原生形状：`{ type: "enabled", budget_tokens: 16000 }`（`type` 可为 `enabled`/`disabled`，留空=不开启；`budget_tokens` 上限统一到 **128000**，各协议按同一 clamp）。锅巴面板用「开启深度思考 + 思考预算」两个控件读写同一字段 |
 | `thinkingAuto` | 关 | 思考自动决策：`{ enable, classifier, model, timeoutMs, maxBudget, budgets:{low,medium,high}, style }`。判档方式 `classifier`：`auto`=规则不确定时用小模型判（省调用）/`always`=总是小模型/`off`=纯规则/`jev`=由 Jev 判档（需开启 Jev）；小模型带超时、缓存，失败自动回退规则，不阻塞对话。档位→厂商原生字段（MiMo/Kimi/GLM/豆包→`thinking`、DeepSeek→`thinking`+`reasoning_effort`、Qwen→`enable_thinking`+`thinking_budget`、MiniMax→`adaptive`、Anthropic→`budget_tokens`、o/GPT-5→`reasoning_effort`、Gemini→`thinking_level`）。模型级 `thinking` 显式覆盖仍优先。**能力自适应**：能力表没明确表态的（新）型号默认乐观启用思考——厂商若拒绝思考字段，请求层自动剥离重试一次并记忆（之后自动判为不支持，`[chat]` 日志随之转 off，无需重启）；明确判为不支持的模型（如 gpt-4o）启动时有 `[thinking]` 警告，可设 `agent.media.caps.thinking=true` 强制 |
 | `memoryLimits` | 空 | 声明式记忆字符上限，如 `{ memory: 2200, user: 1375 }` |

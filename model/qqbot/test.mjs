@@ -12,8 +12,8 @@
  *
  * 运行：node model/qqbot/test.mjs
  */
-import { TokenManager, TOKEN_URL } from './token.js'
-import { QQBotApi, MSG_TYPE, FILE_TYPE, messagePath, mediaPath, explainError, MsgSeqAllocator, API_BASE } from './api.js'
+import { TokenManager, TOKEN_URL, TOKEN_URLS } from './token.js'
+import { QQBotApi, MSG_TYPE, FILE_TYPE, messagePath, mediaPath, explainError, MsgSeqAllocator, API_BASE, API_BASES } from './api.js'
 import { QQBotGateway, INTENTS, DEFAULT_INTENTS, OP, resolveWebSocket } from './gateway.js'
 import { normalizeEvent, normalizeAttachments, GATEWAY_EVENTS } from './events.js'
 import { buildKeyboard, buildMessageJobs, splitText, markdownPayload, resolveMediaSource } from './payload.js'
@@ -76,6 +76,17 @@ console.log('\n[1] token：AppID + AppSecret 换 access_token')
   try { await new TokenManager({ fetchImpl: async () => { throw new Error('ECONNRESET') } }).getAccessToken('x', 'y') } catch (e) { err = e }
   ok(err && /网络/.test(err.message), '网络错误归一人话')
   eq(new TokenManager().status('none').state, 'none', 'status：无缓存')
+
+  // 新域名失败 → 自动回退旧域名
+  const fallbackCalls = []
+  const fbFetch = async (url) => {
+    fallbackCalls.push(String(url))
+    if (String(url).includes('api.bot.qq.com')) return { ok: false, status: 502, headers: { get: () => null }, text: async () => 'bad gateway' }
+    return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ access_token: 'tok-fb', expires_in: 7200 }) }
+  }
+  const tmFb = new TokenManager({ fetchImpl: fbFetch })
+  eq(await tmFb.getAccessToken('A', 'S'), 'tok-fb', 'token 端点：新域名失败回退旧域名')
+  ok(fallbackCalls.some((u) => String(u).includes('bots.qq.com')), '确实请求了旧 token 端点')
 }
 
 console.log('\n[2] api：路径 / 消息体 / 错误映射')
@@ -89,7 +100,10 @@ console.log('\n[2] api：路径 / 消息体 / 错误映射')
   ok(/Markdown/.test(explainError('304036')), '304036 解释为 Markdown 权限')
   ok(/5 行/.test(explainError('40034029')), '键盘超限解释')
   ok(explainError('99999', 'boom').includes('boom'), '未知错误码保留原文')
-  eq(API_BASE, 'https://api.sgroup.qq.com', '默认 API 基址')
+  eq(API_BASE, 'https://api.bot.qq.com', '默认 API 基址（2026 官方文档统一地址）')
+  ok(API_BASES.includes('https://api.sgroup.qq.com'), '保留旧基址作为回退')
+  eq(TOKEN_URL, 'https://api.bot.qq.com/app/getAppAccessToken', '默认 token 端点（新域名）')
+  ok(TOKEN_URLS.includes('https://bots.qq.com/app/getAppAccessToken'), '保留旧 token 端点作为回退')
 
   const seq = new MsgSeqAllocator()
   eq([seq.next('m1'), seq.next('m1'), seq.next('m1')], [1, 2, 3], '同一 msg_id 的 msg_seq 递增')
@@ -140,6 +154,20 @@ console.log('\n[2] api：路径 / 消息体 / 错误映射')
   let e2 = null
   try { await errApi.sendMessage({ appId: 'A', appSecret: 'S' }, 'group', 'G1', { markdown: { content: 'x' } }) } catch (e) { e2 = e }
   ok(e2 && e2.code === 304036 && /Markdown/.test(e2.message), '错误对象带业务码与人话')
+
+  // API 基址回退：新域名网络错误 → 旧域名成功
+  const baseCalls = []
+  const tmOk = new TokenManager({ fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ access_token: 't', expires_in: 7200 }) }) })
+  const apiFb = new QQBotApi({
+    tokenManager: tmOk,
+    fetchImpl: async (url) => {
+      baseCalls.push(String(url))
+      if (String(url).includes('api.bot.qq.com')) throw new Error('fetch failed: ECONNRESET')
+      return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ url: 'wss://legacy' }) }
+    },
+  })
+  eq(await apiFb.getGatewayUrl({ appId: 'A', appSecret: 'S' }), 'wss://legacy', 'API 基址：新域名失败回退旧域名')
+  ok(baseCalls.some((u) => String(u).includes('api.sgroup.qq.com')), '确实回退到旧 API 基址')
 }
 
 console.log('\n[3] gateway：HELLO/IDENTIFY/心跳/READY/关闭码')

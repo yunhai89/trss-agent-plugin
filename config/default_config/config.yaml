@@ -137,8 +137,8 @@ agent:
     markdown: auto             # auto=先试 Markdown、无权限自动降级纯文本并记忆 | true=总是 | false=纯文本
     preferMarkdownText: false  # true=纯文本回复也走 Markdown 消息（平台支持时更美观）
     sandbox: false             # true=连沙箱环境（api 域名 sandbox.）
-    apiBase: ""                # 覆盖 OpenAPI 基址（默认 https://api.sgroup.qq.com，自建代理时填）
-    tokenUrl: ""               # 覆盖 access_token 端点（默认 https://bots.qq.com/app/getAppAccessToken）
+    apiBase: ""                # 覆盖 OpenAPI 基址（默认 https://api.bot.qq.com；网络/404 失败自动回退 api.sgroup.qq.com；自建代理时填）
+    tokenUrl: ""               # 覆盖 access_token 端点（默认 https://api.bot.qq.com/app/getAppAccessToken；失败自动回退 bots.qq.com）
 
   # ── QQ 官方机器人（QQBot / QQ 频道适配器）──
   # 官方协议与 OneBot 不同：消息 ID 是 openid（<self_id>:<openid> / qg_...）而不是 QQ 号/群号，

@@ -16,7 +16,16 @@
 
 import { TokenManager } from './token.js'
 
-export const API_BASE = 'https://api.sgroup.qq.com'
+/**
+ * OpenAPI 基址。2026 官方文档统一地址为 `https://api.bot.qq.com`；
+ * 旧版 SDK/文档仍用 `https://api.sgroup.qq.com` → 主用新域名，网络/404 级失败自动回退旧域名。
+ */
+export const API_BASES = [
+  'https://api.bot.qq.com',
+  'https://api.sgroup.qq.com',
+]
+/** 主基址（兼容旧引用/测试） */
+export const API_BASE = API_BASES[0]
 
 /** 消息类型（官方 msg_type） */
 export const MSG_TYPE = { TEXT: 0, MARKDOWN: 2, ARK: 3, EMBED: 4, MEDIA: 7 }
@@ -95,10 +104,14 @@ export class QQBotApi {
    * @param {number} [opts.timeoutMs]
    * @param {number} [opts.uploadTimeoutMs]
    */
-  constructor({ tokenManager, baseUrl = API_BASE, fetchImpl = null, logger = () => {}, timeoutMs = 30_000, uploadTimeoutMs = 120_000 } = {}) {
+  constructor({ tokenManager, baseUrl = '', baseUrls = API_BASES, fetchImpl = null, logger = () => {}, timeoutMs = 30_000, uploadTimeoutMs = 120_000 } = {}) {
     if (!tokenManager) throw new Error('QQBotApi 需要 tokenManager')
     this.tokenManager = tokenManager
-    this.baseUrl = String(baseUrl || API_BASE).replace(/\/+$/, '')
+    // baseUrl 显式指定时只用它；否则按 baseUrls 依次回退（新域名优先）
+    this.baseUrls = (baseUrl ? [String(baseUrl)] : (Array.isArray(baseUrls) && baseUrls.length ? baseUrls : API_BASES))
+      .map((u) => String(u).replace(/\/+$/, ''))
+    this._goodBase = ''
+    this.baseUrl = this.baseUrls[0]
     this.fetchImpl = fetchImpl
     this.logger = logger
     this.timeoutMs = timeoutMs
@@ -118,7 +131,26 @@ export class QQBotApi {
    */
   async request(creds, method, path, body = null, { timeoutMs = null, upload = false } = {}) {
     const token = await this.tokenManager.getAccessToken(creds.appId, creds.appSecret ?? creds.clientSecret)
-    const url = `${this.baseUrl}${path}`
+    const bases = this._goodBase ? [this._goodBase, ...this.baseUrls.filter((b) => b !== this._goodBase)] : [...this.baseUrls]
+    let lastErr = null
+    for (const base of bases) {
+      try {
+        const r = await this._requestAt(base, token, creds, method, path, body, { timeoutMs, upload })
+        this._goodBase = base
+        return r
+      } catch (e) {
+        lastErr = e
+        // 只对「网络级/网关级」失败换域名：业务错误（有 code）重试也没用
+        const retriable = !e?.code || e.code === 'BAD_JSON' || /HTTP 404|HTML|网络|超时/.test(String(e?.message || ''))
+        if (!retriable || base === bases[bases.length - 1]) break
+        this.logger('debug', '[qqbot:api] 基址失败，回退下一个', base, e?.message || e)
+      }
+    }
+    throw lastErr
+  }
+
+  async _requestAt(base, token, creds, method, path, body, { timeoutMs = null, upload = false } = {}) {
+    const url = `${base}${path}`
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs || (upload ? this.uploadTimeoutMs : this.timeoutMs))
     let res
