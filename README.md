@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.45.6-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.45.7-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -389,6 +389,11 @@ qqOfficial:
 
 官方机器人支持 inline keyboard。开启 `agent.qqOfficial.keyboard.enable`（默认开）后，模型可调用 `send_keyboard` 发「Markdown 正文 + 按钮」卡片。
 
+> **按钮权限（v1.45.7 修复）**：群里回调按钮默认「仅触发者可点」——`permission.type=0` 的
+> `specify_user_ids` 必须是**平台原始 openid**（框架侧 `e.user_id` 是 `<appId>:<openid>`，直接下发会让
+> 本人点自己的按钮也提示「无权限操作」；适配器已自动剥前缀）。**私聊（C2C/频道私信）** 客户端不支持
+> type:0 按钮（连点击事件都不产生），适配器会自动降级为 `type:2`（私聊仅对方一人，安全等价）。
+>
 > **回调事件与 intents**：要让「点击」真的变成一条用户消息，需要该机器人在开放平台开通「交互」能力，并把账号 `intents` 配成 `100663296`（群@+C2C+交互）；默认 `intents: 0`（=33554432，仅群@+C2C）下按钮可正常展示、但点击不会回调。填了未开通的位会被平台以 `4013 invalid intents` 拒绝连接——适配器会自动降级重连并在日志说明原因。
 
 - 最多 **5 行 × 每行 5 个**按钮；单轮最多 **3 张**卡片；
@@ -1743,6 +1748,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.45.7** | 修复按钮卡片「本人点自己的按钮提示无权限操作」：群聊 `specify_user_ids` 未剥 `<appId>:` 前缀（平台只认原始 openid）；私聊 C2C/频道私信客户端不支持 `type:0` 指定用户按钮 → 自动降级 `type:2`（私聊仅对方一人，安全等价） |
 | **v1.45.6** | QQBot 叶子级加固：被动回复严格按 5 分钟窗口（长任务不再用过期 msg_id 白发送失败）；Markdown 回复正确 @ 回复人（`<qqbot-at-user>`，此前被静默丢弃）；API 401 自动刷新 token 重试、start 阶段 token 5xx 退避重试；媒体 >10MB 跳过不读入内存；频道私信 ID/源频道修正；READY 迟到补挂载、断连中断连接等待、`_attachBot` 幂等；网络类 token 失败继续重连（此前一次抖动永久掉线）；回填 bot.fl/gl/gml 并对齐 login/logout 契约 |
 | **v1.45.5** | 修复官方机器人下指令文本翻倍：适配器预设了 `data.msg`，而 TRSS `dealEvent` 会把 `message` 里的 text 段再累加一次 → `e.msg` 变成「#设置主人#设置主人」，导致 `^#设置主人$` / `^#agents更新$` 这类精确匹配规则失效（`^#状态` 前缀规则却正常，表现为「有的指令能用有的不能」）。现已不预设 `msg`，交由框架从消息段构建 |
 | **v1.45.4** | 修复官方机器人下**云崽框架指令被 AI 抢占**（`@机器人 + #设置主人` 无反应）：新增「指令透传」——以 `#`/`＃`/`/` 等开头且不是本插件触发词的消息 `return false` 交给后续插件处理（`agent.commandPassThrough` 默认开，可关）；面板/锅巴/文档同步 |

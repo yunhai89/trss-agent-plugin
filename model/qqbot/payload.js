@@ -19,6 +19,19 @@ export const MAX_MARKDOWN_CHARS = 3800
 export const KEYBOARD_MAX_ROWS = 5
 export const KEYBOARD_MAX_PER_ROW = 5
 
+/**
+ * keyboard 权限里的用户 id 归一化：官方只认**平台原始 openid**，
+ * 而框架侧 e.user_id 是 `<appId>:<openid>`（频道是 `qg_<id>`）——
+ * 直接塞进去平台匹配不到点击者，表现就是「本人点自己的按钮也提示无权限操作」。
+ */
+function normalizeUserId(id, appId = '') {
+  let s = str(id).trim()
+  if (!s) return ''
+  if (appId && s.startsWith(`${appId}:`)) s = s.slice(appId.length + 1)
+  if (s.startsWith('qg_')) s = s.slice(3)
+  return /^[A-Za-z0-9_\-:]+$/.test(s) ? s : ''
+}
+
 let _idSeq = 0
 /** 按钮 id（官方要求消息内唯一；无需全局唯一，但重复会渲染异常） */
 export function buttonId() {
@@ -31,10 +44,14 @@ function str(v) { return v == null ? '' : String(v) }
 /**
  * 构造官方 inline keyboard。
  * @param {Array} rows 行数组：[[{ text, callback|link|input, send?, clicked_text?, permission?, public?, QQBot? }]]
- * @param {object} [opts] { ownerId } 回调按钮默认仅此人可点
+ * @param {object} [opts] { ownerId, appId, scene } 回调按钮默认仅此人可点；appId 用于剥框架侧前缀
+ *   scene=c2c/guild_dm 时强制 `{type:2}`：**私聊窗口不下发 type:0（指定用户）按钮**——
+ *   客户端会直接拦截点击（连 INTERACTION_CREATE 都不产生），表现就是「本人点自己的按钮提示无权限操作」。
+ *   私聊本来只有对方一人可点，安全等价。
  * @returns {object|null} 官方 keyboard 对象；无有效按钮返回 null
  */
-export function buildKeyboard(rows, { ownerId = '' } = {}) {
+export function buildKeyboard(rows, { ownerId = '', appId = '', scene = '' } = {}) {
+  const privateScene = scene === 'c2c' || scene === 'guild_dm'
   const input = Array.isArray(rows) ? rows : []
   const outRows = []
   for (const row of input) {
@@ -68,11 +85,15 @@ export function buildKeyboard(rows, { ownerId = '' } = {}) {
         }
       } else if (b.callback != null) {
         // 回调按钮：默认只允许触发者点击（防他人代点高危命令），public:true 才放开
-        const to = b.permission === 'admin'
+        const ids = (Array.isArray(b.permission) ? b.permission : (ownerId ? [ownerId] : []))
+          .map((x) => normalizeUserId(x, appId))
+          .filter(Boolean)
+          .slice(0, 10)
+        const to = (b.permission === 'admin' && !privateScene)
           ? { type: 1 }
-          : Array.isArray(b.permission) && b.permission.length
-            ? { type: 0, specify_user_ids: b.permission.map((x) => str(x)).slice(0, 10) }
-            : (b.public === true || !ownerId ? { type: 2 } : { type: 0, specify_user_ids: [str(ownerId)] })
+          : (privateScene || b.public === true || !ids.length)
+            ? { type: 2 }
+            : { type: 0, specify_user_ids: ids }
         btn.action = { type: 1, permission: to, data: str(b.callback).slice(0, 200), ...(b.QQBot?.action || {}) }
       } else {
         continue // 无动作按钮官方会报错，直接丢弃
@@ -178,7 +199,7 @@ export function markdownMentionTags(ats = [], appId = '') {
  * @param {boolean} [opts.stripAt] 文本模式是否丢弃 @ 段（官方文本消息不支持 at 段）
  * @returns {Array<object>} 发送任务列表
  */
-export function buildMessageJobs(msg, { msgId = '', preferMarkdown = false, ownerId = '', stripAt = true, templateId = '', appId = '' } = {}) {
+export function buildMessageJobs(msg, { msgId = '', preferMarkdown = false, ownerId = '', stripAt = true, templateId = '', appId = '', scene = '' } = {}) {
   const segs = Array.isArray(msg) ? msg : (msg && typeof msg === 'object' && msg.type ? [msg] : [{ type: 'text', text: str(msg) }])
   const texts = []
   const markdowns = []
@@ -233,7 +254,7 @@ export function buildMessageJobs(msg, { msgId = '', preferMarkdown = false, owne
 
   const jobs = []
   const passiveId = msgId || replyId || ''
-  const keyboard = keyboards.length ? buildKeyboard(keyboards, { ownerId }) : null
+  const keyboard = keyboards.length ? buildKeyboard(keyboards, { ownerId, appId, scene }) : null
   const mdText = markdowns
     .map((m) => (m.content != null ? m.content : ''))
     .filter(Boolean)

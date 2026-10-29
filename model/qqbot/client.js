@@ -207,6 +207,7 @@ export class QQBotClient {
       ownerId,
       templateId,
       appId: this.appId, // 用于把 at 段的 `<appId>:<openid>` 还原成平台原始 openid（Markdown mention）
+      scene, // 私聊场景键盘要强制 {type:2}（QQ 客户端不支持私聊的指定用户按钮）
       preferMarkdown: this.preferMarkdownText && this.markdownUsable,
     })
     if (!jobs.length) {

@@ -197,6 +197,8 @@ console.log('\n[6] send_keyboard 工具')
   ok(ctx.pendingCards.length === 0, 'flush 后清空队列')
   const firstMsg = sent[0].msg
   ok(Array.isArray(firstMsg) && firstMsg[0].type === 'markdown' && firstMsg.some((s) => s.type === 'button'), '投递内容是 markdown+按钮段')
+  const btnSeg = firstMsg.find((s) => s.type === 'button')
+  eq(btnSeg.data[0][0].permission, ['U'], '卡片回调按钮权限用平台原始 openid（剥 self_id 前缀）')
 
   const ctx2 = { e: eQQBot, pendingCards: [good.card] }
   const flushedOneBot = await flushPendingCards({ ctx: ctx2, send: async () => ({ ok: true }) })

@@ -11,7 +11,7 @@
  * 需要所有人可点时显式传 public: true。回调文本本身仍会走插件权限校验。
  */
 
-import { detectAdapter, buildMarkdownMessage, normalizeKeyboard, MARKDOWN_MAX_CHARS } from './index.js'
+import { detectAdapter, buildMarkdownMessage, normalizeKeyboard, rawUserId, MARKDOWN_MAX_CHARS } from './index.js'
 
 /** 卡片的硬上限（防单轮刷屏） */
 export const MAX_CARDS_PER_RUN = 3
@@ -143,7 +143,9 @@ export async function flushPendingCards({ ctx, send, logger = () => {} }) {
     try {
       const msg = buildMarkdownMessage(e, card.markdown, {
         keyboard: card.keyboard,
-        ownerId: e.user_id,
+        // 官方 keyboard.permission.specify_user_ids 只认平台原始 openid：
+        // 传框架侧的 `<appId>:<openid>` 会让「本人点自己的按钮」也提示无权限操作
+        ownerId: rawUserId(e),
         allowPublic: card.public === true,
       })
       if (!msg) { failed++; continue }

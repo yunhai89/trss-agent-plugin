@@ -144,7 +144,8 @@ console.log('\n[3] send_keyboard：卡片在最终回复后发送')
   ok(idxBtn > idxMd, '卡片在最终回复之后（顺序稳定）')
   const btnRow = flats[idxBtn].data[0]
   ok(Array.isArray(btnRow) && btnRow.length === 2, '按钮行含 2 个按钮')
-  ok(Array.isArray(btnRow[0].permission) && btnRow[0].permission[0] === `${SELF}:U_OPENID`, '回调按钮默认仅触发者可点')
+  // 回归（v1.45.7）：卡片权限必须用平台原始 openid（剥 self_id 前缀），否则本人点自己的按钮也会无权限
+  ok(Array.isArray(btnRow[0].permission) && btnRow[0].permission[0] === 'U_OPENID', '回调按钮默认仅触发者可点（原始 openid，无前缀）')
   ok(!btnRow[1].permission, '链接按钮不限人')
 }
 

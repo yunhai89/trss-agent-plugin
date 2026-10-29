@@ -332,3 +332,30 @@ case "text": e.msg = (e.msg || "") + this.dealText(i.text)
 **验证**：`model/qqbot/test.mjs` 168 断言（新增 401 刷新重试、start 重试/鉴权快失败、Markdown mention、
 媒体体积守卫、网关 token 失败分类、被动窗口）；`stress/e2e/qqbot-adapter.mjs` 68 断言（新增被动窗口/ID 去前缀、
 `_attachBot` 幂等、等待期断连快速返回、fl/gl/gml 回填、login/logout 生命周期）。
+
+
+---
+
+# 附：按钮卡片「触发者自己点击提示无权限操作」（v1.45.7）
+
+**现象**：模型通过 `send_keyboard` 发的卡片，**同一用户**点自己触发的按钮，QQ 客户端弹「无权限操作」；
+更换按钮权限配置也无济于事。
+
+**根因（两层）**：
+1. **群聊**：`keyboard.action.permission.specify_user_ids` 只认**平台原始 openid**；TRSS 侧 `e.user_id`
+   是 `<appId>:<openid>`，`qqofficial` 卡片路径与适配器都没剥前缀 → 平台匹配不到点击者，判定无权限。
+2. **私聊（C2C / 频道私信）**：QQ 客户端**不支持** `permission.type=0`（指定用户）按钮——点击连
+   `INTERACTION_CREATE` 都不产生（参考实现 dsh-qqbot 实测：私聊里 type:0 选项按钮点不动，
+   同一张卡上 type:2 的按钮却能点）。
+
+**修复**：
+- `model/qqbot/payload.js: buildKeyboard` 统一归一化权限用户 id：剥 `<appId>:` 与 `qg_` 前缀，
+  仅保留 `[A-Za-z0-9_-:]`；空结果回落 `type:2`。
+- `buildKeyboard`/`buildMessageJobs` 新增 `scene` 维度：`c2c`/`guild_dm` 强制 `type:2`
+  （私聊只有对方一人可点，安全等价）；`admin` 权限在私聊也降级为 `type:2`。
+- `model/qqofficial/tool.js: flushPendingCards` 的 `ownerId` 改用 `rawUserId(e)`（平台原始 openid），
+  与适配器归一化形成双保险。
+- 适配器 `client.send` 把 `scene` 传入消息构造。
+
+**验证**：`model/qqbot/test.mjs` 179 断言（新增：群聊 ownerId/permission 数组剥前缀、私聊强制 type:2、
+admin 降级、scene 透传）；`model/qqofficial/test.mjs` 86 断言（卡片 flush 权限用原始 openid）。

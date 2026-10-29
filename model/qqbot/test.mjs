@@ -453,6 +453,26 @@ console.log('\n[5] payload：段 → 官方消息体')
   eq(kbAdmin.content.rows[0].buttons[0].action.permission, { type: 1 }, 'permission=admin → 管理员权限')
   const kbBig = buildKeyboard(Array.from({ length: 8 }, (_, i) => Array.from({ length: 8 }, (_, j) => ({ text: `b${i}${j}`, callback: `c${i}${j}` }))))
   eq([kbBig.content.rows.length, kbBig.content.rows[0].buttons.length], [5, 5], '键盘裁剪到 5×5')
+  // 权限用户 id 必须归一成平台原始 openid（否则「本人点自己的按钮」也会被平台判无权限）
+  const kbPref = buildKeyboard([[{ text: '确认', callback: 'x' }]], { ownerId: 'APP:UO', appId: 'APP' })
+  eq(kbPref.content.rows[0].buttons[0].action.permission, { type: 0, specify_user_ids: ['UO'] }, 'ownerId 剥 <appId>: 前缀')
+  const kbQg = buildKeyboard([[{ text: '确认', callback: 'x' }]], { ownerId: 'qg_GU', appId: 'APP' })
+  eq(kbQg.content.rows[0].buttons[0].action.permission, { type: 0, specify_user_ids: ['GU'] }, '频道 qg_ 前缀也归一')
+  const kbPerm = buildKeyboard([[{ text: '确认', callback: 'x', permission: ['APP:U1', 'U2', '', '"bad"'] }]], { appId: 'APP' })
+  eq(kbPerm.content.rows[0].buttons[0].action.permission, { type: 0, specify_user_ids: ['U1', 'U2'] }, 'permission 数组逐项归一（脏值丢弃）')
+  // 私聊（C2C / 频道私信）：客户端不支持 type:0 指定用户按钮 → 强制所有人可点
+  const kbC2C = buildKeyboard([[{ text: '确认', callback: 'x' }]], { ownerId: 'APP:UO', appId: 'APP', scene: 'c2c' })
+  eq(kbC2C.content.rows[0].buttons[0].action.permission, { type: 2 }, 'c2c 场景强制 type:2（私聊点 type:0 会被客户端拦）')
+  const kbGuildDm = buildKeyboard([[{ text: '确认', callback: 'x' }]], { ownerId: 'APP:UO', appId: 'APP', scene: 'guild_dm' })
+  eq(kbGuildDm.content.rows[0].buttons[0].action.permission, { type: 2 }, '频道私信同样强制 type:2')
+  const kbGroupScene = buildKeyboard([[{ text: '确认', callback: 'x' }]], { ownerId: 'APP:UO', appId: 'APP', scene: 'group' })
+  eq(kbGroupScene.content.rows[0].buttons[0].action.permission, { type: 0, specify_user_ids: ['UO'] }, '群聊仍用 type:0 指定触发者')
+  const kbPermPrivate = buildKeyboard([[{ text: '确认', callback: 'x', permission: ['APP:UO'] }]], { appId: 'APP', scene: 'c2c' })
+  eq(kbPermPrivate.content.rows[0].buttons[0].action.permission, { type: 2 }, 'c2c 下显式 permission 也降级 type:2')
+  const kbAdminPrivate = buildKeyboard([[{ text: '管理', callback: 'x', permission: 'admin' }]], { appId: 'APP', scene: 'c2c' })
+  eq(kbAdminPrivate.content.rows[0].buttons[0].action.permission, { type: 2 }, 'c2c 下 admin 权限也降级 type:2（私聊无管理员）')
+  const kbNoOwner = buildKeyboard([[{ text: '公开', callback: 'x' }]], { ownerId: '', appId: 'APP' })
+  eq(kbNoOwner.content.rows[0].buttons[0].action.permission, { type: 2 }, '无 owner 时回落所有人可点')
   ok(!buildKeyboard([]), '空键盘返回 null')
   ok(!buildKeyboard([[{ text: '无动作' }]]), '无动作按钮被丢弃')
 
@@ -460,6 +480,16 @@ console.log('\n[5] payload：段 → 官方消息体')
   const jobs1 = buildMessageJobs('hello')
   eq(jobs1.length, 1, '字符串 → 一个文本任务')
   eq(jobs1[0].payload, { content: 'hello' }, '文本 payload')
+  const jobsKb = buildMessageJobs([
+    { type: 'text', text: 'hi' },
+    { type: 'button', data: [[{ text: 'A', callback: 'a', permission: ['APP:UO'] }]] },
+  ], { appId: 'APP' })
+  eq(jobsKb[0].payload.keyboard.content.rows[0].buttons[0].action.permission, { type: 0, specify_user_ids: ['UO'] }, 'buildMessageJobs 把 appId 传进键盘权限归一')
+  const jobsKbC2C = buildMessageJobs([
+    { type: 'text', text: 'hi' },
+    { type: 'button', data: [[{ text: 'A', callback: 'a', permission: ['APP:UO'] }]] },
+  ], { appId: 'APP', scene: 'c2c' })
+  eq(jobsKbC2C[0].payload.keyboard.content.rows[0].buttons[0].action.permission, { type: 2 }, 'buildMessageJobs 把 scene 传进键盘构造')
 
   // markdown + 键盘 + 引用
   const jobs2 = buildMessageJobs([
