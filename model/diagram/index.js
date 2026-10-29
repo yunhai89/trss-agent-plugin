@@ -75,6 +75,11 @@ export class DiagramService {
       ...cfg,
       kroki: krokiCfg,
     }
+    // D8：yaml/锅巴的键是 `agent.diagram.enable`，旧代码只读 `enabled` → 关不掉。
+    // 归一：`enable` 显式优先，其次旧键 `enabled`，都缺省 → true（保持默认启用）。
+    const enabled = cfg.enable ?? cfg.enabled ?? true
+    this.cfg.enable = enabled
+    this.cfg.enabled = enabled
     this.logger = logger
     this.devLog = devLog
     const emit = (e) => this.#emit(e)

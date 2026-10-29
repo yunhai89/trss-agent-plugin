@@ -129,6 +129,35 @@ await test('Memory：合法空结果推进整合水位，避免同批消息反�
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+await test('Memory D18：memory.model 用归一后的真实模型名（跨厂商条目 id 不下发）；缺省沿用旧行为', async () => {
+  const dir1 = path.join(os.tmpdir(), `humanize-model-a-${process.pid}`)
+  const dir2 = path.join(os.tmpdir(), `humanize-model-b-${process.pid}`)
+  fs.rmSync(dir1, { recursive: true, force: true })
+  fs.rmSync(dir2, { recursive: true, force: true })
+  const seen = []
+  const mkProvider = () => ({ chat: async (opts) => { seen.push(opts.model); return { content: '{"memories":[],"suspected_jargon":[]}' } } })
+  const msgs = [
+    { seq: 1, timestamp: Date.now() - 2000, text: '第一条', isSelf: false },
+    { seq: 2, timestamp: Date.now(), text: '第二条', isSelf: false },
+  ]
+  // ① apps 经 modelRouter 解析出真实模型名 → 传入 model，优先于 cfg().memory.model（条目 id）
+  const normalized = new HumanizeMemoryStore({
+    dataDir: dir1, provider: mkProvider(), model: 'qwen3-max-real',
+    cfg: () => ({ memory: { enabled: true, minConsolidateMessages: 2, model: 'mabc123' } }),
+  })
+  await normalized.consolidate({ groupId: 'g-model', messages: msgs })
+  ok(seen[0] === 'qwen3-max-real', `下发归一模型名（实际 ${seen[0]}）`)
+  fs.rmSync(dir1, { recursive: true, force: true })
+  // ② 未传归一模型名（旧行为）→ 回落 cfg().memory.model 裸名
+  const legacy = new HumanizeMemoryStore({
+    dataDir: dir2, provider: mkProvider(),
+    cfg: () => ({ memory: { enabled: true, minConsolidateMessages: 2, model: 'bare-model' } }),
+  })
+  await legacy.consolidate({ groupId: 'g-model2', messages: msgs })
+  ok(seen[1] === 'bare-model', `缺省回落 cfg 裸模型名（实际 ${seen[1]}）`)
+  fs.rmSync(dir2, { recursive: true, force: true })
+})
+
 await test('Planner：只读工具回灌后继续，最终 reply', async () => {
   const { runtime } = mkCtx()
   let memCalled = false

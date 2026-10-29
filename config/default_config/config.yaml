@@ -1,4 +1,4 @@
-debug: false  # 调试日志：true=强制开启全链路 devLog（等价 agent.devLog.enable=true，记录工具入参/每轮 token/搜索词）
+debug: false  # 调试日志：true=强制开启全链路 devLog（等价 agent.devLog.enable=true，记录工具入参/每轮 token/搜索词）；Web 配置中心「基础设置」也可改
 
 agent:
   trigger: at
@@ -21,20 +21,11 @@ agent:
   # ── 厂商/模型注册表（web 配置中心 → 厂商配置 / 模型列表 两区维护；运行时经上面 providerId/modelId 引用）──
   llmProviders: []  # [{ id, name, protocol, preset, baseURL, apiKey }] LLM 服务商端点（「厂商配置」区维护）
   llmModels: []     # [{ id, name, providerId, model, temperature, maxTokens, note }] 模型条目（挂在某厂商下，「模型列表」区维护）
-  # 回退模型：主模型失败时依次尝试。每条独立 baseURL/apiKey/protocol（可跨厂商）。
-  # 优先级：本数组先试；下面的锅巴扁平字段（fallbackModel*）追加在数组之后，二者可并存。
-  # 多回退用数组（在此 yaml 配）：例：主 DeepSeek，回退 GPT
-  #   fallbackModels:
-  #     - model: "gpt-4o"
-  #       baseURL: "https://api.openai.com/v1"
-  #       apiKey: "sk-gpt-xxx"
-  #       protocol: "openai"
+  # 回退模型：主模型失败时依次尝试。**唯一真源**=本数组，每条独立 baseURL/apiKey/protocol（可跨厂商）。
+  # 旧版扁平字段（fallbackModel/fallbackBaseURL/fallbackApiKey/fallbackProtocol）已废弃：
+  # 启动时自动迁移进本数组并删除扁平键；面板（Web/锅巴）都只编辑数组。
+  # 例：主 DeepSeek，回退 GPT → [{ model: "gpt-4o", baseURL: "https://api.openai.com/v1", apiKey: "sk-gpt-xxx", protocol: "openai" }]
   fallbackModels: []
-  # 锅巴面板单回退（扁平字段，方便表单填写；多回退用上面 fallbackModels 数组）
-  fallbackModel: ""        # 回退模型 id（如 gpt-4o）
-  fallbackBaseURL: ""      # 回退 baseURL（如 https://api.openai.com/v1）
-  fallbackApiKey: ""       # 回退 apiKey
-  fallbackProtocol: "openai"  # openai | anthropic
   proxy: ""  # HTTP(S) 代理（如 http://127.0.0.1:7890）；国内服务器访问 GPT/Gemini 等海外 LLM 用，留空=直连。SOCKS 暂不支持（socks5:// 会被忽略并直连）
   reasoningFields: []
   maxTurns: 200  # 单次对话工具调用轮次预算上限（默认 200；配合下方 loop.* 智能终止，实际很少触顶）
@@ -42,7 +33,7 @@ agent:
     maxSameAction: 2          # 同工具+相同参数连续允许次数（超出 → duplicate_action 终止，防 ping 死循环）
     maxConsecutiveFailures: 3 # 连续工具失败次数上限（超出 → consecutive_failures 终止）
     noProgressWindow: 4       # 连续 N 步无新事实 → no_progress 终止
-    timeBudgetMs: 1800000      # 单次对话工作时间预算（毫秒，超出终止在途调用并进入收尾；30 分钟）。注意默认 < multiagent.workerTimeBudgetMs(60min)：长跑子代理会在根任务收尾后后台继续，结果回推
+    timeBudgetMs: 3600000      # 单次对话工作时间预算（毫秒，超出终止在途调用并进入收尾；60 分钟，与 multiagent.workerTimeBudgetMs 对齐）
     tokenBudget: 480000       # 单次对话累计「有效工作 token」上限：未命中输入 + 缓存写 + 输出；缓存命中读按 0.1x 折算。
                              # （与真实成本对齐：长上下文整段被缓存时按全价计会几轮就误杀长任务）
                              # 语义：调模型前按「已用有效 token + 最近一轮有效增量」预检，不再启动注定超支的一轮；
@@ -97,6 +88,8 @@ agent:
   # 配置后启用 token 高低水位压缩（超 contextHighRatio 压到 contextLowRatio、保留首条意图、cacheEpoch 分代），未配置按消息条数水位（30→18）压缩。
   # 请填模型**真实**窗口：填太小会频繁压缩（每次压缩都要重建前缀，命中率下降），填太大可能顶穿上游窗口。
                           # 缓存经济性：稳态 token 命中率 ≈ 1 − 2·d·H/(H²−K²)（d=每轮新增、H=高水位、K=压后目标），同一窗口下「压得深」比「勤压」命中率高得多；压缩无损（原文归档，context_recall 可恢复）
+  contextMsgHighWater: 30    # 未配置 contextWindow 时的消息条数高水位（达到即压缩）
+  contextMsgLowWater: 18     # 消息条数低水位（压缩后保留条数）
   contextHighRatio: 0.65  # token 压缩高水位比例（占 contextWindow；0.3~0.95；仅配置 contextWindow 后生效）。想提高缓存命中率可上调（如 0.8），代价是单次请求更长
   contextLowRatio: 0.45   # token 压缩压后目标比例（占 contextWindow；须小于高水位）。压得更深（如 0.15）能让「新增→再压」的周期更长，命中率更高（无损压缩，历史可用 context_recall 恢复）
   compaction:               # 无损上下文压缩（Hermes 四阶段可逆化）：被移出窗口的原文整块归档（sha256 校验），
@@ -185,7 +178,7 @@ agent:
     topK: 5                 # kb_search 默认返回片段数
     minScore: 0.3           # 最低相似度（cosine；低于不返回）；embedding 复用上面的 recall.embedProvider
   schedule:
-    taskEnabled: true       # 定时任务链总开关（#定时任务 cron 重复 task；false 则拒绝创建）
+    taskEnabled: true       # 定时任务链总开关（#定时任务 cron 重复 task；false 则拒绝创建）。注意：提醒按用户归属，定时任务链按会话（群级）归属
     taskMaxTurns: 200        # 任务链工具调用轮次上限（防失控烧 token；200=给足步数，靠 loop.* 智能终止兜底）
   selfReview:
     enable: true            # 在线自进化：每 N 轮对话后台异步自我评审，产出改进 suggestion（不阻塞回复）
@@ -193,7 +186,7 @@ agent:
     model: ""               # 评审用模型 id（留空=utilityModel→主模型；建议用廉价小模型降本；可跨厂商）
     autoApplyMemory: true   # 记忆类 suggestion 自动应用（有 prev[] 回滚 + 威胁扫描 + 置信度闸兜底）
     autoApplyPrompt: false  # prompt/技能类落盘待审（#审阅进化 人工把关；强烈建议保持 false）
-    dailyBudgetTokens: 200000  # 自评审日 token 预算（耗尽则只采迹不评审，防成本失控）
+    dailyBudgetTokens: 200000  # 自评审日 token 预算（耗尽则只采迹不评审）；0=关闭后台自评审
   evolution:
     traceDir: "data/evolution/traces"           # 对话轨迹存储（供离线 GEPA + 在线自评审消费）
     promptDir: "data/evolution/prompts"         # 进化产出的 prompt 覆盖（加载时覆盖内置 TEMPLATES）
@@ -218,13 +211,17 @@ agent:
   persona:                     # 人设配置（全局默认人选 + 落盘注入检测）
     defaultId: ""              # 全局默认人设 id（未单独 #人设 切换的用户生效；留空=用 systemPrompt/内置默认身份）
     skipInjectionCheck: false  # ⚠️ 高危：跳过「疑似越狱/提示注入」检测（默认关）。开启后人设内容原样进入 system 身份层，仅用于完全信任的自建角色卡
+    styleExamples: []          # 可选：沟通风格示例（注入人设用；供伪人/主 Agent 参考语感）
+  personaLore:                 # 人设资料库（长尾知识/补齐资料；目录可自定义）
+    dir: ""                    # 资料库目录（留空=data/persona-lore）
+    adoptionsDir: ""           # 采纳队列目录（留空=data/persona-adoptions）
   devLog:
     enable: true             # 生产环境默认开：记录 AI 全链路(缩进 JSON 人工可读)，方便 #上报错误 排查
     dir: ""                  # 日志目录(留空=默认 <插件>/data/logs)
   policy:
     categoryMin:            # 覆盖内置类别最低角色，如 { message: 1, mcp_write: 2 }；留空=用内置阶梯（query:0/personal:0/message:1/group_manage:2/system:3）
   media:
-    enable: true
+    enable: true               # 多模态总开关：false=同时关闭附件收集/视觉子模型/表情自动发现/工具看图
     active: true
     passive: true
     maxImages: 4
@@ -325,7 +322,7 @@ agent:
     # 示意图生成（diagram_render 工具）：LLM 提交语义 DiagramSpec → 确定性 D2 编译 → 自托管 Kroki 渲染
     # → SVG 安全检查 → resvg 高清 PNG → 随回复发送。默认禁用公共 Kroki（用户内容不得外发第三方）。
     # 部署见 docs/deploy/kroki-compose.yaml；未部署 Kroki 时工具返回结构化失败，不影响对话。
-    enable: true
+    enable: true                     # 总开关（旧键名 enabled 仍兼容）
     renderer: kroki                  # kroki（自托管容器渲染 D2，推荐）
     fallbackRenderer: none           # Kroki 失败时的本地回退：none | beautiful-mermaid（零 DOM 本地渲染，需已装依赖）
     defaultTheme: paper-blue         # paper-blue | soft-pastel | technical | midnight | sketch（sketch 仅 D2）
@@ -369,7 +366,7 @@ agent:
   tts:                     # 语音合成（tts_speak 工具）：GPT-SoVITS（本地）/ IndexTTS 2.5（本地）/ 豆包 / MiniMax / MiMo
     enable: false          # 总开关（默认关，opt-in）：开=注册 tts_speak 并允许自动语音；关=完全静默（不注册、不合成）。仅 enable=true 时下面的 autoReply 才生效
     provider: indextts     # 当前服务商：sovits | indextts | doubao | minimax | mimo（云服务商仅在选中且配置齐全时才出网）
-    autoReply: true        # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
+    autoReply: false       # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）；默认关，仅 tts.enable=true 时有效
     replyMaxChars: 300     # 自动语音的最大字符数（超长按句截断，防合成出几分钟语音；0=不限）
     hdVoice: true          # 发送前高清化：响度标准化 + 存在感补偿（需宿主 ffmpeg，失败自动回退原始音频）
     sovits:                 # GPT-SoVITS（api_v2，默认 http://127.0.0.1:9880）：音色=参考音频，无音色库/无情绪参数
@@ -466,6 +463,7 @@ agent:
     domain: ""           # 自托管沙箱域名（{port}-{sandboxID}.{domain}）；留空=云默认 e2b.app
     sandboxUrl: ""       # 自托管无通配 DNS 时填 client-proxy 地址（SDK 自动附路由头）；留空=默认
     template: base       # 沙箱模板（CPU/内存/预装依赖由模板承载；插件侧只加硬超时与网络白名单）
+    verifyTemplate: ""   # 可选：toolEvo 行为验证专用模板（留空=复用 template）
     maxTimeout: 600      # 单命令超时上限（秒）
     defaultCwd: /home/user  # 沙箱内默认工作目录（宿主路径在沙箱内无意义）
     idleMs: 300000       # 闲置回收：会话沙箱空闲超时（毫秒）
@@ -562,6 +560,7 @@ agent:
     vision:
       allowPrivateHosts: false     # 伪人看图是否允许私网/回环图片地址（默认 false；自建图床才开，防 SSRF）
     groups: []                     # 显式白名单群号（字符串）；空数组=不开启
+    groupsOverride: {}             # 可选：按群覆盖 humanize 配置（{ "群号": { ... } }，深度合并到本块）
     shadow: true                   # true=只记录决策 trace、不真实发送（先观察再放量）
     talkValue: 0.35                # 0~1 主动性基线（不等于回复概率）
     debounceMs: 1200               # 消息安静窗口（ms）：burst 后等此窗口再评估
@@ -577,6 +576,7 @@ agent:
     knownBots: []                   # 已知其它 bot 账号（QQ号，如林墨的bot）：互相连续对线3轮且无真人 → 熔断10分钟
     memory:                        # 伪人独立记忆库（独立 sqlite：data/humanize/memory.db；与主 Agent 记忆完全隔离）
       enabled: true                # 每日 04:47 睡眠整合近期对话→长时记忆；Planner/Replyer 按相关性检索注入
+      model: ""                    # 伪人记忆抽取/整合模型（留空=utilityModel→主模型；可跨厂商，填模型条目 id 或模型名）
       maxPerQuery: 5               # Planner 单次注入条数
       maxPerGroup: 300             # 单群容量（超量按重要性×使用率淘汰）
       incrementalMinMessages: 20   # 每小时增量整合水位（新增≥N条才跑——梗当天入库，不用等次日）

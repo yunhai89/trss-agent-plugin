@@ -69,8 +69,12 @@ export const DEFAULT_HUMANIZE_CONFIG = Object.freeze({
   },
   behaviorPolicy: { ...DEFAULT_BEHAVIOR_POLICY },
   knownBots: [],              // 已知其它 bot 账号（QQ 号）：bot↔bot 交替≥3轮无真人 → 10分钟熔断（真人不受影响）
+  // 按群覆盖本配置（{ "群号": { ... } }，runtime-manager 合并后交给 resolveHumanizeConfig）；
+  // 键补进默认值，保证 yaml/面板/校验三方同源（此前只在 runtime-manager 里读，配置面不可见）
+  groupsOverride: {},
   memory: {                   // 伪人独立记忆库（MaiBot 式睡眠整合；独立 sqlite，与主 Agent 记忆隔离）
     enabled: true,
+    model: '',                // 记忆抽取/整合模型（留空=utilityModel→主模型；可跨厂商，条目 id 由 apps 归一）
     maxPerQuery: 5,           // Planner 单次注入记忆条数上限
     maxPerGroup: 300,         // 单群记忆容量（超量按价值淘汰）
     minConsolidateMessages: 6, // 整合所需最少消息数

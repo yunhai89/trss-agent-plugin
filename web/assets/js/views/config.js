@@ -1,4 +1,4 @@
-/** 视图:配置中心(§1 全量配置项,可编辑 mock) */
+/** 视图:配置中心（常用项 + 安全项 + 高级项；极少数冷门字段仍以 config.yaml 为准） */
 (function () {
   window.VIEWS = window.VIEWS || {}
 
@@ -97,7 +97,7 @@
     guardSensitivity: [['low', '低 (0.95)'], ['medium', '中 (0.7)'], ['high', '高 (0.5)']],
     reflect: [['off', '关闭'], ['auto', '自动'], ['always', '总是']],
     replyMode: [['image', '图片渲染'], ['text', '纯文本']],
-    degrade: [['describe', 'describe 转文字描述'], ['ignore', 'ignore 忽略']],
+    degrade: [['skip', 'skip 丢弃'], ['note', 'note 占位说明（默认）'], ['text', 'text 文本类提取']],
     researchPerm: [['master', '仅主人(防滥用)'], ['all', '所有人']],
     shMode: [['local', 'local 本地(Playwright+chromium,默认)'], ['cloud', 'cloud Browserbase 云']],
     crawlEngine: [['crawl4ai', 'crawl4ai 真浏览器(默认)'], ['fetch', 'fetch 纯 HTTP']],
@@ -168,6 +168,8 @@
         if (!form.evolution) form.evolution = {}
         if (!form.isolation) form.isolation = {}
         if (form.temperature == null) form.temperature = 1
+        // 顶层 debug（D7：GET /api/config 额外下发，面板「调试日志」开关；保存时单独以 changes.debug 提交）
+        if (form.debug == null) form.debug = false
         // cacheControl 三态字符串：兼容旧布尔配置（false=off / true=explicit），否则 select 无匹配项显示空白
         if (form.cacheControl === false) form.cacheControl = 'off'
         else if (form.cacheControl === true) form.cacheControl = 'explicit'
@@ -191,6 +193,12 @@
         if (!form.persona) form.persona = {}
         if (form.persona.defaultId == null) form.persona.defaultId = ''
         if (form.persona.skipInjectionCheck == null) form.persona.skipInjectionCheck = false
+        // D4：伪人自然风格示例（对象数组：sceneType/speechAct/tone/familiarity/text，JSON 编辑）
+        if (!Array.isArray(form.persona.styleExamples)) form.persona.styleExamples = []
+        // D4：人设资料库（PersonaLore）目录/采纳审批目录（留空=运行时默认）
+        if (!form.personaLore) form.personaLore = {}
+        if (form.personaLore.dir == null) form.personaLore.dir = ''
+        if (form.personaLore.adoptionsDir == null) form.personaLore.adoptionsDir = ''
         // 无损压缩 + 网页抓取引擎兜底（旧 config 无此字段时 v-model 不报错）
         if (!form.compaction) form.compaction = {}
         if (form.compaction.enable == null) form.compaction.enable = true
@@ -223,12 +231,15 @@
         if (form.diagram.kroki.d2.layout == null) form.diagram.kroki.d2.layout = 'elk'
         if (!form.sandbox) form.sandbox = {}
         if (!form.sandbox.mode) form.sandbox.mode = 'off'
+        // D4：工具进化候选验证用的沙箱模板（留空=沿用 sandbox.template）
+        if (form.sandbox.verifyTemplate == null) form.sandbox.verifyTemplate = ''
         if (!form.sandbox.network) form.sandbox.network = {}
         if (form.sandbox.network.allowInternet == null) form.sandbox.network.allowInternet = true
         if (!Array.isArray(form.sandbox.network.allowOut)) form.sandbox.network.allowOut = []
         if (!Array.isArray(form.sandbox.network.denyOut)) form.sandbox.network.denyOut = []
         if (!form.policy) form.policy = {}
         if (!form.media) form.media = {}
+        if (form.media.degrade == null) form.media.degrade = 'note'
         if (!form.diagram) form.diagram = {}
         if (!form.diagram.kroki) form.diagram.kroki = {}
         if (!Array.isArray(form.diagram.kroki.allowedDiagramTypes)) form.diagram.kroki.allowedDiagramTypes = []
@@ -242,6 +253,9 @@
         if (!form.selfState.planner) form.selfState.planner = {}
         if (!form.selfState.replyer) form.selfState.replyer = {}
         if (!form.loop) form.loop = {}
+        // D4：未配置 contextWindow 时按消息条数水位压缩（contextMsgHighWater→LowWater）
+        if (form.contextMsgHighWater == null) form.contextMsgHighWater = 30
+        if (form.contextMsgLowWater == null) form.contextMsgLowWater = 18
         if (!form.multiagent) form.multiagent = {}
         if (!form.toolDiscovery) form.toolDiscovery = {}
         if (!Array.isArray(form.reasoningFields)) form.reasoningFields = []
@@ -307,6 +321,10 @@
         if (!form.devLog) form.devLog = {}
         if (!form.humanize) form.humanize = {}
         if (!form.humanize.memory) form.humanize.memory = {}
+        // D4：humanize.memory.model（伪人独立记忆库模型；可跨厂商，留空=沿用现行为）
+        if (form.humanize.memory.model == null) form.humanize.memory.model = ''
+        // D4：humanize.groupsOverride（群级行为覆盖，JSON 编辑：{ "<群号>": { ... } }）
+        if (!form.humanize.groupsOverride || typeof form.humanize.groupsOverride !== 'object' || Array.isArray(form.humanize.groupsOverride)) form.humanize.groupsOverride = {}
         if (!Array.isArray(form.humanize.knownBots)) form.humanize.knownBots = []
         if (!form.groupWorld) form.groupWorld = {}
         if (!form.groupWorld.graph) form.groupWorld.graph = {}
@@ -421,6 +439,9 @@
           return
         }
         const changes = buildChanges(origSnapshot, JSON.parse(JSON.stringify(form)))
+        // D7：debug 是顶层键（GET 返回在 agent 同级）：从 agent 子树 diff 中剔除，作为 changes.debug 单独提交（PUT 写根）
+        delete changes['agent.debug']
+        if ((origSnapshot?.debug === true) !== (form.debug === true)) changes.debug = form.debug === true
         if (!Object.keys(changes).length) { toast('无改动', 'warn'); return }
         try {
           await window.api.put('/config', { changes })
@@ -552,7 +573,8 @@
 
       /* 功能分配：槽位 ← 注册表模型。所有功能模型均支持跨厂商引用——选到非主厂商的模型时，
          运行时按 llmModels[].id / model 字符串解析到对应 llmProviders 端点（model-router）；
-         视觉/Embedding 仍按其专用端点字段同步；主模型槽位直接写基础模型引用。 */
+         视觉/Embedding 的旧端点副本字段（vision.protocol/baseURL/apiKey、recall.embedBaseURL/apiKey）
+         仅作旧配置兼容保留，选模型时不再主动拷贝；主模型槽位直接写基础模型引用。 */
       const FEATURES = [
         { key: 'main', label: '主模型', mainOnly: false, hint: '对话主力：推理/工具调用/复杂任务，建议用强模型', get: () => mainModel.value?.model || '', set: (v) => { if (!v) form.modelId = '' } },
         { key: 'utility', label: '旁路小模型', mainOnly: false, hint: '高频小任务（意图识别/摘要），推荐便宜快速的小模型', get: () => form.utilityModel, set: (v) => { form.utilityModel = v } },
@@ -563,6 +585,7 @@
         { key: 'worker', label: '子代理模型', mainOnly: false, hint: '并行子任务执行，性价比优先（可多实例并发）', get: () => form.multiagent?.workerModel || '', set: (v) => { if (!form.multiagent) form.multiagent = {}; form.multiagent.workerModel = v } },
         { key: 'hzp', label: '伪人 Planner 模型', mainOnly: false, hint: '群聊参与决策（该不该接话），高频调用，小-中模型重速度', get: () => form.humanize?.planner?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.planner) form.humanize.planner = {}; form.humanize.planner.model = v } },
         { key: 'hzr', label: '伪人 Replyer 模型', mainOnly: false, hint: '写群聊台词要像真人，语感重要，建议与主模型同档', get: () => form.humanize?.replyer?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.replyer) form.humanize.replyer = {}; form.humanize.replyer.model = v } },
+        { key: 'hzm', label: '伪人记忆模型', mainOnly: false, hint: '伪人独立记忆库（睡眠整合/检索注入）用的模型；留空=沿用现行为，可选任意厂商', get: () => form.humanize?.memory?.model || '', set: (v) => { if (!form.humanize) form.humanize = {}; if (!form.humanize.memory) form.humanize.memory = {}; form.humanize.memory.model = v } },
         { key: 'gw', label: '群世界分析模型', mainOnly: false, hint: '批量 JSON 抽取（画像/事件），小模型即可，注意每日预算', get: () => form.groupWorld?.analysis?.modelProfile || '', set: (v) => { if (!form.groupWorld) form.groupWorld = {}; if (!form.groupWorld.analysis) form.groupWorld.analysis = {}; form.groupWorld.analysis.modelProfile = v } },
       ]
       const featureVal = (f) => f.get() || ''
@@ -603,19 +626,9 @@
         if (!m) return
         // 主模型槽位 = 基础模型引用：写 agent.providerId/modelId，不再把端点拷贝到主接入字段
         if (f.key === 'main') { setBaseModel(m.id); return }
-        const prov = provById(m.providerId)
         f.set(m.model)
-        const isMain = provSameAsMain(m.providerId) // 同端点厂商视同主厂商（与 knownModels/featureSel 同基准）——避免对同端点条目做无谓同步与误导提示
-        if (f.key === 'vision') {
-          if (!form.vision) form.vision = {}
-          if (!isMain && prov?.baseURL) { form.vision.protocol = prov.protocol || ''; form.vision.preset = prov.preset || ''; form.vision.baseURL = prov.baseURL; form.vision.apiKey = prov.apiKey }
-          else { form.vision.protocol = ''; form.vision.preset = ''; form.vision.baseURL = ''; form.vision.apiKey = '' }
-        }
-        if (f.key === 'embed') {
-          if (!form.recall) form.recall = {}
-          if (!isMain && prov?.baseURL) { form.recall.embedBaseURL = prov.baseURL; form.recall.embedApiKey = prov.apiKey }
-          else { form.recall.embedBaseURL = ''; form.recall.embedApiKey = '' }
-        }
+        // 跨厂商/同厂商都只写模型引用（运行时经 model-router 解析端点）；
+        // 不再把 vision/recall.embed* 端点字段在选模型时拷贝一遍（旧副本字段保留读取侧兼容，不主动写）。
       }
 
       const sections = [
@@ -665,6 +678,12 @@
         const a = Array.isArray(form.toolDiscovery?.alwaysOn) ? form.toolDiscovery.alwaysOn : []
         form.toolDiscovery.alwaysOn = a.includes(id) ? a.filter((x) => x !== id) : [...a, id]
       }
+      // 常驻工具里「配置已有但当前未注册」的条目（工具包禁用/MCP 未就绪等）：
+      // 旧面板整块隐藏 → 幽灵常驻条目看不见、删不掉；这里单独列出且可点击删除。
+      const staleAlwaysOn = computed(() => {
+        const a = Array.isArray(form.toolDiscovery?.alwaysOn) ? form.toolDiscovery.alwaysOn : []
+        return a.filter((id) => !allTools.value.some((t) => t.id === id))
+      })
 
       onMounted(async () => {
         window.addEventListener('scroll', onScroll, { passive: true })
@@ -1021,7 +1040,7 @@
         mcpServersToUi, delMcp, mcpModal, openNewMcp, confirmNewMcp,
         thinkingOn, tempPct, thinkingBudget, memoryLimitMemory, memoryLimitUser,
         orModels, orSearch, orLoading, loadOrModels, orFiltered, pickOrModel, orKey, loadOrKey,
-        allTools, toolCats, toolsByCat, toggleAlwaysOn, personas,
+        allTools, toolCats, toolsByCat, toggleAlwaysOn, staleAlwaysOn, personas,
         // 厂商/模型注册表 + 功能分配
         delProvider, testProvider, testing, provById, provName, provModal, openProvView, openProvEdit, saveProv,
         delModel, modelModal, openModelView, openModelEdit, saveModel, THK_ZH, knownModels, provSameAsMain, onProvPreset,
@@ -1064,6 +1083,7 @@
         <nav class="cf-nav">
           <a v-for="s in sections" :key="s.id" :class="{on: activeSec === s.id}" @click="jump(s.id)">{{ s.name }}</a>
         </nav>
+        <div class="mut2" style="font-size:11px;line-height:1.55;padding:10px 4px 0">提示：本页覆盖常用项、安全相关项与高级项；极少数冷门字段仍以 <b>config.yaml</b> / 锅巴为准。</div>
       </div>
 
       <!-- 命中清单（fixed 跟随输入框；点一条即定位高亮） -->
@@ -1100,6 +1120,9 @@
             </cfg-row>
             <cfg-row name="多用户数据隔离" desc="开启后按 (群,用户) 隔离记忆与会话">
               <v-switch v-model="form.isolation.enable"/>
+            </cfg-row>
+            <cfg-row name="调试日志" desc="顶层 debug：true=强制开启全链路 devLog（工具入参/每轮 token/搜索词），排查问题用；等价 agent.devLog.enable=true">
+              <v-switch v-model="form.debug"/>
             </cfg-row>
 
             <div class="cf-sub"><v-icon name="link"/>主接入（对话主模型）</div>
@@ -1315,9 +1338,9 @@
           </div>
           <div class="cf-body" v-show="open.features"><div class="cf-grid">
             <div class="full" style="padding:10px 12px;border:1px dashed var(--line);border-radius:10px;margin-bottom:4px">
-              <div class="mut2" style="font-size:12px">从「模型列表」分区选择；留空=该功能默认回落。所有功能模型都支持<b>跨厂商</b>引用（运行时按注册表解析到对应厂商端点）；视觉 / Embedding 选其它厂商时会自动同步其接入信息；<b>主模型</b>槽位等同于「基础 / 模型」的选择（清空 = 停用主模型，需重新选择）。</div>
+              <div class="mut2" style="font-size:12px">从「模型列表」分区选择；留空=该功能默认回落。所有功能模型都支持<b>跨厂商</b>引用（运行时按注册表解析到对应厂商端点，选模型不再拷贝端点/Key）；<b>主模型</b>槽位等同于「基础 / 模型」的选择（清空 = 停用主模型，需重新选择）。</div>
             </div>
-            <cfg-row v-for="f in FEATURES" :key="f.key" :name="f.label" :desc="(f.hint ? f.hint + '；' : '') + (f.key === 'vision' || f.key === 'embed' ? '可选任意厂商（自动同步端点）' : '可选任意厂商（运行时按注册表解析端点）')">
+            <cfg-row v-for="f in FEATURES" :key="f.key" :name="f.label" :desc="(f.hint ? f.hint + '；' : '') + '可选任意厂商（运行时按注册表解析端点）'">
               <div class="row g6">
                 <select class="sel" style="width:250px" :value="featureSel(f)" @change="onFeatureSel(f, $event.target.value)">
                   <option v-if="knownModels.length" value="">{{ f.key === 'main' ? '清空 = 停用主模型（需重新选择）' : '（留空 = 默认回落）' }}</option>
@@ -1489,7 +1512,7 @@
               <v-switch v-model="thinkingOn" :disabled="form.thinkingAuto.enable"/>
             </cfg-row>
             <cfg-row name="思考预算 tokens" desc="thinking.budget_tokens">
-              <input type="number" class="inp" style="width:130px" min="1024" step="1024" :disabled="!form.thinking || form.thinkingAuto.enable" v-model.number="thinkingBudget">
+              <input type="number" class="inp" style="width:130px" min="1024" max="128000" step="1024" :disabled="!form.thinking || form.thinkingAuto.enable" v-model.number="thinkingBudget">
             </cfg-row>
             <cfg-row name="思考自动决策" desc="按提问复杂度自动决定是否思考与深度(覆盖手动 thinking；模型级覆盖仍优先)">
               <v-switch v-model="form.thinkingAuto.enable"/>
@@ -1513,7 +1536,7 @@
               <input type="number" class="inp" style="width:130px" min="500" step="500" :disabled="!form.thinkingAuto.enable || form.thinkingAuto.classifier==='off'" v-model.number="form.thinkingAuto.timeoutMs">
             </cfg-row>
             <cfg-row name="自动预算上限" desc="单轮思考预算硬顶(tokens)">
-              <input type="number" class="inp" style="width:130px" min="1024" step="1024" :disabled="!form.thinkingAuto.enable" v-model.number="form.thinkingAuto.maxBudget">
+              <input type="number" class="inp" style="width:130px" min="1024" max="128000" step="1024" :disabled="!form.thinkingAuto.enable" v-model.number="form.thinkingAuto.maxBudget">
             </cfg-row>
             <cfg-row name="低深度预算" desc="简单问题">
               <input type="number" class="inp" style="width:130px" min="1024" step="1024" :disabled="!form.thinkingAuto.enable" v-model.number="form.thinkingAuto.budgets.low">
@@ -1527,8 +1550,14 @@
             <cfg-row name="单次回复最大 token" desc="留空=厂商默认">
               <input type="number" class="inp" style="width:130px" min="1" v-model.number="form.maxTokens" placeholder="null">
             </cfg-row>
-            <cfg-row name="上下文窗口" desc="填模型真实窗口(按估算 token 计,中文≈1字1token)。超高水位压到低水位(滞回分代)。缓存经济性:命中率≈1−2·d·H/(H²−K²),压得深(H大K小)命中率更高">
+            <cfg-row name="上下文窗口" desc="填模型真实窗口(按估算 token 计,中文≈1字1token)。配置后按 token 高低水位压缩；留空=按消息条数水位（下方两项）压缩。缓存经济性:命中率≈1−2·d·H/(H²−K²),压得深(H大K小)命中率更高">
               <input type="number" class="inp" style="width:130px" min="1000" v-model.number="form.contextWindow">
+            </cfg-row>
+            <cfg-row name="消息条数高水位" desc="contextMsgHighWater：未配置上下文窗口时，消息条数超过该值触发压缩（默认 30）">
+              <input type="number" class="inp" style="width:110px" min="2" max="200" v-model.number="form.contextMsgHighWater">
+            </cfg-row>
+            <cfg-row name="消息条数低水位" desc="contextMsgLowWater：按消息条数压缩后的目标条数（默认 18，须小于高水位）">
+              <input type="number" class="inp" style="width:110px" min="1" max="199" v-model.number="form.contextMsgLowWater">
             </cfg-row>
             <cfg-row name="压缩高水位比例" desc="占上下文窗口比例(0.3~0.95)。调大=单次请求更长但缓存命中率更高">
               <input type="number" class="inp" style="width:110px" min="0.3" max="0.95" step="0.05" v-model.number="form.contextHighRatio">
@@ -1815,11 +1844,16 @@
             <cfg-row class="full" name="默认身份 systemPrompt" desc="留空用富默认身份;被人设覆盖时失效">
               <textarea class="txa" style="min-height:64px" v-model="form.systemPrompt" placeholder="留空=使用内置默认身份"></textarea>
             </cfg-row>
+            <cfg-row class="full" name="伪人说话风格示例" desc="persona.styleExamples（JSON 数组；给伪人 Replyer 的自然口吻样本，全量覆盖内置样本）。元素形如 {&quot;sceneType&quot;:&quot;chat&quot;,&quot;text&quot;:&quot;……&quot;}；留空=用默认人设样本">
+              <textarea class="inp mono" style="width:100%;min-height:64px" :value="JSON.stringify(form.persona.styleExamples || [])" @change="updateJson('persona.styleExamples', $event.target.value)"></textarea>
+            </cfg-row>
             <div class="full" style="cursor:pointer;user-select:none;font-size:12px;font-weight:700;color:var(--ink3);padding:8px 2px;border-top:1px dashed var(--line)" @click="adv.security = !adv.security">
               {{ adv.security ? '▾' : '▸' }} 高级参数
             </div>
             <div v-show="adv.security" data-cf-adv class="full"><div class="cf-grid">
               <cfg-row name="日志目录" desc="devLog.dir（留空=默认 data/logs）"><input class="inp mono" style="width:220px" v-model="form.devLog.dir" placeholder="留空=默认"></cfg-row>
+              <cfg-row name="人设资料库目录" desc="personaLore.dir（留空=默认 data/persona-lore）"><input class="inp mono" style="width:220px" v-model="form.personaLore.dir" placeholder="留空=默认"></cfg-row>
+              <cfg-row name="人设采纳审批目录" desc="personaLore.adoptionsDir（留空=默认 data/persona-adoptions）"><input class="inp mono" style="width:220px" v-model="form.personaLore.adoptionsDir" placeholder="留空=默认"></cfg-row>
               <cfg-row class="full" name="策略类别最低角色" desc="policy.categoryMin（JSON，如 {&quot;mcp_write&quot;:1}；留空=默认）">
                 <textarea class="inp mono" style="width:100%;min-height:54px" :value="JSON.stringify(form.policy.categoryMin || {})" @change="updateJson('policy.categoryMin', $event.target.value)"></textarea>
               </cfg-row>
@@ -1868,8 +1902,8 @@
                 </div>
               </cfg-row>
               <cfg-row class="full" name="常驻工具" desc="不经搜索始终可用；从已注册工具勾选（留空=用内置默认）">
-                <div v-if="!allTools.length" class="mut2" style="font-size:12px">工具列表加载中或运行时未就绪…</div>
-                <div v-else style="max-height:220px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:8px 12px;background:var(--paper-2)">
+                <div style="max-height:240px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:8px 12px;background:var(--paper-2)">
+                  <div v-if="!allTools.length" class="mut2" style="font-size:12px">工具列表加载中或运行时未就绪…<span v-if="staleAlwaysOn.length">（下方为配置里已有但当前未注册的条目）</span></div>
                   <div v-for="cat in toolCats" :key="cat" style="margin-bottom:8px">
                     <div class="mut" style="font-size:11px;margin:3px 0 4px;text-transform:uppercase;letter-spacing:.5px">{{ cat }}</div>
                     <div style="display:flex;flex-wrap:wrap;gap:4px">
@@ -1877,6 +1911,12 @@
                         <input type="checkbox" :checked="(form.toolDiscovery.alwaysOn||[]).includes(t.id)" @change="toggleAlwaysOn(t.id)" style="display:none">
                         {{ t.name }}
                       </label>
+                    </div>
+                  </div>
+                  <div v-if="staleAlwaysOn.length" style="margin-top:4px;border-top:1px dashed var(--line);padding-top:8px">
+                    <div class="mut" style="font-size:11px;margin:3px 0 4px">配置里已有但当前未注册（点击删除）</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:4px">
+                      <span v-for="id in staleAlwaysOn" :key="id" class="pill p-honey mono" style="cursor:pointer;user-select:none;font-size:12px" :title="'点击从常驻列表删除：' + id" @click="toggleAlwaysOn(id)">{{ id }} <v-icon name="x"/></span>
                     </div>
                   </div>
                 </div>
@@ -2073,7 +2113,9 @@
                 <cfg-row name="主动收集附件" desc="media.active"><v-switch v-model="form.media.active"/></cfg-row>
                 <cfg-row name="被动读取附件" desc="media.passive"><v-switch v-model="form.media.passive"/></cfg-row>
                 <cfg-row name="单文件上限(字节)"><input type="number" class="inp" style="width:130px" min="0" step="1048576" v-model.number="form.media.maxFileBytes"></cfg-row>
-                <cfg-row name="降级策略" desc="media.degrade"><input class="inp mono" style="width:120px" v-model="form.media.degrade"></cfg-row>
+                <cfg-row name="降级策略" desc="media.degrade：非视觉模型收到图片/文件时 skip 丢弃 / note 占位说明（默认）/ text 文本类提取">
+                  <select class="sel" style="width:170px" v-model="form.media.degrade"><option v-for="o in OPT.degrade" :value="o[0]">{{ o[1] }}</option></select>
+                </cfg-row>
                 <cfg-row name="视觉描述 maxTokens" desc="识图/看视频报告输出上限（视频报告建议 2048+）"><input type="number" class="inp" style="width:110px" min="64" step="64" v-model.number="form.vision.maxTokens"></cfg-row>
                 <cfg-row class="full" name="视觉描述提示词" desc="识图指令（视频用内置“看视频”报告指令或 bilibili 的 watchPrompt）"><input class="inp" style="width:100%" v-model="form.vision.describePrompt" placeholder="留空=内置"></cfg-row>
                 <cfg-row class="full" name="能力覆盖" desc="media.caps（JSON，如 {&quot;vision&quot;:false,&quot;file&quot;:true}；留空=自动探测）">
@@ -2126,6 +2168,12 @@
                   <tag-editor v-model="form.diagram.kroki.allowedDiagramTypes" mono placeholder="如 d2"/>
                 </cfg-row>
               </div>
+            </div>
+            <div style="font-weight:800;color:var(--ink3);font-size:12px;margin:12px 0 6px">伪人 / 群世界（高级）</div>
+            <div class="cf-grid">
+              <cfg-row class="full" name="群级行为覆盖" desc="humanize.groupsOverride（JSON：{&quot;群号&quot;: { ...behaviorPolicy 覆盖... }}；留空={} 用全局配置；伪人记忆模型在「功能分配」卡）">
+                <textarea class="inp mono" style="width:100%;min-height:64px" :value="JSON.stringify(form.humanize.groupsOverride || {})" @change="updateJson('humanize.groupsOverride', $event.target.value)"></textarea>
+              </cfg-row>
             </div>
           </div></div>
         </div>
@@ -2291,6 +2339,7 @@
               <cfg-row name="公开 URL 需鉴权" desc="false=沙箱公开 URL 也要 token"><v-switch v-model="form.sandbox.allowPublicTraffic"/></cfg-row>
               <cfg-row name="允许互联网" desc="network.allowInternet：true=放通全部出口（默认）；false=断网（配了白名单时白名单仍放行）"><v-switch v-model="form.sandbox.network.allowInternet"/></cfg-row>
               <cfg-row name="候选验证超时(ms)"><input type="number" class="inp" style="width:120px" min="100" step="500" v-model.number="form.sandbox.toolEvoVerifyTimeoutMs"></cfg-row>
+              <cfg-row name="候选验证沙箱模板" desc="verifyTemplate：工具进化候选验证单独使用的 E2B 模板（留空=沿用上方「沙箱模板」）"><input class="inp mono" style="width:170px" v-model="form.sandbox.verifyTemplate" placeholder="留空=沿用沙箱模板"></cfg-row>
               <cfg-row class="full" name="额外拒绝网段" desc="network.denyOut（可选，仅 CIDR/IP）：在默认放通基础上额外封禁（如 169.254.169.254/32 防云元数据）。★不要写 0.0.0.0/0——它=拒绝一切出口（含 DNS）">
                 <tag-editor v-model="form.sandbox.network.denyOut" mono placeholder="如 169.254.169.254/32"/>
               </cfg-row>

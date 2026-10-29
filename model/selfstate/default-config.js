@@ -15,6 +15,7 @@
 export const DEFAULT_SELFSTATE_CONFIG = Object.freeze({
   enabled: false,
   shadowMode: true,          // 计算但不影响发言；观察后翻 false 放量
+  groups: [],                // 定时反思/维护的群白名单（留空=复用 groupWorld.groups → humanize.groups，见 apps/humanize.js）
 
   scope: {
     isolateByGroup: true,    // 群级隔离（唯一支持模式；跨群不传事件/怨气）

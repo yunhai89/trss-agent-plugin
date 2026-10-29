@@ -187,9 +187,17 @@ async function buildHumanize() {
   // 伪人独立记忆库（MaiBot 式睡眠整合；独立 sqlite，与主 Agent 的 recall/KV 完全隔离）
   // embedder：配置 agent.recall.embedProvider 后记忆检索走语义余弦（同义换说可召回），未配回落词面
   const { embedFn: memEmbedFn, embedModel: memEmbedModel } = buildEmbed(rt)
+  // D18：记忆库整合/梗解析模型支持跨厂商——memory.model 经 modelRouter 解析出 provider + 真实模型名。
+  // 回退链与 yaml 一致：memory.model 留空 → agent.utilityModel → 主模型（都留空则 provider 默认主模型）。
+  const memModelRef = () => {
+    const own = String(cfgFn().memory?.model || '').trim()
+    return own || String(Config.get().agent?.utilityModel || '').trim()
+  }
+  const memModel = () => resolveModelRef(memModelRef(), rt) || null // 条目 id → entry.model；空=provider 默认
   const hmem = new H.HumanizeMemoryStore({
     dataDir: Config.path.data + '/humanize',
-    provider: providerForModel(cfgFn().model),
+    provider: resolveModelProvider(memModelRef(), rt) || providerForModel(cfgFn().model), // 跨厂商：按 memory.model 路由
+    model: memModel(), // 归一模型名（memory-store 用它下发，避免条目 id 被当模型名 400）
     cfg: cfgFn,
     embedder: memEmbedFn ? makeEmbedder({ embedFn: memEmbedFn, model: memEmbedModel }) : null,
     trace: { record: (event, data = {}) => { try { trace.record(event, data) } catch { /* noop */ } } },

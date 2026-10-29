@@ -465,6 +465,13 @@ function numOrNull(v) {
   return Number.isFinite(n) ? n : null
 }
 
+/** 统一外发脱敏：redactSecrets=false 时所有发送路径都不脱敏（此前播报/错误/续跑无条件脱敏，开关只关一半）。 */
+function maybeRedact(text) {
+  const s = String(text ?? '')
+  if (Config.get().agent?.redactSecrets === false) return s
+  return redactSecrets(s)
+}
+
 // 构造走代理的 fetch（undici ProxyAgent）；undici 未装/地址错则返回 null（直连）。供 provider 访问海外 LLM（GPT/Gemini 等）
 async function makeProxyFetch(proxy) {
   if (!proxy) return null
@@ -551,7 +558,7 @@ async function _buildRuntime(scope) {
     apiKey: cfg.apiKey,
     model: cfg.model,
     log: providerLog,
-    ...(cfg.reasoningFields ? { reasoningFields: cfg.reasoningFields } : {}),
+    ...(Array.isArray(cfg.reasoningFields) && cfg.reasoningFields.length ? { reasoningFields: cfg.reasoningFields } : {}),
     ...(proxyFetch ? { fetch: proxyFetch } : {}),
   })
   // 官方模型能力（数据驱动）：从厂商 /models 拉取模态元数据（OpenRouter 等）prime 一次，供 detectCapabilities 同步叠加；
@@ -584,8 +591,8 @@ async function _buildRuntime(scope) {
 
   // 回退 provider：每条独立 baseURL/apiKey/protocol（可跨厂商，如主 DeepSeek + 回退 GPT）
   const fallbackProviders = []
-  const fbList = [...(Array.isArray(cfg.fallbackModels) ? cfg.fallbackModels : [])]
-  if (cfg.fallbackModel && cfg.fallbackApiKey) fbList.push({ model: cfg.fallbackModel, baseURL: cfg.fallbackBaseURL, apiKey: cfg.fallbackApiKey, protocol: cfg.fallbackProtocol }) // 兼容锅巴扁平字段（单回退）
+  // F7 单真源：只读 agent.fallbackModels[]（旧扁平字段由 utils/Config.js 启动时迁移进数组并删除）
+  const fbList = Array.isArray(cfg.fallbackModels) ? cfg.fallbackModels : []
   for (const fb of fbList) {
     if (!fb || !fb.model || !fb.apiKey) continue
     try {
@@ -861,7 +868,8 @@ async function _buildRuntime(scope) {
   // tts 服务实例暴露到运行时：自动回复语音（agent.tts.autoReply）在主回复管线里直接调用。
   // 总开关默认关（opt-in，严格 === true）：未显式开启 → 不注册工具、不合成（旧配置缺字段也静默）。
   let tts = null
-  if (cfg.tts?.enable === true) {
+  // 布尔容错：yaml 手写 `enable: 1` / `"true"` 时此前严格 === true 会静默不生效（审计 P2）
+  if (cfg.tts?.enable === true || cfg.tts?.enable === 1 || cfg.tts?.enable === 'true') {
     try {
       const ttsTarget = modelRouter.resolve(cfg.tts?.judgeModel || cfg.tts?.indextts?.model || cfg.utilityModel || cfg.model)
       tts = new TtsService(cfg.tts || {}, {
@@ -1205,6 +1213,9 @@ async function _buildRuntime(scope) {
     // 缓存经济性：稳态 token 命中率 ≈ 1 − 2·d·H/(H²−K²)（d=每轮新增、H=高水位、K=压后目标），
     // 故「窗口吃满 + 压得深」优于「小窗口勤压」；压缩无损（原文归档，context_recall 可恢复）。
     contextWindow: cfg.contextWindow || null,
+    // 未配置 contextWindow 时的消息条数水位（此前代码支持但配置面不可见，FIX v2 D4）
+    contextMsgHighWater: cfg.contextMsgHighWater ?? 30,
+    contextMsgLowWater: cfg.contextMsgLowWater ?? 18,
     contextHighRatio: cfg.contextHighRatio ?? 0.65,
     contextLowRatio: cfg.contextLowRatio ?? 0.45,
     compactArchive, // 无损压缩归档（null=无归档压缩；见上方装配说明）
@@ -1308,7 +1319,8 @@ async function _buildRuntime(scope) {
   // 注意：vision.model 留空时"复用主模型"只对本身支持视觉的主模型成立。主模型若是纯文本模型，
   // 复用会把图片发给文本模型 → 请求失败/返回空 → 表现为"识图/表情打标无任何反应"，必须直接禁用。
   let vision = null
-  if (cfg.vision?.enable === true) {
+  // D15：media.enable=false 是多模态总开关 → 视觉子模型一并关闭（否则工具看图/表情发现仍会把图片发出去）
+  if (cfg.vision?.enable === true && cfg.media?.enable !== false) {
     const vcfg = cfg.vision
     // 视觉模型可落在任意已注册厂商：connection 字段全空时按视觉模型名路由到其 provider，
     // 避免「主通道 commandcode + vision.model=mimo-v2.6-pro」这种模型名发错端点。
@@ -1352,7 +1364,9 @@ async function _buildRuntime(scope) {
         // 需要深度推理的视觉模型，可在「模型列表」把该模型 thinking 显式设为 on。
         const vThinking = vReg?.thinking === 'on' ? { type: 'enabled' } : { type: 'disabled' }
         const vTemperature = numOrNull(vReg?.temperature) // 同 P0/F1：null/空不能当 0
-        const vMaxTokens = Number.isFinite(Number(vReg?.maxTokens)) && Number(vReg.maxTokens) > 0 ? Number(vReg.maxTokens) : (vcfg.maxTokens || 1024)
+        // D14：显式 agent.vision.maxTokens 优先；未显式配置时才用「模型列表」条目的 maxTokens，最后 1024
+        const vCfgMaxTokens = numOrNull(vcfg.maxTokens)
+        const vMaxTokens = vCfgMaxTokens > 0 ? vCfgMaxTokens : (numOrNull(vReg?.maxTokens) > 0 ? numOrNull(vReg?.maxTokens) : 1024)
         const vProvider = vRoute.matched ? vRoute.provider : createProvider({
           protocol: vProtocol,
           ...vPreset,
@@ -1473,7 +1487,7 @@ async function _buildRuntime(scope) {
               : (info.status === 'partial' || info.status === 'waiting_input')
                 ? `⚠️ 后台子代理任务未完整完成（${info.status}）${label}：`
                 : `⚠️ 后台子代理任务${info.status === 'timeout' ? '超时' : info.status === 'cancelled' ? '已中止' : '失败'}${label}：${String(info.error || '原因未记录').slice(0, 200)}`
-            const body = stripMarkers(redactSecrets((info.status === 'done' || info.status === 'partial' || info.status === 'waiting_input') ? `${head}\n${String(info.result || '').slice(0, 4000)}` : head)).trim()
+            const body = stripMarkers(maybeRedact((info.status === 'done' || info.status === 'partial' || info.status === 'waiting_input') ? `${head}\n${String(info.result || '').slice(0, 4000)}` : head)).trim()
             if (!body) return
             const send = (m) => (sctx?.e?.reply ? sctx.e.reply(m)
               : (sctx?.bot?.pickGroup && sctx.groupId) ? sctx.bot.pickGroup(sctx.groupId).sendMsg(m)
@@ -1775,7 +1789,7 @@ export function makeSandboxCtx(ctx, rt, cfg = Config.get().agent || {}) {
  */
 export function attachToolRuntime(ctx, rt, cfg = Config.get().agent || {}) {
   ctx.sandbox = makeSandboxCtx(ctx, rt, cfg)
-  ctx.vision = rt?.vision || null
+  ctx.vision = rt?.vision && Config.get().agent?.media?.enable !== false ? rt.vision : null
   return ctx
 }
 
@@ -2389,14 +2403,14 @@ export class Chat extends plugin {
         onAssistant: (res) => {
           // 旁白与工具进度共享节流闸：短时间内的多条旁白只发第一条，防刷屏 / 撞限流
           if (res?.toolCalls?.length && res?.content && cfg.reply?.narrate !== false && progressGate.allow()) {
-            const narr = stripMarkers(redactSecrets(res.content)).replace(/\s+$/, '')
+            const narr = stripMarkers(maybeRedact(res.content)).replace(/\s+$/, '')
             if (narr) safeReply(narr)
           }
         },
         // 主人免确认直执行（masterSkipConfirm）时的高危提示——否则该开关静默绕过审批
         onMasterAutoApprove: (tc) => {
           const args = typeof tc?.arguments === 'string' ? tc.arguments : JSON.stringify(tc?.arguments ?? {})
-          safeReply(redactSecrets(`⚠️ 主人任务免确认自动执行（高危）：${tc?.name || '?'} ${String(args).slice(0, 200)}`))
+          safeReply(maybeRedact(`⚠️ 主人任务免确认自动执行（高危）：${tc?.name || '?'} ${String(args).slice(0, 200)}`))
         },
       })
       // [chat] 汇总行：thinkingAuto 为 on 时显示自动判定的档位/预算/判档来源；off 时显示静态 thinking 与上限
@@ -2411,7 +2425,7 @@ export class Chat extends plugin {
       // 发送前脱敏：屏蔽 API Key / token 等敏感信息（agent.redactSecrets 默认开；异常不阻塞回复）
       // 安全网：无论 provider 是否已剥离，最终外发前再剥一次内联工具调用标记（<tool_calls><invoke…>），
       // 杜绝任何模型/通道把控制文本当正文发出（provider 层已解析，这里防 fallback/自定义 provider 漏网）
-      const body = stripInlineToolCalls(cfg.redactSecrets === false ? (content || '') : redactSecrets(content || '')).replace(/\s+$/, '')
+      const body = stripInlineToolCalls(cfg.redactSecrets === false ? (content || '') : maybeRedact(content || '')).replace(/\s+$/, '')
       // 收尾流式：发完剩余增量并等待发送队列结算（完成屏障）。只有全部分片确认送达、且流式全文
       // 与最终正文一致，才算"已投递"从而跳过整段最终回复；存在失败/未决/缺片一律不算成功。
       const streamState = await streamer.finish()
@@ -2514,7 +2528,7 @@ export class Chat extends plugin {
         // 保证任何情况下都不把字面 [sticker:x] 漏给用户。
         // 缺片恢复：仅补发未确认送达的尾部（正文身份与流式一致时）；否则按整段正文发送
         const strippedRaw = streamRecovery != null
-          ? stripMarkers(redactSecrets(streamRecovery))
+          ? stripMarkers(maybeRedact(streamRecovery))
           : (acceptMap ? rt.sticker.applyText(body, new Map()) : (body || ''))
         let cleanBody = stripMarkers(String(strippedRaw)).replace(/[\s\n]+$/, '')
         if (!cleanBody && !(acceptMap && acceptMap.size)) cleanBody = '(无回复)'
@@ -2621,7 +2635,7 @@ export class Chat extends plugin {
       terminal('run_error', { error: e?.message || String(e), stack: e?.stack || null, input: (text || '').slice(0, 200), model: cfg.model, turns: 'unknown' })
       // run 已结束（异常路径）：标记子代理任务结算，未消费结果稍后异步回推
       try { rt.multiagent?.endRun?.(ctx) } catch { /* noop */ }
-      await safeReply(redactSecrets([
+      await safeReply(maybeRedact([
         `⚠️ 处理时出错：${e?.message || e}`,
         '如反复出错，请发送 #上报错误 <问题描述> 上报（自动打包会话日志给开发者）；',
         '或加入官方 QQ 群 960179589 @群主 并附上日志反馈。',
@@ -3640,7 +3654,7 @@ export class Chat extends plugin {
         ctx, parentTaskId: id, runtimeGeneration: _runtimeGen,
         systemPrompt: pg.systemPrompt, context: pg.context,
       })
-      const body = stripMarkers(redactSecrets(out?.content || '')).trim()
+      const body = stripMarkers(maybeRedact(out?.content || '')).trim()
       await this.e.reply(body || '续跑未产出内容（可查看任务状态或重新发起）。')
     } catch (e) {
       await this.e.reply(`续跑失败：${e?.message || e}`)

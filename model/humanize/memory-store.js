@@ -32,13 +32,16 @@ const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0))
 
 export class HumanizeMemoryStore {
   /**
-   * @param {object} opts { dataDir, provider?, cfg:()=>object, trace?, embedder? }
+   * @param {object} opts { dataDir, provider?, cfg:()=>object, trace?, embedder?, model? }
    *   embedder = makeEmbedder 产物（可选）。配置后检索走语义余弦，未配回落纯词面。
+   *   model = 已归一模型名（D18）：apps/humanize.js 已按 modelRouter 把 humanize.memory.model
+   *   的条目 id 解析成真实模型名（跨厂商），传进来优先于 cfg().model；缺省 null=沿用旧行为。
    */
-  constructor({ dataDir, provider = null, cfg, trace = null, embedder = null } = {}) {
+  constructor({ dataDir, provider = null, cfg, trace = null, embedder = null, model = null } = {}) {
     this.dataDir = dataDir
     this.provider = provider
     this.embedder = embedder
+    this.model = String(model ?? '').trim() || null // 归一模型名（null=回落 cfg().model，保持旧行为）
     this._cfgFn = typeof cfg === 'function' ? cfg : () => cfg || {}
     this.trace = trace
     this._db = null
@@ -116,6 +119,12 @@ export class HumanizeMemoryStore {
 
   cfg() { return this._cfgFn().memory || {} }
 
+  /**
+   * 记忆库 LLM 调用用的模型名（D18）：apps 经 modelRouter 解析后的真实模型名优先，
+   * 缺省回落 humanize.memory.model（旧行为：裸模型名/undefined=provider 默认主模型）。
+   */
+  modelName() { return this.model || this.cfg().model || undefined }
+
   // ─────────────── 向量辅助（embedder 未配时全 no-op） ───────────────
   /** 检索 query 向量（LRU 缓存，同句重复检索不重复调 API）。 */
   async _embedQuery(text) {
@@ -160,7 +169,7 @@ export class HumanizeMemoryStore {
     let parsed = null
     try {
       const res = await this.provider.chat({
-        model: mc.model || undefined,
+        model: this.modelName(), // D18：归一后的真实模型名（apps 经 modelRouter 解析）
         system: MEMORY_CONSOLIDATE_SYSTEM,
         messages: [{ role: 'user', content: buildConsolidatePrompt(msgs) }],
         tools: undefined, tool_choice: { mode: 'none' },
@@ -443,7 +452,7 @@ export class HumanizeMemoryStore {
         const raw = await webSearch(q)
         if (!raw || String(raw).trim().length < 50) throw new Error('搜索无结果')
         const res = await this.provider.chat({
-          model: this.cfg().model || undefined,
+          model: this.modelName(), // D18：归一后的真实模型名（跨厂商条目 id 不下发）
           system: '你是网络梗释义器。给你一个词和搜索结果，输出纯 JSON：{"explanation":"一句话解释这个梗（≤50字）","confidence":0~1}。搜索结果不足以支撑解释时 confidence 给 0.5 以下。不要编造。',
           messages: [{ role: 'user', content: `词：${term}\n搜索结果：\n${String(raw).slice(0, 2000)}` }],
           tools: undefined, tool_choice: { mode: 'none' }, temperature: 0.2, max_tokens: 150, thinking: { type: 'disabled' }, stream: false,

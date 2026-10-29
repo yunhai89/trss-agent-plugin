@@ -134,6 +134,82 @@ function cfgNow() {
 // 触发命令检测
 function isCommandText(text) { return /^\s*#/.test(String(text || '')) }
 
+// ───────────────────────── analysis.schedule（5 字段 cron 匹配，D19） ─────────────────────────
+
+/** 默认小时分析 cron（每小时 :07）；配置非法/留空时回落到这里。 */
+export const DEFAULT_ANALYSIS_SCHEDULE = '7 * * * *'
+/** 各字段取值范围：分 时 日 月 周（周 0-7，7 视作周日） */
+const CRON_RANGES = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]]
+
+/** 解析单字段（逗号列表的每项 → {lo,hi,step}）；非法返回 null。支持通配、步长（星号/n）、单值、a-b 区间、区间步长。 */
+function parseCronField(field, min, max) {
+  const f = String(field ?? '').trim()
+  if (!f) return null
+  const out = []
+  for (const raw of f.split(',')) {
+    const part = raw.trim()
+    if (!part) return null
+    let step = 1
+    let rangePart = part
+    const slash = part.indexOf('/')
+    if (slash >= 0) {
+      if (!/^\d+$/.test(part.slice(slash + 1))) return null
+      step = Number(part.slice(slash + 1))
+      rangePart = part.slice(0, slash)
+      if (step <= 0) return null
+    }
+    let lo
+    let hi
+    if (rangePart === '*' || rangePart === '?') { lo = min; hi = max }
+    else if (/^\d+$/.test(rangePart)) { lo = Number(rangePart); hi = slash >= 0 ? max : lo }
+    else {
+      const m = rangePart.match(/^(\d+)-(\d+)$/)
+      if (!m) return null
+      lo = Number(m[1]); hi = Number(m[2])
+    }
+    if (!Number.isInteger(lo) || !Number.isInteger(hi) || lo > hi || lo < min || hi > max) return null
+    out.push({ lo, hi, step })
+  }
+  return out.length ? out : null
+}
+
+const cronFieldMatches = (parsed, value) => parsed.some(({ lo, hi, step }) => value >= lo && value <= hi && (value - lo) % step === 0)
+
+/** 5 字段表达式是否可解析（配置校验用；避免写错 cron 后「永不触发」且无提示） */
+export function isValidCron(expr) {
+  const fields = String(expr ?? '').trim().split(/\s+/)
+  if (fields.length !== 5) return false
+  return fields.every((f, i) => parseCronField(f, CRON_RANGES[i][0], CRON_RANGES[i][1]) !== null)
+}
+
+/**
+ * 5 字段 cron 匹配（分钟 时 日 月 周）。
+ * 支持通配、步长（星号/n）、单值、a-b 区间、区间步长、逗号列表；周字段 0/7 均为周日。
+ * 日与周「同时受限」时按 Vixie cron 语义取 OR（任一命中即触发）；否则两字段都须命中（AND）。
+ * 非法表达式返回 false（不抛错）。
+ * @param {string} expr 5 字段 cron
+ * @param {Date} [date] 判定时刻（默认当前；单测注入）
+ */
+export function cronMatches(expr, date = new Date()) {
+  const fields = String(expr ?? '').trim().split(/\s+/)
+  if (fields.length !== 5) return false
+  const d = date instanceof Date ? date : new Date(date)
+  if (Number.isNaN(d.getTime())) return false
+  const parsed = fields.map((f, i) => parseCronField(f, CRON_RANGES[i][0], CRON_RANGES[i][1]))
+  if (parsed.some((p) => !p)) return false
+  const [, , domField, , dowField] = fields
+  if (!cronFieldMatches(parsed[0], d.getMinutes())) return false
+  if (!cronFieldMatches(parsed[1], d.getHours())) return false
+  if (!cronFieldMatches(parsed[3], d.getMonth() + 1)) return false
+  const domOk = cronFieldMatches(parsed[2], d.getDate())
+  const dow = d.getDay()
+  const dowOk = cronFieldMatches(parsed[4], dow) || (dow === 0 && cronFieldMatches(parsed[4], 7))
+  const domRestricted = !/^[*?]$/.test(domField)
+  const dowRestricted = !/^[*?]$/.test(dowField)
+  // Vixie cron：日、周同时受限 → OR；否则 AND
+  return domRestricted && dowRestricted ? (domOk || dowOk) : (domOk && dowOk)
+}
+
 // ───────────────────────── 插件类 ─────────────────────────
 
 export class GroupWorld extends plugin {
@@ -157,16 +233,16 @@ export class GroupWorld extends plugin {
       ],
     })
     // 定时任务：小时增量分析 / 每日维护 / 每周小圈子
-    // analysis.schedule 接线（曾为死配置键，cron 硬编码）：构造期读取，改后需重启生效
-    const hourlyCron = (() => {
-      const s = String(cfgNow().analysis?.schedule || '').trim()
-      return /^(\S+\s+){4}\S+$/.test(s) ? s : '7 * * * *'
-    })()
+    // D19 热加载：analysis.schedule 不再在构造期固化进 task cron（此前改后必须重启）。
+    // 改为固定「每分钟」触发，_hourlyTick 每次按**当前配置**的 5 字段 cron 判断是否命中，
+    // 命中且本分钟未跑过才执行；默认仍等效 '7 * * * *'（每小时 :07）。
+    this._lastHourlyMinute = ''
     this.task = [
-      { name: '群世界-小时分析', cron: hourlyCron, fnc: this.hourlyTask.bind(this) },
+      { name: '群世界-小时分析', cron: '* * * * *', fnc: this._hourlyTick.bind(this) },
       { name: '群世界-每日维护', cron: '30 4 * * *', fnc: this.dailyTask.bind(this) },
       { name: '群世界-每周聚类', cron: '15 3 * * 1', fnc: this.weeklyTask.bind(this) },
     ]
+    Log.info(`[groupworld] 小时分析调度：每分钟检查 analysis.schedule=${this._analysisSchedule()}（热加载即时生效；默认 ${DEFAULT_ANALYSIS_SCHEDULE}）`)
     // 异步预热（不阻塞构造）：默认关不预装配（C10）——未启用不建库/装配，关=整层 no-op；
     // 热开启后由消息路径或状态命令首次调用装配。
     if (cfgNow().enabled === true) getGroupWorld().catch(() => {})
@@ -197,6 +273,34 @@ export class GroupWorld extends plugin {
   }
 
   // ─────────────── 定时任务 ───────────────
+
+  /** 当前生效的小时分析 cron（每次 tick 重读配置；非法/留空 → 默认 '7 * * * *'） */
+  _analysisSchedule() {
+    const s = String(cfgNow().analysis?.schedule || '').trim()
+    return isValidCron(s) ? s : DEFAULT_ANALYSIS_SCHEDULE
+  }
+
+  /** 每分钟 cron 入口（Yunzai this.task 调用；无参） */
+  async _hourlyTick() {
+    await this._runHourlyIfDue(new Date())
+  }
+
+  /**
+   * 到点判断 + 同分钟去重：命中当前配置的 cron 且本分钟未跑过才执行 hourlyTask。
+   * 配置每 tick 重读 → 改 analysis.schedule 无需重启（D19）。
+   * @param {Date} [now] 判定时刻（单测注入）
+   * @returns {Promise<boolean>} 本次是否真的执行了 hourlyTask
+   */
+  async _runHourlyIfDue(now = new Date()) {
+    if (cfgNow().enabled !== true) return false
+    if (!cronMatches(this._analysisSchedule(), now)) return false
+    const d = now instanceof Date ? now : new Date(now)
+    const key = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()} ${d.getHours()}:${d.getMinutes()}`
+    if (this._lastHourlyMinute === key) return false // 同一分钟多 tick 只跑一次（如手动触发 + cron 重叠）
+    this._lastHourlyMinute = key
+    await this.hourlyTask()
+    return true
+  }
 
   async hourlyTask() {
     const c = cfgNow()

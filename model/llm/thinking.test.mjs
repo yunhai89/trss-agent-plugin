@@ -2,7 +2,7 @@
  * 离线自检 —— 思考自动决策：复杂度分档 / 厂商原生字段编码 / 预算硬顶。
  * 运行：node model/llm/thinking.test.mjs
  */
-import { classifyComplexity, encodeThinking, resolveThinkingStyle, decideThinking, decideThinkingSmart, classifyWithModel, parseClassifierOutput, shouldAskModel, clearThinkingCache, thinkingLogFields, DEFAULT_BUDGETS, DEFAULT_MAX_BUDGET } from './thinking.js'
+import { classifyComplexity, encodeThinking, resolveThinkingStyle, decideThinking, decideThinkingSmart, classifyWithModel, parseClassifierOutput, shouldAskModel, clearThinkingCache, thinkingLogFields, DEFAULT_BUDGETS, DEFAULT_MAX_BUDGET, MAX_THINKING_BUDGET, clampThinkingBudget } from './thinking.js'
 
 let passed = 0
 let failed = 0
@@ -98,7 +98,21 @@ await test('decideThinking：一步到位（复杂度 + 编码 + 风格）', asy
   const c = decideThinking('在吗', { protocol: 'openai', preset: 'mimo' })
   eq(c.depth, 'off', '闲聊 off')
   eq(c.thinking, { type: 'disabled' }, '关闭编码')
-  eq(DEFAULT_MAX_BUDGET, 32768, '默认硬顶')
+  eq(DEFAULT_MAX_BUDGET, 128000, '默认硬顶 128k')
+})
+
+await test('D10：思考预算统一硬顶 128k（自动 maxBudget 与手动 budget_tokens 同一 clamp）', async () => {
+  eq(MAX_THINKING_BUDGET, 128000, '统一硬顶 128k')
+  eq(clampThinkingBudget(200000), 128000, '超限 → 128k')
+  eq(clampThinkingBudget(128000), 128000, '恰好 128k 保留')
+  eq(clampThinkingBudget(-5), 0, '负值 → 0')
+  eq(clampThinkingBudget('abc'), 0, '非法 → 0')
+  // 自动路径：maxBudget 配 999999 / 档位预算 200k 也只能到 128k
+  const auto = classifyComplexity('请帮我设计一个分布式系统的架构，分析一致性与容错，并给出实现方案', { budgets: { high: 200000 }, maxBudget: 999999 })
+  eq(auto.budget, 128000, '自动预算被统一硬顶夹到 128k')
+  // 手动路径：encodeThinking 直接传 200k → Anthropic budget_tokens 128k（此前不 clamp）
+  eq(encodeThinking({ depth: 'high', budget: 200000, protocol: 'anthropic', preset: 'anthropic' }), { thinking: { type: 'enabled', budget_tokens: 128000 } }, '手动 budget_tokens 夹到 128k')
+  eq(encodeThinking({ depth: 'high', budget: 128000, protocol: 'anthropic', preset: 'anthropic' }).thinking.budget_tokens, 128000, '手动 128k 保留')
 })
 
 await test('parseClassifierOutput：容错解析小模型输出', async () => {

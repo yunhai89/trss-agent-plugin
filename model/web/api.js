@@ -62,10 +62,11 @@ async function getGw(res) {
 
 // ───────────────── 文件型（不依赖 runtime） ─────────────────
 
-// GET /api/config —— 全量配置（脱敏后）
+// GET /api/config —— 全量配置（脱敏后；顶层 debug 一并下发，供面板「调试日志」开关）
 router.get('/config', asyncHandler(async (req, res) => {
-  const agent = Config.get().agent || {}
-  return ok(res, redactConfig(agent))
+  const data = Config.get()
+  const agent = data.agent || {}
+  return ok(res, redactConfig({ ...agent, debug: data.debug === true }))
 }))
 
 // GET /api/sticker —— 表情包库概览（启用/总数/自动采集数）
@@ -670,6 +671,51 @@ router.get('/models', asyncHandler(async (req, res) => {
 
 // ───────────────── 写操作（9 类，成功触发 Config 热加载或落盘） ─────────────────
 
+// ── TTS 字段校验（/api/tts/config 与 PUT /api/config 的 agent.tts.* 共用同一套白名单/类型/clamp） ──
+const TTS_TOP_KEYS = ['enable', 'provider', 'autoReply', 'replyMaxChars', 'hdVoice', 'judgeModel', 'judgeTimeoutMs']
+const TTS_BOOL_KEYS = new Set(['enable', 'autoReply', 'hdVoice', 'sovits.filterNonChinese', 'doubao.autoEmotion', 'doubao.useTagParser', 'minimax.autoEmotion', 'mimo.autoEmotion', 'indextts.autoEmotion'])
+const TTS_NUM_KEYS = new Set([
+  'judgeTimeoutMs', 'indextts.timeoutMs', 'indextts.judgeTimeoutMs',
+  'sovits.timeoutMs', 'sovits.maxChars',
+  'doubao.timeoutMs', 'doubao.speechRate', 'doubao.loudnessRate', 'doubao.emotionScale', 'doubao.sampleRate',
+  'doubao.segmentGapMs', 'doubao.maxSegmentChars',
+  'minimax.timeoutMs', 'minimax.speed', 'minimax.vol', 'minimax.pitch', 'minimax.sampleRate', 'minimax.bitrate',
+  'minimax.segmentGapMs', 'minimax.maxSegmentChars',
+  'mimo.timeoutMs', 'mimo.segmentGapMs', 'mimo.maxSegmentChars',
+])
+
+/** TTS 点路径白名单（key 相对 agent.tts；拒绝原型链段与已移除的 indextts.apiKey） */
+function isSafeTtsKey(key) {
+  const k = String(key)
+  const parts = k.split('.')
+  if (parts.some((s) => ['__proto__', 'constructor', 'prototype'].includes(s))) return false
+  if (k === 'indextts.apiKey') return false // IndexTTS 直连本体无需鉴权，配置项已移除
+  return TTS_TOP_KEYS.includes(k) || /^(sovits|indextts|doubao|minimax|mimo)(\.[a-zA-Z0-9_]+)+$/.test(k)
+}
+
+/**
+ * 校验并归一单个 TTS 字段（key 相对 agent.tts）。
+ * @returns {null | { key: string, val: any }} null = 非法/未知字段（调用方忽略或拒绝）
+ */
+function normalizeTtsField(key, v) {
+  const k = String(key)
+  if (!isSafeTtsKey(k)) return null
+  if (k === 'provider') return PROVIDER_IDS.includes(String(v)) ? { key: k, val: String(v) } : null
+  if (TTS_BOOL_KEYS.has(k)) return { key: k, val: !!v }
+  if (k === 'replyMaxChars') return { key: k, val: Math.max(0, Math.min(5000, Number(v) || 0)) }
+  if (TTS_NUM_KEYS.has(k)) {
+    const num = Number(v)
+    return Number.isFinite(num) ? { key: k, val: num } : null
+  }
+  if (/\.endpoint$/.test(k)) {
+    const s = String(v || '').trim()
+    if (s && !/^https?:\/\//i.test(s)) return null // 仅允许 http/https，防 javascript:/file: 等协议注入
+    return { key: k, val: s }
+  }
+  if (typeof v === 'string') return { key: k, val: String(v).slice(0, 500) }
+  return { key: k, val: v }
+}
+
 // PUT /api/config —— 点路径 changes（对齐锅巴 setConfigData）
 // 基础模型镜像字段（agent.model/protocol/preset/baseURL/apiKey）只读：保存时由 Config.save()
 // 按 agent.providerId/modelId 的解析结果无条件回填，直接写会被覆盖 → 这里拒绝并计入 ignored。
@@ -683,14 +729,29 @@ router.put('/config', asyncHandler(async (req, res) => {
   const ignored = []
   let mirrorIgnored = false
   for (const [p, v] of Object.entries(changes)) {
-    // 非 agent.* 命名空间（如顶层 debug 归锅巴/配置文件管）不再静默丢弃：计入 ignored 告知调用方
+    // D7：顶层 debug 键（布尔）允许从 Web 面板写根；这是唯一允许的非 agent.* 路径
+    if (p === 'debug') {
+      if (typeof v !== 'boolean') { rejected.push({ path: p, reason: 'debug 必须是布尔值' }); continue }
+      setPath(cfg, 'debug', v)
+      n++
+      continue
+    }
+    // 其余非 agent.* 命名空间（如顶层其它键）不再静默丢弃：计入 ignored 告知调用方
     if (!p.startsWith('agent.')) {
-      ignored.push({ path: p, reason: '仅支持 agent.* 命名空间（顶层键请用锅巴/配置文件）' })
+      ignored.push({ path: p, reason: '仅支持 agent.* 命名空间与顶层 debug（其余顶层键请用锅巴/配置文件）' })
       continue
     }
     if (BASE_MODEL_MIRROR_PATHS.has(p)) {
       mirrorIgnored = true
       ignored.push({ path: p, reason: '基础模型镜像字段由引用自动回填' })
+      continue
+    }
+    // agent.tts.* 与 /api/tts/config 同一套白名单/类型校验，防绕过（整块 agent.tts 提交也拒绝）
+    if (p === 'agent.tts') { rejected.push({ path: p, reason: '请按 agent.tts.<字段> 提交（需逐字段白名单校验）' }); continue }
+    if (p.startsWith('agent.tts.')) {
+      const nv = normalizeTtsField(p.slice('agent.tts.'.length), v)
+      if (!nv) { rejected.push({ path: p, reason: 'TTS 字段不在白名单/类型或取值非法' }); continue }
+      try { setPath(cfg, 'agent.tts.' + nv.key, nv.val); n++ } catch (e) { rejected.push({ path: p, reason: e?.message || String(e) }) }
       continue
     }
     // Jev Key 掩码 = 用户未修改：跳过，避免把掩码写进配置（redactConfig 只掩码展示）
@@ -1119,51 +1180,17 @@ function ttsPayload() {
 router.get('/tts', asyncHandler(async (req, res) => ok(res, ttsPayload())))
 
 // PUT /api/tts/config —— 点路径 changes（相对 agent.tts；白名单服务商前缀 + 原型链键拒绝）
+// 字段白名单/类型/clamp 与 PUT /api/config 的 agent.tts.* 共用 normalizeTtsField（见「写操作」段）。
 router.put('/tts/config', asyncHandler(async (req, res) => {
   const { changes } = req.body || {}
   if (!changes || typeof changes !== 'object') return fail(res, CODE.BAD, 'changes 必须是对象')
-  const TOP_KEYS = ['enable', 'provider', 'autoReply', 'replyMaxChars', 'hdVoice', 'judgeModel', 'judgeTimeoutMs']
-  const SAFE_KEY = (key) => {
-    const parts = String(key).split('.')
-    if (parts.some((s) => ['__proto__', 'constructor', 'prototype'].includes(s))) return false
-    if (key === 'indextts.apiKey') return false // IndexTTS 直连本体无需鉴权，配置项已移除
-    return TOP_KEYS.includes(key) || /^(sovits|indextts|doubao|minimax|mimo)(\.[a-zA-Z0-9_]+)+$/.test(key)
-  }
-  const BOOL_KEYS = new Set(['autoReply', 'hdVoice', 'sovits.filterNonChinese', 'doubao.autoEmotion', 'doubao.useTagParser', 'minimax.autoEmotion', 'mimo.autoEmotion', 'indextts.autoEmotion'])
-  const NUM_KEYS = new Set([
-    'judgeTimeoutMs', 'indextts.timeoutMs', 'indextts.judgeTimeoutMs',
-    'sovits.timeoutMs', 'sovits.maxChars',
-    'doubao.timeoutMs', 'doubao.speechRate', 'doubao.loudnessRate', 'doubao.emotionScale', 'doubao.sampleRate',
-    'doubao.segmentGapMs', 'doubao.maxSegmentChars',
-    'minimax.timeoutMs', 'minimax.speed', 'minimax.vol', 'minimax.pitch', 'minimax.sampleRate', 'minimax.bitrate',
-    'minimax.segmentGapMs', 'minimax.maxSegmentChars',
-    'mimo.timeoutMs', 'mimo.segmentGapMs', 'mimo.maxSegmentChars',
-  ])
   const cfg = Config.get()
   let n = 0
   for (const [p, v] of Object.entries(changes)) {
     const key = String(p).replace(/^agent\.tts\./, '')
-    if (!SAFE_KEY(key)) continue
-    let val = v
-    if (key === 'provider') {
-      if (!PROVIDER_IDS.includes(String(v))) continue
-      val = String(v)
-    } else if (BOOL_KEYS.has(key)) {
-      val = !!v
-    } else if (key === 'replyMaxChars') {
-      val = Math.max(0, Math.min(5000, Number(v) || 0))
-    } else if (NUM_KEYS.has(key)) {
-      const num = Number(v)
-      if (!Number.isFinite(num)) continue
-      val = num
-    } else if (/\.endpoint$/.test(key)) {
-      const s = String(v || '').trim()
-      if (s && !/^https?:\/\//i.test(s)) continue // 仅允许 http/https，防 javascript:/file: 等协议注入
-      val = s
-    } else if (typeof v === 'string') {
-      val = String(v).slice(0, 500)
-    }
-    setPath(cfg, 'agent.tts.' + key, val)
+    const nv = normalizeTtsField(key, v)
+    if (!nv) continue // 白名单外的字段静默忽略（与旧行为一致；跨页提交请走 PUT /api/config 获得 rejected 明细）
+    setPath(cfg, 'agent.tts.' + nv.key, nv.val)
     n++
   }
   if (!n) return fail(res, CODE.BAD, '没有可应用的字段（支持 enable/provider/autoReply/replyMaxChars/hdVoice/judgeModel/judgeTimeoutMs 与 sovits|indextts|doubao|minimax|mimo 前缀）')

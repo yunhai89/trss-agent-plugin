@@ -31,6 +31,13 @@ const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
 
 let _data = {}
 const _subscribers = new Set()
+let _defaults = null // 默认值缓存（load/reload 时刷新；用于差异写入与快照压缩）
+
+/** 默认配置（缓存；load/reload 会刷新） */
+function getDefaults() {
+  if (!_defaults) _defaults = readYamlDir(defaultDir)
+  return _defaults
+}
 
 /** 读取一个目录下的所有 .yaml 文件并合并 */
 export function readYamlDir(dir) {
@@ -48,15 +55,45 @@ function isPlainObj(v) {
   return v && typeof v === 'object' && !Array.isArray(v)
 }
 
-/** 递归检测 base 有而 over 缺失的键（用于 config.yaml 自愈补全） */
-function hasMissingKeys(base, over) {
-  if (!isPlainObj(base)) return false
-  if (!isPlainObj(over)) return true
-  for (const k of Object.keys(base)) {
-    if (!(k in over)) return true
-    if (isPlainObj(base[k]) && hasMissingKeys(base[k], over[k])) return true
+/** 深拷贝（structuredClone 优先；null/不可克隆值回退 JSON）。 */
+function cloneDeep(v) {
+  try { return structuredClone(v) } catch { return JSON.parse(JSON.stringify(v)) }
+}
+
+/** 深度相等（对象/数组/标量；用于「与默认值相同」的键压缩与差异写入）。 */
+function deepEqual(a, b) {
+  if (a === b) return true
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+    return a.every((v, i) => deepEqual(v, b[i]))
+  }
+  if (isPlainObj(a) && isPlainObj(b)) {
+    const ka = Object.keys(a); const kb = Object.keys(b)
+    if (ka.length !== kb.length) return false
+    return ka.every((k) => k in b && deepEqual(a[k], b[k]))
   }
   return false
+}
+
+/**
+ * 计算「相对默认值的差异」：与默认值 deep-equal 的键不写盘。
+ * 这是 2026-10-29 配置审计 F16 的核心修复——此前 save() 把「默认值 + 用户值」整份落盘，
+ * 用户文件变成默认值快照，之后版本改默认值对老用户永不生效。
+ */
+export function diffFromDefaults(data, defaults) {
+  if (!isPlainObj(data) || !isPlainObj(defaults)) return data
+  const out = {}
+  for (const [k, v] of Object.entries(data)) {
+    if (!(k in defaults)) { out[k] = v; continue }
+    const d = defaults[k]
+    if (isPlainObj(v) && isPlainObj(d)) {
+      const child = diffFromDefaults(v, d)
+      if (Object.keys(child).length) out[k] = child
+    } else if (!deepEqual(v, d)) {
+      out[k] = v
+    }
+  }
+  return out
 }
 
 /**
@@ -83,12 +120,20 @@ function readUser() {
   }
 }
 
-/** 写入用户配置（原子：tmp+rename） */
-function writeUser(data) {
+/** 原样写入用户配置（原子：tmp+rename）。仅用于首次生成/迁移等需要完整内容的场景。 */
+function writeUserRaw(data) {
   try { fs.mkdirSync(userConfigDir, { recursive: true }) } catch { /* noop */ }
   const tmp = `${userConfigPath}.tmp`
   fs.writeFileSync(tmp, yaml.stringify(data))
   fs.renameSync(tmp, userConfigPath)
+}
+
+/**
+ * 写入用户配置：只写「相对默认值的差异」（F16）。
+ * 与默认值相同的键不落盘，升级后新默认值才能对老用户生效。
+ */
+function writeUser(data) {
+  writeUserRaw(diffFromDefaults(data, getDefaults()))
 }
 
 /** 迁移旧 Yunzai 根配置 → 插件内（幂等：插件内已有则不动） */
@@ -97,7 +142,7 @@ export function migrateLegacy() {
   try {
     const old = fs.readFileSync(legacyUserConfigPath, 'utf8')
     const parsed = yaml.parse(old) || {}
-    writeUser(parsed)
+    writeUserRaw(parsed)
     try { fs.unlinkSync(legacyUserConfigPath) } catch { /* noop */ }
     Log.mark('[config] 已把旧配置从 Yunzai 根迁移到插件目录并删除旧文件')
     return true
@@ -225,60 +270,116 @@ function warnDanglingBaseRef(agent) {
   Log.warn(`[config] 基础模型引用失效（agent.providerId=${agent.providerId} / agent.modelId=${agent.modelId || '空'}）：对应的厂商或模型条目不在配置中心里，运行时仍在用上一次解析出的接入信息。请重新选择厂商与模型。`)
 }
 
-/** 深合并后的归一步：迁移旧结构 → 修正哨兵引用 → 回填镜像。返回是否需要落盘 */
-function normalizeBaseModel(root) {
+/**
+ * 一次性迁移：扁平回退字段（fallbackModel/fallbackBaseURL/fallbackApiKey/fallbackProtocol）
+ * → `fallbackModels[]` 单真源（F7）。迁移后删除扁平键，运行时只读数组；面板只编辑数组。
+ */
+function migrateFallbackModels(agent) {
+  if (!isPlainObj(agent)) return false
+  const FLAT = ['fallbackModel', 'fallbackBaseURL', 'fallbackApiKey', 'fallbackProtocol']
+  const hasFlat = FLAT.some((k) => k in agent)
+  if (!hasFlat) return false
+  const model = String(agent.fallbackModel || '').trim()
+  const apiKey = String(agent.fallbackApiKey || '').trim()
+  const list = Array.isArray(agent.fallbackModels) ? agent.fallbackModels : []
+  let changed = false
+  if (model && apiKey) {
+    const entry = {
+      model,
+      baseURL: String(agent.fallbackBaseURL || '').trim(),
+      apiKey,
+      protocol: String(agent.fallbackProtocol || 'openai').trim() || 'openai',
+    }
+    const exists = list.some((x) => x && String(x.model) === entry.model && String(x.apiKey) === entry.apiKey
+      && String(x.baseURL || '') === entry.baseURL && String(x.protocol || 'openai') === entry.protocol)
+    if (!exists) {
+      list.push(entry)
+      agent.fallbackModels = list
+      changed = true
+      Log.mark('[config] 已把扁平回退模型迁移到 agent.fallbackModels[]（旧扁平字段已废弃）')
+    }
+  } else if (model && !apiKey) {
+    Log.warn('[config] fallbackModel 已填但 fallbackApiKey 为空，扁平回退字段已废弃并清除；请改用 agent.fallbackModels[]')
+  }
+  for (const k of FLAT) { if (k in agent) { delete agent[k]; changed = true } }
+  if (!Array.isArray(agent.fallbackModels)) { agent.fallbackModels = []; changed = true }
+  return changed
+}
+
+/**
+ * 深合并后的统一归一步（F17）：迁移旧结构 → fallback 单真源 → 修哨兵 → 类型归一 → 回填镜像。
+ * 所有写入口（load/reload/save/面板）共用，避免各面板各写一套私有归一。
+ * @returns {boolean} 是否发生需要落盘的变化
+ */
+export function normalizeConfig(root) {
   const agent = root?.agent
   if (!isPlainObj(agent)) return false
   let dirty = migrateBaseModel(agent)
+  if (migrateFallbackModels(agent)) dirty = true
   if (repointLegacyMainModels(agent)) dirty = true
+  // 类型归一：cacheControl 旧布尔 → 三态字符串（off/auto/explicit）；thinking 布尔 → provider-native 形状
+  if (typeof agent.cacheControl === 'boolean') { agent.cacheControl = agent.cacheControl ? 'explicit' : 'off'; dirty = true }
+  if (agent.thinking === true) { agent.thinking = { type: 'enabled' }; dirty = true }
+  else if (agent.thinking === false) { agent.thinking = null; dirty = true }
   if (syncBaseModel(agent)) dirty = true
   warnDanglingBaseRef(agent)
   return dirty
 }
 
+/**
+ * 启动时一次性压缩用户配置：把与当前默认值 deep-equal 的键删掉（写 config.yaml.bak 备份）。
+ * 用于修复历史版本留下的「默认值全量快照」——否则升级后的新默认值永远被快照旧值覆盖。
+ */
+function compactUserConfig(def) {
+  let user
+  try { user = readUser() } catch { return }
+  if (!isPlainObj(user) || !Object.keys(user).length) return
+  const compact = diffFromDefaults(user, def)
+  if (deepEqual(compact, user)) return
+  try {
+    fs.copyFileSync(userConfigPath, `${userConfigPath}.bak`)
+    writeUserRaw(compact)
+    Log.mark('[config] 已把 config.yaml 压缩为「与默认值的差异」（旧文件备份为 config.yaml.bak）；升级后的新默认值将自动生效')
+  } catch (e) {
+    Log.warn('[config] 压缩 config.yaml 失败（保留原文件）', e?.message || e)
+  }
+}
+
 function load() {
   const def = readYamlDir(defaultDir)
+  // 关键：默认值必须与 _data 完全隔离。deepMerge 是浅拷贝（只 clone 顶层对象），若直接对 `def` 合并，
+  // `_data.agent` 会与 `_defaults.agent` 共享引用——运行时/归一 mutate 配置会污染默认值，
+  // 导致「差异写入」永远算出空 diff（F16 修复的隐形坑）。
+  _defaults = cloneDeep(def)
   // 迁移旧配置（若插件内尚无配置且 Yunzai 根有旧文件）
   migrateLegacy()
-  // 首次运行（无旧文件也无新文件）：把默认配置落到插件内，方便用户直接编辑
-  if (!fs.existsSync(userConfigPath) && Object.keys(def).length) {
-    try { writeUser(def) } catch (err) { Log.warn('写入默认配置失败', err) }
-    _data = deepMerge(def, readUser())
-    persistBaseModel()
-    return
+  const createdNow = !fs.existsSync(userConfigPath) && Object.keys(def).length
+  if (createdNow) {
+    // 首次运行：生成一份完整默认配置，方便用户直接编辑；后续启动会自动压缩为差异（见下）。
+    try { writeUserRaw(def) } catch (err) { Log.warn('写入默认配置失败', err) }
+  } else {
+    // 老用户：一次性删掉「与当前默认值相同」的快照键（F16）；备份 .bak，幂等
+    compactUserConfig(def)
   }
-  const user = readUser()
-  const merged = deepMerge(def, user)
-  // 自愈：default 有而 user 缺失的键，补全回 user config.yaml（user config 是程序生成的、
-  // 无注释，重写无损）。否则用户编辑 config.yaml 时看不到新增字段（如 agent.pixiv / agent.document），
-  // 只能靠运行时 deepMerge 兜底——既不可见也不可编辑。
-  if (hasMissingKeys(def, user)) {
-    try { writeUser(merged); Log.mark('[config] 已补全 config.yaml 中缺失的字段') } catch (e) { Log.warn('[config] 补全缺失字段失败', e?.message || e) }
-  }
-  _data = merged
+  _data = deepMerge(cloneDeep(def), readUser())
   persistBaseModel()
 }
 
-/** 基础模型引用归一步：迁移/镜像有变化才落盘（幂等，避免 fs.watch 自触发抖动） */
+/** 归一并落盘（仅当归一产生了变化）：迁移/fallback/类型/镜像有变化才写，幂等，避免 fs.watch 抖动 */
 function persistBaseModel() {
-  if (!normalizeBaseModel(_data)) return
-  try { writeUser(_data) } catch (e) { Log.warn('[config] 基础模型引用同步落盘失败', e?.message || e) }
+  if (!normalizeConfig(_data)) return
+  try { writeUser(_data) } catch (e) { Log.warn('[config] 配置归一落盘失败', e?.message || e) }
 }
 
 /** 重新读取并合并；内容变化（或 force=true）才通知订阅者（去重，避免自发保存引发无谓重建） */
 function reload(force = false) {
   migrateLegacy() // 自愈：若 config.yaml 缺失但 legacy 在，先拾取
   const def = readYamlDir(defaultDir)
+  _defaults = cloneDeep(def)
   const prev = JSON.stringify(_data)
-  const user = readUser()
-  const merged = deepMerge(def, user)
-  // 与 load() 同口径自愈：升级新增的默认键补全落盘，否则热加载后内存有默认键、文件里没有，
-  // 形成「内存/文件两套真源」（2026-10-29 配置互搏审计 F16）。
-  if (hasMissingKeys(def, user)) {
-    try { writeUser(merged); Log.mark('[config] 已补全 config.yaml 中缺失的字段') } catch (e) { Log.warn('[config] 补全缺失字段失败', e?.message || e) }
-  }
-  _data = merged
-  persistBaseModel() // 引用→镜像归一（幂等；有变化才落盘）
+  // 热加载只合并（缺失键由 deepMerge 补全，不写盘）；写盘只发生在 save/归一有变化时。
+  _data = deepMerge(cloneDeep(def), readUser())
+  persistBaseModel() // 统一归一（幂等；有变化才落盘差异）
   const changed = JSON.stringify(_data) !== prev
   if (changed || force) {
     Log.mark('[config] 配置已热加载')
@@ -316,9 +417,9 @@ function startWatch() {
   }
 }
 
-/** 持久化当前配置到用户配置文件（先做基础模型引用归一，保证磁盘上的镜像字段不滞后） */
+/** 持久化当前配置到用户配置文件：统一归一 → 只写与默认值的差异（F16） */
 function save(data = _data) {
-  normalizeBaseModel(data)
+  normalizeConfig(data)
   writeUser(data)
   _data = data
 }
@@ -354,6 +455,8 @@ export default {
   },
   get: () => _data,
   set: (key, value) => { _data[key] = value },
+  normalize: (data) => normalizeConfig(data),
+  diffFromDefaults,
   reload,
   save,
   onChange,

@@ -1,148 +1,815 @@
 /**
  * agents-plugin 管理面板 · Mock 数据层
  * 全部数据结构与 docs/前端开发数据规范.md 中的 TS interface 对齐。
+ * ⚠ 仅 smoke/开发预览用（生产 index.html 只加载 store.js，空 reactive 覆盖本文件）：
+ *    §1 config 的默认值由 config/default_config/config.yaml 生成，示例接入信息除外。
  * 现阶段无任何后端请求,所有"修改"只作用于内存(刷新即还原)。
  */
 (function () {
   const now = Date.now()
   const H = 3600e3, D = 24 * H, M = 60e3
 
-  /* ---------- §1 配置(自用面板:敏感字段一律明文,不脱敏) ---------- */
+  /* ---------- §1 配置(自用面板:敏感字段一律明文,不脱敏) ----------
+   * 默认值由 config/default_config/config.yaml 生成（仅 smoke/开发预览用，非运行时配置）。
+   * providerId/llmProviders/llmModels/fallbackModels/masters 等是「示例接入信息」，不是默认值。 */
   const config = {
-    trigger: 'both',
-    triggerCommand: '#ai',
-    isolation: { enable: true },
-    // 基础模型 = 「厂商配置 + 模型列表」的引用；下面 protocol/preset/baseURL/apiKey/model 是解析镜像
-    providerId: 'pds',
-    modelId: 'mchat',
+    debug: false,
+    trigger: "at",
+    triggerCommand: "#ai",
+    privateChat: false,
+    isolation: {
+      enable: true
+    },
+    providerId: "pds",
+    modelId: "mchat",
+    protocol: "openai",
+    preset: "deepseek",
+    baseURL: "https://api.deepseek.com",
+    apiKey: "sk-abc123def456a3f9",
+    model: "deepseek-chat",
+    utilityModel: "deepseek-chat",
     llmProviders: [
-      { id: 'pds', name: 'DeepSeek', protocol: 'openai', preset: 'deepseek', baseURL: 'https://api.deepseek.com', apiKey: 'sk-abc123def456a3f9' },
-      { id: 'pgpt', name: 'OpenAI', protocol: 'openai', preset: 'openai', baseURL: 'https://api.openai.com/v1', apiKey: '' },
+      {
+        id: "pds",
+        name: "DeepSeek",
+        protocol: "openai",
+        preset: "deepseek",
+        baseURL: "https://api.deepseek.com",
+        apiKey: "sk-abc123def456a3f9"
+      },
+      {
+        id: "pgpt",
+        name: "OpenAI",
+        protocol: "openai",
+        preset: "openai",
+        baseURL: "https://api.openai.com/v1",
+        apiKey: ""
+      }
     ],
     llmModels: [
-      { id: 'mchat', name: '主力', providerId: 'pds', model: 'deepseek-chat', temperature: null, maxTokens: null, thinking: 'inherit', note: '' },
-      { id: 'mutil', name: '便宜小模型', providerId: 'pds', model: 'deepseek-chat', temperature: 0.1, maxTokens: null, thinking: 'off', note: '旁路' },
-      { id: 'm4o', name: '', providerId: 'pgpt', model: 'gpt-4o-mini', temperature: null, maxTokens: null, thinking: 'inherit', note: '' },
+      {
+        id: "mchat",
+        name: "主力",
+        providerId: "pds",
+        model: "deepseek-chat",
+        thinking: "inherit",
+        note: ""
+      },
+      {
+        id: "mutil",
+        name: "便宜小模型",
+        providerId: "pds",
+        model: "deepseek-chat",
+        temperature: 0.1,
+        thinking: "off",
+        note: "旁路"
+      },
+      {
+        id: "m4o",
+        name: "",
+        providerId: "pgpt",
+        model: "gpt-4o-mini",
+        thinking: "inherit",
+        note: ""
+      }
     ],
-    protocol: 'openai',
-    preset: 'deepseek',
-    baseURL: 'https://api.deepseek.com',
-    apiKey: 'sk-abc123def456a3f9',
-    model: 'deepseek-chat',
-    utilityModel: 'deepseek-chat',
     fallbackModels: [
-      { model: 'gpt-4o-mini', baseURL: 'https://api.openai.com', apiKey: 'sk-gpt4o7c21xyz', protocol: 'openai' },
-      { model: 'claude-3-5-haiku-20241022', baseURL: 'https://api.anthropic.com', apiKey: '', protocol: 'anthropic' },
+      {
+        model: "gpt-4o-mini",
+        baseURL: "https://api.openai.com",
+        apiKey: "sk-gpt4o7c21xyz",
+        protocol: "openai"
+      },
+      {
+        model: "claude-3-5-haiku-20241022",
+        baseURL: "https://api.anthropic.com",
+        apiKey: "",
+        protocol: "anthropic"
+      }
     ],
-    proxy: '',
-    reasoningFields: ['reasoning_content'],
-    maxTurns: 25,
-    loop: { maxSameAction: 2, maxConsecutiveFailures: 3, noProgressWindow: 4, timeBudgetMs: 1800000, tokenBudget: 480000, finalizeGraceMs: 45000 },
-    temperature: 0.2,
-    thinking: { type: 'enabled', budget_tokens: 16000 },
-    thinkingAuto: { enable: false, classifier: 'auto', model: '', timeoutMs: 2500, maxBudget: 32768, budgets: { low: 4096, medium: 8192, high: 16384 }, style: '' },
-    jev: {
-      enable: false, providerId: '', modelId: '', model: '',
-      timeoutMs: 4000, maxRetries: 1, maxStateChars: 32000, toolSelectionMaxTools: 80,
-      decisions: { llmTool: false, terminalRisk: false },
-      allowDestructive: false,
-      thresholds: { lowConfidence: 0.5, highConfidence: 0.9, thinkingMinConfidence: 0.5, toolNoulFloor: 0.6, terminalRiskFloor: 0.75, reflectFloor: 0.5 },
+    proxy: "",
+    reasoningFields: [],
+    maxTurns: 200,
+    loop: {
+      maxSameAction: 2,
+      maxConsecutiveFailures: 3,
+      noProgressWindow: 4,
+      timeBudgetMs: 3600000,
+      tokenBudget: 480000,
+      finalizeGraceMs: 45000
     },
-    shell: { intercept: [] },
+    temperature: 0.2,
+    thinking: null,
+    thinkingAuto: {
+      enable: false,
+      classifier: "auto",
+      model: "",
+      timeoutMs: 2500,
+      maxBudget: 32768,
+      budgets: {
+        low: 4096,
+        medium: 8192,
+        high: 16384
+      },
+      style: ""
+    },
+    jev: {
+      enable: false,
+      providerId: "",
+      modelId: "",
+      model: "",
+      timeoutMs: 4000,
+      maxRetries: 1,
+      maxStateChars: 32000,
+      toolSelectionMaxTools: 80,
+      decisions: {
+        llmTool: false,
+        terminalRisk: false
+      },
+      allowDestructive: false,
+      thresholds: {
+        lowConfidence: 0.5,
+        highConfidence: 0.9,
+        thinkingMinConfidence: 0.5,
+        toolNoulFloor: 0.6,
+        terminalRiskFloor: 0.75,
+        reflectFloor: 0.5
+      }
+    },
+    shell: {
+      intercept: []
+    },
     maxTokens: null,
-    contextWindow: 32000,
-    compaction: { enable: true, archiveDir: 'data/context-archive' },
-    kb: { crawl: { engine: 'crawl4ai', execution: 'local' } },
+    contextWindow: null,
+    contextMsgHighWater: 30,
+    contextMsgLowWater: 18,
+    contextHighRatio: 0.65,
+    contextLowRatio: 0.45,
+    compaction: {
+      enable: true,
+      archiveDir: "data/context-archive"
+    },
     maxToolResultChars: 8000,
+    toolConcurrency: {
+      maxParallel: 3
+    },
+    toolSchemaValidate: true,
+    taskStore: {
+      enable: false,
+      dir: "data/tasks"
+    },
     keepReasoning: false,
     stream: false,
-    reflect: 'auto',
+    reflect: "auto",
+    finalizeMaxTokens: 2048,
+    rootTokenBudget: 0,
+    render: {
+      card: true,
+      timeoutMs: 15000,
+      replyTimeoutMs: 30000
+    },
+    cacheControl: "off",
+    promptCacheKey: false,
     reflectMaxIterations: 1,
     progress: true,
     progressRecall: 3,
-    reply: { mode: 'image', atSender: true, quote: true, narrate: true, renderScale: 3 },
-    memoryLimits: { memory: 2200, user: 1375 },
-    memory: { enable: true, threatScan: true },
+    reply: {
+      mode: "image",
+      atSender: true,
+      quote: true,
+      narrate: true,
+      renderScale: 3
+    },
+    memoryLimits: null,
+    memory: {
+      enable: true,
+      threatScan: true
+    },
     recall: {
-      cap: 200, extractEvery: 10, model: '', embedProvider: '', minScore: 0,
-      diversity: { enable: true, lambda: 0.7, perTypeCap: 3 },
-      usage: { enable: true, containment: 0.5, penalizeAfter: 5, penalty: 0.5 },
+      cap: 200,
+      extractEvery: 10,
+      minScore: 0,
+      diversity: {
+        enable: true,
+        lambda: 0.7,
+        perTypeCap: 3
+      },
+      usage: {
+        enable: true,
+        containment: 0.5,
+        penalizeAfter: 5,
+        penalty: 0.5
+      },
+      model: "",
+      embedProvider: "",
+      embedBaseURL: "",
+      embedApiKey: ""
     },
-    profile: { enable: true, infer: true, maxChars: 600, maxPerFacet: 8, inferAfter: 8 },
-    selfReview: { enable: true, every: 20, model: '', autoApplyMemory: true, autoApplyPrompt: false, dailyBudgetTokens: 200000 },
-    evolution: { traceDir: 'data/evolution/traces', promptDir: 'data/evolution/prompts', suggestionDir: 'data/evolution/suggestions' },
-    toolEvo: { enable: true, dbPath: 'data/evolution/tevo.db', artifactsDir: 'data/evolution/tools', maxRepairAttempts: 2 },
+    profile: {
+      enable: true,
+      maxChars: 600,
+      maxPerFacet: 8,
+      infer: true,
+      inferAfter: 8
+    },
+    kb: {
+      enable: true,
+      crawlEnable: true,
+      crawl: {
+        engine: "crawl4ai",
+        execution: "local",
+        stealth: true,
+        retryBlocked: true,
+        allowPrivateHosts: false,
+        sessionPersist: true,
+        sessionTtlHours: 12,
+        sessionProfile: false,
+        siteMemory: true,
+        perHostIntervalMs: 1200,
+        hostConcurrency: 1
+      },
+      crawlTimeout: 60,
+      chunkSize: 500,
+      chunkOverlap: 50,
+      topK: 5,
+      minScore: 0.3
+    },
+    schedule: {
+      taskEnabled: true,
+      taskMaxTurns: 200
+    },
+    selfReview: {
+      enable: true,
+      every: 20,
+      model: "",
+      autoApplyMemory: true,
+      autoApplyPrompt: false,
+      dailyBudgetTokens: 200000
+    },
+    evolution: {
+      traceDir: "data/evolution/traces",
+      promptDir: "data/evolution/prompts",
+      suggestionDir: "data/evolution/suggestions"
+    },
+    toolEvo: {
+      enable: true,
+      dbPath: "data/evolution/tevo.db",
+      artifactsDir: "data/evolution/tools",
+      maxRepairAttempts: 2,
+      runnerTimeoutMs: 5000
+    },
     systemPrompt: null,
-    chatPermission: 'master',
+    chatPermission: "master",
     masterSkipConfirm: false,
-    masters: ['1234567890', '9876543210'],
+    masters: [
+      "1234567890",
+      "9876543210"
+    ],
     confirmTimeout: 300,
-    guardAction: 'flag',
-    guardSensitivity: 'medium',
+    guardAction: "flag",
+    guardSensitivity: "medium",
+    untrustedGuard: true,
     redactSecrets: true,
-    devLog: { enable: true, dir: 'data/logs' },
-    policy: { categoryMin: { terminal: 3, group: 2 } },
-    media: { enable: true, active: true, passive: true, maxImages: 6, maxFileBytes: 20971520, degrade: 'describe', caps: { vision: true, file: true } },
+    persona: {
+      defaultId: "",
+      skipInjectionCheck: false,
+      styleExamples: []
+    },
+    personaLore: {
+      dir: "",
+      adoptionsDir: ""
+    },
+    devLog: {
+      enable: true,
+      dir: ""
+    },
+    policy: {
+      categoryMin: null
+    },
+    media: {
+      enable: true,
+      active: true,
+      passive: true,
+      maxImages: 4,
+      maxFileBytes: 8388608,
+      degrade: "note",
+      capsFromApi: true,
+      caps: null
+    },
     vision: {
-      enable: true, model: 'mimo-2.5', protocol: 'openai', preset: 'mimo',
-      baseURL: 'https://api.mimo.cn',
-      apiKey: 'mk-vision55e0demo',
-      maxTokens: 4096, describePrompt: '请详细描述这张图片的内容',
+      enable: true,
+      model: "",
+      protocol: null,
+      preset: null,
+      baseURL: "",
+      apiKey: "",
+      maxTokens: 1024,
+      describePrompt: ""
     },
-    tools: { builtin: true, dir: 'tools' },
-    toolDiscovery: { enable: true, method: 'llm', alwaysOn: ['tool_search', 'clarify', 'memory_search', 'web_search', 'skill', 'get_chat_history'], topK: 6, minScore: 0.1 },
-    miyoushe: { cookie: 'miyoushe_cookie_demo', defaultGid: 2 },
-    persona: { dir: 'data/personas', defaultId: '', skipInjectionCheck: false },
-    skill: { builtin: true, dir: 'skills', historyCount: 3 },
+    perception: {
+      sparseInject: true,
+      sparseThreshold: 6
+    },
+    tools: {
+      builtin: true,
+      dir: "tools"
+    },
+    toolDiscovery: {
+      enable: true,
+      method: "llm",
+      alwaysOn: [],
+      topK: 8,
+      minScore: 0.3,
+      stableList: true
+    },
+    miyoushe: {
+      cookie: "",
+      defaultGid: 2,
+      maxImages: 9
+    },
+    comfyui: {
+      enable: false,
+      host: "http://127.0.0.1:8188",
+      cloud: false,
+      apiKey: "",
+      workflowDir: "workflows",
+      workflowCacheTtl: 300,
+      confirm: true,
+      command: {
+        enable: true,
+        masterOnly: false,
+        cooldown: 30
+      },
+      timeout: 300,
+      pollInterval: 1.5,
+      pollMaxInterval: 8,
+      maxImages: 4,
+      outputDir: ""
+    },
+    skill: {
+      dir: "skills",
+      historyCount: 15
+    },
     search: {
-      tavily: { apiKey: 'tvly-demo8b2c' },
-      exa: { apiKey: '' },
-      perplexity: { apiKey: '' },
-      brave: { apiKey: '' },
-      searxng: { url: '' },
-      ddg: true,
+      timeout: 0,
+      tavily: {
+        apiKey: ""
+      },
+      exa: {
+        apiKey: ""
+      },
+      perplexity: {
+        apiKey: ""
+      },
+      brave: {
+        apiKey: ""
+      },
+      searxng: {
+        url: ""
+      },
+      ddg: true
     },
-    research: { permission: 'master', maxRounds: 5, maxConcurrent: 3, workerModel: '', evaluation: true },
+    research: {
+      permission: "master",
+      maxRounds: 3,
+      maxConcurrent: 3,
+      workerModel: "",
+      evaluation: true
+    },
     mcp: {
-      requestTimeout: 30000,
-      servers: {
-        moegirl: { command: 'npx', args: ['-y', 'moegirl-wiki-mcp'], env: { NODE_ENV: 'production' } },
-        'filesystem-remote': { type: 'http', url: 'https://mcp.example.com/fs', headers: { Authorization: 'Bearer demo-token-9f' } },
-      },
+      requestTimeout: 60000,
+      servers: null
     },
-    sticker: { enable: true, maxPerReply: 2, cooldown: 60, sendRate: 1 },
-    calc: { enable: true, python: 'python3', timeout: 30 },
+    sticker: {
+      enable: false,
+      maxPerReply: 2,
+      cooldown: 300,
+      sendRate: 0.25,
+      antiConsecutive: true,
+      groupOnly: false,
+      listTopN: 30,
+      autoDiscover: false,
+      discoverGroups: [],
+      maxDiscovered: 200,
+      discoverMaxSizeMB: 5,
+      sendStickerTool: true
+    },
+    calc: {
+      enable: true,
+      python: "python3",
+      timeout: 10
+    },
     diagram: {
-      enable: true, renderer: 'kroki', fallbackRenderer: 'none', defaultTheme: 'paper-blue', defaultFormat: 'png',
-      timeoutMs: 15000, targetWidth: 1600, maxNodes: 50, maxEdges: 100, maxWidth: 2000, maxHeight: 5000,
-      maxPixels: 10000000, maxOutputBytes: 8388608, tempTtlMinutes: 30,
+      enable: true,
+      renderer: "kroki",
+      fallbackRenderer: "none",
+      defaultTheme: "paper-blue",
+      defaultFormat: "png",
+      timeoutMs: 15000,
+      targetWidth: 1600,
+      maxNodes: 50,
+      maxEdges: 100,
+      maxWidth: 2000,
+      maxHeight: 5000,
+      maxPixels: 10000000,
+      maxOutputBytes: 8388608,
+      tempTtlMinutes: 30,
       kroki: {
-        enabled: true, endpoint: 'http://127.0.0.1:8000', allowPublicEndpoint: false,
-        allowedDiagramTypes: ['d2'], connectTimeoutMs: 2000, requestTimeoutMs: 12000, maxSourceBytes: 131072,
-        maxResponseBytes: 4194304, maxConcurrency: 2, circuitBreaker: { enabled: true, failureThreshold: 3, cooldownMs: 30000 },
-        d2: { layout: 'elk' }, imageTag: '',
-      },
+        enabled: true,
+        endpoint: "http://127.0.0.1:8000",
+        allowPublicEndpoint: false,
+        allowedDiagramTypes: [
+          "d2"
+        ],
+        connectTimeoutMs: 2000,
+        requestTimeoutMs: 12000,
+        maxSourceBytes: 131072,
+        maxResponseBytes: 4194304,
+        maxConcurrency: 2,
+        circuitBreaker: {
+          enabled: true,
+          failureThreshold: 3,
+          cooldownMs: 30000
+        },
+        d2: {
+          layout: "elk"
+        },
+        imageTag: ""
+      }
     },
-    document: { soffice: 'soffice' },
-    stt: { enable: false, apiBase: 'https://api.openai.com/v1', apiKey: '', model: 'whisper-1', language: 'zh' },
-    multiagent: {
-      enable: true, topology: 'spawn', maxConcurrent: 3, maxSpawnsPerConversation: 5,
-      workerMaxTurns: 200, workerTimeBudgetMs: 3600000, workerMaxTokens: 16384, resultCap: 48000, reserveTokens: 32000,
-      workerModel: '', defaultTools: ['web_search', 'memory_search'],
+    document: {
+      soffice: "soffice"
+    },
+    stt: {
+      enable: true,
+      apiBase: "",
+      apiKey: "",
+      model: "whisper-1",
+      language: ""
+    },
+    tts: {
+      enable: false,
+      provider: "indextts",
+      autoReply: false,
+      replyMaxChars: 300,
+      hdVoice: true,
+      sovits: {
+        endpoint: "http://127.0.0.1:9880",
+        refAudioPath: "",
+        promptText: "",
+        promptLang: "zh",
+        textLang: "zh",
+        textSplitMethod: "cut5",
+        filterNonChinese: false,
+        maxChars: 200,
+        timeoutMs: 120000
+      },
+      indextts: {
+        endpoint: "",
+        lang: "ZH",
+        timeoutMs: 300000,
+        voice: "",
+        emotionMode: "same",
+        emotionRef: "",
+        emotionWeight: 0.65,
+        autoEmotion: true,
+        vector: [],
+        tier: "pro",
+        segmentGapMs: 300,
+        maxSegmentChars: 140,
+        model: "",
+        judgeTimeoutMs: 300000,
+        durationFactor: 1,
+        maxTextTokensPerSegment: 100
+      },
+      doubao: {
+        endpoint: "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
+        apiKey: "",
+        resourceId: "seed-tts-2.0",
+        speaker: "",
+        model: "",
+        autoEmotion: true,
+        instruct: "",
+        emotion: "",
+        emotionScale: 0,
+        speechRate: 0,
+        loudnessRate: 0,
+        sampleRate: 24000,
+        format: "wav",
+        useTagParser: false,
+        tier: "pro",
+        segmentGapMs: 300,
+        maxSegmentChars: 140,
+        timeoutMs: 120000
+      },
+      minimax: {
+        endpoint: "https://api.minimaxi.com/v1/t2a_v2",
+        apiKey: "",
+        groupId: "",
+        model: "speech-2.8-hd",
+        voiceId: "",
+        autoEmotion: true,
+        emotion: "",
+        speed: 1,
+        vol: 1,
+        pitch: 0,
+        sampleRate: 32000,
+        format: "wav",
+        bitrate: 128000,
+        languageBoost: "",
+        tier: "pro",
+        segmentGapMs: 300,
+        maxSegmentChars: 140,
+        timeoutMs: 120000
+      },
+      mimo: {
+        endpoint: "https://api.xiaomimimo.com/v1",
+        apiKey: "",
+        model: "mimo-v2.5-tts",
+        voice: "mimo_default",
+        autoEmotion: true,
+        style: "",
+        tagMode: "auto",
+        format: "wav",
+        tier: "pro",
+        segmentGapMs: 300,
+        maxSegmentChars: 140,
+        timeoutMs: 120000
+      },
+      judgeModel: "",
+      judgeTimeoutMs: 300000
     },
     sandbox: {
-      mode: 'e2b', apiKey: 'e2b_demo1234567890abcdef', apiUrl: '', domain: '', sandboxUrl: '',
-      template: 'base', maxTimeout: 600, defaultCwd: '/home/user',
-      idleMs: 300000, sandboxTtlMs: 600000, maxSandboxes: 4, concurrencyWaitMs: 15000,
-      maxCommandsPerSession: 50, requestTimeoutMs: 60000, retries: 1, allowPublicTraffic: false,
+      mode: "off",
+      apiKey: "",
+      apiUrl: "",
+      domain: "",
+      sandboxUrl: "",
+      template: "base",
+      verifyTemplate: "",
+      maxTimeout: 600,
+      defaultCwd: "/home/user",
+      idleMs: 300000,
+      sandboxTtlMs: 600000,
+      maxSandboxes: 4,
+      concurrencyWaitMs: 15000,
+      maxCommandsPerSession: 50,
+      requestTimeoutMs: 60000,
+      retries: 1,
+      allowPublicTraffic: false,
       network: {
         allowInternet: true,
-        denyOut: [],
         allowOut: [],
+        denyOut: []
       },
       audit: true,
-      toolEvoVerifyTimeoutMs: 5000,
+      toolEvoVerifyTimeoutMs: 5000
     },
+    stagehand: {
+      enable: false,
+      permission: "master",
+      mode: "local",
+      headless: true,
+      stealth: true,
+      userAgent: "",
+      executablePath: "",
+      browserbaseApiKey: "",
+      region: "",
+      modelName: "",
+      modelApiKey: "",
+      idleTimeoutMs: 300000,
+      maxSessions: 3,
+      opTimeoutMs: 60000,
+      llmTimeoutMs: 30000,
+      maxCallsPerMinute: 10,
+      maxCallsPerDay: 200,
+      blockedHosts: [],
+      domSettleTimeoutMs: 3000
+    },
+    tempFiles: {
+      enable: true,
+      ttlHours: 24,
+      maxFiles: 500
+    },
+    download: {
+      enable: true,
+      maxMB: 600,
+      sendLimitMB: 100,
+      maxTimeoutSec: 600,
+      bin: "",
+      dir: "",
+      allowPrivateHosts: false
+    },
+    multiagent: {
+      enable: true,
+      topology: "spawn",
+      maxConcurrent: 3,
+      maxSpawnsPerConversation: 5,
+      workerMaxTurns: 200,
+      workerTimeBudgetMs: 3600000,
+      workerMaxTokens: 16384,
+      resultCap: 48000,
+      reserveTokens: 32000,
+      workerModel: "",
+      defaultTools: [
+        "web_search",
+        "memory_search"
+      ]
+    },
+    webApi: {
+      enable: true,
+      port: 6098,
+      publicUrl: ""
+    },
+    humanize: {
+      enable: false,
+      vision: {
+        allowPrivateHosts: false
+      },
+      groups: [],
+      groupsOverride: {},
+      shadow: true,
+      talkValue: 0.35,
+      debounceMs: 1200,
+      plannerTimeoutMs: 30000,
+      maxPlannerRounds: 4,
+      contextMessages: 30,
+      threshold: 80,
+      cooldownSeconds: 45,
+      presenceWindowSeconds: 300,
+      maxRepliesPer10Minutes: 4,
+      bufferCapacity: 150,
+      bufferTtlHours: 2,
+      knownBots: [],
+      memory: {
+        enabled: true,
+        model: "",
+        maxPerQuery: 5,
+        maxPerGroup: 300,
+        incrementalMinMessages: 20,
+        minConsolidateMessages: 6,
+        forgetDays: 30
+      },
+      idleBackoffBaseSeconds: 15,
+      idleBackoffCapSeconds: 300,
+      idleBackoffStartCount: 2,
+      bypassPendingCount: 6,
+      redactSecrets: true,
+      personaName: "",
+      botId: "",
+      persona: {
+        name: "",
+        prompt: "",
+        fromPersonaId: "",
+        aliases: []
+      },
+      planner: {
+        model: "",
+        temperature: 0.2,
+        maxTokens: 800,
+        allowedReadTools: []
+      },
+      replyer: {
+        model: "",
+        temperature: 0.7,
+        maxTokens: 500,
+        maxChars: 500
+      },
+      reply: {
+        maxBubbles: 3,
+        typingSpeed: 1,
+        minDelayMs: 600,
+        maxDelayMs: 3500,
+        typos: false,
+        allowSticker: true
+      },
+      behaviorPolicy: {
+        topics: [],
+        avoidTopics: [],
+        initiative: 0.35,
+        humor: 0.4,
+        answerUnknownQuestions: false,
+        interruptHumanConversation: false,
+        maxRepliesPer10Minutes: 4
+      },
+      safety: {
+        privateMemoryInGroup: false,
+        maxConcurrentGroups: 1
+      }
+    },
+    groupWorld: {
+      enabled: false,
+      groups: [],
+      online: false,
+      ingestion: {
+        rawMessageRetentionDays: 30,
+        segmentIdleSeconds: 300,
+        segmentMaxMessages: 100,
+        ignoreCommandMessages: true,
+        topicShiftEnabled: true,
+        topicShiftWindow: 6,
+        topicShiftSimThreshold: 0.06
+      },
+      analysis: {
+        schedule: "7 * * * *",
+        minSegmentMessages: 4,
+        maxSegmentsPerRun: 50,
+        modelProfile: "",
+        maxDailyCallsPerGroup: 100,
+        retryCount: 1,
+        maxTokens: 1200,
+        episodeMergeSim: 0.85
+      },
+      profiles: {
+        hotActiveDays30d: 10,
+        warmMessageCount30d: 5,
+        minOnlineConfidence: 0.55,
+        maxTraitsPerUser: 5,
+        traitMergeSimThreshold: 0.82
+      },
+      graph: {
+        activeEdgeDays: 90,
+        maxNeighborsPerUser: 40,
+        weeklyCommunityDetection: true,
+        minCommunitySize: 3
+      },
+      retrieval: {
+        plannerTokenBudget: 800,
+        replyerTokenBudget: 500,
+        maxEpisodes: 3,
+        maxRelationships: 5,
+        cacheTtlSeconds: 60
+      },
+      privacy: {
+        allowUserOptOut: true,
+        allowUserInspect: true,
+        allowUserCorrect: true,
+        blockSensitiveInference: true
+      }
+    },
+    selfState: {
+      enabled: false,
+      shadowMode: true,
+      groups: [],
+      scope: {
+        isolateByGroup: true
+      },
+      eventDetection: {
+        semantic: true,
+        ambiguousIntentModelProfile: "",
+        minEventConfidence: 0.55
+      },
+      emotion: {
+        maxNormalImpulse: 0.2,
+        maxHighSalienceImpulse: 0.35,
+        minVisibleIntensity: 0.18,
+        maxActiveEmotions: 8,
+        enableMixedEmotions: true,
+        lazyDecay: true,
+        moodEmaAlpha: 0.3,
+        moodResetHours: 6
+      },
+      resentment: {
+        enabled: true,
+        minCreateConfidence: 0.72,
+        maxSingleEventDelta: 0.05,
+        halfLifeDays: 7
+      },
+      expectations: {
+        enabled: true,
+        minimumWindowSeconds: 90,
+        maximumWindowSeconds: 3600,
+        minIgnoredConfidence: 0.65,
+        requireTargetActivityEvidence: true
+      },
+      reflection: {
+        enabled: true,
+        minSignificantEvents: 3,
+        maxReflectionsPerDay: 10,
+        defaultTtlDays: 7
+      },
+      planner: {
+        includeStateProjection: true,
+        maxStateTokens: 220,
+        emotionIsBiasOnly: true
+      },
+      replyer: {
+        includeExpressionCapsule: true,
+        exposeNumericState: false,
+        allowNaturalEmotionDisclosure: true
+      },
+      stability: {
+        noCrossUserSpillover: true,
+        preventEmotionalBlackmail: true,
+        preventSelfHarmNarratives: true,
+        maxNegativeMoodHours: 24
+      },
+      retention: {
+        transitionLogDays: 14,
+        resolvedEmotionDays: 7,
+        resolvedExpectationDays: 7
+      }
+    }
   }
 
   /* ---------- §6 scope 列表(从 data/memories 目录名反解) ---------- */

@@ -28,7 +28,7 @@ import { tagUntrusted, unwrapUntrusted } from './guard.js'
 import { compactMessages } from './compact/index.js'
 import { TEMPLATES, SERVICE_DIRECTIVE, SEARCH_VERIFICATION, REFLECTION_DIRECTIVE, buildToolCatalogSection, buildToolDiscoverySection, buildSkillsPromptSection, buildStickerPromptSection, buildAgentSystemPrompt } from '../prompt/index.js'
 import { detectScheduleIntent, isSharedScopeId, SHARED_SCOPE_PREFIX } from './schedule.js'
-import { decideThinkingSmart, classifyComplexity } from '../llm/thinking.js'
+import { decideThinkingSmart, classifyComplexity, clampThinkingBudget } from '../llm/thinking.js'
 import { detectCapabilities } from '../llm/capabilities.js'
 import { decideThinkingWithJev, selectToolsWithJev, assessShellRiskWithJev, decideReflectWithJev, evaluateShellRisk } from './jev/index.js'
 
@@ -1899,7 +1899,15 @@ export class Agent {
       if (thinking_budget !== undefined) out.thinking_budget = thinking_budget
       return out
     }
-    return this.thinking ? { thinking: this.thinking } : {}
+    // D10：手动 thinking 的 budget_tokens 也夹到统一上限（MAX_THINKING_BUDGET=128000）；
+    // 超限会被厂商 400，非数字则退回原对象（保持旧行为，避免破坏非标准厂商的自定义形状）。
+    if (!this.thinking) return {}
+    const t = this.thinking
+    if (t && typeof t === 'object' && t.budget_tokens != null) {
+      const b = clampThinkingBudget(t.budget_tokens)
+      if (b > 0 && b !== Number(t.budget_tokens)) return { thinking: { ...t, budget_tokens: b } }
+    }
+    return { thinking: t }
   }
 
   /** 收尾/自反思等短任务：自动模式下强制关思考（省 token 提速）；否则沿用静态配置 */

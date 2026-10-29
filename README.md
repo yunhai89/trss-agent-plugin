@@ -71,7 +71,7 @@
 | 🤖 伪人模式 | 群聊环境参与者：旁听→门控→Planner 决策→Replyer 自然回复（参照 MaiBot） | 🧪 早期 |
 | 💬 私聊对话 | 私聊触发对话（默认**关闭**：`agent.privateChat=false`；开启后私聊任何消息直接触发，独立会话与记忆） | ✅ 稳定 |
 | 🌐 代理访问 | HTTP(S) 代理（国内服务器访问 GPT/Gemini 等海外 LLM；SOCKS 暂不支持，见 `agent.proxy`） | ✅ 稳定 |
-| 🔁 回退模型 | 主模型失败自动依次尝试 `fallbackModels`（可跨厂商，每条独立 baseURL/apiKey/protocol） | ✅ 稳定 |
+| 🔁 回退模型 | 主模型失败自动依次尝试 `fallbackModels[]`（唯一真源，可跨厂商，每条独立 baseURL/apiKey/protocol；旧扁平字段自动迁移） | ✅ 稳定 |
 | 📂 日志分文件 | 按会话分文件 + 图片底部会话/对话id + `#上报错误` 打包发主人 | ✅ 稳定 |
 | 🔍 统一搜索 | Tavily/Exa/Perplexity/Brave → SearXNG → DDG 兜底；`web_search` 多角度并行查询 + 去重合并，内置交叉/对抗验证纪律（防信息茧房） | ✅ 稳定 |
 | 📊 示意图生成 | 流程图/架构图/时序图/状态图/ER/思维导图：LLM 语义结构 → 自托管 Kroki D2 → 高清 PNG（文字/连线精确，非文生图） | ✅ 稳定 |
@@ -134,7 +134,7 @@
 
 > 如不接受该风险，请保持 `agent.sandbox.mode: off`（默认）。此时本插件不涉及任何 shell 执行（含沙箱）。
 >
-> **升级注意**：旧配置 `agent.terminal.*`（`enable`/`maxTimeout`/`blocklist`/`skipConfirm`）已废弃。Config 的自愈机制只增不删，所以旧键会留在你的 `config/config.yaml` 里但**不再被读取**；启动时会打印一条迁移警告，请手工删除该段并改配 `agent.sandbox`。
+> **升级注意**：旧配置 `agent.terminal.*`（`enable`/`maxTimeout`/`blocklist`/`skipConfirm`）已废弃。Config 保存只写差异、不会删除用户手写的未知键，所以旧键会留在你的 `config/config.yaml` 里但**不再被读取**；启动时会打印一条迁移警告，请手工删除该段并改配 `agent.sandbox`。
 >
 > **升级注意（沙箱网络默认变更）**：`agent.sandbox.network` 的默认值改为**全放通**（与 E2B 自身默认一致，白名单只是可选的收紧手段）。你配置里**显式写过**的 `allowInternet`/`allowOut`/`denyOut` 仍然照旧生效、不会被覆盖；要让沙箱联网请在 Web 配置中心把「允许互联网」打开并清空「出口白名单」。
 >
@@ -207,7 +207,7 @@ pnpm install                   # package.json 有变动时需重跑（#agents更
 > **支持热加载**：改完配置保存即可，**无需重启 Yunzai**——下次对话自动用新配置重建运行时（provider/model/tools/skills/mcp）。也可发 `#agents重载`（主人）立即重建。
 >
 > **锅巴（Guoba）适配**：已支持。安装 [Guoba-Plugin](https://gitee.com/guoba-yunzai/guoba-plugin) 后，`#锅巴登录` 进入 Web 面板即可图形化编辑本插件配置；保存后**自动热加载**。适配文件为插件根 `guoba.support.js`。
-> 锅巴面板只覆盖常用项（约 1/4 配置叶子）；首次模型配置（厂商/模型条目）、私聊/多用户隔离、沙箱出口白名单与审计、devLog 等完整配置请用 Web 配置中心或直接改 `config.yaml`。
+> 锅巴面板已覆盖**常用项 + 安全/行为总开关**：基础与调试、模型与回退数组、上下文压缩水位、工具发现、记忆与召回、沙箱（含网络白名单/审计/verifyTemplate）、知识库与抓取、下载、媒体/表情、TTS、以及 humanize/群世界/自状态/ComfyUI 等子系统总闸。长尾细粒度配置（如 humanize 的按群策略、各类阈值）仍在 Web 配置中心或直接改 `config.yaml`。
 
 ---
 
@@ -242,18 +242,22 @@ agent:
 > 老配置（只有 `protocol`/`preset`/`baseURL`/`apiKey`/`model` 五个扁平字段）**首次加载会自动迁移**：按原接入信息生成一条厂商 + 一条模型条目，并让上面两个引用指向它们，无需手工重配。迁移后这五个字段变成只读镜像（由上层引用解析回填），手改会在下次加载被覆盖。
 >
 > 其中 `agent.apiKey` 只是引用的**解析镜像**：它的「必填」由「厂商配置」条目的 `apiKey` 承担（条目 Key 留空则插件不初始化）；手改镜像字段不会生效。
+>
+> 回退模型的旧扁平字段（`fallbackModel`/`fallbackBaseURL`/`fallbackApiKey`/`fallbackProtocol`）也已废弃：启动时会把有效条目迁移为一条 `fallbackModels[]` 并删除扁平键，面板只编辑数组。
 
 ---
 
 ## ⚙️ 详细配置（`plugins/agents-plugin/config/config.yaml`）
 
 > 配置文件不含注释（保持整洁），所有字段含义在此说明。未用到的字段留空即可。
+>
+> **保存只写差异**（v1.41 起）：`Config.save()` 只把「与默认值不同」的键写盘；老版本留下的「默认值全量快照」会在启动时自动压缩为差异（原文件备份为 `config.yaml.bak`）。因此插件升级后的**新默认值会自动对你生效**（此前快照里的旧值会永久覆盖新默认）。
 
 ### 基础
 
 | 字段 | 说明 |
 | --- | --- |
-| `debug` | `true` 等价于**强制开启全链路 devLog**（工具入参/每轮 token/搜索词等）；真正的日志开关是 `agent.devLog.enable`（默认开；仅 `devLog.enable=false` 且 `debug` 未开时才静默） |
+| `debug` | `true` 等价于**强制开启全链路 devLog**（工具入参/每轮 token/搜索词等）；真正的日志开关是 `agent.devLog.enable`（默认开；仅 `devLog.enable=false` 且 `debug` 未开时才静默）。Web 配置中心「基础设置」与锅巴都有开关，也可直接改 yaml |
 
 ### `agent` —— 对话与模型
 
@@ -267,13 +271,14 @@ agent:
 | `llmModels` | `[]` | 模型清单 `[{ id, name, providerId, model, temperature, maxTokens, thinking, note }]`；`thinking/温度/maxTokens` 在被主对话链路使用时覆盖全局 |
 | `protocol` / `preset` / `baseURL` / `apiKey` / `model` | 镜像 | 上面引用的**解析结果**，加载时自动回填；勿手改，改厂商 Key / 换模型会自动跟随 |
 | `utilityModel` | 空 | 播报等旁路小模型（留空=沿用主模型）；可填任意已注册厂商的模型（运行时按注册表解析端点，不再局限主厂商） |
-| `fallbackModels` | `[]` | 多回退数组（在 yaml 配）：`[{ model, baseURL, apiKey, protocol }]`，主模型失败时按顺序尝试；每条独立端点/协议，**可跨厂商**（如主 DeepSeek、回退 GPT） |
-| `fallbackModel` / `fallbackBaseURL` / `fallbackApiKey` / `fallbackProtocol` | 空 / 空 / 空 / `openai` | 锅巴面板的单回退扁平字段（表单友好）：填 `fallbackModel`+`fallbackApiKey` 即生效；与上面的数组同时存在时**数组先试、本项追加在最后** |
-| `reasoningFields` | `[]` | 推理字段归一化（如 `["reasoning_content"]`），preset 通常已带 |
+| `fallbackModels` | `[]` | 回退模型**唯一真源**（主模型失败时按顺序尝试）：`[{ model, baseURL, apiKey, protocol }]`，每条独立端点/协议，**可跨厂商**（如主 DeepSeek、回退 GPT）。旧版扁平字段 `fallbackModel`/`fallbackBaseURL`/`fallbackApiKey`/`fallbackProtocol` 已废弃：启动时自动把有效条目迁移进数组并删除扁平键；Web/锅巴面板都只编辑数组 |
+| `reasoningFields` | `[]` | 推理字段归一化（如 `["reasoning_content"]`），preset 通常已带；**空数组=未配置**（不会向 provider 下发空数组） |
 | `maxTurns` | `200` | 单次对话工具调用轮次预算（面板上限已放宽到 1000；旧版面板上限 100 会把默认值静默截断） |
 | `temperature` | `0.2` | 采样温度 |
 | `maxTokens` | 空 | 单次回复最大 token（留空=厂商默认；Anthropic 默认 4096） |
-| `contextWindow` | 空 | 模型上下文窗口 token 数（如 `100000`）；配置后启用 token 高低水位压缩（超 `contextHighRatio` 压到 `contextLowRatio`、保留首条意图、`cacheEpoch` 分代），未配置按消息条数水位（30→18）。**这是提升多轮缓存命中率的头号开关**：窗口吃满后每轮几乎全量命中前缀缓存，见下方「缓存经济性」 |
+| `contextWindow` | 空 | 模型上下文窗口 token 数（如 `100000`）；配置后启用 token 高低水位压缩（超 `contextHighRatio` 压到 `contextLowRatio`、保留首条意图、`cacheEpoch` 分代），未配置按下面两个消息条数水位（默认 30→18）压缩。**这是提升多轮缓存命中率的头号开关**：窗口吃满后每轮几乎全量命中前缀缓存，见下方「缓存经济性」 |
+| `contextMsgHighWater` | `30` | **未配置 `contextWindow` 时**生效：会话历史达到该消息条数即触发压缩 |
+| `contextMsgLowWater` | `18` | 消息条数水位下的压后目标：压缩后保留最近 N 条消息 |
 | `contextHighRatio` | `0.65` | token 压缩高水位比例（占 `contextWindow`，0.3~0.95）。想进一步提高命中率可上调（如 `0.8`），代价是单次请求更长 |
 | `contextLowRatio` | `0.45` | 压后目标比例（须小于高水位）。压得更深（如 `0.15`）能让「新增→再压」周期更长、命中率更高；压缩无损（原文归档，`context_recall` 可恢复） |
 | `maxToolResultChars` | `8000` | 单条工具结果字符上限，超长截断防上下文膨胀 |
@@ -287,7 +292,7 @@ agent:
 | `reply.quote` | `true` | 群聊回复时引用触发消息（私聊不引用）；人多时便于定位回复对象，可与 `atSender` 同开 |
 | `reply.narrate` | `true` | 中途播报：模型调工具时附带的思路/进展文本自动转发给用户（参考 OpenClaw） |
 | `reply.renderScale` | `3` | 回复图片渲染倍率（deviceScaleFactor，3=超清；越大越清晰但越耗内存/体积） |
-| `thinking` | 空 | 思考模式（手动），provider 原生形状：`{ type: "enabled", budget_tokens: 16000 }`（`type` 可为 `enabled`/`disabled`，留空=不开启）。锅巴面板用「开启深度思考 + 思考预算」两个控件读写同一字段 |
+| `thinking` | 空 | 思考模式（手动），provider 原生形状：`{ type: "enabled", budget_tokens: 16000 }`（`type` 可为 `enabled`/`disabled`，留空=不开启；`budget_tokens` 上限统一到 **128000**，各协议按同一 clamp）。锅巴面板用「开启深度思考 + 思考预算」两个控件读写同一字段 |
 | `thinkingAuto` | 关 | 思考自动决策：`{ enable, classifier, model, timeoutMs, maxBudget, budgets:{low,medium,high}, style }`。判档方式 `classifier`：`auto`=规则不确定时用小模型判（省调用）/`always`=总是小模型/`off`=纯规则/`jev`=由 Jev 判档（需开启 Jev）；小模型带超时、缓存，失败自动回退规则，不阻塞对话。档位→厂商原生字段（MiMo/Kimi/GLM/豆包→`thinking`、DeepSeek→`thinking`+`reasoning_effort`、Qwen→`enable_thinking`+`thinking_budget`、MiniMax→`adaptive`、Anthropic→`budget_tokens`、o/GPT-5→`reasoning_effort`、Gemini→`thinking_level`）。模型级 `thinking` 显式覆盖仍优先。**能力自适应**：能力表没明确表态的（新）型号默认乐观启用思考——厂商若拒绝思考字段，请求层自动剥离重试一次并记忆（之后自动判为不支持，`[chat]` 日志随之转 off，无需重启）；明确判为不支持的模型（如 gpt-4o）启动时有 `[thinking]` 警告，可设 `agent.media.caps.thinking=true` 强制 |
 | `memoryLimits` | 空 | 声明式记忆字符上限，如 `{ memory: 2200, user: 1375 }` |
 | `systemPrompt` | 空 | 默认身份 system prompt（留空用富默认身份）。**优先级**：人设覆盖 > 进化产出的 agent 提示词 > 本项 > 内置默认（v1.26.30 修：此前注册表里预置的内置模板会被当成「进化产出」，导致本项写了也不生效） |
@@ -298,7 +303,7 @@ agent:
 | `confirmTimeout` | `300` | 审批超时自动拒绝（秒） |
 | `guardAction` | `flag` | 注入防御动作：`block`(拦截)/`flag`(隔离标注)/`sanitize`(脱敏) |
 | `guardSensitivity` | `medium` | 防御灵敏度：`low`(0.95)/`medium`(0.7)/`high`(0.5) |
-| `redactSecrets` | `true` | 发送前脱敏：屏蔽回复中的 API Key / token 等敏感信息 |
+| `redactSecrets` | `true` | 外发文本统一脱敏（回复/中途播报/错误提示/续跑），屏蔽 API Key / token 等敏感信息；`false`=全部不脱敏（慎用） |
 
 ### `agent.policy` —— RBAC 策略
 
@@ -315,7 +320,7 @@ policy:
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `enable` | `true` | 多模态总开关 |
+| `enable` | `true` | **多模态总开关**：`false` 时同时关闭附件收集/视觉子模型装配（`ctx.vision` 置空）、表情自动发现与工具看图；主对话按纯文本处理 |
 | `active` | `true` | 主动收集（消息/引用/合并转发/群文件中的图片文件） |
 | `passive` | `true` | 被动工具（`list_group_files`/`get_group_file`/`read_attachment`）；`false`=不注册这组工具（`read_attachment` 是全员可用的 `query` 类，介意权限面时关掉） |
 | `maxImages` | `4` | 单次随消息发送最大图片数 |
@@ -325,7 +330,7 @@ policy:
 
 ### `agent.vision` —— 视觉子模型
 
-主模型不支持视觉时，由视觉子模型识图 → 文本描述 → 主模型回答。主模型支持视觉则直发原图、不走此路径。`vision.model` 留空时：主模型支持视觉 → 复用主模型；主模型纯文本 → 视觉子模型禁用（此时识图/看视频不可用，必须显式配置）。`vision.model` 若指向「模型列表」里已注册的模型，会自动复用该模型所属厂商的 `protocol/baseURL/apiKey`（避免把 MIMO 模型名发到 commandcode 主通道）；未注册或显式填写了下面任一连接字段时，才回退主通道配置。
+主模型不支持视觉时，由视觉子模型识图 → 文本描述 → 主模型回答。主模型支持视觉则直发原图、不走此路径。`vision.model` 留空时：主模型支持视觉 → 复用主模型；主模型纯文本 → 视觉子模型禁用（此时识图/看视频不可用，必须显式配置）。`vision.model` 若指向「模型列表」里已注册的模型，会自动复用该模型所属厂商的 `protocol/baseURL/apiKey`（避免把 MIMO 模型名发到 commandcode 主通道）；未注册或显式填写了下面任一连接字段时，才回退主通道配置。**受多模态总开关 `agent.media.enable` 约束**：`media.enable=false` 时视觉子模型不装配（表情自动发现/工具看图一并停用）。
 
 **视频也走视觉子模型**（主模型没有视频原生块路径）：用户发送的视频、以及 `bilibili__analyze` 的「看视频」都会把视频字节交给它输出文本报告。看视频要求 **OpenAI 兼容协议 + 模型声明视频能力**（`media.caps.video`，`mimo` 系 omni 已内置；纯图像 VL 模型会明确跳过并回退字幕/转录），视频报告输出上限建议 ≥2048 tokens、思考型模型建议关思考。
 
@@ -338,7 +343,7 @@ vision:
   preset:
   baseURL: ""
   apiKey: ""            # 空则复用主 apiKey
-  maxTokens: 1024
+  maxTokens: 1024          # 识图/视频报告输出上限；**显式配置优先于模型条目的 maxTokens**（未显式配置才用条目值）
   describePrompt: ""    # 自定义"描述这张图"指令
 ```
 
@@ -396,9 +401,13 @@ perception:
 persona:
   defaultId: ""   # 全局默认人设 id：未单独 #人设 切换的用户生效；留空=用 systemPrompt / 内置默认身份
   skipInjectionCheck: false   # ⚠️ 高危：跳过人设/人设资料落盘前的「越狱/提示注入」检测（默认关）
+  styleExamples: []   # 沟通风格示例（结构化数组 { sceneType, speechAct, tone, familiarity, text }）；伪人链路的样本读取 humanize 块同名键，见「伪人模式 · 易漏配置」
+personaLore:        # 人设资料库（agent.personaLore；世界观/口癖等长尾资料 + 补充完善）
+  dir: ""           # 资料库目录（留空=data/persona-lore）
+  adoptionsDir: ""  # 采纳队列目录（留空=data/persona-adoptions）
 ```
 
-> 人设库目录固定为插件内 `data/personas`；真正可配的人设资料目录是 `agent.personaLore.dir`（默认 `data/persona-lore`，默认 config.yaml 里没有该段，需要自定义时手写覆盖）。
+> 人设库目录固定为插件内 `data/personas`；上面 `personaLore.dir` 是**人设资料**（长尾知识/补齐草稿）的目录，与 persona 人设库不同层。
 
 > Web 配置中心 / 锅巴的「默认人设」是下拉框，选项来自内置人设 + 自定义人设库；用户发 `#人设` 单独切换后以该用户绑定为准，`#重置人设` 会回到这里的全局默认。
 >
@@ -448,7 +457,7 @@ docker compose -f docs/deploy/kroki-compose.yaml up -d
 
 ```yaml
 diagram:
-  enable: true
+  enable: true                       # 总开关（旧键名 enabled 仍兼容）
   renderer: kroki                    # 自托管 Kroki 渲染 D2
   fallbackRenderer: none             # Kroki 失败的本地回退：none | beautiful-mermaid
   defaultTheme: paper-blue           # paper-blue | soft-pastel | technical | midnight | sketch
@@ -516,7 +525,7 @@ Bot：（时序图图片）用户/Agent/工具 三方消息序列
 | `workerModel` | 空 | 子代理模型（空=主模型；可跨厂商，填便宜模型降本） |
 | `defaultTools` | `[web_search, memory_search]` | 子代理默认可用工具（模型未指定时；仅 query 类安全工具） |
 
-> 子代理的默认值（v1.30.0 起）：**轮数 200、时间 60 分钟、单轮输出 16384、结果回传 48000 字符**；任务结束后的结果保留 60 分钟（期间随时 `check_subagent` 取回）。根任务整体预算（`agent.loop.timeBudgetMs` 默认 30 分钟 / `agent.loop.tokenBudget` 默认 480000）在「推理参数」调整——想等满一个长跑子代理，根预算要不低于子代理预算。
+> 子代理的默认值（v1.30.0 起）：**轮数 200、时间 60 分钟、单轮输出 16384、结果回传 48000 字符**；任务结束后的结果保留 60 分钟（期间随时 `check_subagent` 取回）。根任务整体预算（`agent.loop.timeBudgetMs` 默认 **60 分钟**，已与 `multiagent.workerTimeBudgetMs` 对齐；`agent.loop.tokenBudget` 默认 480000）在「推理参数」调整——想让根任务等满一个满预算子代理，根预算不要低于子代理预算。
 >
 > **取消语义**（v1.30.1 修）：只有真正的取消（`#取消任务`/主动停止、`#agents重载`/退出）才会连带取消在跑子代理；**根任务时间预算到点只是本轮进收尾，不牵连子代理**——子代理按自身预算继续跑完，结果经后台回推（此前会被误杀成「已中止：未知原因」）。非正常结束的子代理一律带可读原因（超时=时间预算耗尽、中止=父任务取消/运行时关闭）。
 
@@ -564,13 +573,13 @@ mcp:
 
 ### `agent.tts` —— 语音合成（GPT-SoVITS / IndexTTS 2.5 / 豆包 / MiniMax / MiMo）
 
-把文字合成为语音发到聊天（Agent 工具 `tts_speak`）。五家服务商任选其一（`provider` 切换）：**GPT-SoVITS**（本机/自托管 api_v2，音色与语气由参考音频决定，无音色库、无情绪参数）、**IndexTTS 2.5**（本机/内网自托管，音色参考 + 情绪参考/向量）、**豆包**（火山引擎 Seed-TTS，语音指令 / 多情感标签）、**MiniMax**（speech-2.8/2.6/02，9 种情绪标签）、**MiMo**（小米 MiMo-V2.5-TTS，预置音色 + 自然语言风格指令）。**总开关默认关（opt-in）**：需在 Web 面板「语音合成」或配置里显式 `enable: true` 后，`tts_speak` 才会注册、自动语音才生效；云服务商仅在「总开关开 + 选中该服务商 + 密钥/音色齐全」时才会把讲稿发往对应平台。
+把文字合成为语音发到聊天（Agent 工具 `tts_speak`）。五家服务商任选其一（`provider` 切换）：**GPT-SoVITS**（本机/自托管 api_v2，音色与语气由参考音频决定，无音色库、无情绪参数）、**IndexTTS 2.5**（本机/内网自托管，音色参考 + 情绪参考/向量）、**豆包**（火山引擎 Seed-TTS，语音指令 / 多情感标签）、**MiniMax**（speech-2.8/2.6/02，9 种情绪标签）、**MiMo**（小米 MiMo-V2.5-TTS，预置音色 + 自然语言风格指令）。**总开关默认关（opt-in）**：需在 Web 面板「语音合成」或配置里显式 `enable: true` 后，`tts_speak` 才会注册、自动语音才生效；**自动语音 `autoReply` 也默认关**（开总闸不会自动每条回复都出语音，需再显式打开）；云服务商仅在「总开关开 + 选中该服务商 + 密钥/音色齐全」时才会把讲稿发往对应平台。
 
 ```yaml
 tts:
   enable: false            # 总开关（默认关，opt-in）；开启后 tts_speak 才注册、自动语音才生效
   provider: indextts       # sovits | indextts | doubao | minimax | mimo
-  autoReply: true          # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）
+  autoReply: false         # 开启后每条最终回复自动合成语音（文字/图片照常发，随后追加语音）；默认关，仅 enable=true 时有效
   replyMaxChars: 300       # 自动语音最大字符数（超长按句截断；0=不限）
   hdVoice: true            # 发送前高清化：响度标准化 + 存在感补偿（需宿主 ffmpeg，失败自动回退）
   judgeModel: ""           # 情绪判定模型（IndexTTS/豆包/MiniMax/MiMo 共用；留空=indextts.model→utilityModel→主模型）
@@ -646,7 +655,7 @@ tts:
 - 配置入口：Web 管理面板 → **语音合成**（服务卡片 → 弹窗配置：GPT-SoVITS 接口地址/参考音频路径/参考文本；IndexTTS 接口地址/音色参考与情绪参考上传+命名/情绪模式与 8 维滑块；云服务商接口地址/密钥/音色）。「测试连接」会真实合成 2 个字（官方探活方式；GPT-SoVITS 首次加载模型可能稍慢）。
 - **IndexTTS 无需 API Key**：官方本体（`127.0.0.1:7860/7862`）本身没有鉴权，插件直连接口地址即可，不发送任何鉴权头；若服务前另配了鉴权网关，请让网关放行本机请求。
 - **GPT-SoVITS 接入要点**（[文档](https://github.com/RVC-Boss/GPT-SoVITS)）：填 api_v2 地址（默认 `http://127.0.0.1:9880`，不是 WebUI 的 9874）、**服务端本地**参考音频绝对路径（3~10 秒）与逐字参考文本；音色和语气完全由参考音频决定，没有情绪参数，也没有 `pro/max` 档位——长文本由服务端 `textSplitMethod` 切段后整段返回，插件不做 LLM 情绪判定、不做 ffmpeg 分段拼接。`textLang` 只支持 `zh/en/ja/ko/yue`（AR/ES 会回落到 `textLang`，服务端不支持）。参考音频与参考文本必须一致，否则音色会漂。
-- **自动语音**（`autoReply`，默认开）：每条最终回复自动追加语音——文字/图片照常发送，语音内容是正文剥除 markdown/代码/链接/表格/emoji 后的文本（超长按句截断，`replyMaxChars`）；合成全过程有 `[tts] 合成开始/完成` 日志。`tts_speak` 工具保留给指定音色/情绪的点播（本轮已点播则不重复补发）。**讲稿清洗在合成入口统一执行**（点播同样生效），破折号（——）会转成停顿而不是被读成"减减"。
+- **自动语音**（`autoReply`，**默认关**，需显式打开）：每条最终回复自动追加语音——文字/图片照常发送，语音内容是正文剥除 markdown/代码/链接/表格/emoji 后的文本（超长按句截断，`replyMaxChars`）；合成全过程有 `[tts] 合成开始/完成` 日志。`tts_speak` 工具保留给指定音色/情绪的点播（本轮已点播则不重复补发）。**讲稿清洗在合成入口统一执行**（点播同样生效），破折号（——）会转成停顿而不是被读成"减减"。
 - **情绪判定（IndexTTS/豆包/MiniMax/MiMo 共用一条 LLM 链路）**：由一次旁路 LLM 调用结合文本与近期对话判定 8 维情绪（高兴/愤怒/悲伤/害怕/厌恶/忧郁/惊讶/平静），并可直接产出自然语言风格指令（`style`，支持复合情绪/语速/发声方式/导演式）与音频标签（`tag`/`tagged`）——IndexTTS 直接下发向量；豆包 1.0 → `emotion` 标签 + `emotion_scale`（由向量强度换算）；豆包 2.0 → 优先用 LLM `style` 作 `context_texts` 语音指令（无则回退向量模板）；MiniMax → 9 标签之一（忧郁→sad）；MiMo → LLM `style` 作 user 风格指令 + 按 `tagMode` 组合句首 `(风格)` 与行内 `[标签]`（保真校验）。GPT-SoVITS 没有情绪参数，不参与这条链路。`judgeModel` 可指定更快/更便宜的小模型，`judgeTimeoutMs` 控制单次判定总预算（默认 5 分钟，单次尝试最多用一半）——快失败（网络/限流等秒级返回）会在剩余预算内自动重试一次；打满单次预算的**慢超时不再重试**（慢模型重试必然再超时，避免白等第二个半预算）；判定失败只影响情绪、不影响出语音，日志会给出预算/尝试次数/耗时与"自动判定失败→回退默认"标注便于排查。
 - **云服务商接入要点**：
   - **豆包**（[文档](https://docs.volcengine.com/docs/DoubaoVoice/unidirectional-streaming-text-to-speech-http?lang=zh)）：HTTP Chunked 单向流式（NDJSON，base64 分片按序拼接，`code 20000000` 结束）；新版控制台只需 `X-Api-Key` + 资源版本；`resourceId` 决定可用音色（2.0 音色以 `_uranus_bigtts` 结尾）与计费；语音指令仅 2.0/复刻 2.0 支持（建议 `model: seed-tts-2.0-expressive`）。
@@ -732,6 +741,8 @@ tts:
 | `#取消任务 +id` | 取消长任务 |
 
 > 长任务账本默认关闭（`agent.taskStore.enable: false`，开发阶段开关）；未开启时上述命令只会回「任务账本未启用」。
+>
+> **作用域区别**：`reminder_set`（一次性提醒，`#我的提醒`/`#取消提醒`）与笔记、人设始终**按用户**；`schedule_task`（`#定时任务` 的周期任务链）按**会话/群级**作用域——任务链执行时要结合群上下文，因此群内创建的周期任务属于该群会话，不跟随创建者跨群。
 
 ### 人设资料（自动补齐）
 | 指令 | 说明 |
@@ -753,6 +764,8 @@ tts:
 | `#LLM进化` | 让模型自主提出进化方向 |
 | `#工具进化列表` / `#采纳工具 +名` / `#淘汰工具 +名` / `#回滚工具 +名 +版本` / `#工具健康` | 工具进化（自动生成新工具）的审阅与运维 |
 
+> **后台自评审预算**（`agent.selfReview.dailyBudgetTokens`，默认 `200000`）：每日 token 预算，耗尽后只采迹不评审；**设 `0` = 关闭后台自评审**（不再等于「不限」）。
+
 ### 群世界（群聊画像建模）
 | 指令 | 说明 |
 | --- | --- |
@@ -760,6 +773,8 @@ tts:
 | `#纠正我的群聊画像 +内容` / `#删除我的群聊画像` | 纠正 / 删除自己的画像 |
 | `#开启我的群聊建模` / `#关闭我的群聊建模` | 自助开关（opt-out 会同时清除该群的画像与关系边） |
 | `#群世界状态 +群号` / `#群世界清理 +天数` | 运行状态 / 清理过期数据（master） |
+
+> `agent.groupWorld.analysis.schedule` 支持**热加载**：改 cron 后无需重启，下一分钟即按新表达式生效（内部每分钟检查 5 字段 cron 匹配）。
 
 ### 伪人模式 🧪
 | 指令 | 说明 |
@@ -770,6 +785,9 @@ tts:
 | `#伪人记忆 +条数` | 伪人独立记忆库（与主 Agent 记忆隔离） |
 
 **易漏配置**（都有代码默认值、但面板不显示，需手改 `config.yaml` 的 `agent.humanize`）：
+- `groupsOverride: {}` —— 按群覆盖本块配置（`{ "群号": { "threshold": 90 } }`；**顶层键覆盖**，嵌套对象整体替换，未列出的键沿用本块默认；如某群单独调阈值/退避）。
+- `memory.model: ""` —— 伪人记忆抽取/整合模型（留空=utilityModel→主模型）；可跨厂商，填模型条目 id 或模型名，运行时按注册表解析真实端点与模型名。
+- `persona.styleExamples: []` —— 伪人 Replyer 的风格示例（结构化 `{ sceneType, speechAct, tone, familiarity, text }`，提供即全量覆盖内置默认样本，最多 60 条）。注意读取的是 `agent.humanize.persona` 下的同名键；顶层 `agent.persona.styleExamples` 是另一层。
 - `persona.fromPersonaId` —— 面板「角色人设 → 从人设库选择」；与主 Agent 共用 PersonaStore，人设正文优先于自定义角色卡，角色名/@ 判定也随人设库；自定义卡内容保留，切回即可继续用。
 - `persona.aliases: []` —— 角色别名数组，参与 @/昵称提及判定（与 `persona.name` 一同构成 `identityNames`）。
 - `memory.minConsolidateMessages: 6` —— 睡眠整合所需最少消息数（低于此不跑整合；增量整合另见 `incrementalMinMessages`）。
@@ -782,6 +800,8 @@ tts:
 | `#画图列表` | 列出可用工作流 |
 | `#画图 +提示词` | 按提示词出图 |
 | `#反推 +图片` | 反推图片提示词 |
+
+> `agent.comfyui.enable` 默认关（关=不注册 comfyui 工具、不吞 `#画图` 指令）；`agent.comfyui.command.enable` 只在 `comfyui.enable=true` 时有效。画图能力可在 Web 配置中心「画图」或锅巴对应分组配置。
 
 ---
 
@@ -957,13 +977,19 @@ E2B_INTEGRATION=1 node model/sandbox/e2b.integration.test.mjs
 | `apiKey` | 空 | E2B 云或自托管团队 key（★敏感，已接入回复脱敏） |
 | `apiUrl` / `domain` / `sandboxUrl` | 空 | 自托管控制面 / 沙箱域名 / 数据面（client-proxy）地址；云托管留空 |
 | `template` | `base` | 沙箱模板（CPU/内存/预装依赖由模板承载） |
+| `verifyTemplate` | 空 | toolEvo 行为验证专用模板（留空=复用 `template`） |
 | `maxTimeout` | `600` | 单命令超时上限（秒） |
 | `defaultCwd` | `/home/user` | 沙箱内默认工作目录（宿主路径在沙箱内无意义） |
 | `idleMs` / `sandboxTtlMs` | `300000` / `600000` | 闲置回收阈值 / 沙箱 TTL（毫秒，命中时自动续期） |
 | `maxSandboxes` / `concurrencyWaitMs` | `4` / `15000` | 全局并发上限 / 等名额超时（超时按配额失败） |
 | `maxCommandsPerSession` | `50` | 单会话命令数上限（0=不限） |
-| `network.allowOut` / `denyOut` | 空 / 空 | **默认全放通**（E2B 原生默认）；配了 `allowOut` 白名单 → 只放行白名单、其余全拒；`allowInternet:false`（无白名单）→ 完全断网；`denyOut` 可在放通基础上额外封禁网段（如防云元数据 `169.254.169.254/32`）。**别写 `0.0.0.0/0`**：它是「拒绝一切（含 DNS）」，旧版本默认值会在启动时被自动清理 |
+| `requestTimeoutMs` / `retries` | `60000` / `1` | E2B SDK 单请求超时（毫秒）/ 重试次数（云默认 3，这里默认降为 1 控延迟） |
+| `allowPublicTraffic` | `false` | 沙箱公开 URL 也要求 token（默认收紧） |
+| `network.allowInternet` | `true` | 总出口开关：`true`=放通全部出口（E2B 原生默认）；`false`=完全断网（配了 `allowOut` 白名单时白名单仍放行） |
+| `network.allowOut` / `denyOut` | 空 / 空 | `allowOut` 白名单（可选收紧）：配了只放行白名单、其余全拒；`denyOut` 在放通基础上额外封禁网段（如防云元数据 `169.254.169.254/32`）。**别写 `0.0.0.0/0`**：它是「拒绝一切（含 DNS）」，旧版本默认值会在启动时被自动清理 |
 | `audit` | `true` | 每条命令写审计日志（会话键/退出码/命令前 200 字符，不含密钥） |
+
+> 上述字段（含网络白名单/审计/`verifyTemplate`）都可在 Web 配置中心与锅巴「E2B 沙箱」分组里编辑，无需手改 yaml。
 
 > 沙箱会话按「群 + 用户 + 会话」绑定：同一会话内文件与进程状态连续（可先装依赖再跑脚本）。群共享模式（`isolation: false`）下同群共用一个沙箱。
 >
@@ -1136,6 +1162,8 @@ sticker:
 ```
 
 > **合规**：自动发现只采集群内公开图片，经视觉判定过滤照片/文档；发送侧只发本地 `images/` 内物理存在的文件。
+>
+> **前置条件**：`sendStickerTool`（默认 `true`）只在 `sticker.enable=true` 时注册 `send_sticker` 工具；`autoDiscover` 还要求多模态总开关 `agent.media.enable` 未关（视觉判定依赖视觉子模型），主模型无视觉能力时需另配 `agent.vision.model`。
 
 ---
 
@@ -1186,7 +1214,7 @@ utils/       Config 配置读写（插件目录 + 热加载） · Log 分级日�
 | `KROKI_INTEGRATION` / `KROKI_ENDPOINT` | 真实 Kroki 容器集成测试开关与端点（默认跳过） |
 | `E2B_INTEGRATION` | E2B 真连接集成测试开关（默认跳过） |
 
-分级日志（`utils/Log.js`）：`mark`（里程碑）/ `info`（研究进度）/ `debug`（工具入参·每轮 token）/ `warn` / `error`。真正的全链路日志开关是 `agent.devLog.enable`（默认开，按会话分文件写 `data/logs/`）；`debug: true` 等价于强制开启 devLog（即使 `devLog.enable=false`）。开启后可看到 AI 每次调用工具的名称、入参、结果与每轮 token 用量，深度研究的迭代轮次与搜索词，便于排查。
+分级日志（`utils/Log.js`）：`mark`（里程碑）/ `info`（研究进度）/ `debug`（工具入参·每轮 token）/ `warn` / `error`。真正的全链路日志开关是 `agent.devLog.enable`（默认开，按会话分文件写 `data/logs/`）；`debug: true` 等价于强制开启 devLog（即使 `devLog.enable=false`），可在 Web 配置中心「基础设置」或锅巴直接勾选。开启后可看到 AI 每次调用工具的名称、入参、结果与每轮 token 用量，深度研究的迭代轮次与搜索词，便于排查。
 
 ### 日志字段说明
 
@@ -1256,7 +1284,7 @@ utils/       Config 配置读写（插件目录 + 热加载） · Log 分级日�
 
 据此得到的实践结论（v1.26.3 / v1.26.4 两处修复都由此而来）：
 
-1. **一定要配 `contextWindow`**：不配则按消息条数水位 30→18 压缩，上下文长期只有 ~2 万 token，命中率被压在 60% 上下；
+1. **一定要配 `contextWindow`**：不配则按消息条数水位（`contextMsgHighWater`/`contextMsgLowWater`，默认 30→18）压缩，上下文长期只有 ~2 万 token，命中率被压在 60% 上下；
 2. **窗口吃满 + 压得深**：`H` 越大、`K` 越小命中率越高（`H` 大让同一段前缀被反复复用；`K` 小让「前缀重建」的代价更小）。例如 `H=0.8W, K=0.15W` 明显优于默认 `0.65/0.45`；
 3. **别让前缀变形**：system 里的工具目录必须与「本轮激活了哪些工具」无关（v1.26.3 起固定为配置静态集，此前每激活一批工具就整段重付）；
 4. **收尾/评判调用要与主请求同形**：`tool_choice:'none'` 会让服务端丢掉 tools 段、换成另一套渲染，这类调用整段 miss（v1.26.4 起不再下发，改由指令禁工具）；

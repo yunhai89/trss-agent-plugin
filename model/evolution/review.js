@@ -100,16 +100,23 @@ export class SelfReviewer {
     this.every = Math.max(1, Number(every) || DEFAULT_EVERY)
     this.autoApplyMemory = autoApplyMemory !== false
     this.autoApplyPrompt = autoApplyPrompt === true
+    // dailyBudgetTokens=0 = 关闭后台自评审（D9，2026-10-29 审计）：此前 0 被当成「不限」，
+    // 用户按面板把预算调到 0 想关掉，结果评审照跑、token 照烧。0 现在恒闸住评审（只采集 trace）。
     this.dailyBudgetTokens = Math.max(0, Number(dailyBudgetTokens) || 0)
+    this._budgetDisabled = this.dailyBudgetTokens === 0
     this.logger = logger
+    if (this._budgetDisabled) {
+      this.logger('warn', '[selfReview] dailyBudgetTokens=0 → 后台自评审已关闭（只采集 trace，不评审、不产出 suggestion；设 >0 恢复）')
+    }
     this._counts = new Map() // scopeId → 已累计对话轮数
     this._budgetDay = ''
     this._usedTokens = 0
     try { fs.mkdirSync(this.suggestionDir, { recursive: true }) } catch { /* noop */ }
   }
 
-  /** 预算闸：日 token 预算耗尽则降级（不评审） */
+  /** 预算闸：dailyBudgetTokens=0 视为关闭（恒 true 跳过评审）；>0 时当日用量耗尽即降级（不评审） */
   _budgetExhausted() {
+    if (this._budgetDisabled) return true
     // 日界用**本地日期**（第 7 轮 L1）：此前用 toISOString()（UTC），东八区要等到北京时间 08:00
     // 才重置当日预算，与 groupworld/analyzer.js 的本地 dateKey 口径不一致。
     const today = localDateKey()
@@ -119,7 +126,7 @@ export class SelfReviewer {
 
   /** 每轮对话后调用：per-scope 计数 → 到阈值 setImmediate 触发后台评审 */
   tick(ctx, runResult = {}) {
-    if (!this.enable) return
+    if (!this.enable || this._budgetDisabled) return
     const scope = ctx?.scopeId || ctx?.scopeUserId || '__global__'
     // 容量上限（第 7 轮 L2）：_counts 此前只增不删，群/用户越多越吃内存；满了整体清零，
     // 代价只是各 scope 重新攒满 every 轮才触发评审（阈值语义不受影响）。
@@ -134,7 +141,12 @@ export class SelfReviewer {
   }
 
   async _review(ctx, runResult) {
-    if (this._budgetExhausted()) { this.logger('debug', '[selfReview] 日预算耗尽，本轮跳过评审'); return }
+    if (this._budgetExhausted()) {
+      this.logger('debug', this._budgetDisabled
+        ? '[selfReview] 自评审已关闭（dailyBudgetTokens=0），跳过'
+        : '[selfReview] 日预算耗尽，本轮跳过评审')
+      return
+    }
     const scopeUserId = ctx?.scopeUserId
     const scopeId = ctx?.scopeId
     // 收集评审上下文：近期 trace（本 scope）+ 记忆快照 + 技能清单

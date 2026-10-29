@@ -122,6 +122,26 @@ await test('enable=false → tick 不触发', async () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+await test('D9：dailyBudgetTokens=0 → 后台自评审关闭（构造器 warn 一次，tick 不触发）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rev-'))
+  let chatCalled = 0
+  const warns = []
+  const r = new SelfReviewer({
+    provider: { chat: async () => { chatCalled++; return { content: '[]' } } },
+    model: 'm', traceStore: mockTrace(), memory: mockMemory(), skills: mockSkills(), suggestionDir: dir,
+    every: 1, dailyBudgetTokens: 0,
+    logger: (lvl, ...args) => { if (lvl === 'warn') warns.push(args.join(' ')) },
+  })
+  ok(warns.length === 1 && /dailyBudgetTokens=0/.test(warns[0]), '构造器 warn 一次（说明 0=关闭）')
+  ok(r._budgetExhausted() === true, '预算闸恒为关闭态')
+  r.tick({ scopeUserId: 'u6', scopeId: 'u6' }, {})
+  r.tick({ scopeUserId: 'u6', scopeId: 'u6' }, {})
+  await tick()
+  ok(chatCalled === 0, 'tick 完全不触发评审（即使 every=1）')
+  ok((await r.force({ scopeUserId: 'u6', scopeId: 'u6' }))?.suggestionCount === 0, '手动 force 也跳过评审')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 await test('applySuggestion：promptDir 不存在时自动创建并落盘（修 ENOENT 首次采纳崩溃）', async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'rev-apply-'))
   const promptDir = path.join(base, 'prompts-not-exist') // 故意不预建

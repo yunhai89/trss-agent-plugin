@@ -23,8 +23,21 @@ import { presets as anthropicPresets } from '../anthropic/presets.js'
 export const DEPTHS = ['off', 'low', 'medium', 'high']
 /** 各深度默认思考预算（tokens；质量优先，取值偏宽松） */
 export const DEFAULT_BUDGETS = { low: 4096, medium: 8192, high: 16384 }
-/** 自动预算硬顶（防单轮烧太多） */
-export const DEFAULT_MAX_BUDGET = 32768
+/**
+ * 思考预算统一硬顶（tokens）：自动路径（thinkingAuto.maxBudget）与手动路径（thinking.budget_tokens）
+ * 共用同一上限——此前自动 32k / 手动面板 64k / 自动面板 128k 三套值互相打架（D10，2026-10-29 审计）。
+ * Anthropic 扩展思考官方上限即 128k（budget_tokens < max_tokens），更大的值会在厂商侧 400。
+ */
+export const MAX_THINKING_BUDGET = 128000
+/** 自动预算默认硬顶（可被 thinkingAuto.maxBudget 调低，但永不超过 MAX_THINKING_BUDGET） */
+export const DEFAULT_MAX_BUDGET = MAX_THINKING_BUDGET
+
+/** 把任意来源（手动配置/自动预算/模型决策）的思考预算夹到 [0, MAX_THINKING_BUDGET]；非法值→0 */
+export function clampThinkingBudget(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return 0
+  return Math.min(Math.floor(n), MAX_THINKING_BUDGET)
+}
 
 // ── 复杂度信号 ──
 const CASUAL_RE = /^(?:哈+|嘿+|嗨+|在吗|在么|你好|您好|hi|hello|早|早安|晚安|谢谢|多谢|好的|好|嗯|哦|噢|收到|ok|okk|哈哈+|笑死|6+|？+|…+|\.{3,})[\s!！。.?？~～,，]*$/i
@@ -89,8 +102,9 @@ export function classifyComplexity(text, { budgets = DEFAULT_BUDGETS, maxBudget 
 function clampBudget(depth, budgets, maxBudget) {
   if (depth === 'off') return 0
   const b = Number(budgets?.[depth]) || DEFAULT_BUDGETS[depth] || 0
-  const cap = Number(maxBudget) || DEFAULT_MAX_BUDGET
-  return Math.max(0, Math.min(b, cap))
+  // 统一上限：配置的 maxBudget 只能调低，不能突破 MAX_THINKING_BUDGET（D10）
+  const cap = Math.min(MAX_THINKING_BUDGET, clampThinkingBudget(maxBudget) || MAX_THINKING_BUDGET)
+  return clampThinkingBudget(Math.min(b, cap))
 }
 
 /** depth → reasoning_effort 档（low/medium/high） */
@@ -127,7 +141,8 @@ export function resolveThinkingStyle({ protocol = 'openai', preset = '', model =
 export function encodeThinking({ depth = 'off', budget = 0, protocol = 'openai', preset = '', model = '', style = '' } = {}) {
   const st = resolveThinkingStyle({ protocol, preset, model, presetStyle: style })
   const on = depth !== 'off'
-  const b = on ? (Number(budget) || DEFAULT_BUDGETS[depth] || 0) : 0
+  // 手动/自动传入的预算都走同一 clamp（D10）：调用方给 200k 也只会下发 128k
+  const b = on ? (clampThinkingBudget(budget) || Math.min(DEFAULT_BUDGETS[depth] || 0, MAX_THINKING_BUDGET)) : 0
   switch (st) {
     case 'reasoning_effort':
       return on ? { reasoning_effort: effortOf(depth) } : {}

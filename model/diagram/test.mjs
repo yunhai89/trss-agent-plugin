@@ -482,6 +482,23 @@ await test('diagram.defaultTheme 生效（spec 未指定 theme 时采用配置�
   eq(fallback.spec.theme, 'paper-blue', '非法配置默认回落到内置 DEFAULT_THEME')
 })
 
+await test('D8：agent.diagram.enable 生效（兼容旧键 enabled；enable 优先、缺省启用）', async () => {
+  // enable:false → 禁用（旧代码只读 enabled，yaml/锅巴写 enable 时关不掉）
+  const offByEnable = mkSvc({ enable: false })
+  eq(offByEnable.cfg.enable, false, 'enable=false 归一')
+  const r1 = await offByEnable.render(FLOW)
+  eq(r1.ok, false, 'enable=false → 渲染被拒')
+  eq(r1.errorClass, 'renderer_unavailable', '错误类型 renderer_unavailable')
+  // 旧键 enabled 仍兼容
+  const offLegacy = mkSvc({ enabled: false })
+  eq(offLegacy.cfg.enable, false, '旧键 enabled=false 同样生效')
+  // enable 显式优先于 enabled（配置迁移期两者并存）
+  const both = mkSvc({ enable: true, enabled: false })
+  eq(both.cfg.enabled, true, 'enable=true 覆盖旧 enabled=false')
+  // 都没配 → 默认启用
+  eq(mkSvc().cfg.enable, true, '缺省启用')
+})
+
 await test('kroki.circuitBreaker.enabled=false → 熔断器不生效（永不拒绝）', async () => {
   const off = new KrokiClient({ endpoint: 'http://127.0.0.1:8000', circuitBreaker: { enabled: false }, onEvent: () => {} })
   eq(off.cb.state, 'disabled', '关闭时状态为 disabled')

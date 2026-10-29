@@ -39,6 +39,7 @@ resources/stickers/
 # 用户配置（含 apiKey 等敏感信息，不入库；仅 config/default_config 入库）
 config/config.yaml
 config/config.yaml.tmp
+config/config.yaml.bak
 
 # 用户截图（不入库）
 Screenshot_*.jpg
