@@ -133,7 +133,8 @@ agent:
     appId: ""                  # 机器人 AppID（QQ 开放平台 → 开发设置）
     appSecret: ""              # 机器人 AppSecret（★敏感：回复发送前会脱敏）
     accounts: []               # 多账号：[{ name, appId, appSecret, sandbox, intents, markdown }]（与上面扁平字段二选一）
-    intents: 0                 # 事件订阅位图（0=默认：群@消息 + 私聊C2C + 按钮交互；频道/频道私信需显式填 1073741825 = GUILDS|PUBLIC_GUILD_MESSAGES）
+    intents: 0                 # 事件订阅位图（0=默认只订「群@消息 + 私聊C2C」= 33554432）。按钮交互=100663296；频道=1073741825。
+                               # 填了平台未开通的位会被拒绝连接（close 4013 invalid intents / 4914）——本插件会自动降级重连，但仍建议只填已开通的。
     markdown: auto             # auto=先试 Markdown、无权限自动降级纯文本并记忆 | true=总是 | false=纯文本
     preferMarkdownText: false  # true=纯文本回复也走 Markdown 消息（平台支持时更美观）
     sandbox: false             # true=连沙箱环境（api 域名 sandbox.）

@@ -627,7 +627,7 @@ export function supportGuoba() {
         { field: 'agent.qqBot.markdown', label: 'Markdown 能力', bottomHelpMessage: 'auto=先试 Markdown、无权限自动降级纯文本并记忆（推荐）| true=总是 | false=纯文本', component: 'Select', componentProps: { options: [{ label: 'auto（推荐）', value: 'auto' }, { label: 'true 总是 Markdown', value: 'true' }, { label: 'false 纯文本', value: 'false' }] } },
         { field: 'agent.qqBot.preferMarkdownText', label: '纯文本也走 Markdown', bottomHelpMessage: '平台支持时，纯文本回复也用 Markdown 消息渲染', component: 'Switch' },
         { field: 'agent.qqBot.sandbox', label: '沙箱环境', bottomHelpMessage: '连开放平台沙箱（api 域名 sandbox.）', component: 'Switch' },
-        { field: 'agent.qqBot.intents', label: '事件订阅位图(intents)', bottomHelpMessage: '0=默认（群@消息 + C2C + 按钮交互；频道需显式配置 1073741825）；一般不用改', component: 'InputNumber', componentProps: { min: 0 } },
+        { field: 'agent.qqBot.intents', label: '事件订阅位图(intents)', bottomHelpMessage: '0=默认只订群@+C2C（33554432）；按钮交互填 100663296、频道填 1073741825。填平台未开通的位会被 close 4013 拒绝（插件会自动降级重连），一般保持 0', component: 'InputNumber', componentProps: { min: 0 } },
         { field: 'agent.qqBot.accounts', label: '多账号(JSON)', bottomHelpMessage: '数组：[{name,appId,appSecret,sandbox,intents,markdown}]；与上面扁平字段二选一（留空用扁平）', component: 'InputTextArea', componentProps: { autosize: { minRows: 2, maxRows: 8 }, placeholder: '[]' } },
         { field: 'agent.qqBot.apiBase', label: 'OpenAPI 基址(可选)', bottomHelpMessage: '默认 https://api.bot.qq.com（失败自动回退 api.sgroup.qq.com）；自建代理时填', component: 'Input', componentProps: { placeholder: '留空=官方' } },
         { field: 'agent.qqBot.tokenUrl', label: 'token 端点(可选)', bottomHelpMessage: '默认 https://api.bot.qq.com/app/getAppAccessToken（失败自动回退 bots.qq.com）', component: 'Input', componentProps: { placeholder: '留空=官方' } },

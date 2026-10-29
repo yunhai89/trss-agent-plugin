@@ -26,12 +26,42 @@ export const INTENTS = {
 }
 
 /**
- * 默认订阅：QQ 群 @ 消息 + C2C + 按钮交互。
- * 频道（GUILDS | PUBLIC_GUILD_MESSAGES）需机器人有频道权限，默认不订阅——
- * 未授权的 intents 会让网关直接拒绝连接（4914/4013），对只用 QQ 群的用户是纯风险。
- * 频道/频道私信用户请在 agent.qqBot.intents 显式配置：1 | (1<<30) = 1073741825。
+ * 默认订阅：**只订 QQ 群 @ 消息 + C2C**（1<<25 = 33554432）。
+ *
+ * 为什么不默认带交互/频道位：订阅未开通的事件会让网关**直接拒绝连接**
+ * （close 4013 invalid intents / 4914 intents 不足），表现为「连上→立刻断开→无限重连」。
+ * 实测（2026-10，QQ 群机器人）：intents=GROUP_AND_C2C|INTERACTION(1<<25|1<<26) 被 4013 拒绝，
+ * 去掉交互位后正常连接。因此默认取最小可用集，其余能力按需显式开启：
+ *   · 按钮交互（需平台开通交互能力）：intents = 33554432 | 67108864 = 100663296
+ *   · 频道/频道私信：intents = 1 | (1<<30) = 1073741825
+ * 即使填错也不会死循环：4013/4914 时网关会按候选列表自动降级重连（见 degradeIntents）。
  */
-export const DEFAULT_INTENTS = INTENTS.GROUP_AND_C2C | INTENTS.INTERACTION
+export const DEFAULT_INTENTS = INTENTS.GROUP_AND_C2C
+
+/** 频道相关位（降级时整组剥离） */
+const GUILD_BITS = INTENTS.GUILDS | INTENTS.PUBLIC_GUILD_MESSAGES | INTENTS.DIRECT_MESSAGE | INTENTS.GUILD_MEMBERS
+
+/**
+ * 计算下一个待尝试的 intents（**只降不升**：先剥交互位 → 再剥频道位 → 再退到最小可用集）。
+ *
+ * 原则：宁少不多。订阅未开通的位会被平台直接拒绝（4013/4914/4915），
+ * 因此降级顺序永远是「去掉可疑位」，而不是试探更多权限。
+ * @param {number} current 当前被拒的 intents
+ * @param {number[]} tried 已尝试过的 intents 列表
+ * @returns {number|null} 下一个候选；无候选返回 null（调用方应停止重连并提示用户）
+ */
+export function nextIntents(current, tried = []) {
+  const seen = new Set((tried || []).filter((n) => Number.isFinite(n)))
+  const cands = []
+  let cur = Number(current) || 0
+  for (const drop of [INTENTS.INTERACTION, GUILD_BITS]) {
+    if (cur & drop) { cur &= ~drop; cands.push(cur) }
+  }
+  // 再退到「最小可用集」方向：群 → 频道 only → 频道全套
+  cands.push(INTENTS.GROUP_AND_C2C, INTENTS.PUBLIC_GUILD_MESSAGES, INTENTS.GUILDS | INTENTS.PUBLIC_GUILD_MESSAGES | INTENTS.DIRECT_MESSAGE)
+  for (const c of cands) if (c > 0 && !seen.has(c)) return c
+  return null
+}
 
 export const OP = {
   DISPATCH: 0, HEARTBEAT: 1, IDENTIFY: 2, RESUME: 6, RECONNECT: 7, INVALID_SESSION: 9, HELLO: 10, HEARTBEAT_ACK: 11,
@@ -89,13 +119,18 @@ export class QQBotGateway {
     appId, appSecret, getToken, getGatewayUrl, intents = DEFAULT_INTENTS,
     WebSocketImpl = null, logger = () => {}, onDispatch = () => {}, onState = () => {},
     reconnectDelays = RECONNECT_DELAYS, maxReconnectAttempts = 30,
+    intentsRetryDelayMs = 1500,
     heartbeatJitterMs = 0,
   } = {}) {
     this.appId = appId
     this.appSecret = appSecret
     this.getToken = getToken
     this.getGatewayUrl = getGatewayUrl
-    this.intents = intents
+    // 非正数一律视为「未配置」→ 用默认最小集（intents=0 发给平台会直接 4013）
+    this.intents = Number(intents) > 0 ? Number(intents) : DEFAULT_INTENTS
+    this._triedIntents = [this.intents]
+    this._pendingInvalidSession = false
+    this._invalidSessionTimer = null
     this.WebSocketImpl = WebSocketImpl
     this.logger = logger
     this.onDispatch = onDispatch
@@ -103,6 +138,7 @@ export class QQBotGateway {
     this.reconnectDelays = reconnectDelays
     this.maxReconnectAttempts = maxReconnectAttempts
     this.heartbeatJitterMs = heartbeatJitterMs
+    this.intentsRetryDelayMs = Number(intentsRetryDelayMs) >= 0 ? Number(intentsRetryDelayMs) : 1500
 
     this.ws = null
     this.state = 'idle' // idle | connecting | open | closed | stopped
@@ -123,6 +159,9 @@ export class QQBotGateway {
     return {
       state: this.state,
       appId: this.appId,
+      intents: this.intents,
+      reason: this._stateExtra?.reason || '',
+      hint: this._stateExtra?.hint || '',
       sessionId: this.sessionId,
       lastSeq: this.lastSeq,
       reconnectAttempts: this.reconnectAttempts,
@@ -135,6 +174,7 @@ export class QQBotGateway {
 
   _setState(state, extra = {}) {
     this.state = state
+    this._stateExtra = extra || {}
     try { this.onState({ state, appId: this.appId, ...extra }) } catch (e) { this.logger('warn', '[qqbot:gateway] onState 回调异常', e?.message || e) }
   }
 
@@ -170,6 +210,7 @@ export class QQBotGateway {
   _clearTimers() {
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null }
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null }
+    if (this._invalidSessionTimer) { clearTimeout(this._invalidSessionTimer); this._invalidSessionTimer = null }
   }
 
   _scheduleReconnect(overrideDelay = null) {
@@ -208,6 +249,9 @@ export class QQBotGateway {
     }
     this.ws = ws
     this.readyAt = 0
+    // 同一 socket 可能连发多个事件（如 op=9 INVALID_SESSION 后紧跟 close）。用身份判等把
+    // 非「当前 socket」的事件全部忽略：否则一次断开会被计成 2 次重连（历史 bug：attempts 1s/2s 连续跳）。
+    const isCurrent = () => this.ws === ws
 
     // 原生 WebSocket 用 addEventListener；ws 包同时有 on()（两者都兼容）
     const on = (name, fn) => {
@@ -215,12 +259,19 @@ export class QQBotGateway {
       else if (typeof ws.on === 'function') ws.on(name, (arg) => fn(name === 'message' ? arg : arg))
     }
     on('open', () => {
+      if (!isCurrent()) return
       this.logger('debug', '[qqbot:gateway] WebSocket 已连接')
       this._setState('open')
     })
-    on('message', (data) => { this._handleMessage(data).catch((e) => this.logger('error', '[qqbot:gateway] 处理消息异常', e?.message || e)) })
-    on('close', (ev) => this._handleClose(ev))
-    on('error', (err) => this.logger('warn', '[qqbot:gateway] WebSocket 错误', err?.message || String(err)))
+    on('message', (data) => {
+      if (!isCurrent()) return
+      this._handleMessage(data).catch((e) => this.logger('error', '[qqbot:gateway] 处理消息异常', e?.message || e))
+    })
+    on('close', (ev) => { if (isCurrent()) this._handleClose(ev) })
+    on('error', (err) => {
+      if (!isCurrent()) return
+      this.logger('warn', '[qqbot:gateway] WebSocket 错误', err?.message || String(err))
+    })
   }
 
   async _send(payload) {
@@ -263,8 +314,8 @@ export class QQBotGateway {
           this.sessionId = d?.session_id || this.sessionId
           this.readyAt = Date.now()
           this.reconnectAttempts = 0
-          this._setState('ready', { sessionId: this.sessionId, user: d?.user || null })
-          this.logger('mark', '[qqbot:gateway] READY', `session=${this.sessionId}`)
+          this._setState('ready', { sessionId: this.sessionId, user: d?.user || null, intents: this.intents })
+          this.logger('mark', '[qqbot:gateway] READY', `session=${this.sessionId} intents=${this.intents}`)
         } else if (t === 'RESUMED') {
           this.readyAt = Date.now()
           this.reconnectAttempts = 0
@@ -284,7 +335,17 @@ export class QQBotGateway {
         const canResume = d === true
         this.logger('warn', '[qqbot:gateway] INVALID_SESSION', canResume ? '（可续传）' : '（会话失效，清 session）')
         if (!canResume) { this.sessionId = null; this.lastSeq = null }
-        this._handleClose({ code: 4006 })
+        // 关键：不要在这里合成 4006 关连接。服务端随后会发真实 close 帧（如 4013 invalid intents），
+        // 那个码才是该重连还是该降级 intents 的依据；提前 close 会把真实码吞掉并触发双重重连。
+        this._pendingInvalidSession = true
+        if (this._invalidSessionTimer) clearTimeout(this._invalidSessionTimer)
+        this._invalidSessionTimer = setTimeout(() => {
+          this._invalidSessionTimer = null
+          if (!this._pendingInvalidSession) return
+          this.logger('warn', '[qqbot:gateway] INVALID_SESSION 后 3s 未收到 close，主动断开重连')
+          this._handleClose({ code: 4006 })
+        }, 3000)
+        if (typeof this._invalidSessionTimer?.unref === 'function') this._invalidSessionTimer.unref()
         break
       }
       default:
@@ -314,15 +375,42 @@ export class QQBotGateway {
     if (typeof this.heartbeatTimer?.unref === 'function') this.heartbeatTimer.unref()
   }
 
-  _handleClose(ev = {}) {
+  /** 找不到可用 intents 时的终止说明 */
+  _intentsHint(intents) {
+    return `当前 intents=${intents} 被平台拒绝。QQ 群机器人默认只需 ${INTENTS.GROUP_AND_C2C}（群@+C2C）；`
+      + '按钮交互/频道事件需到 QQ 开放平台开通对应能力后再填（如 100663296 / 1073741825）。'
+  }
+
+  /** 4013/4914/4915：尝试下一个候选 intents 重连；无候选则停止并给出明确原因 */
+  _handleInvalidIntents(code) {
+    const next = nextIntents(this.intents, this._triedIntents)
+    if (next != null && !this._triedIntents.includes(next)) {
+      this.logger('warn', `[qqbot:gateway] intents=${this.intents} 被平台拒绝（close ${code}）：自动降级为 ${next} 后重连`,
+        code === 4013 ? '（多为该机器人未开通对应事件订阅；平台关码 4013 = invalid intents）' : '')
+      this.intents = next
+      this._triedIntents.push(next)
+      this._setState('connecting', { intents: next, degrading: true })
+      this._scheduleReconnect(this.intentsRetryDelayMs)
+      return
+    }
+    this.logger('error', `[qqbot:gateway] intents 全部候选均被拒绝（close ${code}），已停止重连`, this._intentsHint(this.intents))
+    this._setState('closed', { reason: 'invalid_intents', hint: this._intentsHint(this.intents), code })
+  }
+
+  _handleClose(ev = {}, ws = null) {
+    // socket 判等：非当前连接（旧 socket 迟到的 close）直接忽略，避免双计重连次数
+    if (ws && this.ws !== ws) return
     const code = Number(ev?.code ?? 0)
     const reason = String(ev?.reason ?? '')
+    if (this._invalidSessionTimer) { clearTimeout(this._invalidSessionTimer); this._invalidSessionTimer = null }
+    this._pendingInvalidSession = false
     this.lastClose = { code, reason, at: Date.now() }
     this._clearTimers()
     const hint = CLOSE_CODE_HINT[code] ? `（${CLOSE_CODE_HINT[code]}）` : ''
     this.logger(code === 1000 ? 'info' : 'warn', '[qqbot:gateway] 连接关闭', `code=${code}${hint}`, reason || '')
-    try { this.ws?.close?.() } catch { /* noop */ }
-    this.ws = null
+    const closing = ws || this.ws
+    try { closing?.close?.() } catch { /* noop */ }
+    if (!ws || this.ws === ws) this.ws = null
     if (this.stopped) { this._setState('stopped'); return }
 
     // 4004 鉴权失败：重连没有意义，等配置修复后手动重连
@@ -332,6 +420,8 @@ export class QQBotGateway {
     }
     // 会话类错误：清 session 后重连（不带 RESUME）
     if ([4006, 4007, 4009, 4010, 4011, 4012, 4013, 4014].includes(code)) { this.sessionId = null; this.lastSeq = null }
+    // intents 被拒：按候选自动降级，避免「连上→断开→无限重连」
+    if ([4013, 4914, 4915].includes(code)) { this._handleInvalidIntents(code); return }
     // 4008 频控：固定 60s
     this._scheduleReconnect(code === 4008 ? 60_000 : null)
   }

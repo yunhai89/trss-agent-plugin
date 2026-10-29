@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.45.0-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.45.1-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -266,7 +266,8 @@ agent:
     #   - { name: 主号, appId: "102012345", appSecret: "xxx" }
     #   - { name: 二号, appId: "102054321", appSecret: "yyy", sandbox: true }
     markdown: auto            # auto=先试 Markdown、无权限自动降级纯文本并记忆
-    intents: 0                # 0=默认（群@消息 + C2C + 按钮交互；频道需显式配置 1073741825）
+    intents: 0                # 0=默认只订「群@ + C2C」=33554432；按钮交互=100663296，频道=1073741825
+                              # 填了平台未开通的位会被 close 4013 拒绝——适配器会自动降级重连并在日志说明
 ```
 
 **启用步骤**
@@ -292,7 +293,7 @@ agent:
 | QQ 群 @消息 / 私聊（C2C） / 频道消息 / 频道私信 | ✅ 收发（频道私信首次自动建 DM 会话） |
 | 被动回复 | ✅ 5 分钟窗口内自动带 `msg_id`，同一 `msg_id` 最多 5 条，超出降级主动消息 |
 | Markdown 消息 | ✅ `markdown: auto` 先试；机器人没开通权限（`304036`）自动改纯文本并记忆，不刷错误 |
-| inline keyboard 按钮 | ✅ `send_keyboard` 工具；回调点击当作「用户发了一句话」投递（命令/权限全复用） |
+| inline keyboard 按钮 | ✅ `send_keyboard` 工具；回调点击当作「用户发了一句话」投递（命令/权限全复用）。⚠️ 接收点击事件需该机器人已开通「交互」能力并配 `intents: 100663296`；未开通时自动降级为仅群@+C2C（按钮仍可展示，点击不回调） |
 | 图片/文件 | ✅ 群与私聊走富媒体上传（URL 或本地文件 base64）→ `msg_type=7`；**频道暂不支持富媒体**（会跳过并记日志） |
 | 长文本 | ✅ 3800 字一段分片发送 |
 | 主动消息 | ⚠️ 受平台配额限制；本插件在窗口内优先被动回复 |
@@ -362,7 +363,9 @@ qqOfficial:
 
 ### 按钮卡片（keyboard）与 `send_keyboard` 工具
 
-官方机器人支持 inline keyboard。开启 `agent.qqOfficial.keyboard.enable`（默认开）后，模型可调用 `send_keyboard` 发「Markdown 正文 + 按钮」卡片：
+官方机器人支持 inline keyboard。开启 `agent.qqOfficial.keyboard.enable`（默认开）后，模型可调用 `send_keyboard` 发「Markdown 正文 + 按钮」卡片。
+
+> **回调事件与 intents**：要让「点击」真的变成一条用户消息，需要该机器人在开放平台开通「交互」能力，并把账号 `intents` 配成 `100663296`（群@+C2C+交互）；默认 `intents: 0`（=33554432，仅群@+C2C）下按钮可正常展示、但点击不会回调。填了未开通的位会被平台以 `4013 invalid intents` 拒绝连接——适配器会自动降级重连并在日志说明原因。
 
 - 最多 **5 行 × 每行 5 个**按钮；单轮最多 **3 张**卡片；
 - 按钮三类：`callback`（点击后把文本当作该用户发言发回，常写插件命令，如 `#确认 12`）、`link`（打开网址）、`input`（填输入框）；
@@ -633,7 +636,7 @@ qqOfficial:
 | `qqBot.markdown` | `auto` | `auto`=先试 Markdown、无权限自动降级纯文本并记忆；`true`/`false` 强制 |
 | `qqBot.preferMarkdownText` | `false` | 纯文本回复也走 Markdown 消息 |
 | `qqBot.sandbox` | `false` | 连开放平台沙箱环境 |
-| `qqBot.intents` | `0` | 事件订阅位图（0=默认：群@ + C2C + 按钮交互（频道需配置 1073741825）） |
+| `qqBot.intents` | `0` | 事件订阅位图（0=默认只订群@+C2C=33554432；按钮交互=100663296，频道=1073741825。未开通的位会被 4013 拒绝，插件自动降级） |
 | `qqBot.apiBase` / `qqBot.tokenUrl` | 空 | 覆盖 OpenAPI 基址/token 端点（默认 `api.bot.qq.com`，失败自动回退 `api.sgroup.qq.com` / `bots.qq.com`） |
 | `thinking` | 空 | 思考模式（手动），provider 原生形状：`{ type: "enabled", budget_tokens: 16000 }`（`type` 可为 `enabled`/`disabled`，留空=不开启；`budget_tokens` 上限统一到 **128000**，各协议按同一 clamp）。锅巴面板用「开启深度思考 + 思考预算」两个控件读写同一字段 |
 | `thinkingAuto` | 关 | 思考自动决策：`{ enable, classifier, model, timeoutMs, maxBudget, budgets:{low,medium,high}, style }`。判档方式 `classifier`：`auto`=规则不确定时用小模型判（省调用）/`always`=总是小模型/`off`=纯规则/`jev`=由 Jev 判档（需开启 Jev）；小模型带超时、缓存，失败自动回退规则，不阻塞对话。档位→厂商原生字段（MiMo/Kimi/GLM/豆包→`thinking`、DeepSeek→`thinking`+`reasoning_effort`、Qwen→`enable_thinking`+`thinking_budget`、MiniMax→`adaptive`、Anthropic→`budget_tokens`、o/GPT-5→`reasoning_effort`、Gemini→`thinking_level`）。模型级 `thinking` 显式覆盖仍优先。**能力自适应**：能力表没明确表态的（新）型号默认乐观启用思考——厂商若拒绝思考字段，请求层自动剥离重试一次并记忆（之后自动判为不支持，`[chat]` 日志随之转 off，无需重启）；明确判为不支持的模型（如 gpt-4o）启动时有 `[thinking]` 警告，可设 `agent.media.caps.thinking=true` 强制 |
@@ -1686,7 +1689,7 @@ node scripts/run-tests.mjs --help 2>/dev/null || true
 ① 配置 `contextWindow` 让前缀缓存生效（命中率可达 90%+，见「缓存经济性」）；② 长任务看 `agent.loop.tokenBudget` 与 `maxTurns`；③ 旁路功能（记忆/评审/伪人）配 `utilityModel` 小模型；④ `#任务状态` 看 turns 与 stop 原因。
 
 **Q5：QQ 官方机器人连不上？**
-① 确认 AppID + AppSecret（Token 已废弃，不要填 Token）；② 用 Web「机器人账号」页看状态：4004=密钥错，4013/4914=intents 无权限（频道需填 `1073741825`），4008=频控；③ 首次启用适配器需重启 Yunzai；④ 不要同时开 Yunzai-QQBot-Plugin。
+① 确认 AppID + AppSecret（Token 已废弃，不要填 Token）；② 用 Web「机器人账号」页看状态：4004=密钥错；4013/4914=intents 无权限（默认只订群@+C2C，**不用手填**；填了未开通的位会被拒绝，插件会自动降级并记日志）；4008=频控；③ 首次启用适配器需重启 Yunzai；④ 不要同时开 Yunzai-QQBot-Plugin。
 
 **Q6：官方机器人里主人指令没权限？**
 openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整 user_id」加到 `agent.masters`（或 Yunzai master 配置）。
@@ -1709,6 +1712,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.45.1** | 修复 QQBot 网关无限重连：`intents: 0` 被原样下发（IDENTIFY intents=0 → 平台 4013）现回落为 33554432；4013/4914 按「只降不升」自动降级 intents 重连（耗尽则停止并给出可执行提示）；同一 socket 重复 close 不再双计重连；INVALID_SESSION 不再提前合成 4006（保留真实 close 码用于判断降级）；默认 intents 改为最小可用集（群@+C2C） |
 | **v1.45.0** | 首次启动即给 Web 默认访问地址（带 token，持久化 + 启动日志 + `data/web/console-url.txt`）：**没有协议端也能进面板配模型**；面板内一键复制；登录只在「认证失败」时清 token（运行时未就绪不再误报登录失败） |
 | **v1.44.1** | 文档重构：项目介绍按最新能力重排（能力地图 / 三协议端接入 / Web 面板 / 完整指令表 / 架构与配置治理 / 运维 FAQ） |
 | **v1.44.0** | Web 新增「机器人账号」页：QQBot 账号增删改 / 连接状态 / 排障；账号单一真源（`accounts[]`）；新 API `/api/qqbot*` |

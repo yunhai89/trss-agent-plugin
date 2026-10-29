@@ -1762,7 +1762,7 @@
             <cfg-row name="沙箱环境" desc="sandbox：连开放平台沙箱（api 域名 sandbox.）">
               <v-switch v-model="form.qqBot.sandbox"/>
             </cfg-row>
-            <cfg-row name="事件订阅位图(intents)" desc="0=默认（群@消息 + C2C + 按钮交互；频道需显式填 1073741825）；一般不用改">
+            <cfg-row name="事件订阅位图(intents)" desc="0=默认只订群@+C2C（33554432）；按钮交互填 100663296、频道填 1073741825。填未开通的位会被 4013 拒绝（插件会自动降级），一般保持 0">
               <input type="number" class="inp" style="width:150px" min="0" v-model.number="form.qqBot.intents">
             </cfg-row>
             <cfg-row name="多账号(JSON)" desc="accounts：[{name,appId,appSecret,sandbox,intents,markdown}]；与上面扁平字段二选一">

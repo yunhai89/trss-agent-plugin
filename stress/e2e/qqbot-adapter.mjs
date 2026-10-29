@@ -81,6 +81,11 @@ console.log('\n[2] 账号配置归一化（AppID + AppSecret）')
   eq(normalizeAccounts({ agent: { qqBot: { appId: 'A' } } }).length, 0, '缺 appSecret 跳过')
   const norm = normalizeAccounts({ agent: { qqBot: { appId: 'A', appSecret: 'S' } } })[0]
   ok(norm.intents > 0 && norm.markdown === 'auto', '默认 intents 与 markdown=auto')
+  // 回归：intents=0（默认配置）必须回落为「群@+C2C」，不能原样 0 传给网关（IDENTIFY intents=0 → 平台 4013）
+  eq(norm.intents, 33554432, 'intents=0 → 默认 33554432（GROUP_AND_C2C）')
+  eq(normalizeAccounts({ agent: { qqBot: { intents: 0, accounts: [{ appId: 'A', appSecret: 'S' }] } } })[0].intents, 33554432, 'accounts[] + qq.intents=0 也回落默认')
+  eq(normalizeAccounts({ agent: { qqBot: { intents: 100663296, accounts: [{ appId: 'A', appSecret: 'S' }] } } })[0].intents, 100663296, '显式 intents 保留（群@+C2C+交互）')
+  eq(normalizeAccounts({ agent: { qqBot: { intents: 100663296, accounts: [{ appId: 'A', appSecret: 'S', intents: 1073741825 }] } } })[0].intents, 1073741825, '账号级 intents 覆盖全局')
 }
 
 console.log('\n[3] 连接：注册 Bot[id] + pickFriend/pickGroup/pickMember')

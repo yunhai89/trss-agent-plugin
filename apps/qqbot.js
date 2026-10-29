@@ -18,7 +18,7 @@ import plugin from '../../../lib/plugins/plugin.js'
 import Config from '../utils/Config.js'
 import Log from '../utils/Log.js'
 import { QQBotClient } from '../model/qqbot/client.js'
-import { DEFAULT_INTENTS, INTENTS } from '../model/qqbot/gateway.js'
+import { DEFAULT_INTENTS, INTENTS, CLOSE_CODE_HINT } from '../model/qqbot/gateway.js'
 import { installMasterGate } from '../model/qqofficial/guard.js'
 
 /** 适配器标识（与 model/qqofficial 的 detectAdapter 对齐：id/name 都能识别为 QQ 官方机器人） */
@@ -53,7 +53,9 @@ export function normalizeAccounts(cfg = {}) {
       appSecret,
       name: String(a.name || '').trim() || appId,
       sandbox: a.sandbox === true,
-      intents: Number.isFinite(Number(a.intents)) && Number(a.intents) > 0 ? Number(a.intents) : (qq.intents != null && Number.isFinite(Number(qq.intents)) ? Number(qq.intents) : DEFAULT_INTENTS),
+      // intents=0（默认配置）表示「用默认订阅」，不能原样传给网关（IDENTIFY intents=0 会被平台以 4013 拒绝）
+      intents: (Number(a.intents) > 0 ? Number(a.intents) : null)
+        ?? (Number(qq.intents) > 0 ? Number(qq.intents) : DEFAULT_INTENTS),
       markdown: a.markdown ?? qq.markdown ?? 'auto',
       preferMarkdownText: (a.preferMarkdownText ?? qq.preferMarkdownText) === true,
       apiBase: String(a.apiBase || qq.apiBase || '').trim(),
@@ -160,7 +162,14 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
         if (client.status?.().state === 'closed') break
       }
       if (!entry.connectedAt) {
-        log('warn', '[qqbot] 连接尚未就绪（网关会在后台继续重连）', appId)
+        const st = client.status?.() || {}
+        if (st.reason === 'invalid_intents') {
+          log('error', '[qqbot] 连接失败：intents 不被平台接受，已停止重连', appId, st.hint || '')
+        } else if (st.state === 'closed') {
+          log('error', '[qqbot] 连接失败', appId, st.hint || st.reason || st.lastClose?.code || '')
+        } else {
+          log('warn', '[qqbot] 连接尚未就绪（网关会在后台继续重连）', appId)
+        }
         return false
       }
       adapter._attachBot(appId, entry)
@@ -480,8 +489,12 @@ export class QQBotManage extends plugin {
     const lines = list.map((s) => {
       const state = s.state || (s.connected ? 'ready' : 'disconnected')
       const at = s.readyAt || s.connectedAt
+      const closeCode = s.lastClose?.code
+      const closeHint = closeCode && CLOSE_CODE_HINT[closeCode] ? `（${CLOSE_CODE_HINT[closeCode]}）` : ''
       return `· ${s.name}（${s.appId}）：${state}${at ? ` · 连接于 ${new Date(at).toLocaleString('zh-CN')}` : ''}`
+        + `${s.intents ? ` · intents=${s.intents}` : ''}`
         + `${s.sessionId ? ` · session=${String(s.sessionId).slice(0, 8)}…` : ''}`
+        + `${closeCode ? ` · 最近断开 code=${closeCode}${closeHint}` : ''}`
         + `${s.markdownUsable === false ? ' · Markdown 未开通(已自动纯文本)' : ''}`
     })
     return this.reply(['QQ 官方机器人适配器：', ...lines].join('\n'))

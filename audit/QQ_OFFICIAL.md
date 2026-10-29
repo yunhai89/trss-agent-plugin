@@ -162,8 +162,8 @@ qqBot:
 
 | 项 | 结果 |
 | --- | --- |
-| `node model/qqbot/test.mjs` | **105 断言**：token 缓存/单飞/错误、REST 路径与消息体、错误码人话、网关 IDENTIFY/RESUME/心跳/关闭码、事件归一化、键盘/媒体/分片、client 发送与 markdown 降级 |
-| `node --import ./stress/e2e/hooks.mjs stress/e2e/qqbot-adapter.mjs` | **39 断言**：模块加载注册适配器、账号归一化（扁平/多账号/缺密钥）、`Bot[id]`+pick*、事件字段（含 ID 拼接与 adapter_id）、被动回复 5 次上限、按钮回调投递、断连清理 |
+| `node model/qqbot/test.mjs` | **135 断言**：token 缓存/单飞/错误、REST 路径与消息体、错误码人话、网关 IDENTIFY/RESUME/心跳/关闭码、intents 默认最小集与 4013 自动降级（只降不升/耗尽停止）、重复 close 去重、INVALID_SESSION 不提前重连、事件归一化、键盘/媒体/分片、client 发送与 markdown 降级 |
+| `node --import ./stress/e2e/hooks.mjs stress/e2e/qqbot-adapter.mjs` | **43 断言**：模块加载注册适配器、账号归一化（扁平/多账号/缺密钥/intents=0 回落默认）、`Bot[id]`+pick*、事件字段（含 ID 拼接与 adapter_id）、被动回复 5 次上限、按钮回调投递、断连清理 |
 | `node scripts/run-tests.mjs` | 见仓库提交记录（全量通过） |
 
 
@@ -212,3 +212,23 @@ qqBot:
 - `node --import ./stress/e2e/hooks.mjs model/web/api.qqbot.test.mjs` → 35 断言
   （真实 express router + 桩适配器 + 桩 Config：空配置/校验/新增连接/编辑保持密钥/断开/重连全部/状态合并/扁平迁移/删除）
 - `node web/dev/smoke.mjs` → 新视图模板编译 + setup 通过；config-search / feature-assign 全过
+
+
+---
+
+# 附：intents 与无限重连排障（v1.45.1）
+
+**现象**：启动后日志反复 `INVALID_SESSION → close 4006 → close 4013 → 重连`，attempts 1s/2s/5s… 越滚越大。
+
+**原因（两层）**：
+1. `agent.qqBot.intents: 0` 本意是「用默认订阅」，但适配器归一化把 0 原样传给网关 → IDENTIFY 携带 `intents=0` → 平台以 `close 4013 invalid intents` 拒绝。
+2. 网关在 `op=9 INVALID_SESSION` 时**提前合成** `close 4006` 并关闭 socket；随后服务端真实 close 帧（4013）又到达 → 同一 socket 被算成两次断开 → 重连次数双倍递增、真实错误码被 4006 掩盖。
+
+**修复**：
+- intents=0/非正数一律回落 `33554432`（仅群@+C2C）；默认不再包含交互位（未开通会被 4013）。
+- 4013/4914/4915 按「只降不升」自动降级：剥交互位 → 剥频道位 → 退到群最小集/频道单聊；成功 READY 即用该值。全部候选都被拒 → 停止重连并写清 `hint`（`#qqbot状态` 可见）。
+- INVALID_SESSION 不再提前断开，等真实 close 码决定「清 session 重连」还是「降级 intents」；3s 未收到 close 才兜底断开。
+- 同一 socket 的重复 close 只处理一次（socket 身份判等），重连次数不再双计。
+- 启动日志与 `#qqbot状态` 显示当前 `intents`、最近 close code 与中文说明。
+
+**按钮回调**：需要机器人在开放平台开通「交互」能力，并配 `intents: 100663296`（群@+C2C+交互）。默认 `intents: 0` 下卡片可正常展示，但点击不会回调；若填了未开通的位，连接会被 4013 拒绝（此时代码会自动降级，日志会说明）。

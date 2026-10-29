@@ -14,7 +14,7 @@
  */
 import { TokenManager, TOKEN_URL, TOKEN_URLS } from './token.js'
 import { QQBotApi, MSG_TYPE, FILE_TYPE, messagePath, mediaPath, explainError, MsgSeqAllocator, API_BASE, API_BASES } from './api.js'
-import { QQBotGateway, INTENTS, DEFAULT_INTENTS, OP, resolveWebSocket } from './gateway.js'
+import { QQBotGateway, INTENTS, DEFAULT_INTENTS, OP, resolveWebSocket, CLOSE_CODE_HINT, nextIntents } from './gateway.js'
 import { normalizeEvent, normalizeAttachments, GATEWAY_EVENTS } from './events.js'
 import { buildKeyboard, buildMessageJobs, splitText, markdownPayload, resolveMediaSource } from './payload.js'
 import { QQBotClient, markdownToPlain } from './client.js'
@@ -252,6 +252,108 @@ console.log('\n[3] gateway：HELLO/IDENTIFY/心跳/READY/关闭码')
 
   const resolved = await resolveWebSocket().catch(() => null)
   ok(resolved && typeof resolved.Ctor === 'function', `WebSocket 实现可解析（${resolved?.kind}）`)
+}
+
+console.log('\n[3b] intents：默认最小集 / 4013 自动降级 / 关闭去重 / INVALID_SESSION 不重复重连')
+{
+  // 默认只订群@+C2C（1<<25）；交互/频道位按需显式开启
+  eq(DEFAULT_INTENTS, INTENTS.GROUP_AND_C2C, '默认 intents 只含 GROUP_AND_C2C')
+  eq(DEFAULT_INTENTS, 33554432, '默认 intents = 33554432')
+  ok((DEFAULT_INTENTS & INTENTS.INTERACTION) === 0, '默认不含交互位（未开通会被 4013）')
+
+  // 只降不升
+  eq(nextIntents(INTENTS.GROUP_AND_C2C | INTENTS.INTERACTION, [INTENTS.GROUP_AND_C2C | INTENTS.INTERACTION]), INTENTS.GROUP_AND_C2C, '先剥交互位')
+  eq(nextIntents(INTENTS.GUILDS | INTENTS.PUBLIC_GUILD_MESSAGES, [INTENTS.GUILDS | INTENTS.PUBLIC_GUILD_MESSAGES]), INTENTS.GROUP_AND_C2C, '频道位被拒 → 退到群最小集')
+  eq(nextIntents(INTENTS.GROUP_AND_C2C, [INTENTS.GROUP_AND_C2C]), INTENTS.PUBLIC_GUILD_MESSAGES, '群位被拒 → 试频道单聊/频道消息')
+  eq(nextIntents(INTENTS.GROUP_AND_C2C, [INTENTS.GROUP_AND_C2C, INTENTS.PUBLIC_GUILD_MESSAGES, INTENTS.GUILDS | INTENTS.PUBLIC_GUILD_MESSAGES | INTENTS.DIRECT_MESSAGE]), null, '候选耗尽返回 null')
+  ok(nextIntents(INTENTS.GROUP_AND_C2C | INTENTS.INTERACTION, [INTENTS.GROUP_AND_C2C | INTENTS.INTERACTION]) !== (INTENTS.GROUP_AND_C2C | INTENTS.INTERACTION), '降级不会返回相同值（不循环）')
+
+  const makeFake = () => {
+    class FWS {
+      constructor(url) { this.url = url; this.sent = []; this.listeners = {}; FWS.all.push(this); FWS.instance = this; setTimeout(() => this.emit('open', {}), 0) }
+      addEventListener(n, fn) { (this.listeners[n] ||= []).push(fn) }
+      emit(n, ev) { for (const fn of this.listeners[n] || []) fn(ev) }
+      send(text) { this.sent.push(JSON.parse(text)) }
+      close() { this.closed = true }
+    }
+    FWS.all = []
+    return FWS
+  }
+  const hello = (ws) => ws.emit('message', { data: JSON.stringify({ op: OP.HELLO, d: { heartbeat_interval: 100000 } }) })
+  const identifyOf = (ws) => ws.sent.find((p) => p.op === OP.IDENTIFY)
+
+  // 4013 降级：交互位被拒 → 自动改群最小集重连成功
+  {
+    const FWS = makeFake()
+    const gw = new QQBotGateway({
+      appId: 'A', appSecret: 'S', getToken: async () => 'T', getGatewayUrl: async () => 'wss://gw',
+      WebSocketImpl: FWS, intents: INTENTS.GROUP_AND_C2C | INTENTS.INTERACTION, reconnectDelays: [5], intentsRetryDelayMs: 5,
+    })
+    await gw.start()
+    await sleep(5)
+    hello(FWS.instance)
+    await sleep(3)
+    eq(identifyOf(FWS.instance)?.d.intents, 100663296, '首次 IDENTIFY 用配置的 intents')
+    FWS.instance.emit('close', { code: 4013, reason: 'invalid intents' })
+    await sleep(3)
+    eq([gw.status().intents, gw.status().state], [INTENTS.GROUP_AND_C2C, 'connecting'], '4013 → 自动降级为群最小集并计划重连')
+    eq(gw.reconnectAttempts, 1, '降级只计一次重连')
+    await sleep(20) // 等 reconnectDelays=5 后重连
+    ok(FWS.all.length >= 2, '降级后重新建立连接')
+    hello(FWS.all[FWS.all.length - 1])
+    await sleep(3)
+    eq(identifyOf(FWS.all[FWS.all.length - 1])?.d.intents, INTENTS.GROUP_AND_C2C, '重连后的 IDENTIFY 用降级 intents')
+    FWS.all[FWS.all.length - 1].emit('message', { data: JSON.stringify({ op: OP.DISPATCH, t: 'READY', s: 1, d: { session_id: 'S' } }) })
+    await sleep(3)
+    eq(gw.status().state, 'ready', '降级后 READY 成功')
+    gw.stop()
+  }
+
+  // 候选耗尽：停止重连并给出 invalid_intents 原因（不再无限循环）
+  {
+    const FWS = makeFake()
+    const gw = new QQBotGateway({ appId: 'A', appSecret: 'S', getToken: async () => 'T', getGatewayUrl: async () => 'wss://gw', WebSocketImpl: FWS, reconnectDelays: [5] })
+    await gw.start(); await sleep(5); hello(FWS.instance); await sleep(3)
+    gw._triedIntents = [INTENTS.GROUP_AND_C2C | INTENTS.INTERACTION, INTENTS.GROUP_AND_C2C, INTENTS.PUBLIC_GUILD_MESSAGES, INTENTS.GUILDS | INTENTS.PUBLIC_GUILD_MESSAGES | INTENTS.DIRECT_MESSAGE]
+    gw.intents = INTENTS.PUBLIC_GUILD_MESSAGES
+    FWS.instance.emit('close', { code: 4013 })
+    await sleep(5)
+    eq(gw.status().state, 'closed', '候选耗尽后状态 closed（不再重连）')
+    ok(String(gw.status().hint || '').includes('intents'), '状态里带可执行提示')
+    eq(gw.reconnectAttempts, 0, '耗尽时不排重连')
+    gw.stop()
+  }
+
+  // 同一 socket 连续两个 close 只算一次（历史 bug：attempts 1s/2s 连跳导致重连风暴）
+  {
+    const FWS = makeFake()
+    const gw = new QQBotGateway({ appId: 'A', appSecret: 'S', getToken: async () => 'T', getGatewayUrl: async () => 'wss://gw', WebSocketImpl: FWS, reconnectDelays: [50] })
+    await gw.start(); await sleep(5); hello(FWS.instance); await sleep(3)
+    FWS.instance.emit('close', { code: 4006 })
+    FWS.instance.emit('close', { code: 4006 })
+    await sleep(5)
+    eq(gw.reconnectAttempts, 1, '重复 close 只计一次重连')
+    gw.stop()
+  }
+
+  // INVALID_SESSION：先不重连（等真实 close 码），3s 兜底才主动断开
+  {
+    const FWS = makeFake()
+    const gw = new QQBotGateway({ appId: 'A', appSecret: 'S', getToken: async () => 'T', getGatewayUrl: async () => 'wss://gw', WebSocketImpl: FWS, reconnectDelays: [50] })
+    await gw.start(); await sleep(5); hello(FWS.instance); await sleep(3)
+    FWS.instance.emit('message', { data: JSON.stringify({ op: OP.INVALID_SESSION, d: false }) })
+    await sleep(5)
+    eq(gw.reconnectAttempts, 0, 'INVALID_SESSION 后不立即重连（等 close 码以决定是否降级）')
+    eq(gw.sessionId, null, 'INVALID_SESSION 清 session')
+    FWS.instance.emit('close', { code: 4013 })
+    await sleep(3)
+    eq(gw.reconnectAttempts, 1, '随后真实 close 4013 触发一次降级重连')
+    gw.stop()
+  }
+
+  // 关闭码提示表覆盖 4013/4914
+  ok(CLOSE_CODE_HINT[4013].includes('intents'), '4013 有中文说明')
+  ok(CLOSE_CODE_HINT[4914].includes('intents'), '4914 有中文说明')
 }
 
 console.log('\n[4] events：事件归一化')

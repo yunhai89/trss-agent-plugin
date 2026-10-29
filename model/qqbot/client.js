@@ -88,7 +88,7 @@ export class QQBotClient {
         const url = await this.api.getGatewayUrl(this.creds())
         return url
       },
-      intents,
+      intents: Number(intents) > 0 ? Number(intents) : DEFAULT_INTENTS,
       WebSocketImpl,
       logger,
       onDispatch: ({ t, d, s }) => this._dispatch(t, d, s),
