@@ -174,6 +174,12 @@
         if (form.cacheControl === false) form.cacheControl = 'off'
         else if (form.cacheControl === true) form.cacheControl = 'explicit'
         else if (form.cacheControl == null) form.cacheControl = 'off'
+        if (!form.webApi) form.webApi = {}
+        if (form.webApi.enable == null) form.webApi.enable = true
+        if (form.webApi.port == null) form.webApi.port = 6098
+        if (form.webApi.publicUrl == null) form.webApi.publicUrl = ''
+        if (form.webApi.printTokenOnStart == null) form.webApi.printTokenOnStart = true
+        if (form.webApi.consoleTokenTtlHours == null) form.webApi.consoleTokenTtlHours = 720
         if (!form.qqBot) form.qqBot = {}
         if (form.qqBot.enable == null) form.qqBot.enable = false
         if (form.qqBot.appId == null) form.qqBot.appId = ''
@@ -662,6 +668,7 @@
         { id: 'task', name: '任务账本', icon: 'schedule', grad: 'var(--grad-vio)' },
         { id: 'reply', name: '进度 / 回复渲染', icon: 'send', grad: 'var(--grad-mint)' },
         { id: 'qqofficial', name: 'QQ 官方机器人', icon: 'send', grad: 'var(--grad-sky)' },
+        { id: 'web', name: 'Web 面板', icon: 'config', grad: 'var(--grad)' },
         { id: 'memory', name: '记忆系统', icon: 'memory', grad: 'var(--grad-honey)' },
         { id: 'evolution', name: '自进化', icon: 'evolution', grad: 'var(--grad-rose)' },
         { id: 'security', name: '权限 / 安全 / 日志', icon: 'shield', grad: 'var(--grad)' },
@@ -677,6 +684,19 @@
       // 各卡片内「高级参数」折叠态（默认折叠）
       const adv = reactive({ reason: false, evolution: false, security: false, ext: false, sandbox: false, selfstate: false })
       const activeSec = ref('basic')
+      // Web 面板：启动默认登录地址（带 token）——等同启动日志，用于面板内复制/排障
+      const webUrl = ref(null)
+      const webUrlLoading = ref(false)
+      const loadWebUrl = async () => {
+        webUrlLoading.value = true
+        try { webUrl.value = await window.api.get('/web/console-url') }
+        catch (e) { window.UI.toast(e.message, 'error') }
+        finally { webUrlLoading.value = false }
+      }
+      const copyWebUrl = async () => {
+        try { await navigator.clipboard.writeText(webUrl.value?.local || ''); window.UI.toast('已复制本地登录地址', 'success') }
+        catch { window.UI.toast('复制失败，请手动选择输入框内容', 'warn') }
+      }
       const jump = (id) => {
         open[id] = true
         activeSec.value = id
@@ -1057,6 +1077,7 @@
 
       return {
         form, dirty, save, reset, sections, open, activeSec, jump, OPT, updateJson, adv, loadError, formReady, sandboxEgressWarn,
+        webUrl, webUrlLoading, loadWebUrl, copyWebUrl,
         addFallback, delFallback, masterInput, addMaster, delMaster,
         mcpServersToUi, delMcp, mcpModal, openNewMcp, confirmNewMcp,
         thinkingOn, tempPct, thinkingBudget, memoryLimitMemory, memoryLimitUser,
@@ -1884,6 +1905,45 @@
         </div>
 
         <!-- ===== §1.6 权限 / 安全 / 日志 ===== -->
+        <div :id="'cfg-web'" class="card cf-sec" :class="{open: open.web}">
+          <div class="cf-sh" @click="open.web = !open.web">
+            <span class="ct-ico" style="background:var(--grad)"><v-icon name="config"/></span>
+            <div><div class="ct-t">Web 面板</div><div class="ct-s">管理面板服务 · 启动默认访问地址（带 token，无需 #agents登录）</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
+          </div>
+          <div class="cf-body" v-show="open.web"><div class="cf-grid">
+            <cfg-row name="启用 Web 面板" desc="独立 HTTP 服务（默认 0.0.0.0:6098）；关闭后只能用配置/锅巴管理">
+              <v-switch v-model="form.webApi.enable"/>
+            </cfg-row>
+            <cfg-row name="面板端口" desc="监听 0.0.0.0；默认 6098（避开 Yunzai 2536 / 锅巴 6099）；改端口会重启面板服务">
+              <input type="number" class="inp" style="width:130px" min="1" max="65535" v-model.number="form.webApi.port">
+            </cfg-row>
+            <cfg-row name="对外地址(可选)" desc="publicUrl：留空自动探测公网/LAN IP；填 http://1.2.3.4:6098 覆盖（本地地址固定 127.0.0.1）">
+              <input class="inp mono" style="width:250px" v-model="form.webApi.publicUrl" placeholder="留空=自动探测">
+            </cfg-row>
+            <cfg-row name="启动时打印访问地址" desc="printTokenOnStart：启动日志打印带 token 的默认地址并写 data/web/console-url.txt。首次部署还没有协议端（发不了 #agents登录）时靠它进面板">
+              <v-switch v-model="form.webApi.printTokenOnStart"/>
+            </cfg-row>
+            <cfg-row name="启动地址令牌有效期(小时)" desc="consoleTokenTtlHours：默认 720（30 天）；使用中滑动续期，过期后下次启动自动换新">
+              <input type="number" class="inp" style="width:130px" min="1" max="8760" v-model.number="form.webApi.consoleTokenTtlHours">
+            </cfg-row>
+            <cfg-row class="full" name="当前默认登录地址" desc="带 token 的固定地址（等同启动日志那条；点按钮取/复制；也可点「重置令牌」换新）">
+              <div class="row g6 wrap" style="justify-content:flex-end">
+                <template v-if="webUrl">
+                  <input class="inp mono" style="flex:1;min-width:240px" readonly :value="webUrl.local" @focus="$event.target.select()">
+                  <button type="button" class="btn b-soft b-sm" @click="copyWebUrl">复制</button>
+                  <button type="button" class="btn b-line b-sm" @click="webUrl = null">收起</button>
+                </template>
+                <button v-else type="button" class="btn b-line b-sm" :disabled="webUrlLoading" @click="loadWebUrl">{{ webUrlLoading ? '获取中…' : '获取默认登录地址' }}</button>
+              </div>
+            </cfg-row>
+            <div class="full mut2" style="font-size:12px;line-height:1.8;padding:0 2px 4px">
+              首次部署：<b>启动日志里直接给出了带 token 的访问地址</b>（同时写到插件目录 <code>data/web/console-url.txt</code>，权限 600）。
+              即使还没有配置任何协议端，也可以先打开面板 → 「厂商配置 / 模型列表」配好模型，保存即热加载。
+            </div>
+          </div></div>
+        </div>
+
         <div :id="'cfg-security'" class="card cf-sec" :class="{open: open.security}">
           <div class="cf-sh" @click="open.security = !open.security">
             <span class="ct-ico" style="background:var(--grad)"><v-icon name="shield"/></span>

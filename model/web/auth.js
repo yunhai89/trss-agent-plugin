@@ -5,7 +5,9 @@
  * 故意不依赖 getRuntime()/KV——apiKey 未配时用户仍能登录面板填配置（运行时恢复前置）。
  */
 import crypto from 'node:crypto'
+import fs from 'node:fs'
 import os from 'node:os'
+import path from 'node:path'
 import Config from '../../utils/Config.js'
 import Log from '../../utils/Log.js'
 
@@ -20,19 +22,213 @@ export function issueToken(masterId) {
   return token
 }
 
-/** 校验 token；命中且未过期则滑动续期 24h，返回 { masterId }；否则 null */
+/**
+ * 校验 token；命中且未过期则滑动续期 24h，返回 { masterId }；否则 null。
+ * 除会话令牌外，也接受「控制台令牌」（启动时打印的固定地址用，见 ensureConsoleToken）——
+ * 这让**还没有协议端**的首次部署也能直接打开面板填配置（此前只能先连 QQ 发 #agents登录）。
+ */
 export function verifyToken(token) {
   if (!token) return null
   const r = _tokens.get(token)
-  if (!r) return null
-  if (Date.now() > r.expiresAt) { _tokens.delete(token); return null }
-  r.expiresAt = Date.now() + TTL_MS
-  return r
+  if (r) {
+    if (Date.now() > r.expiresAt) { _tokens.delete(token); return null }
+    r.expiresAt = Date.now() + TTL_MS
+    return r
+  }
+  const consoleRec = verifyConsoleToken(token)
+  if (consoleRec) return { masterId: 'console', console: true, createdAt: consoleRec.createdAt, expiresAt: consoleRec.expiresAt }
+  return null
+}
+
+// ───────────────────────── 控制台令牌（首次启动即可登录） ─────────────────────────
+
+const CONSOLE_TTL_HOURS_DEFAULT = 24 * 30 // 30 天；每次使用滑动续期，过期后下次启动自动换新
+const CONSOLE_REFRESH_MIN_MS = 10 * 60 * 1000 // 续期落盘节流（避免每个 API 请求都写文件）
+const CONSOLE_DIR_NAME = 'web'
+const CONSOLE_FILE = 'console-token.json'
+let _lastConsoleRefresh = 0
+
+/** 控制台令牌目录（data/web/），可用 opts.dir 覆盖（测试） */
+export function consoleTokenDir(opts = {}) {
+  return opts.dir || path.join(Config.path.data, CONSOLE_DIR_NAME)
+}
+
+/** 控制台令牌 TTL（毫秒）：agent.webApi.consoleTokenTtlHours，默认 30 天 */
+export function consoleTokenTtlMs(cfg = null) {
+  const c = cfg || Config.get().agent?.webApi || {}
+  const h = Number(c.consoleTokenTtlHours)
+  return Number.isFinite(h) && h > 0 ? Math.round(h * 60 * 60 * 1000) : CONSOLE_TTL_HOURS_DEFAULT * 60 * 60 * 1000
+}
+
+function readConsoleFile(dir) {
+  try {
+    const raw = fs.readFileSync(path.join(dir, CONSOLE_FILE), 'utf8')
+    const rec = JSON.parse(raw)
+    return rec && typeof rec.token === 'string' && rec.token.length >= 32 ? rec : null
+  } catch { return null }
+}
+
+function writeConsoleFile(dir, rec) {
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const file = path.join(dir, CONSOLE_FILE)
+    fs.writeFileSync(file, JSON.stringify(rec, null, 2) + '\n', { mode: 0o600 })
+    try { fs.chmodSync(file, 0o600) } catch { /* Windows 无权限位，忽略 */ }
+    return true
+  } catch (e) {
+    Log.warn('[web] 控制台令牌写入失败（不影响本次启动）', e?.message || e)
+    return false
+  }
+}
+
+/**
+ * 取（必要时生成）控制台令牌。过期则换新并落盘。
+ * @param {object} [opts] { dir, ttlMs, now }
+ * @returns {{token:string, createdAt:number, expiresAt:number, ttlMs:number, regenerated:boolean}}
+ */
+export function ensureConsoleToken(opts = {}) {
+  const dir = consoleTokenDir(opts)
+  const now = Number(opts.now) || Date.now()
+  const ttlMs = Number(opts.ttlMs) > 0 ? Number(opts.ttlMs) : consoleTokenTtlMs()
+  const old = readConsoleFile(dir)
+  if (old && old.expiresAt > now) {
+    return { token: old.token, createdAt: old.createdAt || now, expiresAt: old.expiresAt, ttlMs, regenerated: false }
+  }
+  const rec = { token: crypto.randomBytes(24).toString('hex'), createdAt: now, expiresAt: now + ttlMs, ttlHours: Math.round(ttlMs / 3.6e6) }
+  writeConsoleFile(dir, rec)
+  return { ...rec, ttlMs, regenerated: true }
+}
+
+/**
+ * 校验控制台令牌；命中且未过期 → 滑动续期（落盘节流 10 分钟）。
+ * @returns {object|null} 令牌记录
+ */
+export function verifyConsoleToken(token, opts = {}) {
+  if (!token || token.length < 32) return null
+  const dir = consoleTokenDir(opts)
+  const now = Number(opts.now) || Date.now()
+  const rec = readConsoleFile(dir)
+  if (!rec || rec.token !== token) return null
+  if (rec.expiresAt <= now) return null
+  const ttlMs = Number(opts.ttlMs) > 0 ? Number(opts.ttlMs) : consoleTokenTtlMs()
+  if (now - _lastConsoleRefresh >= CONSOLE_REFRESH_MIN_MS) {
+    _lastConsoleRefresh = now
+    const next = { ...rec, expiresAt: now + ttlMs }
+    writeConsoleFile(dir, next)
+    return next
+  }
+  return rec
+}
+
+/** 吊销控制台令牌（下次启动重新生成；也用于泄露应急） */
+export function revokeConsoleToken(opts = {}) {
+  const dir = consoleTokenDir(opts)
+  try { fs.unlinkSync(path.join(dir, CONSOLE_FILE)); return true } catch { return false }
 }
 
 /** 撤销（登出/泄露应急） */
 export function revokeToken(token) {
   return _tokens.delete(token)
+}
+
+// ───────────────────────── 启动横幅：默认访问地址（带 token） ─────────────────────────
+
+/**
+ * 拼面板访问地址（纯函数）。
+ * @param {object} p { token, port, localHost, lanHost, publicHost }
+ * @returns {{local:string, lan:string, public:string}}
+ */
+export function formatConsoleUrls({ token, port, localHost = '127.0.0.1', lanHost = '', publicHost = '' }) {
+  const q = `/?token=${token}`
+  const at = (h) => `http://${h}:${port}${q}`
+  return {
+    local: at(localHost),
+    lan: lanHost && lanHost !== localHost ? at(lanHost) : '',
+    public: publicHost ? at(publicHost) : '',
+  }
+}
+
+function publicHostOf(cfg) {
+  const pu = String(cfg?.publicUrl || '').trim()
+  if (!pu) return ''
+  return pu.replace(/^https?:\/\//i, '').replace(/[\/:].*$/, '')
+}
+
+/**
+ * 启动时输出带 token 的面板地址，并写一份到 data/web/console-url.txt。
+ *
+ * 解决「首次部署还没有协议端（QQ 未连）→ 发不了 #agents登录 → 进不去面板 → 配不了模型」的死锁：
+ * 面板服务本身不依赖协议端与运行时，启动日志直接给出可用地址即可完成首次配置。
+ *
+ * @param {object} [opts]
+ * @param {number} [opts.port]
+ * @param {object} [opts.cfg] webApi 配置块（默认读 Config）
+ * @param {string} [opts.dir] 令牌/地址文件目录（默认 data/web）
+ * @param {string} [opts.publicHost] 指定公网 host（测试/不探测）
+ * @param {()=>Promise<string|null>} [opts.detectPublic] 公网 IP 探测（默认内置）
+ * @param {(line:string)=>void} [opts.logger] 日志输出（默认 Log.mark）
+ * @returns {Promise<object|null>} 地址信息；未启用/关闭提示时返回 null
+ */
+export async function announceConsoleAccess(opts = {}) {
+  const cfg = opts.cfg || Config.get().agent?.webApi || {}
+  if (cfg.enable === false) return null
+  if (cfg.printTokenOnStart === false) return null
+  const port = Number(opts.port || cfg.port) || 6098
+  const dir = consoleTokenDir(opts)
+  const ttlMs = consoleTokenTtlMs(cfg)
+  const rec = ensureConsoleToken({ dir, ttlMs })
+  const log = typeof opts.logger === 'function' ? opts.logger : (line) => Log.mark(line)
+
+  const loopback = localHost()
+  const lanHost = detectLanIp()
+  const knownPublic = opts.publicHost || publicHostOf(cfg)
+  const first = formatConsoleUrls({ token: rec.token, port, localHost: loopback, lanHost, publicHost: knownPublic })
+
+  const lines = [
+    '[web] 面板默认访问地址（带 token，无需 #agents登录；协议端未配置时也能进面板配模型）',
+    `[web]   本地  ${first.local}`,
+    first.lan ? `[web]   内网  ${first.lan}` : '',
+    first.public ? `[web]   公网  ${first.public}` : '',
+    `[web]   令牌有效期 ${Math.round(ttlMs / 86400000)} 天（使用中自动续期，过期后下次启动换新）；地址副本：${path.join(dir, 'console-url.txt')}`,
+    '[web]   不想在日志里显示？agent.webApi.printTokenOnStart=false',
+  ].filter(Boolean)
+  for (const line of lines) log(line)
+
+  const writeUrls = (publicUrl) => {
+    try {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+      const file = path.join(dir, 'console-url.txt')
+      const text = [
+        '# agents-plugin Web 管理面板访问地址（含登录 token，勿泄露/勿提交到仓库）',
+        '# 首次部署还没有协议端时也可用：面板服务不依赖 QQ 连接与模型运行时。',
+        `本地: ${first.local}`,
+        first.lan ? `内网: ${first.lan}` : '',
+        publicUrl ? `公网: ${publicUrl}` : '',
+        `生成时间: ${new Date(rec.createdAt).toLocaleString('zh-CN')}`,
+        `令牌文件: ${path.join(dir, CONSOLE_FILE)}`,
+        '',
+      ].filter((l) => l !== '').join('\n') + '\n'
+      fs.writeFileSync(file, text, { mode: 0o600 })
+      try { fs.chmodSync(file, 0o600) } catch { /* Windows 无权限位 */ }
+    } catch { /* 写地址副本失败不影响启动 */ }
+  }
+  writeUrls(first.public)
+
+  // 公网地址：未配置 publicUrl 时异步探测（不阻塞启动，探测到再补一行）
+  if (!knownPublic) {
+    const probe = typeof opts.detectPublic === 'function' ? opts.detectPublic : detectPublicIp
+    try {
+      const pub = await probe()
+      if (pub) {
+        const url = formatConsoleUrls({ token: rec.token, port, localHost: loopback, lanHost, publicHost: pub }).public
+        writeUrls(url)
+        log(`[web]   公网  ${url}${cfg.publicUrl ? '' : '（自动探测出口 IP；端口未放行则用内网/本地地址）'}`)
+        return { ...first, public: url, tokenFile: path.join(dir, CONSOLE_FILE), urlFile: path.join(dir, 'console-url.txt'), regenerated: rec.regenerated }
+      }
+    } catch { /* 无外网：只输出本地/内网 */ }
+  }
+
+  return { ...first, tokenFile: path.join(dir, CONSOLE_FILE), urlFile: path.join(dir, 'console-url.txt'), regenerated: rec.regenerated }
 }
 
 /** express 中间件：校验 Authorization: Bearer <token> 或 ?token=（仅登录直跳用） */

@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.44.1-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.45.0-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -45,7 +45,7 @@
 - **前缀缓存友好**：上下文 token 双水位压缩 + 工具数组恒定 + 稳定 system 前缀，长对话命中率可达 90%+（见「缓存经济性」）。
 - **文件即真相的记忆**：`MEMORY.md` / `USER.md` 人可读可编辑 + `memory_search` 主动召回 + 用户画像 + 知识库 RAG，跨会话不失忆、不串档。
 - **安全纵深**：工具 RBAC + 主人审批 + 注入防御（不可信内容边界）+ 高危执行面隔离（E2B microVM），高危动作不裸奔。
-- **三种配置入口、一套真源**：Web 配置中心（全量）/ 锅巴面板（379 字段常用+安全项）/ `config.yaml`；配置保存只写差异、升级新默认值自动生效。
+- **三种配置入口、一套真源**：Web 配置中心（全量）/ 锅巴面板（381 字段常用+安全项）/ `config.yaml`；配置保存只写差异、升级新默认值自动生效。
 - **热加载**：改配置即生效，重建时取消在途任务、回收资源。
 - **QQ 官方机器人就绪**：自实现适配器（AppID+AppSecret）+ 官方协议能力（Markdown / keyboard / 被动回复），并提供 `/uid`、`/groupid` 排障指令。
 - **🧬 工具进化**：LLM 生成 → AST 静态门 → 隔离验证 → 主人审批 → 版本化上线/淘汰，工具库可持续变强。
@@ -120,7 +120,7 @@
 | 协议端 | OneBot/ICQQ（NapCat 等）；QQ 官方机器人（自实现适配器 / Yunzai-QQBot-Plugin）；QQ 频道 | ✅ |
 | QQ 官方机器人 | 只需 AppID+AppSecret；Markdown 直发、inline keyboard、被动回复窗口；`/uid`、`/groupid` | ✅ |
 | Web 管理面板 | 22 个页面：概览/配置中心/机器人账号/记忆/召回/画像/人设/技能/知识库/会话/日志/定时/账本/审批/进化/工具/群世界/伪人/自状态/表情包/TTS/外置工具 | ✅ |
-| 锅巴面板 | 379 字段 / 52 分组：常用项 + 安全/行为总开关 + 各子系统常用调参 | ✅ |
+| 锅巴面板 | 381 字段 / 52 分组：常用项 + 安全/行为总开关 + 各子系统常用调参 | ✅ |
 | 配置热加载 | 保存配置自动重建运行时（provider/model/tools/skills/mcp） | ✅ |
 
 ### 安全与可观测
@@ -151,6 +151,21 @@ cd ./plugins/agents-plugin && pnpm install   # markdown 渲染依赖（用 npm �
 
 > 其余依赖随 Yunzai 提供（`ws` / `sharp` / `puppeteer` 等）。`#agents更新` 检测到 `package.json` 变动会自动 `pnpm install`。
 > 重启 Yunzai 后，插件会在**自己的** `plugins/agents-plugin/config/config.yaml` 生成配置（不在 Yunzai 根；旧的 `Yunzai/config/agents-plugin.yaml` 会自动迁移）。
+
+### 1.5 首次启动：先拿到面板地址（无需协议端）
+
+**这一步解决了「没有协议端 → 发不了 `#agents登录` → 进不去面板」的死锁**：
+
+- 插件启动时，日志会直接打印**带 token 的面板访问地址**（本地 / 内网 / 可探测到的公网）：
+  ```
+  [web] 面板默认访问地址（带 token，无需 #agents登录；协议端未配置时也能进面板配模型）
+  [web]   本地  http://127.0.0.1:6098/?token=xxxxxxxx
+  [web]   内网  http://192.168.1.7:6098/?token=xxxxxxxx
+  ```
+- 同一份地址也写到插件目录 **`data/web/console-url.txt`**（权限 600），方便事后找回；
+- **面板服务不依赖 QQ 连接，也不依赖模型运行时**：即使一行配置都没有，也能打开面板 → 配置中心填模型，保存即热加载；
+- 令牌默认 30 天有效（使用中自动续期，过期后下次启动自动换新）；不想在日志里出现，可设 `agent.webApi.printTokenOnStart: false` 关闭，或删 `data/web/console-token.json` 让下次启动重新生成；
+- 已配好协议端后，仍可私聊机器人发 **`#agents登录`** 获取 24h 会话令牌（两条消息分别给公网/本地地址）。
 
 ### 2. 配模型（引用制）
 
@@ -388,7 +403,12 @@ qqOfficial:
 
 ## 🖥️ Web 管理面板
 
-主人私聊机器人发 **`#agents登录`**，会分两条消息返回【公网地址】与【本地地址】（`127.0.0.1:6098`，token 24h 有效）。也可把链接里的 token 粘到登录框。
+**两种进入方式**：
+
+1. **首次启动 / 还没有协议端**：看启动日志里打印的默认地址，或打开插件目录 `data/web/console-url.txt` —— 里面是**带 token 的固定地址**（本地 `127.0.0.1:6098` + 内网 + 可探测的公网）。面板服务不依赖 QQ 连接与模型运行时，可直接进去完成首次配置。配置中心「Web 面板」卡片里也能一键「获取默认登录地址」并复制。
+2. **已连上协议端**：主人私聊机器人发 **`#agents登录`**，会分两条消息返回【公网地址】与【本地地址】（token 24h 有效，使用中滑动续期）。也可把链接里的 token 粘到登录框。
+
+> 默认地址令牌由 `agent.webApi.consoleTokenTtlHours` 控制（默认 720h = 30 天）；不想要启动日志出现 token，设 `agent.webApi.printTokenOnStart: false`。
 
 | 分组 | 页面 | 用途 |
 | --- | --- | --- |
@@ -417,13 +437,14 @@ qqOfficial:
 
 | 入口 | 覆盖 | 适合 |
 | --- | --- | --- |
-| **Web 配置中心** | 全量字段（562 个配置叶子） | 首次配置模型、改任何细项 |
-| **锅巴面板（Guoba）** | 379 字段 / 52 分组：常用项 + 安全/行为总开关 + 各子系统常用调参 | 已在用锅巴、只想改常用项 |
+| **Web 配置中心** | 全量字段（564 个配置叶子） | 首次配置模型、改任何细项 |
+| **锅巴面板（Guoba）** | 381 字段 / 52 分组：常用项 + 安全/行为总开关 + 各子系统常用调参 | 已在用锅巴、只想改常用项 |
 | **`config.yaml`** | 全量（真源） | 批量/脚本化/版本管理；热加载 |
 
 > 保存时只写「与默认值的差异」，且厂商/模型/回退等结构会被统一归一（`utils/Config.js`），三个入口改同一份数据。
 
-**安全提示**：面板是主人级控制台（可见 API Key 等），`agent.webApi.publicUrl` 暴露公网时请务必用反代加 HTTPS + 访问控制；token 24 小时过期，重新发 `#agents登录` 即可。
+**安全提示**：面板是主人级控制台（可见 API Key 等），`agent.webApi.publicUrl` 暴露公网时请务必用反代加 HTTPS + 访问控制。
+启动地址中的 token 落盘在 `data/web/console-token.json`（`chmod 600`）、地址副本在 `data/web/console-url.txt`（`chmod 600`）——**别提交到仓库、别发群**；泄露时删掉令牌文件并重启即可换新（`#agents登录` 的 24h 会话令牌不受影响）。
 
 ---
 
@@ -529,7 +550,7 @@ qqOfficial:
 ---
 ## ⚙️ 配置总览
 
-配置文件：`plugins/agents-plugin/config/config.yaml`（**562 个配置叶子**，全部带注释；Web 配置中心可全量编辑）。
+配置文件：`plugins/agents-plugin/config/config.yaml`（**564 个配置叶子**，全部带注释；Web 配置中心可全量编辑）。
 下面按主题列出 `agent.*` 下的配置块，字段细节见 「详细配置参考」 与 Web 配置中心。
 
 | 主题 | 配置块（点路径） | 说明 |
@@ -546,7 +567,7 @@ qqOfficial:
 | **执行面** | `sandbox.*`（`mode`/`network`/`audit`/TTL/并发…） `stagehand.*` `tempFiles.*` `calc.*` | E2B 沙箱、浏览器自动化、临时文件、计算 |
 | **协作** | `multiagent.*` `research.*` `mcp.*` `skill.*` `tools.*` `miyoushe.*` | 子代理、深度研究、MCP、技能、工具包 |
 | **群聊智能（早期）** | `humanize.*` `groupWorld.*` `selfState.*` | 伪人 / 群世界 / 自我状态 |
-| **接入与观测** | `webApi.*` `qqBot.*` `qqOfficial.*` `persona.*` `personaLore.*` `devLog.*` | Web 面板、官方机器人、人设、日志 |
+| **接入与观测** | `webApi.*`（`enable/port/publicUrl/printTokenOnStart/consoleTokenTtlHours`） `qqBot.*` `qqOfficial.*` `persona.*` `personaLore.*` `devLog.*` | Web 面板（含启动默认地址）、官方机器人、人设、日志 |
 
 > 💡 **改配置前先看「安全与权限」与「执行面」**：沙箱、审批、RBAC 是高危开关，默认已按安全侧取值。
 
@@ -1486,7 +1507,7 @@ audit/                配置审计报告与修复记录（历史决策留档）
 
 **配置真源与治理**
 
-- 四类配置面：`config.yaml` 默认值 + Web 配置中心（全量）+ 锅巴（379 字段常用项）+ README/开发指南；
+- 四类配置面：`config.yaml` 默认值 + Web 配置中心（全量）+ 锅巴（381 字段常用项）+ README/开发指南；
   运行时读取统一经 `utils/Config.js`：`deepMerge 默认值 → normalizeConfig 归一 → 差异落盘 → 热加载`。
 - 保存只写差异（不改默认值的键不落盘），老版本全量快照启动时自动压缩（备份 `.bak`）→ 升级后的新默认值自动生效。
 - 供应商/模型引用、fallback、`cacheControl`/`thinking` 类型、官方机器人账号等结构由归一逻辑统一收敛，三个入口不会互相打架。
@@ -1649,6 +1670,9 @@ node scripts/run-tests.mjs --help 2>/dev/null || true
 
 ### 常见问题（FAQ）
 
+**Q0：还没有协议端（QQ 没连上），怎么进 Web 面板配东西？**
+看插件启动日志：会自动打印**带 token 的默认访问地址**（本地/内网/公网），也写在 `data/web/console-url.txt`。面板服务与令牌都不依赖协议端和模型运行时——打开就能进「配置中心」填厂商/模型。日志里没有？检查 `agent.webApi.enable`（默认 true）、`agent.webApi.printTokenOnStart`（默认 true）与端口是否被占用。
+
 **Q1：机器人不回话？**
 ① 看日志 `[trigger]` 是否有触发记录；② `agent.trigger=at` 时确认是 @ 且消息含文字或媒体；③ 私聊需要 `agent.privateChat=true`；④ QQ 官方机器人需先 `/uid` 配 `agent.masters`；⑤ `agent.chatPermission` 会限制群内 `#ai` 命令（@ 对话不受限）。
 
@@ -1685,6 +1709,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.45.0** | 首次启动即给 Web 默认访问地址（带 token，持久化 + 启动日志 + `data/web/console-url.txt`）：**没有协议端也能进面板配模型**；面板内一键复制；登录只在「认证失败」时清 token（运行时未就绪不再误报登录失败） |
 | **v1.44.1** | 文档重构：项目介绍按最新能力重排（能力地图 / 三协议端接入 / Web 面板 / 完整指令表 / 架构与配置治理 / 运维 FAQ） |
 | **v1.44.0** | Web 新增「机器人账号」页：QQBot 账号增删改 / 连接状态 / 排障；账号单一真源（`accounts[]`）；新 API `/api/qqbot*` |
 | **v1.43.1** | 对齐 2026 官方文档域名：`api.bot.qq.com` 主用，`bots.qq.com` / `api.sgroup.qq.com` 自动回退 |

@@ -16,6 +16,7 @@ import { presets as anthropicPresets } from '../anthropic/presets.js'
 import { getRuntime, fireReminder, makeFireDispatch } from '../../apps/agent.js'
 import { getGroupWorld } from '../../apps/groupworld.js'
 import { listAccounts, upsertAccount, removeAccount, publicAccount, toAdapterAccount } from '../qqbot/accounts.js'
+import { ensureConsoleToken, formatConsoleUrls, detectLanIp, consoleTokenDir, consoleTokenTtlMs } from './auth.js'
 import { parseCron } from '../agent/schedule.js'
 import { redactConfig, JEV_KEY_MASK } from './redact.js'
 import { listLogFiles, readLogFile, aggregateStats, queryLogFiles, buildCachePayload } from './logs.js'
@@ -1459,6 +1460,27 @@ router.get('/qqbot/status', asyncHandler(async (req, res) => {
   const adapter = await getQQAdapterSafe()
   if (!adapter) return ok(res, { ready: false, accounts: [] })
   return ok(res, { ready: true, accounts: adapter.status?.() || [] })
+}))
+
+// ───────────────── Web 面板自身（启动默认地址） ─────────────────
+
+// GET /api/web/console-url —— 当前「启动默认访问地址（带 token）」的地址副本
+// 用途：面板内展示/复制固定登录地址（首次部署没协议端时，用户可在启动日志或 data/web/console-url.txt 拿到它）
+router.get('/web/console-url', asyncHandler(async (req, res) => {
+  const cfg = Config.get().agent?.webApi || {}
+  const port = Number(cfg.port) || 6098
+  const rec = ensureConsoleToken({ ttlMs: consoleTokenTtlMs(cfg) })
+  const pubHost = String(cfg.publicUrl || '').trim().replace(/^https?:\/\//i, '').replace(/[\/:].*$/, '')
+  const urls = formatConsoleUrls({ token: rec.token, port, localHost: '127.0.0.1', lanHost: detectLanIp(), publicHost: pubHost })
+  return ok(res, {
+    ...urls,
+    port,
+    expiresAt: rec.expiresAt,
+    ttlHours: Math.round(consoleTokenTtlMs(cfg) / 3.6e6),
+    tokenFile: path.join(consoleTokenDir(), 'console-token.json'),
+    urlFile: path.join(consoleTokenDir(), 'console-url.txt'),
+    printTokenOnStart: cfg.printTokenOnStart !== false,
+  })
 }))
 
 // 未知 /api 路径 → JSON 404（不走 SPA fallback）

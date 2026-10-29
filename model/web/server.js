@@ -10,7 +10,7 @@ import path from 'node:path'
 import Config from '../../utils/Config.js'
 import Log from '../../utils/Log.js'
 import { VERSION } from '../../utils/version.js'
-import { authMiddleware } from './auth.js'
+import { authMiddleware, announceConsoleAccess } from './auth.js'
 import { errorMiddleware } from './response.js'
 import { buildApiRouter } from './api.js'
 import { versionAssetUrls } from './asset-version.js'
@@ -48,7 +48,22 @@ export async function startServer() {
   app.use(errorMiddleware)
 
   // 0.0.0.0 已同时监听公网与本地回环，本地地址固定可用（#agents登录 会分别给出公网/本地两条地址）
-  _server = app.listen(port, '0.0.0.0', () => Log.mark(`[web] 管理面板已启动：0.0.0.0:${port}（公网+本地 127.0.0.1；私聊 #agents登录 取访问地址）`))
+  _server = app.listen(port, '0.0.0.0', () => {
+    Log.mark(`[web] 管理面板已启动：0.0.0.0:${port}（公网+本地 127.0.0.1）`)
+    // 首次启动即给出带 token 的默认地址：此时往往还没有协议端（发不了 #agents登录），
+    // 面板服务不依赖 QQ 连接与模型运行时，可直接打开完成首次配置。
+    announceConsoleAccess({ port }).catch((e) => Log.warn('[web] 启动访问地址输出失败', e?.message || e))
+    // 首次部署最常见卡点：还没配模型（provider/model/Key），此时对话全不可用但面板可配——
+    // 明确告诉用户下一步点哪里，避免「面板进了但不知道干嘛」。
+    try {
+      const a = Config.get().agent || {}
+      const hasProviderKey = (Array.isArray(a.llmProviders) ? a.llmProviders : []).some((p) => p && String(p.apiKey || '').trim())
+      const hasFlatKey = !!String(a.apiKey || '').trim()
+      if (!hasProviderKey && !hasFlatKey) {
+        Log.mark('[web] 还没配置模型 —— 打开上面的地址 → 配置中心 → 「厂商配置」填接口地址 + Key →「模型列表」挂模型 →「基础 / 模型」选中，保存即生效')
+      }
+    } catch { /* 配置读取异常不影响启动 */ }
+  })
   _curPort = port
   _server.on('error', (e) => {
     if (e.code === 'EADDRINUSE') Log.warn(`[web] 端口 ${port} 被占用，面板未启动；改 agent.webApi.port 后 #agents重载`)

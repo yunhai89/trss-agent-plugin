@@ -248,6 +248,8 @@ export function supportGuoba() {
         { field: 'agent.webApi.enable', label: '启用 Web 面板', bottomHelpMessage: '独立 HTTP 服务；主人私聊 #agents登录 取带 token 的访问地址（24h 有效）', component: 'Switch' },
         { field: 'agent.webApi.port', label: '面板端口', bottomHelpMessage: '监听 0.0.0.0；默认 6098（避开 Yunzai 2536 / 锅巴 6099）', component: 'InputNumber', componentProps: { min: 1, max: 65535 } },
         { field: 'agent.webApi.publicUrl', label: '对外地址(可选)', bottomHelpMessage: '留空自动探测本机 LAN IP；填 http://1.2.3.4:6098 覆盖', component: 'Input', componentProps: { placeholder: '留空=自动探测' } },
+        { field: 'agent.webApi.printTokenOnStart', label: '启动时打印访问地址', bottomHelpMessage: '启动日志输出带 token 的默认地址并写 data/web/console-url.txt：首次部署还没有协议端、发不了 #agents登录 时靠它进面板。（关闭后仍可用 #agents登录，或删 data/web/console-token.json 让下次启动重新打印）', component: 'Switch' },
+        { field: 'agent.webApi.consoleTokenTtlHours', label: '启动地址令牌有效期(小时)', bottomHelpMessage: '默认 720（30 天）；使用中滑动续期，过期后下次启动自动换新', component: 'InputNumber', componentProps: { min: 1, max: 8760 } },
 
         { label: '模型与对话', component: 'SOFT_GROUP_BEGIN' },
         // 基础模型改为引用制：锅巴无联动控件，此处只手填厂商条目 id / 模型条目 id；

@@ -95,12 +95,21 @@
         window.api.setToken(t)
         try { await window.store.loadScopes(); loggedIn.value = true }
         catch (e) {
-          window.api.setToken('')
-          window.UI.alert({
-            title: '登录失败',
-            icon: 'warn',
-            message: `Token 校验未通过：${e?.message || e}<br>请私聊 bot 重新发送 <b>#agents登录</b> 获取新链接，或核对粘贴的 token 是否完整。`,
-          })
+          const msg = String(e?.message || e)
+          // 只有「确实没认证」才清 token。运行时未就绪（首次部署还没配模型/API Key）不是登录失败：
+          // 面板服务与令牌都不依赖运行时，必须能进去填配置。
+          if (/4010|未认证|token 已失效|未登录/.test(msg)) {
+            window.api.setToken('')
+            window.UI.alert({
+              title: '登录失败',
+              icon: 'warn',
+              message: `Token 校验未通过：${msg}<br>请私聊 bot 重新发送 <b>#agents登录</b> 获取新链接，或核对粘贴的 token 是否完整。`,
+            })
+          } else {
+            window.api.setToken(t) // 保留 token：认证已通过，只是部分接口暂时不可用
+            loggedIn.value = true
+            window.UI.toast?.(`已登录，但运行时未就绪（${msg}）；可先在「配置中心」填模型/API Key`, 'warn')
+          }
         }
       }
       const logout = () => { loggedIn.value = false; window.api && window.api.setToken('') }
