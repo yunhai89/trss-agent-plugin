@@ -139,6 +139,26 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
   eq(d.message[1], { type: 'text', text: '你好' }, '正文段')
   ok(typeof d.reply === 'function', '提供 reply')
   eq(d.raw_message, '你好', 'raw_message')
+  // 回归（线上「#设置主人/#agents更新 无反应、#状态 却能用」）：
+  // 适配器不能预设 data.msg —— TRSS loader.dealEvent 会把 message 的 text 段累加到 e.msg，
+  // 若这里已有初值就会变成「#设置主人#设置主人」，精确匹配（$ 结尾）的规则全失效，前缀规则却照常。
+  ok(!('msg' in d), '不设置 data.msg（避免框架累加后文本翻倍）')
+  const buildMsg = (data) => {
+    let m = data.msg || ''
+    for (const seg of data.message || []) if (seg.type === 'text') m += seg.text
+    return m.trim()
+  }
+  eq(buildMsg(d), '你好', '模拟框架 dealEvent 后 e.msg 不重复')
+
+  // 精确匹配命令完整链路：群 @ + #设置主人 → 框架 e.msg 恰为 #设置主人
+  client.emit('message', {
+    type: 'message', scene: 'group', appId: 'APP2', eventName: 'GROUP_AT_MESSAGE_CREATE', atBot: true,
+    messageId: 'm1x', content: '#设置主人', timestamp: '2026-10-29T10:00:00Z',
+    userId: 'MO', groupOpenid: 'GO', username: '小明', mentions: [], attachments: [], msgElements: [], raw: {},
+  })
+  const cmdData = harness.emCalls.pop().data
+  eq(buildMsg(cmdData), '#设置主人', '@机器人的框架指令 e.msg 精确匹配（不再翻倍）')
+  ok(new RegExp('^#设置主人$').test(buildMsg(cmdData)), 'TRSS ^#设置主人$ 规则可命中')
 
   // 被动回复：同一 msg_id 最多 5 次
   const ids = []

@@ -411,7 +411,11 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
         message_id: ev.messageId,
         message,
         raw_message: ev.content || '',
-        msg: ev.content || '',
+        // 不要设置 data.msg：TRSS loader.dealEvent 会用 message 段累加出 e.msg
+        // （`e.msg = (e.msg || '') + dealText(text段)`）。这里再给一份初值会导致
+        // 「#设置主人」变成「#设置主人#设置主人」——带 $ 结尾的框架规则/本插件规则全部匹配失败
+        // （线上实测：#状态 这类前缀规则能中，精确匹配的 #设置主人 / #agents更新 没反应）。
+        // msg: ev.content || '',
         time,
         sender: { user_id: userId, nickname: ev.username || ev.userId },
         // 供本插件识别官方协议（也兼容 adapter 元数据推断）

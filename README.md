@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.45.4-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.45.5-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -1743,6 +1743,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.45.5** | 修复官方机器人下指令文本翻倍：适配器预设了 `data.msg`，而 TRSS `dealEvent` 会把 `message` 里的 text 段再累加一次 → `e.msg` 变成「#设置主人#设置主人」，导致 `^#设置主人$` / `^#agents更新$` 这类精确匹配规则失效（`^#状态` 前缀规则却正常，表现为「有的指令能用有的不能」）。现已不预设 `msg`，交由框架从消息段构建 |
 | **v1.45.4** | 修复官方机器人下**云崽框架指令被 AI 抢占**（`@机器人 + #设置主人` 无反应）：新增「指令透传」——以 `#`/`＃`/`/` 等开头且不是本插件触发词的消息 `return false` 交给后续插件处理（`agent.commandPassThrough` 默认开，可关）；面板/锅巴/文档同步 |
 | **v1.45.3** | 修复 QQ 群机器人「不管发什么都回复」：开启全量消息权限后 `GROUP_MESSAGE_CREATE`（非 @）也被无条件补 `at` 段 → `e.atBot=true` → `trigger=at` 全量触发。现按事件类型 + `mentions.is_you` 判定，只对真正 @ 回复；按钮点击仍正常触发；非 @ 群消息保留投递供伪人/群世界旁听 |
 | **v1.45.2** | 修复 toolEvo seed 全量失败：内置工具 `diagram_render` 的 `sideEffects:['file_write']` 不在枚举内 → 整批内置工具无法入库（埋点/健康检测失效）。现改正为 `write`，并在 seed 入口做副作用归一化（别名纠正 + 未知值剔除告警 + 无版本空壳工具自愈补建） |

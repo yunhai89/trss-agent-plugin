@@ -284,3 +284,27 @@ AI 触发是 catch-all 规则（`^[\s\S]*$` → `onTrigger`），@ 消息会先�
 **验证**：`stress/e2e/agent-trigger-permission.mjs` 19 断言（新增：@机器人+#设置主人/#重启/全角＃帮助 透传、
 privateChat 下私聊指令透传、普通文本仍进 AI、`#ai` 触发词不受影响、`commandPassThrough=false` 恢复旧行为）；
 `node model/qqbot/test.mjs` 144 断言、全量 138 文件通过。
+
+
+---
+
+# 附：官方机器人下指令文本翻倍导致精确匹配失效（v1.45.5）
+
+**现象**：升级 v1.45.4 后，`#设置主人` / `#agents更新` 仍无反应，但 `#状态` 能用；
+日志里框架打印的是 `[#设置主人#设置主人][...]`、`text=#设置主人#设置主人`。
+
+**原因**：适配器在事件数据里同时给了 `message: [{type:'text',text:'#设置主人'}]` **和** `msg: '#设置主人'`。
+TRSS `lib/plugins/loader.js` 的 `dealEvent` 会用消息段累加文本：
+
+```js
+case "text": e.msg = (e.msg || "") + this.dealText(i.text)
+```
+
+于是 `e.msg` 变成 `#设置主人#设置主人`。
+- 前缀/包含型规则（`^#(状态|统计)`、`^#ai`）仍能命中 → 看起来「部分指令正常」；
+- 精确匹配规则（`^#设置主人$`、`^#*(agents)(插件)?(强制)?更新$`、本插件大量 `^...$` 规则）全部失配 → 无响应。
+
+**修复**：适配器不再预设 `data.msg`（保留 `raw_message` 供日志兜底），`e.msg` 完全交给框架由 `message` 段构建。
+回归断言：`stress/e2e/qqbot-adapter.mjs` 模拟 `dealEvent` 累加后 `e.msg === '#设置主人'`，且 `^#设置主人$` 可命中。
+
+**教训**：适配器只提供「原始消息段 + raw_message」；`msg` 是 TRSS 的派生物，预设会造成双写。
