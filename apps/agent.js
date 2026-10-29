@@ -2049,6 +2049,15 @@ export class Chat extends plugin {
     const isAt = !!this.e.atBot
     const cmdRe = new RegExp(`^${cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`)
     const isCmd = cmdMode && cmdRe.test(text)
+    // 指令透传：`#设置主人` / `#重启` / `#帮助` 这类 **Yunzai 与其它插件的指令** 不能被 AI 抢走。
+    // 官方机器人场景下群里通常必须 @机器人 才能发消息，@ + `#指令` 会被 catch-all 先接到 AI；
+    // 私聊开了 privateChat 后同理。这里识别「指令前缀且不是本插件触发词」后 return false，
+    // 框架会继续把事件交给后续插件（loader: res === false → continue）。
+    const looksLikeCommand = /^\s*[#＃/／＊*※]/.test(text)
+    if (cfg.commandPassThrough !== false && looksLikeCommand && !isCmd) {
+      Log.mark('[trigger]', `指令透传（交给框架/其它插件）user=${this.e.user_id} gid=${this.e.group_id || '-'} text=${text.slice(0, 40)}`)
+      return false
+    }
     // media.enable=false 时不把媒体算作触发条件（图片/文件消息不触发，避免每张图都回"未识别到"）
     const hasMedia = cfg.media?.enable !== false && this._hasMedia(this.e)
     // 触发条件：命令匹配 ｜（@机器人 且（有文字 或 有媒体））。

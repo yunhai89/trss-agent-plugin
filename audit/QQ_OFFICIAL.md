@@ -255,3 +255,32 @@ qqBot:
 **验证**：`model/qqbot/test.mjs` 144 断言（新增 GROUP_AT/GROUP_MESSAGE±mentions/C2C/频道私信 atBot 判定与
 mentionsBot 单元）；`stress/e2e/qqbot-adapter.mjs` 47 断言（新增非 @ 群消息不补 at 段、@ 时补 at 段、
 按钮点击触发）。
+
+
+---
+
+# 附：官方机器人下云崽框架指令被 AI 抢占（v1.45.4）
+
+**现象**：QQ 官方机器人连上后，`#设置主人`、`#重启`、`#帮助` 等 Yunzai 框架指令没反应
+（或只看到 AI 在回答/无响应）。
+
+**原因**：官方机器人群里通常只有被 @ 才会收到消息，用户只能发「@机器人 + #指令」；而本插件的
+AI 触发是 catch-all 规则（`^[\s\S]*$` → `onTrigger`），@ 消息会先进 AI：
+`atMode && isAt && text` 成立即当作提问处理并返回 true，框架的 system 插件（`#设置主人` 等）根本没机会执行。
+私聊开启 `privateChat` 后同理。
+
+**修复**：
+- `onTrigger` 新增「指令透传」：文本以 `#`（含全角 `＃`）、`/`、`＊` 等指令前缀开头、且**不是**本插件触发词
+  （默认 `#ai`）时，记一条 `[trigger] 指令透传` 日志并 `return false`——框架 loader 对 `res === false`
+  会继续下一个插件（见 Yunzai `lib/plugins/loader.js`），于是 system/其它插件正常处理。
+- 新增配置 `agent.commandPassThrough`（默认 `true`）；关掉后恢复「指令也当 AI 提问」的旧行为。
+- 面板（Web 配置中心「基础/模型」、锅巴）与 README/FAQ 同步说明。
+
+**框架主人兼容性**：TRSS `#设置主人` 会写入 `master: ["<self_id>:<user_id>"]`；官方适配器下
+`self_id=appId`、`user_id=<appId>:<openid>`，写入后为 `appId:appId:openid`，框架解析（按第一个 `:` 切分）
+得到 `master[appId] = ["appId:openid"]` 正好等于 `e.user_id` → 框架 `e.isMaster` 正常为 true，
+`#重启` 等 master 指令随之可用。只给本插件授权则用 `/uid` + `agent.masters`。
+
+**验证**：`stress/e2e/agent-trigger-permission.mjs` 19 断言（新增：@机器人+#设置主人/#重启/全角＃帮助 透传、
+privateChat 下私聊指令透传、普通文本仍进 AI、`#ai` 触发词不受影响、`commandPassThrough=false` 恢复旧行为）；
+`node model/qqbot/test.mjs` 144 断言、全量 138 文件通过。

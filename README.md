@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.45.3-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.45.4-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -45,7 +45,7 @@
 - **前缀缓存友好**：上下文 token 双水位压缩 + 工具数组恒定 + 稳定 system 前缀，长对话命中率可达 90%+（见「缓存经济性」）。
 - **文件即真相的记忆**：`MEMORY.md` / `USER.md` 人可读可编辑 + `memory_search` 主动召回 + 用户画像 + 知识库 RAG，跨会话不失忆、不串档。
 - **安全纵深**：工具 RBAC + 主人审批 + 注入防御（不可信内容边界）+ 高危执行面隔离（E2B microVM），高危动作不裸奔。
-- **三种配置入口、一套真源**：Web 配置中心（全量）/ 锅巴面板（381 字段常用+安全项）/ `config.yaml`；配置保存只写差异、升级新默认值自动生效。
+- **三种配置入口、一套真源**：Web 配置中心（全量）/ 锅巴面板（382 字段常用+安全项）/ `config.yaml`；配置保存只写差异、升级新默认值自动生效。
 - **热加载**：改配置即生效，重建时取消在途任务、回收资源。
 - **QQ 官方机器人就绪**：自实现适配器（AppID+AppSecret）+ 官方协议能力（Markdown / keyboard / 被动回复），并提供 `/uid`、`/groupid` 排障指令。
 - **🧬 工具进化**：LLM 生成 → AST 静态门 → 隔离验证 → 主人审批 → 版本化上线/淘汰，工具库可持续变强。
@@ -120,7 +120,7 @@
 | 协议端 | OneBot/ICQQ（NapCat 等）；QQ 官方机器人（自实现适配器 / Yunzai-QQBot-Plugin）；QQ 频道 | ✅ |
 | QQ 官方机器人 | 只需 AppID+AppSecret；Markdown 直发、inline keyboard、被动回复窗口；`/uid`、`/groupid` | ✅ |
 | Web 管理面板 | 22 个页面：概览/配置中心/机器人账号/记忆/召回/画像/人设/技能/知识库/会话/日志/定时/账本/审批/进化/工具/群世界/伪人/自状态/表情包/TTS/外置工具 | ✅ |
-| 锅巴面板 | 381 字段 / 52 分组：常用项 + 安全/行为总开关 + 各子系统常用调参 | ✅ |
+| 锅巴面板 | 382 字段 / 52 分组：常用项 + 安全/行为总开关 + 各子系统常用调参 | ✅ |
 | 配置热加载 | 保存配置自动重建运行时（provider/model/tools/skills/mcp） | ✅ |
 
 ### 安全与可观测
@@ -349,6 +349,18 @@ QQ 群机器人在开放平台开启「全量消息」权限后，除了 `GROUP_
 scopeId：g1024-G_OPENID_u1024-U_OPENID
 ```
 
+### 云崽（框架）指令与主人设置
+
+官方机器人下框架指令同样可用（v1.45.4 起「指令透传」）：
+
+- 群里必须 **@机器人 + `#指令`**（没有「全量消息」权限时）；开了全量消息权限后也可直接发 `#指令`；
+- 以 `#`（含全角 `＃`）、`/` 等开头且不是本插件触发词（默认 `#ai`）的消息，会**交给 Yunzai 与其它插件处理**，
+  不再被 AI 抢走；关闭 `agent.commandPassThrough` 可恢复旧行为；
+- 第一次设置框架主人：私聊或 @机器人 发 **`#设置主人`** → 按提示回复验证码（TRSS 官方流程），
+  完成后 `#重启` / `#状态` / `#帮助` 等框架指令即可用（框架按 `self_id:user_id` 记录，兼容官方 bot 的 openid 前缀）；
+- 只给**本插件**授权主人：发 `/uid`，把「完整 user_id」加进 `agent.masters`（两条路互不影响；
+  `#设置主人` 影响整个框架，`agent.masters` 只影响本插件）。
+
 ### 主人配置（官方机器人必看）
 
 框架的 `permission: 'master'` 用 `e.user_id` 比对主人列表，而官方 `user_id` 是 `1024:U_OPENID` 这种形态，**填 QQ 号永远匹配不上**，表现为所有主人指令回「暂无权限」。
@@ -452,8 +464,8 @@ qqOfficial:
 
 | 入口 | 覆盖 | 适合 |
 | --- | --- | --- |
-| **Web 配置中心** | 全量字段（564 个配置叶子） | 首次配置模型、改任何细项 |
-| **锅巴面板（Guoba）** | 381 字段 / 52 分组：常用项 + 安全/行为总开关 + 各子系统常用调参 | 已在用锅巴、只想改常用项 |
+| **Web 配置中心** | 全量字段（565 个配置叶子） | 首次配置模型、改任何细项 |
+| **锅巴面板（Guoba）** | 382 字段 / 52 分组：常用项 + 安全/行为总开关 + 各子系统常用调参 | 已在用锅巴、只想改常用项 |
 | **`config.yaml`** | 全量（真源） | 批量/脚本化/版本管理；热加载 |
 
 > 保存时只写「与默认值的差异」，且厂商/模型/回退等结构会被统一归一（`utils/Config.js`），三个入口改同一份数据。
@@ -561,16 +573,17 @@ qqOfficial:
 | `#沙箱诊断 [预览/修复/实测]` | 沙箱出口网络自检 / 旧配置清理 / 实测 |
 | `#openrouter余额` | 查 OpenRouter Key 额度（需主模型为 OpenRouter） |
 | `#上报错误 +描述` | 打包本次日志发主人 |
+| `#设置主人` / `#设置主人验证码` | **Yunzai 框架指令**（非本插件）：按验证码流程设置框架主人；官方机器人下需 @机器人 或私聊，详见「云崽（框架）指令与主人设置」 |
 
 ---
 ## ⚙️ 配置总览
 
-配置文件：`plugins/agents-plugin/config/config.yaml`（**564 个配置叶子**，全部带注释；Web 配置中心可全量编辑）。
+配置文件：`plugins/agents-plugin/config/config.yaml`（**565 个配置叶子**，全部带注释；Web 配置中心可全量编辑）。
 下面按主题列出 `agent.*` 下的配置块，字段细节见 「详细配置参考」 与 Web 配置中心。
 
 | 主题 | 配置块（点路径） | 说明 |
 | --- | --- | --- |
-| **基础与回复** | `trigger` `triggerCommand` `privateChat` `isolation.enable` `progress` `progressRecall` `reply.mode/atSender/quote/narrate/renderScale` `render.*` | 触发方式、私聊开关、数据隔离、进度与回复渲染 |
+| **基础与回复** | `trigger` `triggerCommand` `commandPassThrough` `privateChat` `isolation.enable` `progress` `progressRecall` `reply.mode/atSender/quote/narrate/renderScale` `render.*` | 触发方式、私聊开关、数据隔离、进度与回复渲染 |
 | **模型** | `providerId` `modelId` `llmProviders[]` `llmModels[]` `fallbackModels[]` `utilityModel` `proxy` `reasoningFields` `temperature` `maxTokens` | 引用制厂商/模型、回退、旁路小模型、代理 |
 | **思考** | `thinking` `thinkingAuto.*` `jev.*` | 手动思考 / 自动判档（规则·小模型·Jev） |
 | **上下文与缓存** | `contextWindow` `contextMsgHighWater/LowWater` `contextHighRatio/LowRatio` `compaction.*` `cacheControl` `promptCacheKey` `keepReasoning` `stream` `reflect*` `finalizeMaxTokens` `rootTokenBudget` | 压缩水位、缓存策略、收尾与预算 |
@@ -1522,7 +1535,7 @@ audit/                配置审计报告与修复记录（历史决策留档）
 
 **配置真源与治理**
 
-- 四类配置面：`config.yaml` 默认值 + Web 配置中心（全量）+ 锅巴（381 字段常用项）+ README/开发指南；
+- 四类配置面：`config.yaml` 默认值 + Web 配置中心（全量）+ 锅巴（382 字段常用项）+ README/开发指南；
   运行时读取统一经 `utils/Config.js`：`deepMerge 默认值 → normalizeConfig 归一 → 差异落盘 → 热加载`。
 - 保存只写差异（不改默认值的键不落盘），老版本全量快照启动时自动压缩（备份 `.bak`）→ 升级后的新默认值自动生效。
 - 供应商/模型引用、fallback、`cacheControl`/`thinking` 类型、官方机器人账号等结构由归一逻辑统一收敛，三个入口不会互相打架。
@@ -1691,6 +1704,9 @@ node scripts/run-tests.mjs --help 2>/dev/null || true
 **Q1：机器人不回话？**
 ① 看日志 `[trigger]` 是否有触发记录；② `agent.trigger=at` 时确认是 @ 且消息含文字或媒体；③ 私聊需要 `agent.privateChat=true`；④ QQ 官方机器人需先 `/uid` 配 `agent.masters`；⑤ `agent.chatPermission` 会限制群内 `#ai` 命令（@ 对话不受限）。
 
+**Q1.2：官方机器人连上了，但 `#设置主人` / `#重启` 等云崽指令没反应？**
+v1.45.4 起已修：以前 `@机器人 + #指令` 会被本插件的 AI catch-all 抢先处理。现在以 `#`/`/` 开头且不是本插件触发词的消息会**透传**给 Yunzai 与其它插件（`agent.commandPassThrough` 默认开）。注意：① 群里没开「全量消息」权限时必须 **@机器人 + 指令**；② 私聊需 `agent.privateChat` 或直接 `#设置主人`（框架指令不受 privateChat 影响）；③ 若仍有插件级权限问题，先按提示走完 `#设置主人` 验证码流程。
+
 **Q1.5：机器人在群里「不管发什么都回复」？**
 ① 确认是官方机器人且开放平台开了「全量消息」权限：该权限下普通群消息也会推送，插件本应按「事件类型 + mentions.is_you」只对 @ 回复（v1.45.3 修复了早前无条件补 `at` 段导致的全量误触发）；② 若 `agent.trigger=both`，`#ai` 命令也会触发，属预期；③ 伪人模式（`agent.humanize`）是另一条独立回复通路，可在配置里关掉。
 
@@ -1727,6 +1743,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.45.4** | 修复官方机器人下**云崽框架指令被 AI 抢占**（`@机器人 + #设置主人` 无反应）：新增「指令透传」——以 `#`/`＃`/`/` 等开头且不是本插件触发词的消息 `return false` 交给后续插件处理（`agent.commandPassThrough` 默认开，可关）；面板/锅巴/文档同步 |
 | **v1.45.3** | 修复 QQ 群机器人「不管发什么都回复」：开启全量消息权限后 `GROUP_MESSAGE_CREATE`（非 @）也被无条件补 `at` 段 → `e.atBot=true` → `trigger=at` 全量触发。现按事件类型 + `mentions.is_you` 判定，只对真正 @ 回复；按钮点击仍正常触发；非 @ 群消息保留投递供伪人/群世界旁听 |
 | **v1.45.2** | 修复 toolEvo seed 全量失败：内置工具 `diagram_render` 的 `sideEffects:['file_write']` 不在枚举内 → 整批内置工具无法入库（埋点/健康检测失效）。现改正为 `write`，并在 seed 入口做副作用归一化（别名纠正 + 未知值剔除告警 + 无版本空壳工具自愈补建） |
 | **v1.45.1** | 修复 QQBot 网关无限重连：`intents: 0` 被原样下发（IDENTIFY intents=0 → 平台 4013）现回落为 33554432；4013/4914 按「只降不升」自动降级 intents 重连（耗尽则停止并给出可执行提示）；同一 socket 重复 close 不再双计重连；INVALID_SESSION 不再提前合成 4006（保留真实 close 码用于判断降级）；默认 intents 改为最小可用集（群@+C2C） |

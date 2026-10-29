@@ -101,6 +101,51 @@ console.log('\n[chatPermission=master：@机器人不受限 / 私聊默认禁用
   cfgMod.__setConfig(baseCfg())
 }
 
+console.log('\n[指令透传：框架指令不能被 AI 抢走（官方机器人 / 私聊）]')
+{
+  // 官方机器人群里通常必须 @机器人 才能发消息：@ + #设置主人 不能进 AI
+  const { bot, replies } = makeBot({ user_id: 'u20', msg: '#设置主人', atBot: true })
+  const r = await bot.onTrigger()
+  ok(r === false && replies.length === 0, '@机器人 + #设置主人 → 透传给框架（不回复、不进 Agent）')
+}
+{
+  const { bot, replies } = makeBot({ user_id: 'u21', msg: '#重启', atBot: true })
+  const r = await bot.onTrigger()
+  ok(r === false && replies.length === 0, '@机器人 + #重启 → 透传')
+}
+{
+  const { bot, replies } = makeBot({ user_id: 'u22', msg: '＃帮助', atBot: true })
+  const r = await bot.onTrigger()
+  ok(r === false && replies.length === 0, '全角 ＃帮助 → 也透传')
+}
+{
+  cfgMod.__setConfig({ agent: { ...baseCfg().agent, privateChat: true } })
+  const { bot, replies } = makeBot({ user_id: 'u23', msg: '#设置主人', isGroup: false, group_id: null })
+  const r = await bot.onTrigger()
+  ok(r === false && replies.length === 0, 'privateChat=true 时私聊 #设置主人 → 仍透传给框架')
+  cfgMod.__setConfig(baseCfg())
+}
+{
+  // 普通文字照常进 AI（没被误伤）
+  const { bot, replies } = makeBot({ user_id: 'u24', msg: '你好呀', atBot: true })
+  await bot.onTrigger()
+  ok(allowed(replies), '普通 @ 文本仍然放行到 Agent')
+}
+{
+  // 触发词本身不算「其它插件指令」
+  const { bot, replies } = makeBot({ user_id: 'u25', msg: '#ai 你好', isMaster: true })
+  await bot.onTrigger()
+  ok(allowed(replies), '#ai 触发词仍由本插件处理（不会被透传）')
+}
+{
+  // 关掉透传 → 指令回到 AI 处理
+  cfgMod.__setConfig({ agent: { ...baseCfg().agent, commandPassThrough: false } })
+  const { bot, replies } = makeBot({ user_id: 'u26', msg: '#设置主人', atBot: true })
+  await bot.onTrigger()
+  ok(allowed(replies), 'commandPassThrough=false → #设置主人 会被当成 AI 提问（旧行为）')
+  cfgMod.__setConfig(baseCfg())
+}
+
 console.log('\n[chatPermission=all：命令对所有人开放]')
 cfgMod.__setConfig({ agent: { ...baseCfg().agent, chatPermission: 'all' } })
 {

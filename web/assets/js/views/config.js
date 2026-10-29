@@ -174,6 +174,7 @@
         if (form.cacheControl === false) form.cacheControl = 'off'
         else if (form.cacheControl === true) form.cacheControl = 'explicit'
         else if (form.cacheControl == null) form.cacheControl = 'off'
+        if (form.commandPassThrough == null) form.commandPassThrough = true
         if (!form.webApi) form.webApi = {}
         if (form.webApi.enable == null) form.webApi.enable = true
         if (form.webApi.port == null) form.webApi.port = 6098
@@ -1159,6 +1160,9 @@
             </cfg-row>
             <cfg-row name="触发词" desc="command/both 时生效">
               <input class="inp" style="width:150px" v-model="form.triggerCommand" placeholder="#ai">
+            </cfg-row>
+            <cfg-row name="指令透传" desc="commandPassThrough：以 # / ／ 等开头的 @/私聊消息若不是本插件触发词，交给 Yunzai 与其它插件处理（#设置主人 / #重启 / #帮助 等）。关掉后这些消息会被当成 AI 提问">
+              <v-switch v-model="form.commandPassThrough"/>
             </cfg-row>
             <cfg-row name="多用户数据隔离" desc="开启后按 (群,用户) 隔离记忆与会话">
               <v-switch v-model="form.isolation.enable"/>

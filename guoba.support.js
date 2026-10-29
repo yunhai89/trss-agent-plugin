@@ -237,6 +237,7 @@ export function supportGuoba() {
         { field: 'debug', label: '调试日志', bottomHelpMessage: '等价于强制开启全链路 devLog（真正日志开关是 agent.devLog.enable）；临时排查时开启', component: 'Switch' },
         { field: 'agent.trigger', label: '触发模式', component: 'Select', componentProps: { options: OPT.trigger } },
         { field: 'agent.triggerCommand', label: '触发词', bottomHelpMessage: 'trigger 为 command/both 时生效，如 #ai', component: 'Input', componentProps: { placeholder: '#ai' } },
+        { field: 'agent.commandPassThrough', label: '指令透传', bottomHelpMessage: '默认开：以 # 等开头的 @/私聊消息若不是本插件触发词，交给 Yunzai 与其它插件处理（#设置主人/#重启/#帮助 等）；关掉后会被当成 AI 提问', component: 'Switch' },
         { field: 'agent.privateChat', label: '私聊触发对话', bottomHelpMessage: '默认关（私聊不响应，仅群内 @/命令触发）；开启后私聊任何消息直接触发，独立会话与记忆', component: 'Switch' },
         { field: 'agent.isolation.enable', label: '多用户数据隔离', bottomHelpMessage: '默认开：每个群每个用户完全独立（会话/长期记忆/召回/群历史）；关=同群共享（群体型 bot）。跨群始终隔离；私聊按用户', component: 'Switch' },
         { field: 'agent.chatPermission', label: '#ai 命令权限', component: 'Select', componentProps: { options: OPT.permission } },

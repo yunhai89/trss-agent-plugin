@@ -3,6 +3,7 @@ debug: false  # 调试日志：true=强制开启全链路 devLog（等价 agent.
 agent:
   trigger: at
   triggerCommand: "#ai"
+  commandPassThrough: true  # 指令透传（默认开）：以 # / ／ ＃ 等开头的 @/私聊消息若不是本插件的 AI 触发词，交给 Yunzai 与其它插件处理（如 #设置主人 / #重启 / #帮助）。关掉后这些消息会被当作 AI 提问（官方机器人没有 @ 也能收到全量消息时尤其需要保持开启）
   privateChat: false   # 私聊是否触发对话（默认关；false=私聊不响应，仅群内 @/命令触发）
   isolation:
     enable: true  # 多用户数据隔离（默认开）。true=每个群每个用户完全独立（会话/长期记忆/recall/群历史可见范围）；false=同群完全共享（群体型 bot，会话+记忆+群历史全群共用）。跨群始终隔离；私聊始终按用户。提醒/笔记/人设始终按用户。
