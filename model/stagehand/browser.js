@@ -6,6 +6,7 @@
  */
 import Log from '../../utils/Log.js'
 import { buildLaunchOptions } from './guard.js'
+import { resolveChromeExecutable, missingChromeMessage } from './chrome.js'
 
 let _mod = null
 async function getMod() {
@@ -35,7 +36,19 @@ export async function launchBrowser(cfg = {}, profile = null) {
   }
   // local（stealth 默认开：真机 UA/视口/语言 + 去自动化 flag）
   const opts = buildLaunchOptions(cfg, profile || undefined)
-  Log.info('[stagehand] 启动本地浏览器', opts.headless ? 'headless' : 'headed', opts.executablePath || '(默认chromium)', cfg.stealth === false ? 'stealth=off' : `fingerprint=${profile?.name || 'default'}`)
+  // Stagehand v4 未给 executablePath 时会走 chrome-launcher.getChromePath()，只认系统 Chrome，
+  // 找不到就抛「The CHROME_PATH environment variable must be set…」——服务器上通常只有 Puppeteer
+  // 自带 Chromium，必须先替他探测出来，否则 stagehand__goto 永远失败。
+  const resolved = await resolveChromeExecutable(cfg)
+  if (resolved) {
+    opts.executablePath = resolved.path
+    if (resolved.source !== 'config') Log.info('[stagehand] 已自动定位 Chromium', `source=${resolved.source}`, resolved.path)
+    // 兜底：把路径写进环境变量，便于 SDK/子进程按 CHROME_PATH 约定再次查找
+    if (!process.env.CHROME_PATH) { try { process.env.CHROME_PATH = resolved.path } catch { /* noop */ } }
+  } else {
+    throw new Error(missingChromeMessage(String(cfg.executablePath || '').trim()))
+  }
+  Log.info('[stagehand] 启动本地浏览器', opts.headless ? 'headless' : 'headed', `${opts.executablePath}（${resolved.source}）`, cfg.stealth === false ? 'stealth=off' : `fingerprint=${profile?.name || 'default'}`)
   const browser = await localBrowser.launch(opts)
   return { browser, close: () => browser.close().catch(() => {}) }
 }

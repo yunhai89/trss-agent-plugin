@@ -530,7 +530,7 @@ agent:
     headless: true         # 本地模式是否无头
     stealth: true          # 真机化：随机设备指纹(UA/视口/语言/触屏)+去自动化 flag+规避脚本，降低被风控拦截概率
     userAgent: ""          # 指定固定 UA（留空=按设备指纹池随机）
-    executablePath: ""     # 本地 chrome 可执行路径（空=Stagehand 自定/CHROME_PATH；可填复用已装 chrome）
+    executablePath: ""     # 本地 Chrome/Chromium 可执行文件；留空=自动探测（CHROME_PATH/PUPPETEER_EXECUTABLE_PATH → Puppeteer 自带 → ~/.cache 缓存 → 系统路径）。服务器装了 chromium 或 Yunzai 自带 puppeteer 通常无需填
     browserbaseApiKey: ""  # 云模式必填（bb_live_...）
     region: ""             # 云模式可选：us-west-2(默认)/us-east-1/eu-central-1/ap-southeast-1
     modelName: ""          # Stagehand 原生模型（如 google/gemini-2.5-flash；空=复用插件 provider，仅 OpenAI 兼容；云模式空=Model Gateway 自动选）

@@ -2408,7 +2408,7 @@
                 <input type="number" class="inp" style="width:110px" min="1" v-model.number="form.stagehand.maxCallsPerDay">
               </cfg-row>
               <cfg-row name="chrome 路径(本地,可选)" desc="空=默认/CHROME_PATH；可填复用已装 chrome">
-                <input class="inp mono" style="width:200px" v-model="form.stagehand.executablePath" placeholder="留空=默认">
+                <input class="inp mono" style="width:200px" v-model="form.stagehand.executablePath" placeholder="留空=自动探测">
               </cfg-row>
               <cfg-row name="Browserbase apiKey" desc="云模式必填（bb_live_...）">
                 <input class="inp mono" style="width:200px" v-model="form.stagehand.browserbaseApiKey" placeholder="bb_live_...">
