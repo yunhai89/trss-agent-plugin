@@ -37,7 +37,7 @@ export function makeDiagramTool(service) {
       summary: '生成流程图/架构图/时序图/状态图/关系图/思维导图并作为图片发送',
       resultCap: 4000,
       interactive: false,
-      sideEffects: ['file_write'], // 仅写插件 data/diagram/ 临时目录
+      sideEffects: ['write'], // 仅写插件 data/diagram/ 临时目录（合法枚举：none/read/write/network/message/delete）
     },
     parameters: {
       type: 'object',

@@ -1093,6 +1093,7 @@ async function _buildRuntime(scope) {
       }))
       const seedRes = await te.seedBuiltinTools(toolEvoRegistry, builtins).catch((e) => { Log.warn('[toolEvo] seed 失败', e?.message || e); return { added: 0, bindings: [] } })
       const seeded = seedRes?.added || 0
+      for (const w of (seedRes?.warnings || [])) Log.warn('[toolEvo] seed 元数据归一化', w)
       // 内置工具执行契约绑定 seed 出的版本身份（否则埋点 version_id=null，健康检测漏报，审计 P1-8）
       for (const b of (seedRes?.bindings || [])) { try { tools.bindVersion(b.name, b.versionId) } catch { /* noop */ } }
       const synthesizer = new te.ToolSynthesizer({ provider: srTarget.provider, model: srTarget.model || cfg.model, maxRepairAttempts: cfg.toolEvo?.maxRepairAttempts ?? 2, logger: Log.tag('toolEvo') })

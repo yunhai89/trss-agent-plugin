@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.45.1-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.45.2-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -1712,6 +1712,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.45.2** | 修复 toolEvo seed 全量失败：内置工具 `diagram_render` 的 `sideEffects:['file_write']` 不在枚举内 → 整批内置工具无法入库（埋点/健康检测失效）。现改正为 `write`，并在 seed 入口做副作用归一化（别名纠正 + 未知值剔除告警 + 无版本空壳工具自愈补建） |
 | **v1.45.1** | 修复 QQBot 网关无限重连：`intents: 0` 被原样下发（IDENTIFY intents=0 → 平台 4013）现回落为 33554432；4013/4914 按「只降不升」自动降级 intents 重连（耗尽则停止并给出可执行提示）；同一 socket 重复 close 不再双计重连；INVALID_SESSION 不再提前合成 4006（保留真实 close 码用于判断降级）；默认 intents 改为最小可用集（群@+C2C） |
 | **v1.45.0** | 首次启动即给 Web 默认访问地址（带 token，持久化 + 启动日志 + `data/web/console-url.txt`）：**没有协议端也能进面板配模型**；面板内一键复制；登录只在「认证失败」时清 token（运行时未就绪不再误报登录失败） |
 | **v1.44.1** | 文档重构：项目介绍按最新能力重排（能力地图 / 三协议端接入 / Web 面板 / 完整指令表 / 架构与配置治理 / 运维 FAQ） |

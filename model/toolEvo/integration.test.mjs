@@ -140,6 +140,42 @@ await test('P1-8：seed 绑定版本 → 调用埋点关联版本，三次失败
   assert.equal(typeof metrics.reuseRate, 'number', 'reuseRate 有定义')
 })
 
+await test('seed：历史失败残留的「无版本空壳工具」会被补建版本并绑定（自愈）', async () => {
+  // 旧 seed 先 createTool 再 createVersion：manifest 校验失败后只留下 tools 行（无 active 版本）。
+  // 若 seed 对已存在工具直接 continue，该工具永远没有版本 → 埋点 version_id=null。
+  const toolId = 'tool_shell_1'
+  await reg.createTool({ id: toolId, name: 'builtin_shell', namespace: 'builtin' })
+  const before = await reg.getByName('builtin_shell')
+  assert.equal(before.active_version_id, null, '构造：空壳工具无 active 版本')
+
+  const r = await seedBuiltinTools(reg, [{ name: 'builtin_shell', description: '空壳修复工具', parameters: { type: 'object' }, sideEffects: ['none'] }])
+  assert.equal(r.added, 1, '补建计入 added')
+  const after = await reg.getByName('builtin_shell')
+  assert.ok(after.active_version_id, '已补建 active 版本并绑定')
+  assert.ok(r.bindings.some((b) => b.name === 'builtin_shell' && b.versionId === after.active_version_id), '返回绑定供埋点使用')
+  assert.ok(r.warnings.some((w) => w.includes('builtin_shell') && w.includes('空壳')), '给出自愈告警')
+  // 幂等：再次 seed 不应重复建版本
+  const r2 = await seedBuiltinTools(reg, [{ name: 'builtin_shell', description: '空壳修复工具', parameters: { type: 'object' }, sideEffects: ['none'] }])
+  assert.equal(r2.added, 0, '再次 seed 幂等（不重复建版本）')
+})
+
+await test('seed：脏 sideEffects（别名/未知值）自动归一化，不连累整批入库', async () => {
+  // 线上事故回归：内置工具 meta 写 file_write（不在 schema 枚举）曾让整个 seed 抛错，
+  // 导致所有内置工具都无法入库（调用埋点/健康检测全失效）。
+  const r = await seedBuiltinTools(reg, [
+    { name: 'builtin_alias', description: '别名副作用工具', parameters: { type: 'object' }, sideEffects: ['file_write'] },
+    { name: 'builtin_bogus', description: '未知副作用工具', parameters: { type: 'object' }, sideEffects: ['bogus', 'read'] },
+  ])
+  assert.equal(r.added, 2, '脏 meta 不阻断入库（两个都成功）')
+  const t1 = await reg.getByName('builtin_alias')
+  const v1 = (await reg.listVersions({ toolId: t1.id }))[0]
+  assert.deepEqual(v1.sideEffects, ['write'], 'file_write 归一为 write 后入库')
+  assert.ok(r.warnings.some((w) => w.includes('builtin_bogus') && w.includes('bogus')), '未知值给出归一化告警')
+  const t2 = await reg.getByName('builtin_bogus')
+  const v2 = (await reg.listVersions({ toolId: t2.id }))[0]
+  assert.deepEqual(v2.sideEffects, ['read'], '未知值被剔除、合法值保留')
+})
+
 await test('P0-1：显式 e2b 且 manager 缺失 → fail-closed，不降级本地', async () => {
   const r = new RunnerClient({ logger: () => {}, sandbox: { mode: 'e2b', manager: null } })
   assert.equal(r.backend, 'sandbox-unavailable')
