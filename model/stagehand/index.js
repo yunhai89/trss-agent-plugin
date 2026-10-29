@@ -25,7 +25,7 @@
  */
 import { defineToolPack, defineTool, param, ok, fail } from '../toolkit/index.js'
 import { SessionManager } from './session.js'
-import { makeGenerate } from './llm.js'
+import { makeGenerate, resolveProviderHeaders } from './llm.js'
 import { assertUrlAllowed } from './guard.js'
 import { jsonSchemaToZod } from './schema.js'
 
@@ -66,12 +66,18 @@ export function makeStagehand(opt = {}) {
       return cfg.modelApiKey ? { modelName: cfg.modelName, apiKey: cfg.modelApiKey } : { modelName: cfg.modelName }
     }
     if (agent.protocol === 'openai' || agent.protocol == null) {
+      // 主 provider 是 OpenCode Go/Zen 等网关时，observe/extract/act 的推理请求也必须带
+      // preset 的 UA + x-opencode-session，否则网关返回 400 MissingSessionID。
+      const providerHeaders = resolveProviderHeaders(agent)
       return {
         generate: makeGenerate({
           apiKey: agent.apiKey, baseURL: agent.baseURL, model: agent.model,
           fetch: proxyFetch,
           timeoutMs: Number(cfg.llmTimeoutMs) || undefined,
           getSignal: () => sessionMgr.signalOf(key),
+          headers: providerHeaders.headers,
+          sessionHeader: providerHeaders.sessionHeader,
+          sessionId: key, // 与浏览器会话绑定，跨多轮工具调用保持稳定路由
         }),
       }
     }

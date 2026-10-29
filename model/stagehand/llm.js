@@ -11,6 +11,7 @@
  *
  * 可靠性：
  *  - 复用主 provider 的代理 fetch（llm.fetch），海外端点可走代理；
+ *  - 复用主 provider 的 preset 请求头（UA）与会话头（OpenCode Go/Zen 的 x-opencode-session）；
  *  - 截止时间覆盖「请求发出 + 响应体读取」全过程，而非只覆盖响应头；
  *  - 贯穿会话操作级取消信号（llm.getSignal()）；
  *  - 解析并保留 token usage；
@@ -20,7 +21,31 @@
  * provider 不支持结构化输出时，用户应改用 stagehand.modelName 原生模型（见 index.js buildModel）。
  */
 
+import { presets as openaiPresets } from '../openai/index.js'
+
 const DEFAULT_TIMEOUT_MS = 30000
+
+function randomSessionId() {
+  try {
+    if (globalThis.crypto?.randomUUID) return `stagehand-${globalThis.crypto.randomUUID()}`
+  } catch { /* noop */ }
+  return `stagehand-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+/**
+ * 主 provider（仅 OpenAI 兼容分支）的附加请求头：
+ *  - preset.headers：真实客户端 UA（OpenCode Zen/Go 会校验）；
+ *  - sessionHeader：会话路由头（OpenCode Zen/Go 的 x-opencode-session，缺省返回 400 MissingSessionID）。
+ * @param {object} agent 运行时 agent 配置（protocol/preset/headers/sessionHeader）
+ * @returns {{headers:object, sessionHeader:string}}
+ */
+export function resolveProviderHeaders(agent = {}) {
+  const preset = agent?.preset ? openaiPresets[agent.preset] : null
+  return {
+    headers: { ...(preset?.headers || {}), ...(agent?.headers || {}) },
+    sessionHeader: String(agent?.sessionHeader || preset?.sessionHeader || '').trim(),
+  }
+}
 
 /** 错误信息脱敏：抹掉 apiKey（防止上游回显或异常串里带出） */
 function redact(text, apiKey) {
@@ -37,13 +62,16 @@ function resolveSignal(getSignal) {
 }
 
 /**
- * @param {object} llm { apiKey, baseURL, model, fetch?, timeoutMs?, getSignal? }
+ * @param {object} llm { apiKey, baseURL, model, fetch?, timeoutMs?, getSignal?, headers?, sessionHeader?, sessionId? }
  * @returns {(params:object)=>Promise<object>} generate 回调
  */
 export function makeGenerate(llm = {}) {
   const { apiKey, baseURL, model } = llm
   const fetchImpl = typeof llm.fetch === 'function' ? llm.fetch : globalThis.fetch
   const timeoutMs = Math.max(20, Number(llm.timeoutMs) || DEFAULT_TIMEOUT_MS)
+  const extraHeaders = { ...(llm.headers || {}) }
+  const sessionHeader = String(llm.sessionHeader || '').trim()
+  const sessionId = String(llm.sessionId || '').trim() || randomSessionId()
   return async function generate(params) {
     if (!apiKey || !model) throw new Error('stagehand 复用 provider 需 agent.apiKey + agent.model')
     if (params?.responseFormat?.type !== 'json_schema') {
@@ -73,12 +101,18 @@ export function makeGenerate(llm = {}) {
       ext.addEventListener('abort', onAbort, { once: true })
     }
     const timer = setTimeout(() => controller.abort(new Error(`stagehand LLM 请求超时（${timeoutMs}ms）`)), timeoutMs)
+    const headers = {
+      'Content-Type': 'application/json',
+      ...extraHeaders,
+      Authorization: `Bearer ${apiKey}`,
+    }
+    if (sessionHeader) headers[sessionHeader] = sessionId
     try {
       let res
       try {
         res = await fetchImpl(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+          headers,
           body: JSON.stringify(body),
           signal: controller.signal,
         })

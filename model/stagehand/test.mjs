@@ -6,7 +6,7 @@
  * makeGenerate 用 mock fetch；jsonSchemaToZod 需 zod（未装则 skip 该段，其余照跑）。
  */
 import { SessionManager } from './session.js'
-import { makeGenerate } from './llm.js'
+import { makeGenerate, resolveProviderHeaders } from './llm.js'
 import { jsonSchemaToZod } from './index.js'
 
 let passed = 0
@@ -125,7 +125,32 @@ await test('makeGenerate：构建正确请求 + 解析 structuredContent', async
   } finally { globalThis.fetch = origFetch }
 })
 
-// ---------- 8. makeGenerate：非 JSON 返回 → 抛错 ----------
+// ---------- 8. makeGenerate：OpenCode 会话头/UA 下发 ----------
+await test('makeGenerate：preset 的 UA + x-opencode-session 下发', async () => {
+  const providerHeaders = resolveProviderHeaders({ preset: 'opencode-go' })
+  eq(providerHeaders.sessionHeader, 'x-opencode-session', 'opencode-go 预设解析出会话头')
+  ok(/User-Agent/.test(JSON.stringify(providerHeaders.headers)), 'opencode-go 预设解析出 UA')
+  eq(providerHeaders.headers['User-Agent'], `trss-agent-plugin/${(await import('../../utils/version.js')).VERSION}`, 'UA 带插件版本')
+
+  let capturedHeaders
+  const origFetch = globalThis.fetch
+  globalThis.fetch = async (_url, opt) => {
+    capturedHeaders = opt.headers
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+  try {
+    const gen = makeGenerate({
+      apiKey: 'sk-x', baseURL: 'https://opencode.ai/zen/go/v1', model: 'deepseek-v4.1-flash',
+      ...providerHeaders, sessionId: 'conv-42',
+    })
+    await gen({ messages: [], responseFormat: { type: 'json_schema', name: 'r', schema: {} } })
+    eq(capturedHeaders['x-opencode-session'], 'conv-42', '请求带 x-opencode-session（会话 key）')
+    ok(String(capturedHeaders['User-Agent']).startsWith('trss-agent-plugin/'), '请求带真实客户端 UA')
+    eq(capturedHeaders.Authorization, 'Bearer sk-x', 'Authorization 未被自定义头覆盖')
+  } finally { globalThis.fetch = origFetch }
+})
+
+// ---------- 8b. makeGenerate：非 JSON 返回 → 抛错 ----------
 await test('makeGenerate：LLM 返回非 JSON → 抛错', async () => {
   const origFetch = globalThis.fetch
   globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: 'not json' } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } })

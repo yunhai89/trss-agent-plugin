@@ -45,3 +45,25 @@ Chromium。服务器上通常只有 Yunzai 的 puppeteer Chromium，于是直接
 
 **验证**：`chrome.test.mjs` 扩到 22 断言（新增两种真实布局、多版本取最新、自定义缓存根）；
 全量 `node scripts/run-tests.mjs`；并用解析结果实际启动 Stagehand 本地浏览器成功（launch/close）。
+
+## observe/extract/act 报 400 MissingSessionID（v1.45.12）
+
+**现象**：`stagehand__goto` 成功（HTTP 200 且标题正确），但 `stagehand__extract` 报：
+`stagehand LLM 请求失败 400: {"type":"error","error":{"type":"MissingSessionID",
+"message":"Request is missing x-opencode-session and cannot be routed efficiently."}}`
+
+**根因**：Stagehand 的 `observe/extract/act` 需要调用一次 LLM；插件复用主 provider 时，
+`model/stagehand/llm.js` 只发了 `Content-Type` + `Authorization`，而主 provider（OpenCode Zen/Go）
+的 preset 还要求真实客户端 `User-Agent` 和每会话稳定的 `x-opencode-session`。普通对话走
+`model/openai/Client.buildHeaders()` 会自动带上，Stagehand 的独立 fetch 链路没有复用这套逻辑。
+
+**修复**：
+- `resolveProviderHeaders(agent)`：从主 provider preset 解析 `headers`（UA）与 `sessionHeader`；
+- `makeGenerate` 接收 `headers` / `sessionHeader` / `sessionId`，合并进请求头（`Authorization` 最后写入，
+  不允许自定义头覆盖）；
+- `makeStagehand.buildModel(key)` 透传上述字段，`sessionId` 绑定当前浏览器会话 key，
+  同一页面跨多轮 `observe/extract/act` 保持稳定路由；
+- 无 `sessionId` 时仍生成稳定的 `stagehand-<uuid>`，保证配置了 `sessionHeader` 的网关不会漏头。
+
+**验证**：`model/stagehand/test.mjs` 扩到 54 断言，新增 `opencode-go` preset 解析、
+`x-opencode-session` 下发、UA 透传、`Authorization` 不被覆盖；全量测试通过。
