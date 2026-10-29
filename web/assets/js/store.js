@@ -18,10 +18,45 @@
   })
 
   const TOKEN_KEY = 'agents_token'
+  /** 合法 token 形态：随机 hex/urlsafe（#agents登录 48 hex；控制台令牌同） */
+  const TOKEN_RE = /^[A-Za-z0-9_-]{16,128}$/
+
+  /**
+   * 归一化登录 token：允许直接粘贴**整条登录地址**或带中文的整段消息。
+   *
+   * 背景（线上故障）：用户把 `#agents登录` 返回的整段内容（含「🌐 公网地址：」等中文）粘进登录框，
+   * 旧代码原样存进 localStorage 并塞进 Authorization 头 → 浏览器直接抛
+   * `Failed to execute 'fetch' ... String contains non ISO-8859-1 code point`，
+   * 之后每个页面（人设库等）的所有接口都失败。
+   * @param {any} raw 用户输入/URL 参数
+   * @returns {string} 合法 token；非法返回空串
+   */
+  function normalizeToken(raw) {
+    let s = String(raw ?? '').trim()
+    if (!s) return ''
+    // 整条登录地址：取 ?token= / &token= 参数（URL 编码的也还原）
+    const m = s.match(/[?&#]token=([^&#\s]+)/i)
+    if (m) {
+      try { s = decodeURIComponent(m[1]) } catch { s = m[1] }
+      s = s.trim()
+    }
+    // 粘贴文本里 token 前后可能有引号/中文标点：只保留合法字符段
+    if (!TOKEN_RE.test(s)) {
+      const hit = s.match(/[A-Za-z0-9_-]{16,128}/)
+      s = hit ? hit[0] : ''
+    }
+    return TOKEN_RE.test(s) ? s : ''
+  }
+
   const api = window.api = (() => {
     const BASE = '/api'
     const getToken = () => localStorage.getItem(TOKEN_KEY) || ''
-    const setToken = (t) => { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY) }
+    const setToken = (t) => {
+      const v = normalizeToken(t)
+      if (v) localStorage.setItem(TOKEN_KEY, v)
+      else localStorage.removeItem(TOKEN_KEY)
+      return v
+    }
     const request = async (method, p, { query, body, raw } = {}) => {
       // 只拼接有值的查询参数：跳过 null/undefined（否则 new URLSearchParams 会写成字面量
       // "scopeId=undefined"，后端当有效值过滤 → 结果恒空）。空字符串仍保留（语义可能与缺省不同）。
@@ -33,7 +68,11 @@
       }
       const url = BASE + p + (qs ? '?' + qs : '')
       const opt = { method, headers: {} }
-      const tk = getToken()
+      // 读取时再归一一次：旧版本可能把中文/整段消息存进了 localStorage，
+      // 直接拼进 Authorization 会让 fetch 抛 ISO-8859-1 错误（所有页面全挂）。
+      const rawTok = getToken()
+      const tk = normalizeToken(rawTok)
+      if (rawTok && tk !== rawTok) setToken(tk) // 自愈：能归一就写回归一值，不能归一（空）就清掉
       if (tk) opt.headers.Authorization = 'Bearer ' + tk
       if (raw && raw.body !== undefined) {
         // 二进制直传（参考音频等）：Content-Type 用文件自身类型
@@ -59,14 +98,14 @@
       postRaw: (p, body, q) => request('POST', p, { query: q, raw: { body, type: body?.type } }),
       put: (p, b) => request('PUT', p, { body: b }),
       del: (p) => request('DELETE', p),
-      getToken, setToken,
+      getToken, setToken, normalizeToken,
     }
   })()
 
   // URL ?token= 落地到 localStorage（仅登录直跳用一次，落地后清 URL）
   window.storeLoginFromUrl = function () {
     const u = new URLSearchParams(location.search)
-    const t = u.get('token')
+    const t = api.normalizeToken(u.get('token') || '')
     if (t) { api.setToken(t); history.replaceState(null, '', location.pathname + location.hash) }
     return !!t
   }

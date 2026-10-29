@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.45.8-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.45.9-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -438,7 +438,7 @@ qqOfficial:
 **两种进入方式**：
 
 1. **首次启动 / 还没有协议端**：看启动日志里打印的默认地址，或打开插件目录 `data/web/console-url.txt` —— 里面是**带 token 的固定地址**（本地 `127.0.0.1:6098` + 内网 + 可探测的公网）。面板服务不依赖 QQ 连接与模型运行时，可直接进去完成首次配置。配置中心「Web 面板」卡片里也能一键「获取默认登录地址」并复制。
-2. **已连上协议端**：主人私聊机器人发 **`#agents登录`**，会分两条消息返回【公网地址】与【本地地址】（token 24h 有效，使用中滑动续期）。也可把链接里的 token 粘到登录框。
+2. **已连上协议端**：主人私聊机器人发 **`#agents登录`**，会分两条消息返回【公网地址】与【本地地址】（token 24h 有效，使用中滑动续期）。登录框可**直接粘贴完整链接**（会自动抽取 token），粘贴整段带中文的消息也可以；非法内容会明确提示而不是写入本地。
 
 > 默认地址令牌由 `agent.webApi.consoleTokenTtlHours` 控制（默认 720h = 30 天）；不想要启动日志出现 token，设 `agent.webApi.printTokenOnStart: false`。
 
@@ -1709,6 +1709,9 @@ node scripts/run-tests.mjs --help 2>/dev/null || true
 **Q1：机器人不回话？**
 ① 看日志 `[trigger]` 是否有触发记录；② `agent.trigger=at` 时确认是 @ 且消息含文字或媒体；③ 私聊需要 `agent.privateChat=true`；④ QQ 官方机器人需先 `/uid` 配 `agent.masters`；⑤ `agent.chatPermission` 会限制群内 `#ai` 命令（@ 对话不受限）。
 
+**Q1.1：Web 面板登录后打开任意页面报 `Failed to execute 'fetch' … String contains non ISO-8859-1 code point`？**
+说明浏览器 localStorage 里存的 token 不是纯 ASCII（典型：把 `#agents登录` 的整段回执含「🌐 公网地址：」等中文一起粘进了登录框）。v1.45.9 起已修复：登录框支持粘贴完整链接并自动抽取 token，历史脏值读取时会自愈。若你的面板还是旧前端（缓存），强刷页面（Ctrl/Cmd+Shift+R）后重新 `#agents登录` 粘贴一次即可。
+
 **Q1.2：官方机器人连上了，但 `#设置主人` / `#重启` 等云崽指令没反应？**
 v1.45.4 起已修：以前 `@机器人 + #指令` 会被本插件的 AI catch-all 抢先处理。现在以 `#`/`/` 开头且不是本插件触发词的消息会**透传**给 Yunzai 与其它插件（`agent.commandPassThrough` 默认开）。注意：① 群里没开「全量消息」权限时必须 **@机器人 + 指令**；② 私聊需 `agent.privateChat` 或直接 `#设置主人`（框架指令不受 privateChat 影响）；③ 若仍有插件级权限问题，先按提示走完 `#设置主人` 验证码流程。
 
@@ -1749,6 +1752,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.45.9** | 修复 Web 面板登录后所有页面报 `Failed to execute 'fetch' … String contains non ISO-8859-1 code point`：用户把 `#agents登录` 返回的整段内容（含中文）粘进登录框时会原样存进 localStorage 并拼进 `Authorization` 请求头。现统一归一化 token（支持直接粘贴**完整登录链接**、自动抽取 48 位 token、剥离中文/脏字符），历史脏值读取时自愈，非法输入明确提示 |
 | **v1.45.8** | 帮助图渲染超时默认改为 **300000ms（5 分钟）**：新增 `agent.render.helpTimeoutMs`，与普通卡片图 `render.timeoutMs`（默认 15s）分开——帮助卡片最长，弱机器/冷缓存首次渲染常超过 15s，此前会直接降级成文本；超时仍按原策略降级并进入冷却 |
 | **v1.45.7** | 修复按钮卡片「本人点自己的按钮提示无权限操作」：群聊 `specify_user_ids` 未剥 `<appId>:` 前缀（平台只认原始 openid）；私聊 C2C/频道私信客户端不支持 `type:0` 指定用户按钮 → 自动降级 `type:2`（私聊仅对方一人，安全等价） |
 | **v1.45.6** | QQBot 叶子级加固：被动回复严格按 5 分钟窗口（长任务不再用过期 msg_id 白发送失败）；Markdown 回复正确 @ 回复人（`<qqbot-at-user>`，此前被静默丢弃）；API 401 自动刷新 token 重试、start 阶段 token 5xx 退避重试；媒体 >10MB 跳过不读入内存；频道私信 ID/源频道修正；READY 迟到补挂载、断连中断连接等待、`_attachBot` 幂等；网络类 token 失败继续重连（此前一次抖动永久掉线）；回填 bot.fl/gl/gml 并对齐 login/logout 契约 |
