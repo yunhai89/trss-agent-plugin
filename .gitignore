@@ -9,6 +9,8 @@ node_modules/
 !/开发指南.md
 !skills/*.md
 !skills/**/*.md
+# 审计报告/修复记录（docs 性内容，随仓库走便于追溯配置决策）
+!audit/**/*.md
 
 # Claude Code 本地配置/技能（不入项目仓库；开发用技能放全局 ~/.claude/skills/）
 .claude/
