@@ -1715,7 +1715,8 @@
               <div class="mut2" style="font-size:12px">
                 本插件自带一套 QQBot 适配器：只需 <b>AppID + AppSecret</b>（无需机器人 QQ 号与 Token）。
                 开启后请<b>停用 Yunzai-QQBot-Plugin 的同一机器人</b>，否则会重复收发消息。
-                连接后可用 <code>#qqbot状态</code> / <code>#qqbot重连</code> 排查。
+                <b>日常账号管理请用左侧「系统 → 机器人账号」页</b>（增删改/连接状态/排障）；这里是底层配置字段。
+                连接后也可用 <code>#qqbot状态</code> / <code>#qqbot重连</code> 排查。
               </div>
             </div>
             <cfg-row name="启用自实现适配器" desc="qqBot.enable：本插件直接连 QQ 官方网关（WebSocket）">

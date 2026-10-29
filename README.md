@@ -150,8 +150,10 @@ agent:
 
 **启用步骤**
 
-1. `agent.qqBot.enable: true`，填 `appId` + `appSecret`（**不要**再用 Yunzai-QQBot-Plugin 的同一机器人）；
-2. 重启 Yunzai（适配器在框架 Listener 阶段注册；之后改配置可用 `#qqbot重连` 热重连）；
+1. **推荐用 Web 面板「机器人账号」页**（`#agents登录` → 左侧「系统 → 机器人账号」）：
+   点「添加账号」填 AppID + AppSecret 即保存并自动连接；页面还提供连接/断开/编辑/删除、实时状态与排障提示。
+   也可直接改 yaml（见上）或用聊天指令 `#qqbot账号` 只读查看。
+2. 首次启用需重启 Yunzai（适配器在框架 Listener 阶段注册；之后改配置可在页面点「重连全部」或发 `#qqbot重连` 热重连）；
 3. 群里 @ 机器人发一句话即可对话；发 `/uid`、`/groupid` 配主人与白名单（见下节）。
 
 **管理指令**（主人）：

@@ -165,3 +165,50 @@ qqBot:
 | `node model/qqbot/test.mjs` | **105 断言**：token 缓存/单飞/错误、REST 路径与消息体、错误码人话、网关 IDENTIFY/RESUME/心跳/关闭码、事件归一化、键盘/媒体/分片、client 发送与 markdown 降级 |
 | `node --import ./stress/e2e/hooks.mjs stress/e2e/qqbot-adapter.mjs` | **39 断言**：模块加载注册适配器、账号归一化（扁平/多账号/缺密钥）、`Bot[id]`+pick*、事件字段（含 ID 拼接与 adapter_id）、被动回复 5 次上限、按钮回调投递、断连清理 |
 | `node scripts/run-tests.mjs` | 见仓库提交记录（全量通过） |
+
+
+---
+
+# 附：Web「机器人账号」页（v1.44.0）
+
+`#agents登录` → 左侧「系统 → 机器人账号」，用于管理自实现适配器的多账号，不用再手改 yaml。
+
+## 页面能力
+
+| 区域 | 功能 |
+| --- | --- |
+| 适配器状态卡 | 适配器是否就绪（是否在 Yunzai 进程内）、`agent.qqBot.enable` 开关状态、已连接/总数 |
+| 接入提示卡 | 只需 AppID+AppSecret（Token 已废弃）、`/uid`/`/groupid`、被动回复窗口、Markdown 自动降级 |
+| 账号卡片 | 名称/AppID、连接状态（含 session 前缀、最近关闭码与重连次数）、密钥是否配置（只显示 `••••••••`+尾 4 位）、Markdown 模式、沙箱标记 |
+| 操作 | 连接 / 断开 / 编辑（AppSecret 留空=不修改，保存后自动重连）/ 删除（二次确认，同时断开）/ 复制 AppID |
+| 添加/编辑表单 | AppID、AppSecret、显示名称、Markdown 能力（auto/true/false）、纯文本也走 Markdown、沙箱、intents（频道需 1073741825） |
+| 顶部动作 | 刷新状态 / 重连全部（按当前配置 `stopAll + load`，改完 yaml 免重启） |
+| 排障卡 | 鉴权失败(4004)、intents(4013/4914)、频控(4008)、会话(4006/4007/4009)、与 Yunzai-QQBot-Plugin 二选一 |
+
+## 后端接口（`model/web/api.js`）
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `GET /api/qqbot` | 账号列表 + 实时连接状态（**不回显 AppSecret**，只有 `hasSecret` / `secretMasked`） |
+| `POST /api/qqbot/accounts` | 新增（appId 纯数字校验；缺 appSecret 拒绝；保存后自动 `enable=true` 并尝试连接） |
+| `PUT /api/qqbot/accounts/:appId` | 编辑（appSecret 传空=保持原值；已连接会重连） |
+| `DELETE /api/qqbot/accounts/:appId` | 删除并断开 |
+| `POST /api/qqbot/accounts/:appId/connect` / `disconnect` | 连接 / 断开单个账号 |
+| `POST /api/qqbot/reload` | 按当前配置重连全部（`stopAll + load`） |
+| `GET /api/qqbot/status` | 适配器原始状态（网关 state/session/重连次数，排障用） |
+
+连接接口带 10s 上限：握手未完成时返回「已发起（后台继续）」而不是让浏览器一直挂起；随后刷新状态即可。
+
+## 账号存储（单一真源）
+
+- 统一写 `agent.qqBot.accounts[]`；历史上写在 `agent.qqBot.appId/appSecret` 的扁平单账号，
+  在**首次写操作**时自动迁入 `accounts[]` 并清掉扁平字段（`model/qqbot/accounts.js: normalizeAccountsConfig`）。
+- 密钥只落配置、不回显；`GET /api/qqbot` 只给掩码；删除账号即删除密钥。
+- 账号与适配器条目形状由 `toAdapterAccount()` 对齐（`apps/qqbot.js: normalizeAccounts` 同字段）。
+
+## 验证
+
+- `node model/qqbot/accounts.test.mjs` → 41 断言（读取/归一/增删改/掩码/适配器形状）
+- `node --import ./stress/e2e/hooks.mjs model/web/api.qqbot.test.mjs` → 35 断言
+  （真实 express router + 桩适配器 + 桩 Config：空配置/校验/新增连接/编辑保持密钥/断开/重连全部/状态合并/扁平迁移/删除）
+- `node web/dev/smoke.mjs` → 新视图模板编译 + setup 通过；config-search / feature-assign 全过

@@ -15,6 +15,7 @@ import { presets as openaiPresets } from '../openai/presets.js'
 import { presets as anthropicPresets } from '../anthropic/presets.js'
 import { getRuntime, fireReminder, makeFireDispatch } from '../../apps/agent.js'
 import { getGroupWorld } from '../../apps/groupworld.js'
+import { listAccounts, upsertAccount, removeAccount, publicAccount, toAdapterAccount } from '../qqbot/accounts.js'
 import { parseCron } from '../agent/schedule.js'
 import { redactConfig, JEV_KEY_MASK } from './redact.js'
 import { listLogFiles, readLogFile, aggregateStats, queryLogFiles, buildCachePayload } from './logs.js'
@@ -34,6 +35,37 @@ const router = express.Router()
 
 // 运行时提供者：默认 getRuntime；离线集成测试可经 buildApiRouter({ runtimeProvider }) 注入桩
 let _runtimeProvider = getRuntime
+
+// QQBot 适配器提供者：默认动态加载 apps/qqbot.js 的模块级适配器；
+// 离线测试可经 buildApiRouter({ qqbotAdapterProvider }) 注入假适配器。
+let _qqbotAdapterProvider = null
+let _qqbotAdapterCache = null
+async function getQQBotAdapter() {
+  if (_qqbotAdapterProvider) {
+    try { return await _qqbotAdapterProvider() } catch { return null }
+  }
+  if (_qqbotAdapterCache) return _qqbotAdapterCache
+  try {
+    const m = await import('../../apps/qqbot.js')
+    _qqbotAdapterCache = m.adapter || (typeof m.createQQBotAdapter === 'function' ? m.createQQBotAdapter() : null)
+  } catch (e) {
+    Log.warn('[web] QQBot 适配器加载失败（Web 账号页不可用）', e?.message || e)
+    _qqbotAdapterCache = null
+    return null
+  }
+  return _qqbotAdapterCache
+}
+
+/** 适配器状态按 appId 建索引（连接状态/会话/是否支持 markdown） */
+async function qqbotStatusMap() {
+  const adapter = await getQQBotAdapter()
+  const map = {}
+  if (!adapter) return map
+  try {
+    for (const s of adapter.status?.() || []) map[String(s.appId)] = s
+  } catch { /* 适配器状态异常不影响账号列表 */ }
+  return map
+}
 
 /** 取运行时；失败则响应 5000 并返回 null（handler 据此中断） */
 async function getRt(res) {
@@ -1278,10 +1310,163 @@ router.post('/tts/test', asyncHandler(async (req, res) => {
   return ok(res, r, `连接成功（${provider}，${r.tookMs}ms）`)
 }))
 
+// ───────────────── QQ 官方机器人账号（Web「账号」页） ─────────────────
+
+/** 组装账号列表（配置 + 实时连接状态，密钥只给掩码） */
+async function buildQQBotPayload() {
+  const cfg = Config.get().agent || {}
+  const qq = cfg.qqBot || {}
+  const accounts = listAccounts(cfg)
+  const status = await qqbotStatusMap()
+  const adapter = await getQQAdapterSafe()
+  return {
+    enable: qq.enable !== false,
+    adapterReady: !!adapter,
+    accounts: accounts.map((a) => publicAccount(a, status[a.appId] || null)),
+    connected: Object.values(status).filter((s) => s?.connected || s?.state === 'ready').length,
+    total: accounts.length,
+  }
+}
+
+/** 拿适配器但不抛错（页面在非 Yunzai 环境/未启用时也要能打开） */
+async function getQQAdapterSafe() {
+  try { return await getQQBotAdapter() } catch { return null }
+}
+
+/**
+ * 连接账号（带超时）：adapter.connect 内部最多等 READY 20s，Web 请求不该被一直挂着——
+ * 超时按「已发起，后台继续」返回，账号状态由后续 GET /api/qqbot 反映。
+ */
+async function connectAccount(adapter, account, { timeoutMs = 10_000 } = {}) {
+  let timer = null
+  try {
+    const r = await Promise.race([
+      adapter.connect(toAdapterAccount(account)),
+      new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), timeoutMs); if (typeof timer?.unref === 'function') timer.unref() }),
+    ])
+    return r === 'timeout' ? { ok: false, timeout: true } : { ok: r !== false }
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+// GET /api/qqbot —— 账号列表 + 连接状态（不返回明文 AppSecret）
+router.get('/qqbot', asyncHandler(async (req, res) => ok(res, await buildQQBotPayload())))
+
+// POST /api/qqbot/accounts —— 新增账号 { appId, appSecret, name?, sandbox?, intents?, markdown? }
+router.post('/qqbot/accounts', asyncHandler(async (req, res) => {
+  const cfg = Config.get()
+  if (!cfg.agent) cfg.agent = {}
+  const r = upsertAccount(cfg.agent, req.body || {})
+  if (!r.ok) return fail(res, CODE.BAD, r.error)
+  Config.save(cfg)
+  Config.reload(true)
+  // 尽力即时连接（失败不影响保存：配置已落盘，可在页面上看状态/重试）
+  let connectMsg = ''
+  const adapter = await getQQAdapterSafe()
+  if (adapter) {
+    try {
+      const c = await connectAccount(adapter, r.account)
+      connectMsg = c.timeout ? '，已发起连接（后台继续握手，稍后刷新状态）' : (c.ok ? '，已连接' : '，连接未就绪（后台会自动重试）')
+    } catch (e) {
+      connectMsg = `，但连接失败：${e?.message || e}`
+      Log.warn('[web] QQBot 账号连接失败', r.account.appId, e?.message || e)
+    }
+  } else {
+    connectMsg = '，适配器未初始化（重启 Yunzai 后生效）'
+  }
+  return ok(res, await buildQQBotPayload(), `账号${r.created ? '已添加' : '已更新'}${connectMsg}`)
+}))
+
+// PUT /api/qqbot/accounts/:appId —— 编辑（appSecret 留空=保持原值）
+router.put('/qqbot/accounts/:appId', asyncHandler(async (req, res) => {
+  const appId = String(req.params.appId || '').trim()
+  if (!appId) return fail(res, CODE.BAD, '缺少 appId')
+  const cfg = Config.get()
+  if (!cfg.agent) cfg.agent = {}
+  const r = upsertAccount(cfg.agent, { ...(req.body || {}), appId })
+  if (!r.ok) return fail(res, CODE.BAD, r.error)
+  Config.save(cfg)
+  Config.reload(true)
+  // 已连接的账号改了密钥/参数 → 重连生效
+  const adapter = await getQQAdapterSafe()
+  if (adapter) {
+    try {
+      adapter.disconnect?.(appId)
+      await connectAccount(adapter, r.account)
+    } catch (e) {
+      Log.warn('[web] QQBot 账号重连失败', appId, e?.message || e)
+    }
+  }
+  return ok(res, await buildQQBotPayload(), '账号已更新')
+}))
+
+// DELETE /api/qqbot/accounts/:appId —— 删除账号（同时断开连接）
+router.delete('/qqbot/accounts/:appId', asyncHandler(async (req, res) => {
+  const appId = String(req.params.appId || '').trim()
+  if (!appId) return fail(res, CODE.BAD, '缺少 appId')
+  const cfg = Config.get()
+  if (!cfg.agent) cfg.agent = {}
+  const r = removeAccount(cfg.agent, appId)
+  if (!r.removed) return fail(res, CODE.NOTFOUND, `账号不存在：${appId}`)
+  Config.save(cfg)
+  Config.reload(true)
+  const adapter = await getQQAdapterSafe()
+  try { adapter?.disconnect?.(appId) } catch { /* noop */ }
+  return ok(res, await buildQQBotPayload(), '账号已删除')
+}))
+
+// POST /api/qqbot/accounts/:appId/connect —— 连接指定账号
+router.post('/qqbot/accounts/:appId/connect', asyncHandler(async (req, res) => {
+  const appId = String(req.params.appId || '').trim()
+  const cfg = Config.get().agent || {}
+  const account = listAccounts(cfg).find((a) => a.appId === appId)
+  if (!account) return fail(res, CODE.NOTFOUND, `账号不存在：${appId}`)
+  const adapter = await getQQAdapterSafe()
+  if (!adapter) return fail(res, CODE.INTERNAL, 'QQBot 适配器未初始化（需在 Yunzai 环境运行；首次启用请重启框架）')
+  try {
+    const c = await connectAccount(adapter, account)
+    return ok(res, await buildQQBotPayload(), c.timeout ? '已发起连接（后台继续握手）' : (c.ok ? '已连接' : '连接未就绪（后台会自动重试）'))
+  } catch (e) {
+    return fail(res, CODE.INTERNAL, `连接失败：${e?.message || e}`)
+  }
+}))
+
+// POST /api/qqbot/accounts/:appId/disconnect —— 断开指定账号
+router.post('/qqbot/accounts/:appId/disconnect', asyncHandler(async (req, res) => {
+  const appId = String(req.params.appId || '').trim()
+  const adapter = await getQQAdapterSafe()
+  if (!adapter) return fail(res, CODE.INTERNAL, 'QQBot 适配器未初始化')
+  try { adapter.disconnect?.(appId) } catch (e) { return fail(res, CODE.INTERNAL, `断开失败：${e?.message || e}`) }
+  return ok(res, await buildQQBotPayload(), '已断开')
+}))
+
+// POST /api/qqbot/reload —— 按当前配置重连全部账号（改 yaml 后免重启）
+router.post('/qqbot/reload', asyncHandler(async (req, res) => {
+  const adapter = await getQQAdapterSafe()
+  if (!adapter) return fail(res, CODE.INTERNAL, 'QQBot 适配器未初始化（需在 Yunzai 环境运行）')
+  try {
+    adapter.stopAll?.()
+    await adapter.load?.()
+  } catch (e) {
+    return fail(res, CODE.INTERNAL, `重连失败：${e?.message || e}`)
+  }
+  return ok(res, await buildQQBotPayload(), '已按当前配置重连')
+}))
+
+// GET /api/qqbot/status —— 适配器原始状态（含网关会话/重连次数，排障用）
+router.get('/qqbot/status', asyncHandler(async (req, res) => {
+  const adapter = await getQQAdapterSafe()
+  if (!adapter) return ok(res, { ready: false, accounts: [] })
+  return ok(res, { ready: true, accounts: adapter.status?.() || [] })
+}))
+
 // 未知 /api 路径 → JSON 404（不走 SPA fallback）
 router.use((req, res) => fail(res, CODE.NOTFOUND, `未知接口 ${req.method} ${req.path}`))
 
-export function buildApiRouter({ runtimeProvider } = {}) {
+export function buildApiRouter({ runtimeProvider, qqbotAdapterProvider } = {}) {
   if (typeof runtimeProvider === 'function') _runtimeProvider = runtimeProvider
+  if (typeof qqbotAdapterProvider === 'function') _qqbotAdapterProvider = qqbotAdapterProvider
+  else if (qqbotAdapterProvider === null) _qqbotAdapterProvider = null
   return router
 }

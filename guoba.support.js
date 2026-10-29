@@ -619,7 +619,7 @@ export function supportGuoba() {
         // —— QQ 官方机器人（QQBot / QQ 频道）——
         { label: 'QQ 官方机器人（QQBot / 频道）', component: 'SOFT_GROUP_BEGIN' },
         { label: 'QQ 官方机器人 · 自实现适配器（AppID + AppSecret）', component: 'SOFT_GROUP_BEGIN' },
-        { field: 'agent.qqBot.enable', label: '启用自实现适配器', bottomHelpMessage: '本插件直接连 QQ 官方网关，只需 AppID + AppSecret（不需要机器人 QQ 号与 Token）。⚠️ 与 Yunzai-QQBot-Plugin 二选一，否则重复收发', component: 'Switch' },
+        { field: 'agent.qqBot.enable', label: '启用自实现适配器', bottomHelpMessage: '本插件直接连 QQ 官方网关，只需 AppID + AppSecret（不需要机器人 QQ 号与 Token）。账号增删/连接状态建议用 Web 面板「机器人账号」页；⚠️ 与 Yunzai-QQBot-Plugin 二选一，否则重复收发', component: 'Switch' },
         { field: 'agent.qqBot.appId', label: 'AppID', bottomHelpMessage: 'QQ 开放平台 → 开发设置 → 机器人 AppID', component: 'Input', componentProps: { placeholder: '如 102012345' } },
         { field: 'agent.qqBot.appSecret', label: 'AppSecret', bottomHelpMessage: 'QQ 开放平台 → 开发设置 → AppSecret（敏感：回复发送前会脱敏）', component: 'Input', componentProps: { placeholder: 'AppSecret' } },
         { field: 'agent.qqBot.markdown', label: 'Markdown 能力', bottomHelpMessage: 'auto=先试 Markdown、无权限自动降级纯文本并记忆（推荐）| true=总是 | false=纯文本', component: 'Select', componentProps: { options: [{ label: 'auto（推荐）', value: 'auto' }, { label: 'true 总是 Markdown', value: 'true' }, { label: 'false 纯文本', value: 'false' }] } },
