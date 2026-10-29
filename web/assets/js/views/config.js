@@ -751,12 +751,14 @@
       const addFallback = () => form.fallbackModels.push({ model: '', baseURL: '', apiKey: '', protocol: 'openai' })
       const delFallback = (i) => form.fallbackModels.splice(i, 1)
 
-      /* masters(明文 QQ 数组) */
+      /* masters（QQ 号或 QQ 官方机器人 openid） */
       const masterInput = ref('')
+      // QQ 号：5-12 位数字；官方机器人：<appId>:<openid> / qg_<openid> / 纯 openid（如 807AC...）
+      const isMasterId = (v) => /^\d{5,12}$/.test(v) || /^(?:\d{5,12}:)?[A-Za-z0-9_-]{6,128}$/.test(v)
       const addMaster = () => {
         const v = masterInput.value.trim()
         if (!v) return
-        if (!/^\d{5,11}$/.test(v)) { toast('QQ 号需 5-11 位数字', 'warn'); return }
+        if (!isMasterId(v)) { toast('请填 QQ 号，或官方机器人 openid（如 807AC… 或 1903797111:807AC…）', 'warn'); return }
         // 整体替换新数组（而非 push）：确保 reactive set 触发，push/splice 偶发不更新 UI/脏标记
         if (!form.masters.includes(v)) form.masters = [...form.masters, v]
         masterInput.value = ''
@@ -1989,10 +1991,10 @@
             <cfg-row name="主人任务免确认" desc="主人发起的确认类工具跳过审批,高危!" danger>
               <v-switch v-model="form.masterSkipConfirm"/>
             </cfg-row>
-            <cfg-row class="full" name="主人列表" desc="主人 QQ 号(明文,点标签删除)">
+            <cfg-row class="full" name="主人列表" desc="QQ 号或 QQ 官方机器人 openid（明文，点标签删除）">
               <div class="row g6 wrap" style="justify-content:flex-end">
                 <span v-for="(m, i) in form.masters" :key="i" class="pill p-line mono" style="cursor:pointer" @click="delMaster(i)" title="点击删除">{{ m }} <v-icon name="x"/></span>
-                <input class="inp" style="width:130px;padding:4px 9px;font-size:12px" v-model="masterInput" placeholder="输入 QQ 回车添加" @keydown.enter.prevent.stop="addMaster">
+                <input class="inp" style="width:240px;padding:4px 9px;font-size:12px" v-model="masterInput" placeholder="QQ 号 / openid（807AC…）" @keydown.enter.prevent.stop="addMaster">
                 <button type="button" class="btn b-soft b-sm" @click="addMaster" style="padding:4px 10px;font-size:12px">添加</button>
               </div>
             </cfg-row>

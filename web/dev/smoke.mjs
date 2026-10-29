@@ -109,5 +109,20 @@ const need = ['trigger', 'media', 'input', 'run_start', 'turn', 'tool', 'tool_di
 assert(need.every((n) => evts.has(n)), `devLog 12 种 event 全覆盖(实际 ${evts.size} 种)`)
 assert(MOCK.suggestions.some((s) => s.action === 'replace' && s.newPayload), 'suggestions 含 replace diff 示例')
 
+/* 6. 配置中心「主人列表」：QQ 号 + QQ 官方机器人 openid 都要能添加 */
+try {
+  const cfgView = VIEWS.config.setup({}, {})
+  cfgView.form.masters = []
+  const officialRaw = '807AC1596B40D96591A5ACBEB3CFFA4D'
+  const officialFull = `1903797111:${officialRaw}`
+  const valid = ['10001', '10001234567', officialRaw, officialFull, `qg_${officialRaw}`]
+  for (const v of valid) { cfgView.masterInput.value = v; cfgView.addMaster() }
+  assert(valid.every((v) => cfgView.form.masters.includes(v)), '主人列表接受 QQ 号 / 官方 openid（纯值、<appId>: 前缀、qg_ 前缀）')
+  const before = cfgView.form.masters.length
+  cfgView.masterInput.value = 'bad id with spaces'
+  cfgView.addMaster()
+  assert(cfgView.form.masters.length === before, '非法主人 ID 仍被拒绝')
+} catch (e) { bad('主人列表 openid 校验', e) }
+
 console.log(failed ? `\n共 ${failed} 项失败` : '\n全部通过')
 process.exit(failed ? 1 : 0)

@@ -285,6 +285,25 @@ AI 触发是 catch-all 规则（`^[\s\S]*$` → `onTrigger`），@ 消息会先�
 privateChat 下私聊指令透传、普通文本仍进 AI、`#ai` 触发词不受影响、`commandPassThrough=false` 恢复旧行为）；
 `node model/qqbot/test.mjs` 144 断言、全量 138 文件通过。
 
+---
+
+# 附：Web 配置中心「主人列表」无法添加官方机器人 openid（v1.45.13）
+
+**现象**：QQ 官方机器人主人 ID 形如 `807AC1596B40D96591A5ACBEB3CFFA4D`
+（或完整 `<appId>:<openid>`），但 Web 配置中心「主人列表」输入后提示
+「QQ 号需 5-11 位数字」，无法添加；只能手改 yaml 或锅巴。
+
+**原因**：`web/assets/js/views/config.js` 的 `addMaster()` 把输入写死为 `/^\d{5,11}$/`。
+官方机器人 `user_id` 是 openid（32 位十六进制），不是 QQ 号，被前端校验直接拒绝。
+
+**修复**：
+- 校验改为同时接受：QQ 号（5-12 位数字）、纯 openid（`807AC…`）、完整
+  `<appId>:<openid>`、频道前缀 `qg_<openid>`；
+- Web 输入框标签/占位符/宽度、锅巴 `agent.masters` 帮助、默认 yaml 注释、README 配置表同步；
+- `/uid` 的回执提示 Web「主人列表」可直接粘贴。
+
+**验证**：`web/dev/smoke.mjs` 新增 2 断言（三种官方 ID 形态可添加、非法 ID 仍拒绝）；全量测试通过。
+
 
 ---
 

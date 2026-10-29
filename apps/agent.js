@@ -3233,7 +3233,7 @@ export class Chat extends plugin {
       `scopeId：${info.scopeId}`,
       '',
       '配置位置：',
-      '· agent.masters（主人/审批通知，每行一个）：官方机器人请填上面的「完整 user_id」或「去前缀」值',
+      '· agent.masters（主人/审批通知，每行一个）：官方机器人请填上面的「完整 user_id」或「去前缀」值（Web 配置中心「主人列表」可直接粘贴）',
       '· 群白名单（如 agent.groupWorld.groups）：请用 /groupid 给出的值',
     ]
     return this.e.reply(lines.join('\n'))

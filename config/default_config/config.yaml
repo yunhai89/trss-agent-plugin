@@ -235,7 +235,7 @@ agent:
     # （留空＝用内置默认；v1.26.30 修：此前注册表里预置的内置模板被误当「进化产出」，本项写了不生效）
   chatPermission: master
   masterSkipConfirm: false   # 主人发起的任务免确认直执行（高危！仅主人；denylist 仍拦）。开启后主人命令不再 #确认，但会发高危提示
-  masters: []
+  masters: []                # 主人/审批通知 ID：QQ 号，或 QQ 官方机器人 openid（/uid 的完整 user_id 或去前缀值，如 807AC...）
   confirmTimeout: 300        # 审批超时（秒）；超时自动拒绝
   guardAction: flag
   guardSensitivity: medium

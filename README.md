@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.45.12-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.45.13-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -366,7 +366,7 @@ scopeId：g1024-G_OPENID_u1024-U_OPENID
 框架的 `permission: 'master'` 用 `e.user_id` 比对主人列表，而官方 `user_id` 是 `1024:U_OPENID` 这种形态，**填 QQ 号永远匹配不上**，表现为所有主人指令回「暂无权限」。
 本插件已把规则级 master 校验下沉到插件内，两种方式任选：
 
-1. **插件内（推荐）**：把 `/uid` 的「完整 user_id」或「去前缀 ID」加入 `agent.masters`（Web 配置中心 / 锅巴 panel / yaml 均可）。官方机器人下 `agent.masters` 同时用于审批通知与主人权限。
+1. **插件内（推荐）**：把 `/uid` 的「完整 user_id」或「去前缀 ID」加入 `agent.masters`（Web 配置中心 / 锅巴 panel / yaml 均可；Web「主人列表」输入框已支持直接粘贴 `807AC…` 这类 openid）。官方机器人下 `agent.masters` 同时用于审批通知与主人权限。
 2. **框架层**：把同样的值加入 Yunzai 的 `config/config.yaml` → `master`（按 `self_id` 分组的列表）。
 
 ### Markdown 直发（默认开）
@@ -674,7 +674,7 @@ qqOfficial:
 | `systemPrompt` | 空 | 默认身份 system prompt（留空用富默认身份）。**优先级**：人设覆盖 > 进化产出的 agent 提示词 > 本项 > 内置默认（v1.26.30 修：此前注册表里预置的内置模板会被当成「进化产出」，导致本项写了也不生效） |
 | `chatPermission` | `master` | `#ai` 命令权限：`master`/`admin`/`owner`/`all` |
 | `privateChat` | `false` | 私聊是否触发对话；默认关（私聊不响应，仅群内 @/命令触发），设 `true` 开启 |
-| `masters` | `[]` | 接收审批通知的 master QQ 号列表 |
+| `masters` | `[]` | 主人/审批通知 ID 列表：QQ 号，或 QQ 官方机器人 openid（`/uid` 的完整 `user_id` / 去前缀值，如 `807AC…`） |
 | `masterSkipConfirm` | `false` | ⚠️高危：主人发起的确认类工具（stagehand act 等）免 `#确认` 直接执行（仅主人，控制台有日志不在聊天提示；denylist 仍硬拦）。注：terminal 已沙箱化，不走审批 |
 | `confirmTimeout` | `300` | 审批超时自动拒绝（秒） |
 | `guardAction` | `flag` | 注入防御动作：`block`(拦截)/`flag`(隔离标注)/`sanitize`(脱敏) |
@@ -1754,6 +1754,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.45.13** | 修复 Web 配置中心「主人列表」只接受 5-11 位 QQ 号：QQ 官方机器人主人 ID 是 openid（如 `807AC1596B40D96591A5ACBEB3CFFA4D`、`1903797111:807AC…`、`qg_807AC…`），此前输入框直接提示「QQ 号需 5-11 位数字」无法添加。现兼容 QQ 号与官方 openid 三种形态，锅巴/yaml/README 提示同步 |
 | **v1.45.12** | 修复 `stagehand__extract/observe/act` 报 `400 MissingSessionID: Request is missing x-opencode-session`：goto 正常但 Stagehand 内部 LLM 请求只带了 `Authorization`，未带主 provider preset 的 UA 与会话头。现透传 `User-Agent` + `x-opencode-session`（值绑定浏览器会话 key），OpenCode Zen/Go 下三个原语恢复可用 |
 | **v1.45.11** | 修复 Stagehand 仍探测不到本机 Chromium：Puppeteer v19+ 缓存目录是 `chrome/linux-<ver>/chrome-linux64/chrome`、Playwright 新版是 `chromium-<rev>/chrome-linux64/chrome`，此前只匹配纯数字目录与 `chrome-linux`，导致 v1.45.10 的自动探测在真实机器上全部落空。现兼容新旧布局、支持 `PUPPETEER_CACHE_DIR`/`PLAYWRIGHT_BROWSERS_PATH`、多版本按数字取最新 |
 | **v1.45.10** | 修复 `stagehand__goto` 报 `The CHROME_PATH environment variable must be set…`：Stagehand v4 未给 `executablePath` 时只认系统 Chrome。新增本地 Chromium 自动探测（配置 → 环境变量 → **Puppeteer 自带 Chromium** → `~/.cache` 缓存 → 系统路径），找不到时给出安装/配置建议而非 SDK 晦涩报错 |

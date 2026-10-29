@@ -241,7 +241,7 @@ export function supportGuoba() {
         { field: 'agent.privateChat', label: '私聊触发对话', bottomHelpMessage: '默认关（私聊不响应，仅群内 @/命令触发）；开启后私聊任何消息直接触发，独立会话与记忆', component: 'Switch' },
         { field: 'agent.isolation.enable', label: '多用户数据隔离', bottomHelpMessage: '默认开：每个群每个用户完全独立（会话/长期记忆/召回/群历史）；关=同群共享（群体型 bot）。跨群始终隔离；私聊按用户', component: 'Switch' },
         { field: 'agent.chatPermission', label: '#ai 命令权限', component: 'Select', componentProps: { options: OPT.permission } },
-        { field: 'agent.masters', label: '接收审批通知的 master ID', bottomHelpMessage: '每行一个：普通协议填 QQ 号；QQ 官方机器人填 /uid 打印的完整 user_id（openid，不是 QQ 号）', component: 'InputTextArea', componentProps: { placeholder: '每行一个 QQ 号' } },
+        { field: 'agent.masters', label: '主人 / 审批通知 ID', bottomHelpMessage: '每行一个：普通协议填 QQ 号；QQ 官方机器人填 /uid 打印的完整 user_id 或去前缀 openid（如 807AC...，不是 QQ 号）', component: 'InputTextArea', componentProps: { placeholder: 'QQ 号或官方机器人 openid，每行一个' } },
         { field: 'agent.systemPrompt', label: '默认身份 systemPrompt', bottomHelpMessage: '留空用富默认身份；被人设覆盖时失效', component: 'InputTextArea' },
 
         // —— Web 管理面板（独立 HTTP 服务，脱离锅巴）——
