@@ -121,6 +121,111 @@
 
 ---
 
+## 🤖 QQ 官方机器人（QQBot / QQ 频道）适配
+
+> 适用：协议端为 **TRSS-Yunzai + [Yunzai-QQBot-Plugin](https://github.com/TimeRainStarSky/Yunzai-QQBot-Plugin)**（QQ 群机器人 / C2C）或 QQ 频道适配器。
+> OneBot/ICQQ（NapCat 等）用户不需要本节的任何配置，行为与以前完全一致。
+
+### 协议差异：ID 不是 QQ 号
+
+官方机器人返回的 ID 是 **openid**，不是 QQ 号/群号：
+
+| 场景 | `user_id` | `group_id` |
+| --- | --- | --- |
+| QQ 群 | `<appid>:<member_openid>` | `<appid>:<group_openid>` |
+| 私聊（C2C） | `<appid>:<user_openid>` | 无 |
+| 频道 | `qg_<openid>` | `qg_<guild_id>-<channel_id>` |
+| 频道私聊 | `qg_<openid>` | 无 |
+
+因此**按 QQ 号配置的东西在官方机器人上不会生效**（主人列表、群白名单、`#群世界清理 <群号>` 等）。
+插件已做兼容：ID 全链路按字符串处理、`scopeId` 目录安全化（数字 ID 仍原样，官方 openid 净化后加短哈希，Windows 也不会因 `:` 报错）。
+
+### 两个排障指令：`/uid`、`/groupid`
+
+| 指令 | 作用 |
+| --- | --- |
+| `/uid`（也认 `#uid`） | 打印发言人「完整 user_id / 去前缀 ID / 适配器 / 上下文 / scopeId / 是否主人」 |
+| `/groupid`（也认 `#groupid`） | 打印当前群「完整 group_id / 去前缀 ID / 适配器 / 上下文」；频道会拆出 guild_id 与 channel_id；私聊会说明没有群聊 ID |
+
+> TRSS-Yunzai 默认把行首 `/` 转成 `#`（`config.bot["/→#"]`），所以两种写法都能用。
+
+示例（QQ 群）：
+
+```
+【发言人 ID】
+完整 user_id：1024:U_OPENID
+去前缀：U_OPENID
+适配器：QQBot（QQ 官方机器人）
+上下文：群聊
+是否主人：否
+scopeId：g1024-G_OPENID_u1024-U_OPENID
+```
+
+### 主人配置（官方机器人必看）
+
+框架的 `permission: 'master'` 用 `e.user_id` 比对主人列表，而官方 `user_id` 是 `1024:U_OPENID` 这种形态，**填 QQ 号永远匹配不上**，表现为所有主人指令回「暂无权限」。
+本插件已把规则级 master 校验下沉到插件内，两种方式任选：
+
+1. **插件内（推荐）**：把 `/uid` 的「完整 user_id」或「去前缀 ID」加入 `agent.masters`（Web 配置中心 / 锅巴 panel / yaml 均可）。官方机器人下 `agent.masters` 同时用于审批通知与主人权限。
+2. **框架层**：把同样的值加入 Yunzai 的 `config/config.yaml` → `master`（按 `self_id` 分组的列表）。
+
+### Markdown 直发（默认开）
+
+官方适配器支持原生 Markdown 消息，插件在官方协议下**自动改为 Markdown 直发**，不再把回复渲染成图片（`agent.reply.mode` 在官方下被忽略）：
+
+- 长回复按 `agent.qqOfficial.markdown.maxChars`（默认 3500）按行分片发送，代码块会补闭合围栏；
+- 平台拒绝 markdown 时**自动降级为纯文本**（剥掉 md 标记），不会丢消息；
+- 需要官方模板消息时填 `agent.qqOfficial.markdown.templateId`（后台申请）。
+
+```yaml
+qqOfficial:
+  markdown:
+    enable: true      # 官方协议下 Markdown 直发（不渲染图片）
+    maxChars: 3500    # 单条上限（超出分片；官方约 4000）
+    templateId: ""    # 可选：官方 Markdown 模板 ID
+```
+
+### 按钮卡片（keyboard）与 `send_keyboard` 工具
+
+官方机器人支持 inline keyboard。开启 `agent.qqOfficial.keyboard.enable`（默认开）后，模型可调用 `send_keyboard` 发「Markdown 正文 + 按钮」卡片：
+
+- 最多 **5 行 × 每行 5 个**按钮；单轮最多 **3 张**卡片；
+- 按钮三类：`callback`（点击后把文本当作该用户发言发回，常写插件命令，如 `#确认 12`）、`link`（打开网址）、`input`（填输入框）；
+- **回调按钮默认只有触发者本人可点**（防他人代点高危命令）；需要所有人可点时显式传 `public: true`，链接按钮不受限；
+- 卡片在**本轮最终回复之后**投递，保证「进度 → 正文 → 卡片」的顺序；发送失败不影响对话终态。
+
+模型侧调用示例（工具参数）：
+
+```json
+{
+  "text": "### 下一步\n请选择要执行的操作",
+  "keyboard": [
+    [{ "text": "继续", "callback": "#ai 继续" }, { "text": "看文档", "link": "https://example.com" }],
+    [{ "text": "输入自定义指令", "input": "#ai ", "send": false }]
+  ]
+}
+```
+
+### 官方模式下默认静音进度
+
+官方机器人主动推送有频控/需权限，因此 `agent.qqOfficial.progress`、`agent.qqOfficial.narrate` **默认关**（不发「思考中…」与中途播报）。需要时打开：
+
+```yaml
+qqOfficial:
+  progress: true   # 思考中…等进度
+  narrate: true    # 中途播报
+```
+
+### 常见问题
+
+- **按 QQ 号配白名单/主人不生效**：官方 openid ≠ QQ 号，请用 `/uid`、`/groupid` 的输出配置。
+- **频道里没有被 @ 到**：频道不支持 OneBot 式 `segment.at`，官方机器人下已自动跳过 @（引用/正文仍正常）。
+- **回复偶尔只发出一条**：官方「被动回复」窗口有限（约 5 分钟/条数限制），本插件已在官方模式默认关掉进度与播报来减少消息条数。
+- **按钮点了没反应**：确认按钮是 `callback` 且当前协议为官方；回调走的是「把文本当用户消息」的通道，需要对应命令/触发词存在。
+- **Miao-Yunzai 等非 TRSS 框架**：`segment.markdown/button` 不存在 → 插件自动退回纯文本/图片模式，不会报错。
+
+---
+
 ## ⚠️ 安全声明
 
 本插件提供**终端（shell）执行能力**，命令跑在 **E2B 沙箱**（Firecracker microVM）里：
@@ -287,11 +392,17 @@ agent:
 | `stream` | `false` | 逐字流式输出（依赖适配器、不稳，默认关） |
 | `progress` | `true` | 工具调用时推送节流进度消息（消除"干等"，默认开） |
 | `progressRecall` | `3` | 进度消息多少秒后自动撤回（适配器不支持则忽略） |
-| `reply.mode` | `image` | 回复渲染：`image`（markdown→浅色图片，默认）/ `text`（纯文本） |
+| `reply.mode` | `image` | 回复渲染：`image`（markdown→浅色图片，默认）/ `text`（纯文本）。**QQ 官方机器人下自动走 Markdown 直发，本项被忽略** |
 | `reply.atSender` | `true` | 群聊回复时艾特发言人（私聊不艾特） |
 | `reply.quote` | `true` | 群聊回复时引用触发消息（私聊不引用）；人多时便于定位回复对象，可与 `atSender` 同开 |
 | `reply.narrate` | `true` | 中途播报：模型调工具时附带的思路/进展文本自动转发给用户（参考 OpenClaw） |
 | `reply.renderScale` | `3` | 回复图片渲染倍率（deviceScaleFactor，3=超清；越大越清晰但越耗内存/体积） |
+| `qqOfficial.markdown.enable` | `true` | QQ 官方机器人下 Markdown 直发（不渲染图片）；平台拒绝自动降级纯文本。OneBot 不受影响 |
+| `qqOfficial.markdown.maxChars` | `3500` | 单条 Markdown 上限（超出按行分片；官方约 4000） |
+| `qqOfficial.markdown.templateId` | 空 | 官方后台申请的 Markdown 模板 ID（填了走模板消息） |
+| `qqOfficial.keyboard.enable` | `true` | 注册 `send_keyboard` 工具（Markdown + inline keyboard，≤5×5，单轮 ≤3 张） |
+| `qqOfficial.progress` | `false` | 官方协议下是否发「思考中…」等进度（默认关，官方主动推送有频控） |
+| `qqOfficial.narrate` | `false` | 官方协议下是否中途播报（默认关） |
 | `thinking` | 空 | 思考模式（手动），provider 原生形状：`{ type: "enabled", budget_tokens: 16000 }`（`type` 可为 `enabled`/`disabled`，留空=不开启；`budget_tokens` 上限统一到 **128000**，各协议按同一 clamp）。锅巴面板用「开启深度思考 + 思考预算」两个控件读写同一字段 |
 | `thinkingAuto` | 关 | 思考自动决策：`{ enable, classifier, model, timeoutMs, maxBudget, budgets:{low,medium,high}, style }`。判档方式 `classifier`：`auto`=规则不确定时用小模型判（省调用）/`always`=总是小模型/`off`=纯规则/`jev`=由 Jev 判档（需开启 Jev）；小模型带超时、缓存，失败自动回退规则，不阻塞对话。档位→厂商原生字段（MiMo/Kimi/GLM/豆包→`thinking`、DeepSeek→`thinking`+`reasoning_effort`、Qwen→`enable_thinking`+`thinking_budget`、MiniMax→`adaptive`、Anthropic→`budget_tokens`、o/GPT-5→`reasoning_effort`、Gemini→`thinking_level`）。模型级 `thinking` 显式覆盖仍优先。**能力自适应**：能力表没明确表态的（新）型号默认乐观启用思考——厂商若拒绝思考字段，请求层自动剥离重试一次并记忆（之后自动判为不支持，`[chat]` 日志随之转 off，无需重启）；明确判为不支持的模型（如 gpt-4o）启动时有 `[thinking]` 警告，可设 `agent.media.caps.thinking=true` 强制 |
 | `memoryLimits` | 空 | 声明式记忆字符上限，如 `{ memory: 2200, user: 1375 }` |
@@ -679,6 +790,12 @@ tts:
 | `#聊天列表` | 查看所有对话（图片） |
 | `#进入聊天 +id` | 切换对话 |
 | `#new` | 新建对话 |
+
+### 协议排障（QQ 官方机器人）
+| 指令 | 说明 |
+| --- | --- |
+| `/uid` / `#uid` | 打印发言人 ID（完整/去前缀）、适配器、上下文、scopeId、是否主人——官方机器人排障必备 |
+| `/groupid` / `#groupid` | 打印当前群 ID（完整/去前缀）；频道拆 guild/channel；私聊说明无群聊 ID |
 
 ### 人设
 | 指令 | 说明 |

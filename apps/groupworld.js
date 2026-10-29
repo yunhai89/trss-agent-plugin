@@ -22,6 +22,8 @@ import { embed } from '../model/llm/embed.js'
 import { buildEmbed } from '../model/llm/embed-wiring.js'
 import { normalizeYunzaiEvent, collectSelfIds } from '../model/humanize/message-normalizer.js'
 import { GroupWorldService } from '../model/groupworld/index.js'
+import { stripSelfPrefix } from '../model/qqofficial/index.js'
+import { installMasterGate } from '../model/qqofficial/guard.js'
 
 let _gw = null
 let _gwFailed = null
@@ -226,12 +228,15 @@ export class GroupWorld extends plugin {
         { reg: '^#删除我的群聊画像$', fnc: 'gwDelete' },
         { reg: '^#(?:关闭|开启)我的群聊建模$', fnc: 'gwOptOut' },
         // 主人指令
-        { reg: '^#群世界状态(?:\\s+(\\d+))?$', fnc: 'gwStatus', permission: 'master' },
-        { reg: '^#群世界清理\\s+(\\d+)$', fnc: 'gwPurge', permission: 'master' },
+        // 群标识不再要求纯数字：QQ 官方机器人是 openid（`<appid>:<group_openid>` / 频道 `qg_g-c`）
+        { reg: '^#群世界状态(?:\\s+(\\S+))?$', fnc: 'gwStatus', permission: 'master' },
+        { reg: '^#群世界清理\\s+(\\S+)$', fnc: 'gwPurge', permission: 'master' },
         // 旁听 catch-all（最后）
         { reg: '^[\\s\\S]*$', fnc: 'onAmbient', log: false },
       ],
     })
+    // QQ 官方机器人：规则级 permission:master 改为插件内判定（openid 不是 QQ 号）
+    installMasterGate(this)
     // 定时任务：小时增量分析 / 每日维护 / 每周小圈子
     // D19 热加载：analysis.schedule 不再在构造期固化进 task cron（此前改后必须重启）。
     // 改为固定「每分钟」触发，_hourlyTick 每次按**当前配置**的 5 字段 cron 判断是否命中，
@@ -407,7 +412,15 @@ export class GroupWorld extends plugin {
     const e = this.e
     let gw; try { gw = await getGroupWorld() } catch (err) { return e.reply(`群聊小世界未就绪：${err?.message || err}`, true) }
     const c = cfgNow()
-    const gid = e.msg.match(/\d+/)?.[0] || (c.groups[0] ? String(c.groups[0]) : null)
+    // 群标识：显式参数（任意非空白 token）> 当前群 > 白名单首个。
+    // 官方机器人 group_id 含冒号，不能再用 \d+；比较时同时认「完整 ID」与「去前缀 ID」。
+    const token = String(e.msg || '').match(/^#群世界状态(?:\s+(\S+))?$/)?.[1] || ''
+    const rawToken = token ? stripSelfPrefix(token, e) : ''
+    const matchGroup = (id) => {
+      const list = Array.isArray(c.groups) ? c.groups.map(String) : []
+      return list.find((x) => x === token || stripSelfPrefix(x, e) === rawToken) || (token || (e.group_id ? String(e.group_id) : ''))
+    }
+    const gid = token ? matchGroup(token) : (e.group_id ? String(e.group_id) : (c.groups[0] ? String(c.groups[0]) : null))
     const lines = [
       `群聊小世界：${c.enabled ? '✅已开启' : '❌未开启'}（online=${c.online === true}）`,
       `白名单群：${(c.groups || []).join('、') || '(空)'}`,
@@ -428,8 +441,12 @@ export class GroupWorld extends plugin {
   async gwPurge() {
     const e = this.e
     let gw; try { gw = await getGroupWorld() } catch (err) { return e.reply(`群聊小世界未就绪：${err?.message || err}`, true) }
-    const gid = e.msg.match(/\d+/)?.[0]
-    if (!gid) return e.reply('用法：#群世界清理 <群号>', true)
+    // 官方机器人群标识是 openid（含冒号），按 token 解析；兼容「完整 ID」与「去前缀 ID」
+    const token = String(e.msg || '').match(/^#群世界清理\s+(\S+)$/)?.[1] || ''
+    if (!token) return e.reply('用法：#群世界清理 <群号/群 ID>（官方机器人为 openid，可先用 /groupid 查看）', true)
+    const c = cfgNow()
+    const rawToken = stripSelfPrefix(token, e)
+    const gid = (Array.isArray(c.groups) ? c.groups.map(String) : []).find((x) => x === token || stripSelfPrefix(x, e) === rawToken) || token
     const okPurge = await gw.purgeGroup(gid, { keepMessages: false })
     // M-058：未就绪（null）/写库失败（false）时不再回「已清理」
     if (!okPurge) return e.reply('群聊小世界数据层未就绪或清理失败，本次清理未生效，请稍后重试。', true)

@@ -240,7 +240,7 @@ export function supportGuoba() {
         { field: 'agent.privateChat', label: '私聊触发对话', bottomHelpMessage: '默认关（私聊不响应，仅群内 @/命令触发）；开启后私聊任何消息直接触发，独立会话与记忆', component: 'Switch' },
         { field: 'agent.isolation.enable', label: '多用户数据隔离', bottomHelpMessage: '默认开：每个群每个用户完全独立（会话/长期记忆/召回/群历史）；关=同群共享（群体型 bot）。跨群始终隔离；私聊按用户', component: 'Switch' },
         { field: 'agent.chatPermission', label: '#ai 命令权限', component: 'Select', componentProps: { options: OPT.permission } },
-        { field: 'agent.masters', label: '接收审批通知的 master QQ', bottomHelpMessage: '每行一个 QQ 号', component: 'InputTextArea', componentProps: { placeholder: '每行一个 QQ 号' } },
+        { field: 'agent.masters', label: '接收审批通知的 master ID', bottomHelpMessage: '每行一个：普通协议填 QQ 号；QQ 官方机器人填 /uid 打印的完整 user_id（openid，不是 QQ 号）', component: 'InputTextArea', componentProps: { placeholder: '每行一个 QQ 号' } },
         { field: 'agent.systemPrompt', label: '默认身份 systemPrompt', bottomHelpMessage: '留空用富默认身份；被人设覆盖时失效', component: 'InputTextArea' },
 
         // —— Web 管理面板（独立 HTTP 服务，脱离锅巴）——
@@ -615,6 +615,15 @@ export function supportGuoba() {
         { field: 'agent.selfState.enabled', label: '自我认知层总开关', bottomHelpMessage: '默认关；关=整层 no-op', component: 'Switch' },
         { field: 'agent.selfState.shadowMode', label: '影子模式', bottomHelpMessage: '计算入库但不影响发言（默认开，观察期）；false 才注入伪人 Planner/Replyer（需 humanize.enable=true）', component: 'Switch' },
         { field: 'agent.selfState.groups', label: '维护群号(每行一个)', bottomHelpMessage: '定时反思/维护的群白名单；留空=复用 groupWorld.groups → humanize.groups', component: 'InputTextArea', componentProps: { rows: 2, placeholder: '留空=复用上游白名单' } },
+
+        // —— QQ 官方机器人（QQBot / QQ 频道）——
+        { label: 'QQ 官方机器人（QQBot / 频道）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.qqOfficial.markdown.enable', label: 'Markdown 直发', bottomHelpMessage: '仅 QQ 官方机器人适配器生效：回复用原生 Markdown 消息（不再渲染成图片）；平台拒绝时自动降级纯文本。OneBot/ICQQ 不受影响', component: 'Switch' },
+        { field: 'agent.qqOfficial.markdown.maxChars', label: 'Markdown 单条上限(字符)', bottomHelpMessage: '超出按行分片发送（官方上限约 4000，默认 3500）', component: 'InputNumber', componentProps: { min: 500, max: 4000, step: 100 } },
+        { field: 'agent.qqOfficial.markdown.templateId', label: 'Markdown 模板 ID(可选)', bottomHelpMessage: 'QQ 后台申请的模板 ID；填了走模板消息（忽略正文直接渲染）', component: 'Input', componentProps: { placeholder: '留空=原始 Markdown' } },
+        { field: 'agent.qqOfficial.keyboard.enable', label: '按钮卡片工具(send_keyboard)', bottomHelpMessage: '注册 send_keyboard 工具：Markdown + inline keyboard（≤5 行 × ≤5 个；回调按钮默认仅触发者可点）。仅官方协议可发', component: 'Switch' },
+        { field: 'agent.qqOfficial.progress', label: '官方下发进度消息', bottomHelpMessage: '默认关：官方机器人主动推送有频控/需权限，关=不发「思考中…」；需要时打开', component: 'Switch' },
+        { field: 'agent.qqOfficial.narrate', label: '官方下中途播报', bottomHelpMessage: '默认关：同上，避免被动回复窗口外的消息被平台拒绝', component: 'Switch' },
 
         // —— 调试日志（devLog）——
         { label: '调试日志（devLog）', component: 'SOFT_GROUP_BEGIN' },

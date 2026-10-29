@@ -539,6 +539,13 @@
       judgeModel: "",
       judgeTimeoutMs: 300000
     },
+    // QQ 官方机器人（QQBot / 频道）：仅官方适配器生效；Markdown 直发 + 按钮卡片
+    qqOfficial: {
+      markdown: { enable: true, maxChars: 3500, templateId: "" },
+      keyboard: { enable: true },
+      progress: false,
+      narrate: false,
+    },
     sandbox: {
       mode: "off",
       apiKey: "",

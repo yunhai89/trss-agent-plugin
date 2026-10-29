@@ -174,6 +174,15 @@
         if (form.cacheControl === false) form.cacheControl = 'off'
         else if (form.cacheControl === true) form.cacheControl = 'explicit'
         else if (form.cacheControl == null) form.cacheControl = 'off'
+        if (!form.qqOfficial) form.qqOfficial = {}
+        if (!form.qqOfficial.markdown) form.qqOfficial.markdown = {}
+        if (form.qqOfficial.markdown.enable == null) form.qqOfficial.markdown.enable = true
+        if (form.qqOfficial.markdown.maxChars == null) form.qqOfficial.markdown.maxChars = 3500
+        if (form.qqOfficial.markdown.templateId == null) form.qqOfficial.markdown.templateId = ''
+        if (!form.qqOfficial.keyboard) form.qqOfficial.keyboard = {}
+        if (form.qqOfficial.keyboard.enable == null) form.qqOfficial.keyboard.enable = true
+        if (form.qqOfficial.progress == null) form.qqOfficial.progress = false
+        if (form.qqOfficial.narrate == null) form.qqOfficial.narrate = false
         if (!form.stagehand) form.stagehand = {}
         if (!form.stagehand.permission) form.stagehand.permission = 'master'
         if (form.stagehand.stealth == null) form.stagehand.stealth = true
@@ -641,6 +650,7 @@
         { id: 'reason', name: '推理参数', icon: 'zap', grad: 'var(--grad-sky)' },
         { id: 'task', name: '任务账本', icon: 'schedule', grad: 'var(--grad-vio)' },
         { id: 'reply', name: '进度 / 回复渲染', icon: 'send', grad: 'var(--grad-mint)' },
+        { id: 'qqofficial', name: 'QQ 官方机器人', icon: 'send', grad: 'var(--grad-sky)' },
         { id: 'memory', name: '记忆系统', icon: 'memory', grad: 'var(--grad-honey)' },
         { id: 'evolution', name: '自进化', icon: 'evolution', grad: 'var(--grad-rose)' },
         { id: 'security', name: '权限 / 安全 / 日志', icon: 'shield', grad: 'var(--grad)' },
@@ -1670,6 +1680,42 @@
             </cfg-row>
             <cfg-row name="中途播报" desc="调工具时顺带转发思路/进展">
               <v-switch v-model="form.reply.narrate"/>
+            </cfg-row>
+          </div></div>
+        </div>
+
+        <!-- ===== §1.3b QQ 官方机器人（QQBot / 频道）===== -->
+        <div :id="'cfg-qqofficial'" class="card cf-sec" :class="{open: open.qqofficial}">
+          <div class="cf-sh" @click="open.qqofficial = !open.qqofficial">
+            <span class="ct-ico" style="background:var(--grad-sky)"><v-icon name="send"/></span>
+            <div><div class="ct-t">QQ 官方机器人</div><div class="ct-s">仅 QQBot / QQ频道适配器生效：Markdown 直发（不再渲染图片）+ 按钮卡片</div></div>
+            <v-icon class="cf-arrow" name="chevron"/>
+          </div>
+          <div class="cf-body" v-show="open.qqofficial"><div class="cf-grid">
+            <div class="full" style="padding:10px 12px;border:1px dashed var(--line);border-radius:10px;margin-bottom:4px">
+              <div class="mut2" style="font-size:12px">
+                官方机器人的 <code>user_id</code>/<code>group_id</code> 是 openid（<code>&lt;appid&gt;:&lt;openid&gt;</code> / <code>qg_…</code>），不是 QQ 号/群号；
+                发 <code>/uid</code>、<code>/groupid</code> 可打印可直接粘贴的 ID（也认 <code>#uid</code>/<code>#groupid</code>）。
+                本卡配置仅在官方协议下生效，OneBot/ICQQ 不受影响。
+              </div>
+            </div>
+            <cfg-row name="Markdown 直发" desc="官方机器人下回复用原生 Markdown 消息（不渲染图片）；平台拒绝时自动降级纯文本">
+              <v-switch v-model="form.qqOfficial.markdown.enable"/>
+            </cfg-row>
+            <cfg-row name="Markdown 单条上限(字符)" desc="超出按行分片发送；官方上限约 4000">
+              <input type="number" class="inp" style="width:120px" min="500" max="4000" step="100" v-model.number="form.qqOfficial.markdown.maxChars">
+            </cfg-row>
+            <cfg-row name="Markdown 模板 ID(可选)" desc="后台申请的模板 ID；填了走模板消息（忽略正文直接渲染）">
+              <input class="inp mono" style="width:200px" v-model="form.qqOfficial.markdown.templateId" placeholder="留空=原始 Markdown">
+            </cfg-row>
+            <cfg-row name="按钮卡片工具" desc="注册 send_keyboard 工具（Markdown + inline keyboard；回调按钮默认仅触发者）">
+              <v-switch v-model="form.qqOfficial.keyboard.enable"/>
+            </cfg-row>
+            <cfg-row name="官方下发进度消息" desc="默认关：官方主动推送有频控/需权限，关=不发「思考中…」">
+              <v-switch v-model="form.qqOfficial.progress"/>
+            </cfg-row>
+            <cfg-row name="官方下中途播报" desc="默认关：同上，避免被动回复窗口外消息被拒">
+              <v-switch v-model="form.qqOfficial.narrate"/>
             </cfg-row>
           </div></div>
         </div>

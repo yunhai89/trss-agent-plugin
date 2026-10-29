@@ -81,12 +81,19 @@ router.get('/scopes', asyncHandler(async (req, res) => {
   if (fs.existsSync(dir)) {
     for (const name of fs.readdirSync(dir)) {
       try { if (!fs.statSync(`${dir}/${name}`).isDirectory()) continue } catch { continue }
-      const m = name.match(/^(?:u_(\d+)|g(\d+)_u(\d+)|g(\d+))$/)
-      if (!m) continue
+      // 目录名形态：u_<id> / g<gid>_u<uid> / g<gid>。
+      // id 既可能是 QQ 号（纯数字），也可能是 QQ 官方机器人 openid 的目录安全形态
+      // （safeScopePart：字母/数字/_/- 且净化后带短哈希），故不再要求纯数字。
+      if (!SCOPE_ID_RE.test(name)) continue
       let type, userId, groupId
-      if (m[1]) { type = 'private'; userId = m[1]; groupId = null }
-      else if (m[2]) { type = 'group'; groupId = m[2]; userId = m[3] }
-      else { type = 'group'; groupId = m[4]; userId = '' }
+      if (name.startsWith('u_')) {
+        type = 'private'; userId = name.slice(2); groupId = null
+      } else {
+        const body = name.slice(1) // 去掉前导 g
+        const idx = body.lastIndexOf('_u') // 用 lastIndexOf：群/用户片段自身可能含下划线
+        if (idx > 0) { type = 'group'; groupId = body.slice(0, idx); userId = body.slice(idx + 2) }
+        else { type = 'group'; groupId = body; userId = '' }
+      }
       const label = type === 'private'
         ? `私聊 · ${userId}`
         : (userId ? `群${groupId} · ${userId}` : `群${groupId} · 共享`)
@@ -120,7 +127,12 @@ router.get('/logs', asyncHandler(async (req, res) => {
  * scopeId 白名单校验：合法形态只有 u_<uid> / g<gid> / g<gid>_u<uid>（与 /scopes 的反解正则一致）。
  * store._scopeDir() 直接 path.join(dir, scopeId)，不校验就能用 `../../x` 越目录读写 MEMORY.md/USER.md。
  */
-const SCOPE_ID_RE = /^(?:u_\d+|g\d+(?:_u\d+)?)$/
+// 兼容两类目录名：
+//  - 旧/数字形态：u_123 / g456 / g456_u123
+//  - QQ 官方机器人净化形态：safeScopePart 把 openid 的 `:` 等换成 `-` 并追加 8 位哈希，
+//    例如 g1024-G-78babf7d_u1024-U-86bad587；片段只允许 [A-Za-z0-9_-]。
+// 仍禁止 `.` `/` 与 `..`，路径穿越由 store._scopeDir 前的这层校验兜住。
+const SCOPE_ID_RE = /^(?:u_[A-Za-z0-9_-]{1,120}|g[A-Za-z0-9_-]{1,120}(?:_u[A-Za-z0-9_-]{1,120})?)$/
 const scopeIdError = (scopeId) => (SCOPE_ID_RE.test(String(scopeId || '')) ? null : `scopeId 非法：${scopeId}`)
 
 // GET /api/memories?scopeId= —— 声明式记忆双文件

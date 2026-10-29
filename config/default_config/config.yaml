@@ -122,6 +122,18 @@ agent:
     quote: true             # 群聊回复时引用触发消息（私聊不引用）；人多时便于定位回复对象，可与 atSender 同开
     narrate: true           # 中途播报：模型调工具时附带的思路/进展文本自动转发给用户（OpenClaw 式）
     renderScale: 3          # 回复图片渲染倍率（deviceScaleFactor，3=超清默认；2=高清；1=普通；越大越清晰但越耗内存/体积）
+  # ── QQ 官方机器人（QQBot / QQ 频道适配器）──
+  # 官方协议与 OneBot 不同：消息 ID 是 openid（<self_id>:<openid> / qg_...）而不是 QQ 号/群号，
+  # 且支持原生 Markdown 消息与 inline keyboard 按钮。发 /uid、/groupid 可打印可直接粘贴的原始 ID。
+  qqOfficial:
+    markdown:
+      enable: true             # true=官方机器人回复直发 Markdown（不再渲染成图片）；平台拒绝时自动降级纯文本
+      maxChars: 3500           # 单条 markdown 内容上限（超出按行分片；官方上限约 4000）
+      templateId: ""           # 官方 Markdown 模板 ID（后台申请后填；填了走模板消息，忽略正文的直接渲染）
+    keyboard:
+      enable: true             # true=注册 send_keyboard 工具（Markdown 卡片 + 按钮，仅官方协议可用）
+    progress: false            # 官方机器人默认不发"思考中…"等进度消息（主动推送有频控/需权限）；需要时置 true
+    narrate: false             # 中途播报同上（默认关，避免被动回复窗口内多条消息被拒）
   memoryLimits:             # 声明式记忆字符上限 {memory:2200,user:1375}；留空=默认
   memory:
     enable: true            # 声明式记忆总开关（关则不注入 MEMORY.md/USER.md）

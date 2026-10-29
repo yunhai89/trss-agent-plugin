@@ -69,10 +69,17 @@ function fmtTime(ms) {
  * scope → 日志文件名。<群号>-<用户>-<会话id>-<创建时间>.log
  * 与 #上报错误 的 glob 前缀（<群号>-<用户>-<会话id>-*.log）保持一致。
  */
+/** 文件名安全片段：QQ 官方机器人的 ID 含 ':'（`<self_id>:<openid>`），Windows 下是非法文件名字符 */
+function fileSafe(v) {
+  const s = String(v ?? '').replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '')
+  return s.slice(0, 80)
+}
+
 export function devLogFilename({ gid, uid, convId, createdAt } = {}) {
-  const g = gid || 'private'
-  const u = uid || 'unknown'
-  const c = convId || '0'
+  // 数字 QQ 号/群号原样输出（历史文件名兼容）；官方机器人 openid 净化后拼入，避免 Windows 非法字符
+  const g = fileSafe(gid || 'private') || 'private'
+  const u = fileSafe(uid || 'unknown') || 'unknown'
+  const c = fileSafe(convId || '0') || '0'
   return `${g}-${u}-${c}-${fmtTime(createdAt)}.log`
 }
 

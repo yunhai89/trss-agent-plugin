@@ -5,6 +5,7 @@ import plugin from '../../../lib/plugins/plugin.js'
 import Config from '../utils/Config.js'
 import { buildHelpHtml } from '../model/agent/index.js'
 import { renderCardBuffer } from './render.js'
+import { installMasterGate } from '../model/qqofficial/guard.js'
 
 /** 帮助卡片渲染失败后的冷却：弱服务器渲染卡死时，冷却期内直接走文本，避免每次指令都等超时。 */
 let _helpCardCooldownUntil = 0
@@ -156,6 +157,8 @@ export class Help extends plugin {
         { reg: '^#agents状态$', fnc: 'status', permission: 'master' },
       ],
     })
+    // QQ 官方机器人：规则级 permission:master 改为插件内判定（openid 不是 QQ 号）
+    installMasterGate(this)
   }
 
   async help() {

@@ -9,6 +9,7 @@ import Config from '../utils/Config.js'
 import Log from '../utils/Log.js'
 import { startServer, stopServer } from '../model/web/server.js'
 import { handleAgentsLogin } from '../model/web/auth.js'
+import { installMasterGate } from '../model/qqofficial/guard.js'
 
 let _started = false
 let _watchedPort = null
@@ -44,6 +45,8 @@ export class WebAdmin extends plugin {
       priority: 0,
       rule: [{ reg: '^#agents登录$', fnc: 'login', permission: 'master' }],
     })
+    // QQ 官方机器人：规则级 permission:master 改为插件内判定（openid 不是 QQ 号）
+    installMasterGate(this)
     const cfg = Config.get().agent?.webApi || {}
     if (cfg.enable !== false && !_started) {
       _started = true

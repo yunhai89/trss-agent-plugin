@@ -77,6 +77,13 @@ import {
 import { VisionService, describeImages, resolveVisionBaseURL, resolveVisionRoute } from '../model/vision/index.js'
 import { getStickerManager } from '../model/sticker/manager.js'
 import { isStickerOnly, stripMarkers } from '../model/sticker/parser.js'
+import {
+  detectAdapter as detectQQAdapter, contextKind as qqContextKind, describeContext as describeQQContext,
+  rawUserId as qqRawUserId, rawGroupId as qqRawGroupId, safeScopePart,
+  buildMarkdownMessage, splitMarkdown, markdownToPlain, hasMarkdownSegment,
+} from '../model/qqofficial/index.js'
+import { makeSendKeyboardTool, flushPendingCards } from '../model/qqofficial/tool.js'
+import { installMasterGate } from '../model/qqofficial/guard.js'
 import { redactSecrets, redactSafeCut } from '../model/agent/redact.js'
 import { randomUUID } from 'node:crypto'
 import devLog from '../utils/DevLog.js'
@@ -453,6 +460,21 @@ function migratePluginData() {
       } catch (e) { Log.warn('[migrate] 迁移失败', name, e?.message || e) }
     }
   } catch { /* noop */ }
+}
+
+/**
+ * 官方机器人适配器的失败形态：sendMsg 内部 catch 后返回 { message_id:[], data:[], error:[...] }，
+ * 不抛错也不算 retcode 失败。这里识别「error 非空且没有任何 message_id」= 发送失败，
+ * 由回复路径降级到纯文本（markdown 被平台拒绝时的兜底）。
+ */
+function apiRejected(ret) {
+  if (!ret || typeof ret !== 'object') return false
+  if (typeof ret.retcode === 'number' && ret.retcode !== 0) return true
+  if (Array.isArray(ret.error) && ret.error.length) {
+    const ids = Array.isArray(ret.message_id) ? ret.message_id.length : 0
+    if (!ids) return true
+  }
+  return false
 }
 
 // 配置数值判空：null/''/undefined → null；0 是合法值，必须保留（不要用 Number(x) 判存在：
@@ -937,6 +959,13 @@ async function _buildRuntime(scope) {
       const { makeSendStickerTool } = await import('../model/sticker/send-tool.js')
       tools.register(makeSendStickerTool(getStickerManager()))
     } catch (e) { Log.warn('[sticker] send_sticker 工具注册失败', e?.message || e) }
+  }
+
+  // send_keyboard 工具：QQ 官方机器人 inline keyboard（Markdown 正文 + 按钮）
+  // 与 diagram 同约定：工具只排队，由最终回复后的 flush 统一投递（顺序/失败不污染终态）。
+  // 是否可用在执行期按 ctx.e 判定（多账号部署时同一运行时可能同时服务 OneBot 与官方机器人）。
+  if (cfg.qqOfficial?.keyboard?.enable !== false) {
+    tools.register(makeSendKeyboardTool({ logger: Log.tag('qqofficial') }))
   }
 
   // 技能热加载工具：安装 SkillHub 技能后免重启即可用
@@ -1652,24 +1681,52 @@ function ownsScheduleRecord(rec, ctx) {
   return owner === SHARED_SCOPE_PREFIX && isLegacySharedRecord(rec, ctx.groupId)
 }
 
+/**
+ * 主人判定：优先框架 e.isMaster；QQ 官方机器人下 e.user_id 是 openid（不是 QQ 号），
+ * 框架 master 列表通常配的是 QQ 号→ 永远匹配不上，因此额外按 agent.masters 兜底
+ * （支持完整 `<self_id>:<openid>` 与去前缀 openid 两种写法；/uid 会打印可直接粘贴的值）。
+ * 仅在官方适配器下兜底，避免改变 OneBot 场景 masters 的既有语义（只收审批通知）。
+ */
+function isCtxMaster(e, qqAdapter, cfg) {
+  if (e?.isMaster) return true
+  if (!qqAdapter?.official) return false
+  const masters = Array.isArray(cfg?.masters) ? cfg.masters.map((m) => String(m).trim()).filter(Boolean) : []
+  if (!masters.length) return false
+  const full = String(e?.user_id ?? '')
+  const raw = qqRawUserId(e)
+  return (full && masters.includes(full)) || (raw && masters.includes(raw))
+}
+
 function ctxOf(e) {
-  const isMaster = !!e.isMaster
+  const cfgNow = Config.get().agent || {}
+  const qqAdapter = detectQQAdapter(e)
+  const userId = String(e.user_id ?? '')
+  const isMaster = isCtxMaster(e, qqAdapter, cfgNow)
   let role = 'member'
   if (e.member?.is_owner) role = 'owner'
   else if (e.member?.is_admin) role = 'admin'
-  const userId = String(e.user_id)
   const groupId = e.group_id ? String(e.group_id) : null
   const isGroup = !!e.isGroup
   // —— 数据隔离 scope 身份 ——
   // isolation=true（默认）: 每(群,用户)独立；false: 同群共享（群体型 bot）；跨群始终隔离；私聊始终按用户。
   // userId=真实用户(个人功能/get_chat_history 自过滤/回复@)；scopeUserId=session/recall 键；scopeId=MemoryStore 文件目录。
-  const isolation = Config.get().agent?.isolation?.enable !== false
+  // QQ 官方机器人的 ID 是 `<self_id>:<openid>` / `qg_<...>`，scopeId 会被当目录名：
+  // 这里统一经 safeScopePart（数字 ID 原样=旧目录兼容，官方 ID 净化+短哈希=Windows 也安全）。
+  const isolation = cfgNow.isolation?.enable !== false
   const sharedGroup = !!(isGroup && groupId && !isolation)
   const scopeUserId = sharedGroup ? sharedScopeId(groupId) : userId
   const scopeId = !isGroup
-    ? `u_${userId}`
-    : (isolation ? `g${groupId}_u${userId}` : `g${groupId}`)
+    ? `u_${safeScopePart(userId)}`
+    : (isolation ? `g${safeScopePart(groupId)}_u${safeScopePart(userId)}` : `g${safeScopePart(groupId)}`)
   return {
+    // QQ 官方机器人（QQBot/QQGuild 适配器）：markdown/keyboard 能力、ID 形态与 OneBot 不同
+    official: qqAdapter.official,
+    adapterKind: qqAdapter.kind,
+    adapterId: qqAdapter.adapterId,
+    contextKind: qqContextKind(e, qqAdapter),
+    rawUserId: qqRawUserId(e),
+    rawGroupId: qqRawGroupId(e),
+    selfId: String(e.self_id || e.selfId || ''),
     role,
     isMaster,
     userId,
@@ -1740,7 +1797,7 @@ function ctxFromInfo(info) {
   const isolation = cfg.isolation?.enable !== false
   const sharedGroup = !!(isGroup && groupId && !isolation)
   const scopeUserId = sharedGroup ? sharedScopeId(groupId) : userId
-  const scopeId = !isGroup ? `u_${userId}` : (isolation ? `g${groupId}_u${userId}` : `g${groupId}`)
+  const scopeId = !isGroup ? `u_${safeScopePart(userId)}` : (isolation ? `g${safeScopePart(groupId)}_u${safeScopePart(userId)}` : `g${safeScopePart(groupId)}`)
   // 创建者身份：定时任务 fire 时无用户事件，但任务创建者的主人身份必须保留——
   // 否则群管类工具（如 send_group_notice）会被判为 member 而 rejected_by_policy
   //（生产事故：master 建的群公告任务被误拒 + AI 反复重试）。
@@ -1937,6 +1994,12 @@ export class Chat extends plugin {
         { reg: '^#重置人设$', fnc: 'personaReset' },
         { reg: '^#人设$', fnc: 'personaList' },
         { reg: '^#人设\\s+(.+)', fnc: 'personaSwitch' },
+        // —— QQ 官方机器人协议排障：ID 与上下文 ——
+        // 官方机器人返回的是 openid（<self_id>:<openid> / qg_...），不是 QQ 号/群号；
+        // 这两个指令打印「可直接粘贴进配置」的原始 ID，避免按 QQ 号配置后静默不生效。
+        // TRSS 默认把行首 `/` 转成 `#`（config.bot["/→#"]=true），两种写法都要认
+        { reg: '^\\s*[#/]\\s*uid\\s*$', fnc: 'showUid' },
+        { reg: '^\\s*[#/]\\s*groupid\\s*$', fnc: 'showGroupId' },
         // —— 在线自进化：审阅 / 采纳 / 拒绝 / 回滚（主人）——
         { reg: '^#审阅进化$', fnc: 'reviewList', permission: 'master' },
         { reg: '^#采纳\\s+(.+)', fnc: 'reviewAdopt', permission: 'master' },
@@ -1952,6 +2015,9 @@ export class Chat extends plugin {
         { reg: '^[\\s\\S]*$', fnc: 'onTrigger', log: false },
       ],
     })
+    // QQ 官方机器人主人兜底：规则级 permission:'master' 依赖框架 e.isMaster（按 QQ 号匹配），
+    // openid 场景永远 false → 所有主人指令不可用。改为插件内判定（agent.masters 支持完整/去前缀 openid）。
+    installMasterGate(this)
     // 运行时装配完成后会自动恢复定时调度（见 getRuntime 的 .then）；此处只预热运行时并处理初始化失败提示。
     getRuntime()
       .catch((e) => { if (!_initErrLogged) { _initErrLogged = true; Log.error('agent 初始化失败（修复 config 后重启，或保存 config 触发热加载自动恢复）', e?.message || e) } })
@@ -2082,6 +2148,8 @@ export class Chat extends plugin {
     }
     const cfg = Config.get().agent || {}
     const ctx = ctxOf(this.e)
+    // QQ 官方机器人：send_keyboard 工具排队卡片，由本轮最终回复后统一投递
+    ctx.pendingCards = []
     // 会话指针读取须有错误边界（此前裸 await 抛出 → 整条消息无响应、控制台无 trace）
     try {
       ctx.conversationId = await rt.session.getActiveConversation(ctx.scopeUserId, ctx.groupId)
@@ -2109,7 +2177,13 @@ export class Chat extends plugin {
     const caps = detectCapabilities({ protocol, model: cfg.model, caps: cfg.media?.caps })
     const mediaCfg = cfg.media || {}
     ctx.miyoushe = { cookie: cfg.miyoushe?.cookie || '', defaultGid: cfg.miyoushe?.defaultGid || 2, maxImages: cfg.miyoushe?.maxImages ?? 9 }
-    ctx.replyMode = cfg.reply?.mode || 'image' // 供工具按回复模式分流发图（image 渲染进回复图 / text 合并转发）
+    // 供工具按回复模式分流发图：image=渲染进回复图 / text=合并转发 / markdown=QQ 官方机器人直发
+    ctx.replyMode = cfg.reply?.mode || 'image'
+    try {
+      const __qq = detectQQAdapter(this.e)
+      if (__qq.official && cfg.qqOfficial?.markdown?.enable !== false && hasMarkdownSegment()) ctx.replyMode = 'markdown'
+      ctx.official = __qq.official
+    } catch { /* noop */ }
     // 提醒服务：reminder_set 工具经此调 rt.schedule.add（绑定 fireReminder + selfId），到时间 fireReminder 主动发消息
     ctx.selfId = String(this.e.self_id || this.e.selfId || '')
     ctx.reminder = {
@@ -2322,7 +2396,11 @@ export class Chat extends plugin {
     }
 
     // [chat] 汇总行移到 run 之后打印：需带上本轮"思考自动决策"结果（档位/预算/判档来源）
-    const wantProgress = cfg.progress !== false
+    // 官方机器人：主动推送有频控/需权限，默认不发进度（qqOfficial.progress=true 可开）
+    let wantProgress = cfg.progress !== false
+    try {
+      if (detectQQAdapter(this.e).official && cfg.qqOfficial?.progress !== true) wantProgress = false
+    } catch { /* noop */ }
     // 逐字流式默认关（适配器差异大）；进度反馈默认开。
     // stream=true + 文本回复模式时，onDelta 增量按节流逐字发送；流式全文与最终正文一致则跳过重复整段回复。
     const wantStream = cfg.stream === true
@@ -2347,8 +2425,13 @@ export class Chat extends plugin {
     // 同一 run 内进度与旁白共享节流闸：总条数与频率受限，降低短时间连发撞 QQ 限流概率。
     const progressGate = makeProgressGate({ minIntervalMs: 1800, maxMsgs: 6 })
     const rs = makeReplyStream(this.e, { progress: wantProgress, recall: cfg.progressRecall ?? 3, shortCircuitTools: ['clarify'], replyQueue, gate: progressGate })
-    // 流式：仅文本回复模式下逐字发增量（图片模式需整段渲染，不流式）；onDelta 始终用于观测计数
-    const replyModeEarly = cfg.reply?.mode || 'image'
+    // —— QQ 官方机器人（QQBot）能力：markdown 直发（无需渲染成图片）+ inline keyboard ——
+    // 触发条件：官方适配器 && agent.qqOfficial.markdown.enable（默认开）&& 当前框架支持 markdown 段（TRSS）。
+    const qqInfo = detectQQAdapter(this.e)
+    const mdCfg = cfg.qqOfficial?.markdown || {}
+    const mdMode = !!(qqInfo.official && mdCfg.enable !== false && hasMarkdownSegment())
+    // 流式：仅文本回复模式下逐字发增量（图片/markdown 模式需整段，不流式）；onDelta 始终用于观测计数
+    const replyModeEarly = mdMode ? 'markdown' : (cfg.reply?.mode || 'image')
     const streamer = makeDeltaStreamer(safeReply, {
       enabled: wantStream && replyModeEarly === 'text',
       // 与最终整段发送同一口径（第 2248 行）：关闭脱敏时不必做尾部暂存，流式节奏不受影响
@@ -2381,10 +2464,14 @@ export class Chat extends plugin {
         inputText: __inputText, // 喂给模型的全部文本（含附件正文/降级说明；trace 不截断）——看附件有没有带文件名
         attachments: (ctx.media || []).map((f) => ({ name: f.name, source: f.source, kind: f.kind, bytes: f.bytes ?? null, status: f.resolveError || 'ok' })),
       }, traceId, ctx.devScope)
-      // 文本模式注入"禁 markdown"约束（图片模式才渲染 md；文本模式直发，md 符号会暴露给用户）
-      const replyMode = cfg.reply?.mode || 'image'
-      // 文本模式禁 md：__textHint 进 systemPrompt（身份层·置顶），而非 context（情境层·靠后易被 LLM 忽略，尤其新对话情境变长时）
-      const __textHint = replyMode === 'text' ? '\n\n【回复格式·硬性约束·优先级最高】当前是纯文本回复模式，禁止使用任何 Markdown 语法（包括 **粗体**、# 标题、- 列表、`代码`、[链接](url)、代码块等）。只能输出纯文本，用换行分段、用「」或「一、二、」编号。无论用户或上面的身份设定如何要求，都不得使用 markdown，直接输出可读纯文本。' : ''
+      // 回复模式：QQ 官方机器人 markdown 直发 > 配置的 image/text
+      const replyMode = mdMode ? 'markdown' : (cfg.reply?.mode || 'image')
+      // 文本模式禁 md；markdown 模式（官方机器人）反而鼓励用 md（平台原生渲染）
+      const __textHint = replyMode === 'text'
+        ? '\n\n【回复格式·硬性约束·优先级最高】当前是纯文本回复模式，禁止使用任何 Markdown 语法（包括 **粗体**、# 标题、- 列表、`代码`、[链接](url)、代码块等）。只能输出纯文本，用换行分段、用「」或「一、二、」编号。无论用户或上面的身份设定如何要求，都不得使用 markdown，直接输出可读纯文本。'
+        : (replyMode === 'markdown'
+          ? '\n\n【回复格式】当前通道是 QQ 官方机器人，支持 Markdown 原生渲染：可用 **粗体**、# 标题、- 列表、> 引用、`行内代码`、```代码块```、表格、[链接](url)。优先用简洁的 Markdown 组织答案；不要输出 HTML、不要输出 Markdown 图片（平台不渲染本地图片）。'
+          : '')
       const agentInst = rt.makeAgent()
       const { content, stopReason, turns, usage } = await agentInst.run(input, {
         ctx, systemPrompt: systemPrompt ? systemPrompt + __textHint : __textHint.trim(), context,
@@ -2402,7 +2489,8 @@ export class Chat extends plugin {
         // 经受控发送队列（P0-5）：rejection 记日志，不产生 unhandledRejection，也不阻塞 Agent。
         onAssistant: (res) => {
           // 旁白与工具进度共享节流闸：短时间内的多条旁白只发第一条，防刷屏 / 撞限流
-          if (res?.toolCalls?.length && res?.content && cfg.reply?.narrate !== false && progressGate.allow()) {
+          const narrateOn = cfg.reply?.narrate !== false && !(ctx.official && cfg.qqOfficial?.narrate !== true)
+          if (res?.toolCalls?.length && res?.content && narrateOn && progressGate.allow()) {
             const narr = stripMarkers(maybeRedact(res.content)).replace(/\s+$/, '')
             if (narr) safeReply(narr)
           }
@@ -2452,13 +2540,60 @@ export class Chat extends plugin {
       // @ 仍由 atSender 独立控制，二者可同时生效。只作用于最终正文/图片，不引用进度与旁白。
       const quoteReply = ctx.isGroup && cfg.reply?.quote !== false
       // 群聊回复艾特发言人（agent.reply.atSender，默认开；私聊不艾特）
-      const atSender = (ctx.isGroup && cfg.reply?.atSender !== false && ctx.userId && typeof segment !== 'undefined') ? segment.at(ctx.userId) : null
+      // 频道（guild）不支持普通 at 段，跳过；官方群聊把 at 折进 markdown 内容（适配器转换）
+      const atSender = (ctx.isGroup && cfg.reply?.atSender !== false && ctx.userId && qqInfo.kind !== 'guild' && typeof segment !== 'undefined' && typeof segment.at === 'function') ? segment.at(ctx.userId) : null
       // 回复渲染：默认图片（markdown→图片，失败退文本）；replyMode 已在上方 run 前计算
       // 发送经受控队列；delivered 依据队列 outcome（适配器返回值/retcode/rejection），不再"执行过 await 即成功"。
       let delivered = streamedFinal // 流式已逐字送达 → 不再重复发整段正文
       let finalOutcome = null
+      let mdHandled = false // markdown 分支已自行处理（成功或已降级），不再走下方通用文本兜底
       devLog('send_start', { mode: replyMode, replyLen: (body || '').length, stopReason, turns, streamed: streamedFinal }, traceId, ctx.devScope)
-      if (replyMode === 'image' && body) {
+      if (replyMode === 'markdown' && body) {
+        // QQ 官方机器人 markdown 直发：按上限分片（长回答不留半截），首片带 @/引用。
+        // 失败兜底：适配器返回 error 且无 message_id（平台拒绝 markdown / 模板未申请）→ 转纯文本重发一次。
+        mdHandled = true
+        try {
+          // 剥表情包标记（与文本模式同源）；否则 [sticker:x] 字面量会进 markdown 正文
+          let mdBody = body
+          try { mdBody = stripMarkers(rt.sticker ? rt.sticker.applyText(body, new Map()) : body) } catch { mdBody = stripMarkers(body) }
+          const chunks = splitMarkdown(mdBody, Number(mdCfg.maxChars) || undefined)
+          // 异常停止原因并入最后一片（markdown 模式不单独补发，避免多一条消息）
+          if (suffix && chunks.length) chunks[chunks.length - 1] = `${chunks[chunks.length - 1]}\n\n${suffix}`
+          let mdOk = chunks.length > 0
+          for (let i = 0; i < chunks.length && mdOk; i++) {
+            const msg = buildMarkdownMessage(this.e, chunks[i], {
+              atSender: i === 0 ? atSender : null,
+              ownerId: ctx.userId,
+            })
+            if (!msg) { mdOk = false; break }
+            const out = await replyQueue.enqueue({ msg, quote: i === 0 ? quoteReply : false }, { tag: 'final' })
+            if (!out.ok || apiRejected(out.ret)) { mdOk = false; break }
+            // 分片间让适配器串行队列自然排队；最终 outcome 取最后一片（失败时整体按失败处理）
+            finalOutcome = { ok: true, markdown: true, chunks: chunks.length, ret: out.ret }
+          }
+          if (mdOk) {
+            delivered = true
+          } else {
+            // markdown 被拒 → 纯文本降级（保留可读性：剥掉 md 标记）
+            Log.warn('[qqofficial] markdown 发送失败，降级纯文本', JSON.stringify(finalOutcome?.ret || {}).slice(0, 300))
+            const plain = `${markdownToPlain(body)}${suffix ? `\n${suffix}` : ''}`
+            finalOutcome = await replyQueue.enqueue({ msg: atSender ? [atSender, plain] : plain, quote: quoteReply }, { tag: 'final' })
+            delivered = !!finalOutcome.ok && !apiRejected(finalOutcome.ret)
+          }
+          // 表情包：官方 markdown 模式下作为独立图片消息追加（适配器会转 markdown 图片；失败忽略）
+          if (delivered && acceptMap && acceptMap.size && typeof segment !== 'undefined' && typeof segment.image === 'function') {
+            for (const abs of acceptMap.values()) {
+              const st = await safeReply(segment.image(abs))
+              if (!st.ok) Log.warn('[qqofficial] 表情包发送失败（已忽略）', st.error)
+            }
+            try { rt.sticker?.noteSent?.([...acceptMap.keys()]) } catch { /* noop */ }
+          }
+          if (delivered && suffix) { /* 已并入最后分片/降级文本，无需另发 */ }
+        } catch (e) {
+          Log.warn('[qqofficial] markdown 回复失败，回退文本', e?.message || e)
+          mdHandled = false // 让下方通用文本兜底接管
+        }
+      } else if (replyMode === 'image' && body) {
         try {
           // 拆 sticker：正文始终剥除标记（未通过的也剥，防 [sticker:x] 字面量漏进图片——
           // 文本模式本就如此；此前图片模式仅在 acceptMap 非空时才剥，被频率闸挡下时标记会漏进图里）；
@@ -2521,7 +2656,7 @@ export class Chat extends plugin {
           }
         } catch (e) { Log.warn('[render] 回复图片渲染失败，回退文本', e?.message || e) }
       }
-      if (!delivered) {
+      if (!delivered && !mdHandled) {
         // 文本模式（或图片渲染失败）：正文先发（剥除所有表情包标记，不在正文内联）；
         // 表情包作为主内容之后的【独立消息】依次发送（不与文字混排在同一条）。
         // 安全网：无论 acceptMap 是否存在，都再 stripMarkers 一次（半/全角变体、超长名、门控异常），
@@ -2544,11 +2679,17 @@ export class Chat extends plugin {
           }
           rt.sticker?.noteSent?.([...acceptMap.keys()])
         }
-      } else if (suffix) {
+      } else if (suffix && !mdHandled) {
         await safeReply(suffix) // 图片已发，异常停止提示另发一条附注
       }
       // diagram 示意图：最终回复送达后发送（文本/图片两种回复模式都覆盖；取消路径不会执行到此处）
       await sendPendingDiagrams()
+      // QQ 官方机器人 keyboard 卡片：send_keyboard 工具排队的卡片在最终回复后投递（顺序稳定）
+      if (Array.isArray(ctx.pendingCards) && ctx.pendingCards.length) {
+        try {
+          await flushPendingCards({ ctx, send: (msg, quote) => safeReply(msg, quote), logger: Log.tag('qqofficial') })
+        } catch (e) { Log.warn('[qqofficial] 卡片投递失败', e?.message || e) }
+      }
       // —— 用量统计（KV 日聚合，Web 端 overview 趋势主数据源）：对话完成即记（含 reply_failed；
       //    run_error/cancelled 在外层 catch 记 errors）。normalizeUsage 跨协议归一 ——
       try {
@@ -3063,6 +3204,57 @@ export class Chat extends plugin {
     // 群聊反馈本身也可能失败：显式 catch 并落日志，不静默
     try { await this.e.reply(lines.join('\n')) } catch (e) { Log.error('[reportBug] 群聊反馈发送失败', e?.message || e) }
     return true
+  }
+
+  // —— QQ 官方机器人：ID / 上下文诊断 ——
+  /**
+   * /uid 返回发言人 ID（含完整与去前缀两种形态），用于 agent.masters、群白名单等配置。
+   * 官方机器人下 user_id 不是 QQ 号，按 QQ 号配置会静默不生效（权限/白名单全部落空）。
+   */
+  async showUid() {
+    const info = describeQQContext(this.e)
+    const lines = [
+      '【发言人 ID】',
+      `完整 user_id：${info.fullUserId || '(空)'}`,
+      `去前缀：${info.rawUserId || '(空)'}`,
+      `适配器：${info.adapterId || info.adapterName || '未知'}${info.official ? '（QQ 官方机器人）' : '（非官方协议）'}`,
+      `上下文：${info.contextLabel}`,
+      `是否主人：${isCtxMaster(this.e, detectQQAdapter(this.e), Config.get().agent || {}) ? '是' : '否'}`,
+      `scopeId：${info.scopeId}`,
+      '',
+      '配置位置：',
+      '· agent.masters（主人/审批通知，每行一个）：官方机器人请填上面的「完整 user_id」或「去前缀」值',
+      '· 群白名单（如 agent.groupWorld.groups）：请用 /groupid 给出的值',
+    ]
+    return this.e.reply(lines.join('\n'))
+  }
+
+  /** /groupid 返回当前群聊 ID（官方机器人下是 openid；频道会拆 guild/channel） */
+  async showGroupId() {
+    const info = describeQQContext(this.e)
+    if (!info.isGroup) {
+      return this.e.reply([
+        '【当前会话 ID】',
+        `这是${info.contextLabel}，没有群聊 ID。`,
+        `完整 user_id：${info.fullUserId || '(空)'}`,
+        `scopeId：${info.scopeId}`,
+        '（私聊会话按用户隔离；如需群信息请在群里发 /groupid）',
+      ].join('\n'))
+    }
+    const lines = [
+      '【群聊 ID】',
+      `完整 group_id：${info.fullGroupId || '(空)'}`,
+      `去前缀：${info.rawGroupId || '(空)'}`,
+      `适配器：${info.adapterId || info.adapterName || '未知'}${info.official ? '（QQ 官方机器人）' : '（非官方协议）'}`,
+      `上下文：${info.contextLabel}`,
+    ]
+    if (info.guildId) {
+      lines.push(`频道 guild_id：${info.guildId}`, `子频道 channel_id：${info.channelId}`)
+    }
+    lines.push('', '配置位置：')
+    lines.push('· 群白名单（agent.groupWorld.groups / humanize.groups / sticker.discoverGroups 等）：填上面的「完整 group_id」或「去前缀」值')
+    lines.push('· 官方机器人的群号不是 QQ 群号，直接用 QQ 群号填白名单不会命中')
+    return this.e.reply(lines.join('\n'))
   }
 
   // —— 模型切换 ——

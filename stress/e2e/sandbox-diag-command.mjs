@@ -43,7 +43,11 @@ console.log('\n[命令注册]')
   const rules = (chat.rule || []).map((r) => r.reg)
   const rule = (chat.rule || []).find((r) => r.fnc === 'sandboxDiag')
   ok(!!rule, 'rule 表里有 sandboxDiag')
-  eq(rule?.permission, 'master', '仅主人可用')
+  // 2026-10-29 QQ 官方机器人适配：规则级 master 改为插件内判定
+  // （框架 e.isMaster 按 QQ 号匹配，官方 openid 永远不命中 → 主人指令全不可用）。
+  // 契约变为：permission='all' + __masterGate 标记 + 入口 isOfficialMaster 复核。
+  eq(rule?.permission, 'all', '权限交插件内判定（原 master）')
+  eq(rule?.__masterGate, true, '规则带 masterGate 标记（入口复核主人身份）')
   ok(new RegExp(rule.reg).test('#沙箱诊断') && new RegExp(rule.reg).test('#沙箱诊断 预览') && new RegExp(rule.reg).test('#沙箱诊断 修复'), '正则可匹配三种用法')
   ok(!new RegExp(rule.reg).test('#沙箱诊断x'), '不会误匹配 #沙箱诊断x')
   ok(rules.length > 0, '其余规则未受影响')

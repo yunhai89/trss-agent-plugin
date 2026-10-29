@@ -25,6 +25,8 @@ import { makeEmbedder } from '../model/groupworld/embedding.js'
 import { createSearchManager, formatResults } from '../model/search/index.js'
 import { fetchReply } from '../model/media/collect.js'
 import * as H from '../model/humanize/index.js'
+import { installMasterGate } from '../model/qqofficial/guard.js'
+import { stripSelfPrefix } from '../model/qqofficial/index.js'
 
 let _humanize = null
 let _humanizeRt = null // 装配时使用的主运行时；Config 热重载后 getRuntime 会重建，据此判断是否需要重新装配
@@ -549,10 +551,13 @@ export class Humanize extends plugin {
         { reg: '^#伪人状态$', fnc: 'humanizeStatus', permission: 'master' },
         { reg: '^#伪人决策(?:\\s+(\\d+))?$', fnc: 'humanizeTrace', permission: 'master' },
         { reg: '^#伪人开关\\s+(on|off|开|关)$', fnc: 'humanizeToggle', permission: 'master' },
-        { reg: '^#伪人记忆(?:\\s+(\\d+))?$', fnc: 'humanizeMemory', permission: 'master' },
+        // 群标识不再要求纯数字：QQ 官方机器人是 openid（`<appid>:<group_openid>`）
+        { reg: '^#伪人记忆(?:\\s+(\\S+))?$', fnc: 'humanizeMemory', permission: 'master' },
         { reg: '^[\\s\\S]+$', fnc: 'onAmbient', log: false }, // 旁听 catch-all（最后）
       ],
     })
+    // QQ 官方机器人：规则级 permission:master 改为插件内判定（openid 不是 QQ 号）
+    installMasterGate(this)
     // 每天 04:17 压缩归档过期的伪人全链路日志（>24h 未修改的 .log → .gz）
     this.task = [{
       name: '伪人日志压缩归档',
@@ -791,8 +796,13 @@ export class Humanize extends plugin {
   async humanizeMemory() {
     let h
     try { h = await getHumanize() } catch (e) { return this.e.reply(`伪人模式未就绪：${e?.message || e}`, true) }
-    const gid = String(this.e.msg.match(/\d+/)?.[0] || this.e.group_id || (h.cfgFn().groups || [])[0] || '')
-    if (!gid) return this.e.reply('请指定群号或在白名单群内使用：#伪人记忆 960179589', true)
+    // 群标识：显式参数（任意 token）> 当前群 > 白名单首个；官方机器人 openid 含冒号，不能只认 \d+
+    const token = String(this.e.msg || '').match(/^#伪人记忆(?:\s+(\S+))?$/)?.[1] || ''
+    const rawToken = token ? stripSelfPrefix(token, this.e) : ''
+    const list = Array.isArray(h.cfgFn()?.groups) ? h.cfgFn().groups.map(String) : []
+    const gid = String((token && (list.find((x) => x === token || stripSelfPrefix(x, this.e) === rawToken) || token))
+      || this.e.group_id || list[0] || '')
+    if (!gid) return this.e.reply('请指定群号/群 ID（官方机器人为 openid，可先用 /groupid 查看），或在白名单群内使用：#伪人记忆 <群号>', true)
     const st = await h.hmem.stats(gid)
     const rows = await h.hmem.recent(gid, 15)
     if (!st?.total) return this.e.reply(`群 ${gid} 暂无伪人记忆（每日 04:47 自动整合，或等群聊积累后查看）。`, true)
