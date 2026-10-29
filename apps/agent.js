@@ -64,6 +64,7 @@ import { webCrawlTool, resetCrawl4aiProbe } from '../model/crawl/index.js' // we
 import { CompactionArchive } from '../model/agent/compact/archive.js' // 无损压缩：原文内容寻址归档
 import { makeContextRecallTool } from '../model/agent/compact/recall.js' // context_recall：取回归档原文
 import { groupInfoTools, groupManageTools, groupHistoryTools, groupNoticeTools, groupFileTools, aiVoiceTools, forwardTools } from '../model/group/index.js'
+import { recordGroupMessage } from '../model/group/history-store.js'
 import { miyousheTools } from '../model/miyoushe/index.js'
 import { enkaTools } from '../model/enka/index.js'
 import { loadToolPacks } from '../model/toolkit/index.js'
@@ -2033,6 +2034,9 @@ export class Chat extends plugin {
     if (__selfId && (String(this.e.user_id) === String(__selfId) || String(this.e.sender?.user_id || '') === String(__selfId))) {
       return false
     }
+    // 本地群消息缓存：QQ 官方机器人没有历史消息 API，get_chat_history 需要这份兜底数据。
+    // 放在触发判定之前，确保非 @ 的旁听消息也能进入缓存（需官方平台「全量消息」权限）。
+    try { recordGroupMessage(this.e) } catch { /* 缓存失败不影响正常对话 */ }
     // #添加mcp 交互式监听：私聊下，待接收 JSON 的用户，本条消息当作 mcpServers 配置处理
     const __uid = String(this.e.user_id)
     if (!this.e.isGroup && mcpAddPending.has(__uid)) {

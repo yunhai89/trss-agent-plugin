@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.45.13-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.45.14-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -1754,6 +1754,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.45.14** | 修复 QQ 官方机器人 `get_chat_history` 必然失败（官方 OpenAPI 没有群历史接口）：新增进程内群消息环形缓存（每群 200 条 / 24h，按 message_id 去重），`get_chat_history` 在协议端不支持/返回空/调用失败时自动回退本地缓存；空缓存返回可读 `note` 而不是 error，避免模型无意义重试。开启官方平台「全量消息」或群世界/伪人旁听可积累更多历史 |
 | **v1.45.13** | 修复 Web 配置中心「主人列表」只接受 5-11 位 QQ 号：QQ 官方机器人主人 ID 是 openid（如 `807AC1596B40D96591A5ACBEB3CFFA4D`、`1903797111:807AC…`、`qg_807AC…`），此前输入框直接提示「QQ 号需 5-11 位数字」无法添加。现兼容 QQ 号与官方 openid 三种形态，锅巴/yaml/README 提示同步 |
 | **v1.45.12** | 修复 `stagehand__extract/observe/act` 报 `400 MissingSessionID: Request is missing x-opencode-session`：goto 正常但 Stagehand 内部 LLM 请求只带了 `Authorization`，未带主 provider preset 的 UA 与会话头。现透传 `User-Agent` + `x-opencode-session`（值绑定浏览器会话 key），OpenCode Zen/Go 下三个原语恢复可用 |
 | **v1.45.11** | 修复 Stagehand 仍探测不到本机 Chromium：Puppeteer v19+ 缓存目录是 `chrome/linux-<ver>/chrome-linux64/chrome`、Playwright 新版是 `chromium-<rev>/chrome-linux64/chrome`，此前只匹配纯数字目录与 `chrome-linux`，导致 v1.45.10 的自动探测在真实机器上全部落空。现兼容新旧布局、支持 `PUPPETEER_CACHE_DIR`/`PLAYWRIGHT_BROWSERS_PATH`、多版本按数字取最新 |
