@@ -207,7 +207,7 @@ pnpm install                   # package.json 有变动时需重跑（#agents更
 > **支持热加载**：改完配置保存即可，**无需重启 Yunzai**——下次对话自动用新配置重建运行时（provider/model/tools/skills/mcp）。也可发 `#agents重载`（主人）立即重建。
 >
 > **锅巴（Guoba）适配**：已支持。安装 [Guoba-Plugin](https://gitee.com/guoba-yunzai/guoba-plugin) 后，`#锅巴登录` 进入 Web 面板即可图形化编辑本插件配置；保存后**自动热加载**。适配文件为插件根 `guoba.support.js`。
-> 锅巴面板已覆盖**常用项 + 安全/行为总开关**：基础与调试、模型与回退数组、上下文压缩水位、工具发现、记忆与召回、沙箱（含网络白名单/审计/verifyTemplate）、知识库与抓取、下载、媒体/表情、TTS、以及 humanize/群世界/自状态/ComfyUI 等子系统总闸。长尾细粒度配置（如 humanize 的按群策略、各类阈值）仍在 Web 配置中心或直接改 `config.yaml`。
+> 锅巴面板已覆盖**常用项 + 安全/行为总开关 + 各子系统常用调参**（约 66% 配置叶子、50 个分组）：基础与调试、模型与回退数组、上下文压缩水位、工具发现、记忆与召回、沙箱（含网络白名单/审计/verifyTemplate/并发与超时）、知识库与抓取、下载、媒体/表情、TTS（含各家服务商连接与音色）、STT、STAGEHAND、示意图、ComfyUI、深度研究、任务账本，以及 humanize/群世界/自状态等子系统。剩余长尾（如 humanize 的按群策略细分、recall 的逐源覆盖、部分 JSON 子块）仍在 Web 配置中心或直接改 `config.yaml`。
 
 ---
 

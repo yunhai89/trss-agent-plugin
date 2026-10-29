@@ -67,6 +67,9 @@ const MULTILINE_FIELDS = new Set([
   'agent.humanize.groups',
   'agent.groupWorld.groups',
   'agent.selfState.groups',
+  'agent.sticker.discoverGroups',
+  'agent.stagehand.blockedHosts',
+  'agent.diagram.kroki.allowedDiagramTypes',
 ])
 
 /**
@@ -79,6 +82,7 @@ const JSON_FIELDS = {
   'agent.humanize.groupsOverride': { array: false, empty: {}, label: '伪人群级覆盖' },
   'agent.memoryLimits': { array: false, empty: null, label: '记忆字符上限' },
   'agent.policy.categoryMin': { array: false, empty: null, label: '权限类别下限' },
+  'agent.media.caps': { array: false, empty: null, label: '多模态能力覆盖' },
 }
 
 /**
@@ -151,6 +155,62 @@ const OPT = {
   topology: [
     { label: 'spawn 异步三件套（默认）', value: 'spawn' },
     { label: 'orchestrator 同步编排', value: 'orchestrator' },
+  ],
+  researchPerm: [
+    { label: '仅主人（防滥用）', value: 'master' },
+    { label: '所有人', value: 'all' },
+  ],
+  dgFallback: [
+    { label: 'none 无（结构化失败）', value: 'none' },
+    { label: 'beautiful-mermaid 本地渲染', value: 'beautiful-mermaid' },
+  ],
+  dgTheme: [
+    { label: 'paper-blue 米白纸蓝', value: 'paper-blue' },
+    { label: 'soft-pastel 柔和粉彩', value: 'soft-pastel' },
+    { label: 'technical 技术蓝灰', value: 'technical' },
+    { label: 'midnight 午夜深色', value: 'midnight' },
+    { label: 'sketch 手绘素描', value: 'sketch' },
+  ],
+  dgFormat: [
+    { label: 'png 图片', value: 'png' },
+    { label: 'svg 源文件', value: 'svg' },
+  ],
+  lang5: [
+    { label: '中文', value: 'zh' },
+    { label: '英文', value: 'en' },
+    { label: '日文', value: 'ja' },
+    { label: '韩文', value: 'ko' },
+    { label: '粤语', value: 'yue' },
+  ],
+  ixLang: [
+    { label: 'ZH 中文', value: 'ZH' },
+    { label: 'EN 英文', value: 'EN' },
+    { label: 'JA 日文', value: 'JA' },
+    { label: 'AR 阿拉伯', value: 'AR' },
+    { label: 'ES 西班牙', value: 'ES' },
+  ],
+  emoMode: [
+    { label: 'same 沿用音色情绪', value: 'same' },
+    { label: 'audio 情绪参考音频', value: 'audio' },
+    { label: 'vector 情绪向量', value: 'vector' },
+  ],
+  tier: [
+    { label: 'pro 整段', value: 'pro' },
+    { label: 'max 逐段', value: 'max' },
+  ],
+  wavmp3: [
+    { label: 'wav', value: 'wav' },
+    { label: 'mp3', value: 'mp3' },
+  ],
+  wavmp3flac: [
+    { label: 'wav', value: 'wav' },
+    { label: 'mp3', value: 'mp3' },
+    { label: 'flac', value: 'flac' },
+  ],
+  doubaoRes: [
+    { label: 'seed-tts-2.0', value: 'seed-tts-2.0' },
+    { label: 'seed-tts-1.0', value: 'seed-tts-1.0' },
+    { label: 'seed-tts-1.0-concurr', value: 'seed-tts-1.0-concurr' },
   ],
 }
 
@@ -369,9 +429,6 @@ export function supportGuoba() {
 
         // —— 深度研究 ——
         { label: '深度研究', component: 'SOFT_GROUP_BEGIN' },
-        { field: 'agent.research.permission', label: '#研究 权限', component: 'Select', componentProps: { options: [{ label: '仅主人(防滥用)', value: 'master' }, { label: '所有人', value: 'all' }] } },
-        { field: 'agent.research.maxRounds', label: '最大轮次', bottomHelpMessage: '默认 3', component: 'InputNumber', componentProps: { min: 1, max: 10 } },
-        { field: 'agent.research.workerModel', label: '子代理模型', bottomHelpMessage: '空则用主模型；可填任意已注册厂商的模型省钱（可跨厂商）', component: 'Input' },
 
         // —— 搜索服务 ——
         { label: '搜索服务（web_search / 深度研究）', component: 'SOFT_GROUP_BEGIN' },
@@ -381,7 +438,6 @@ export function supportGuoba() {
         { field: 'agent.search.brave.apiKey', label: 'Brave API Key', component: 'Input' },
         { field: 'agent.search.searxng.url', label: 'SearXNG 地址', bottomHelpMessage: '自建/公共 SearXNG 实例', component: 'Input', componentProps: { placeholder: 'http://localhost:8080' } },
         { field: 'agent.search.ddg', label: 'DDG 兜底', bottomHelpMessage: '本地 DuckDuckGo，免 key、默认开（最后兜底）', component: 'Switch' },
-        { field: 'agent.search.timeout', label: '搜索超时(ms)', bottomHelpMessage: '0/留空=各源默认（DDG 15s）；慢源可调大；单源覆盖需 yaml（如 tavily: { timeout: 20000 }）', component: 'InputNumber', componentProps: { min: 0, max: 120000 } },
 
         // —— 知识库与网页抓取 ——
         { label: '知识库与网页抓取', component: 'SOFT_GROUP_BEGIN' },
@@ -419,7 +475,6 @@ export function supportGuoba() {
 
         // —— MCP 服务端 ——
         { label: 'MCP 服务端', component: 'SOFT_GROUP_BEGIN' },
-        { field: 'agent.mcp.requestTimeout', label: '请求超时(毫秒)', bottomHelpMessage: '默认 60000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
         {
           field: 'agent.mcp.serversJson',
           label: 'MCP 服务端（粘贴新增 · 自动合并）',
@@ -524,9 +579,6 @@ export function supportGuoba() {
         // —— ComfyUI ——
         { label: 'ComfyUI', component: 'SOFT_GROUP_BEGIN' },
         { field: 'agent.comfyui.enable', label: 'ComfyUI 工具总开关', bottomHelpMessage: '默认关；关则不注册 comfyui__* 工具', component: 'Switch' },
-        { field: 'agent.comfyui.host', label: '服务地址', bottomHelpMessage: '本地/远程/Cloud（如 http://127.0.0.1:8188）', component: 'Input', componentProps: { placeholder: 'http://127.0.0.1:8188' } },
-        { field: 'agent.comfyui.cloud', label: 'Comfy Cloud 路由', bottomHelpMessage: 'true=走云端点（host 填 https://cloud.comfy.org；cloud 时 apiKey 必填）', component: 'Switch' },
-        { field: 'agent.comfyui.confirm', label: '生成需主人审批', bottomHelpMessage: '默认开（#确认/#拒绝）；false=免审批直接生成，每次消耗 GPU，谨慎关闭', component: 'Switch' },
 
         // —— 米游社（miyoushe）——
         { label: '米游社（miyoushe）', component: 'SOFT_GROUP_BEGIN' },
@@ -568,6 +620,165 @@ export function supportGuoba() {
         { label: '调试日志（devLog）', component: 'SOFT_GROUP_BEGIN' },
         { field: 'agent.devLog.enable', label: '全链路日志', bottomHelpMessage: '记录 AI 全链路（缩进 JSON 人工可读），方便 #上报错误 排查；生产环境默认开', component: 'Switch' },
         { field: 'agent.devLog.dir', label: '日志目录', bottomHelpMessage: '留空=data/logs', component: 'Input', componentProps: { placeholder: '留空=默认' } },
+
+        // —— 视觉子模型（补充） ——
+        { label: '视觉子模型（补充）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.vision.protocol', label: '视觉协议', bottomHelpMessage: '如 anthropic；留空=复用主协议', component: 'Input' },
+        { field: 'agent.vision.preset', label: '视觉厂商预设', bottomHelpMessage: '留空=复用主预设', component: 'Input' },
+        { field: 'agent.vision.baseURL', label: '视觉 baseURL', bottomHelpMessage: '留空=复用主 baseURL', component: 'Input' },
+        { field: 'agent.vision.maxTokens', label: '识图/视频报告输出上限(tokens)', bottomHelpMessage: '显式配置优先于模型条目的 maxTokens；视频报告建议 ≥2048', component: 'InputNumber', componentProps: { min: 256, step: 256 } },
+        { field: 'agent.vision.describePrompt', label: '自定义识图指令', bottomHelpMessage: '留空=内置指令（不影响视频）', component: 'InputTextArea', componentProps: { autosize: { minRows: 2, maxRows: 6 } } },
+
+        // —— 定时任务 / 任务账本 ——
+        { label: '定时任务 / 任务账本', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.schedule.taskEnabled', label: '定时任务链开关', bottomHelpMessage: 'false=拒绝创建 #定时任务（提醒按用户归属，任务链按会话/群级归属）', component: 'Switch' },
+        { field: 'agent.schedule.taskMaxTurns', label: '任务链轮次上限', bottomHelpMessage: '默认 200（防失控烧 token）', component: 'InputNumber', componentProps: { min: 1, max: 1000 } },
+        { field: 'agent.taskStore.enable', label: '可恢复任务账本', bottomHelpMessage: '默认关（开发阶段）；开启后任务事件/检查点落 sqlite，#任务列表/#继续任务 可用', component: 'Switch' },
+        { field: 'agent.taskStore.dir', label: '任务账本目录', bottomHelpMessage: '默认 data/tasks', component: 'Input' },
+
+        // —— 工具 / 渲染 ——
+        { label: '工具 / 渲染', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.tools.builtin', label: '内置工具包', bottomHelpMessage: '群信息/群管/米游社/Enka 等（默认开）', component: 'Switch' },
+        { field: 'agent.tools.dir', label: '自定义工具包目录', bottomHelpMessage: '相对插件根（默认 tools）', component: 'Input' },
+        { field: 'agent.render.timeoutMs', label: '卡片图渲染超时(ms)', bottomHelpMessage: '超时降级文本（默认 15000）', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+        { field: 'agent.render.replyTimeoutMs', label: '回复图渲染超时(ms)', bottomHelpMessage: '默认 30000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+
+        // —— 记忆召回（补充） ——
+        { label: '记忆召回（补充）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.recall.usage.containment', label: '记忆被引用判定阈值', bottomHelpMessage: '最终回复对记忆词元包含率 ≥ 该值判为被引用（默认 0.5）', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
+        { field: 'agent.recall.usage.penalizeAfter', label: '未引用降权次数', bottomHelpMessage: '注入达此次数且从未被引用 → 降权（默认 5）', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.recall.usage.penalty', label: '降权系数', bottomHelpMessage: '0.5=权重减半（默认 0.5）', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
+        { field: 'agent.recall.embedBaseURL', label: 'embedding 接口地址', bottomHelpMessage: '留空=复用主 baseURL', component: 'Input' },
+        { field: 'agent.recall.embedApiKey', label: 'embedding apiKey', bottomHelpMessage: '留空=复用主 apiKey', component: 'Input' },
+        { field: 'agent.profile.inferAfter', label: '隐式推断起始消息数', bottomHelpMessage: '累计消息数达到此值后才开始隐式推断（默认 8）', component: 'InputNumber', componentProps: { min: 1 } },
+
+        // —— 深度研究（research） ——
+        { label: '深度研究（research）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.research.maxConcurrent', label: '并发 worker 上限', bottomHelpMessage: '默认 3', component: 'InputNumber', componentProps: { min: 1, max: 10 } },
+        { field: 'agent.research.permission', label: '#研究 权限', component: 'Select', componentProps: { options: [{ label: '仅主人(防滥用)', value: 'master' }, { label: '所有人', value: 'all' }] } },
+        { field: 'agent.research.maxRounds', label: '最大轮次', bottomHelpMessage: '默认 3', component: 'InputNumber', componentProps: { min: 1, max: 10 } },
+        { field: 'agent.research.workerModel', label: '子代理模型', bottomHelpMessage: '空则用主模型；可填任意已注册厂商的模型省钱（可跨厂商）', component: 'Input' },
+        { field: 'agent.research.evaluation', label: '交叉验证', bottomHelpMessage: '对研究结果做评估/对抗验证（默认开）', component: 'Switch' },
+
+        // —— 技能 / 搜索 / MCP ——
+        { label: '技能 / 搜索 / MCP', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.skill.dir', label: '技能目录', bottomHelpMessage: '相对插件根（默认 skills）', component: 'Input' },
+        { field: 'agent.skill.historyCount', label: '技能历史注入条数', bottomHelpMessage: '默认 15', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.search.timeout', label: '搜索超时(ms)', bottomHelpMessage: '0/留空=各源默认（DDG 15s）；慢源可调大；单源覆盖需 yaml（如 tavily: { timeout: 20000 }）', component: 'InputNumber', componentProps: { min: 0, max: 120000 } },
+        { field: 'agent.mcp.requestTimeout', label: '请求超时(毫秒)', bottomHelpMessage: '默认 60000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+
+        // —— 表情包（补充） ——
+        { label: '表情包（补充）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.sticker.autoDiscover', label: '自动发现总开关', bottomHelpMessage: '需 sticker.enable + agent.vision.enable（主模型无视觉时还需 vision.model）', component: 'Switch' },
+        { field: 'agent.sticker.discoverGroups', label: '采集群白名单(每行一个)', bottomHelpMessage: '空=所有群都采集', component: 'InputTextArea', componentProps: { rows: 3, placeholder: "123456789" } },
+        { field: 'agent.sticker.maxDiscovered', label: '自动发现条目上限', bottomHelpMessage: '超限按 usageCount 升序淘汰（默认 200）', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.sticker.discoverMaxSizeMB', label: '单张采集大小上限(MB)', bottomHelpMessage: '0=不限（默认 5）', component: 'InputNumber', componentProps: { min: 0 } },
+
+        // —— ComfyUI（补充） ——
+        { label: 'ComfyUI（补充）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.comfyui.apiKey', label: 'Cloud X-API-Key', bottomHelpMessage: 'cloud=true 时必填', component: 'Input' },
+        { field: 'agent.comfyui.host', label: '服务地址', bottomHelpMessage: '本地/远程/Cloud（如 http://127.0.0.1:8188）', component: 'Input', componentProps: { placeholder: 'http://127.0.0.1:8188' } },
+        { field: 'agent.comfyui.cloud', label: 'Comfy Cloud 路由', bottomHelpMessage: 'true=走云端点（host 填 https://cloud.comfy.org；cloud 时 apiKey 必填）', component: 'Switch' },
+        { field: 'agent.comfyui.confirm', label: '生成需主人审批', bottomHelpMessage: '默认开（#确认/#拒绝）；false=免审批直接生成，每次消耗 GPU，谨慎关闭', component: 'Switch' },
+        { field: 'agent.comfyui.workflowDir', label: '工作流目录', bottomHelpMessage: 'ComfyUI user 目录下（默认 user/default/workflows，递归）', component: 'Input' },
+        { field: 'agent.comfyui.workflowCacheTtl', label: '工作流缓存(秒)', bottomHelpMessage: '默认 300', component: 'InputNumber', componentProps: { min: 0 } },
+        { field: 'agent.comfyui.timeout', label: '单次生成最长等待(秒)', bottomHelpMessage: '默认 300（视频工作流自动放宽到 900）', component: 'InputNumber', componentProps: { min: 10 } },
+        { field: 'agent.comfyui.pollInterval', label: '轮询初始间隔(秒)', bottomHelpMessage: '默认 1.5', component: 'InputNumber', componentProps: { min: 0.5, step: 0.5 } },
+        { field: 'agent.comfyui.pollMaxInterval', label: '轮询最大间隔(秒)', bottomHelpMessage: '默认 8', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.comfyui.maxImages', label: '单次最多发图数', bottomHelpMessage: '默认 4', component: 'InputNumber', componentProps: { min: 1, max: 10 } },
+        { field: 'agent.comfyui.outputDir', label: '产物落盘目录', bottomHelpMessage: '留空=data/temp', component: 'Input' },
+        { field: 'agent.comfyui.command.enable', label: '#画图 指令', bottomHelpMessage: '仅在 comfyui.enable=true 时有效', component: 'Switch' },
+        { field: 'agent.comfyui.command.masterOnly', label: '#画图 仅主人', bottomHelpMessage: '默认 false', component: 'Switch' },
+        { field: 'agent.comfyui.command.cooldown', label: '#画图 冷却(秒)', bottomHelpMessage: '0=不限（默认 30）', component: 'InputNumber', componentProps: { min: 0 } },
+
+        // —— 示意图（补充） ——
+        { label: '示意图（补充）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.diagram.fallbackRenderer', label: '本地回退渲染器', bottomHelpMessage: 'Kroki 失败时：none / beautiful-mermaid（需已装依赖）', component: 'Select', componentProps: { options: OPT.dgFallback } },
+        { field: 'agent.diagram.defaultTheme', label: '默认主题', bottomHelpMessage: '', component: 'Select', componentProps: { options: OPT.dgTheme } },
+        { field: 'agent.diagram.defaultFormat', label: '默认输出格式', bottomHelpMessage: '', component: 'Select', componentProps: { options: OPT.dgFormat } },
+        { field: 'agent.diagram.timeoutMs', label: '渲染总预算(ms)', bottomHelpMessage: '默认 15000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+        { field: 'agent.diagram.targetWidth', label: '默认输出宽度(px)', bottomHelpMessage: '默认 1600', component: 'InputNumber', componentProps: { min: 200, step: 100 } },
+        { field: 'agent.diagram.maxNodes', label: '节点数上限', bottomHelpMessage: '默认 50', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.diagram.maxEdges', label: '连线数上限', bottomHelpMessage: '默认 100', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.diagram.kroki.enabled', label: 'Kroki 启用', bottomHelpMessage: '默认开', component: 'Switch' },
+        { field: 'agent.diagram.kroki.endpoint', label: 'Kroki 地址', bottomHelpMessage: '自托管地址（默认 http://127.0.0.1:8000）', component: 'Input' },
+        { field: 'agent.diagram.kroki.allowPublicEndpoint', label: '允许公共 Kroki【高危】', bottomHelpMessage: 'true=允许 kroki.io（图中文字将发往第三方）；且强制 HTTPS', component: 'Switch' },
+        { field: 'agent.diagram.kroki.allowedDiagramTypes', label: '图类型白名单(每行一个)', bottomHelpMessage: '模型不可指定；默认 d2', component: 'InputTextArea', componentProps: { rows: 2, placeholder: "d2" } },
+
+        // —— TTS 子配置（补充） ——
+        { label: 'TTS 子配置（补充）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.tts.judgeModel', label: '情绪判定模型', bottomHelpMessage: '留空=indextts.model→utilityModel→主模型；可跨厂商', component: 'Input', componentProps: { placeholder: "留空=utilityModel" } },
+        { field: 'agent.tts.judgeTimeoutMs', label: '情绪判定总预算(ms)', bottomHelpMessage: '默认 300000（全局优先；indextts.judgeTimeoutMs 为历史兜底键）', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+        { field: 'agent.tts.sovits.endpoint', label: 'SoVITS 接口地址', bottomHelpMessage: 'api_v2（默认 http://127.0.0.1:9880）', component: 'Input' },
+        { field: 'agent.tts.sovits.refAudioPath', label: '参考音频路径', bottomHelpMessage: '服务端本地绝对路径，3~10 秒', component: 'Input' },
+        { field: 'agent.tts.sovits.promptText', label: '参考音频逐字文本', bottomHelpMessage: '必须与音频一致，否则音色漂移', component: 'Input' },
+        { field: 'agent.tts.sovits.promptLang', label: '参考音频语种', bottomHelpMessage: '', component: 'Select', componentProps: { options: OPT.lang5 } },
+        { field: 'agent.tts.sovits.textLang', label: '默认合成语种', bottomHelpMessage: '', component: 'Select', componentProps: { options: OPT.lang5 } },
+        { field: 'agent.tts.sovits.maxChars', label: '单次朗读上限(字)', bottomHelpMessage: '默认 200', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.tts.sovits.timeoutMs', label: '单次合成超时(ms)', bottomHelpMessage: '默认 120000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+        { field: 'agent.tts.indextts.endpoint', label: 'IndexTTS 接口地址', bottomHelpMessage: '如 http://127.0.0.1:7860', component: 'Input' },
+        { field: 'agent.tts.indextts.lang', label: '合成语言', bottomHelpMessage: '', component: 'Select', componentProps: { options: OPT.ixLang } },
+        { field: 'agent.tts.indextts.voice', label: '默认音色参考名', bottomHelpMessage: '留空=最新上传的音色', component: 'Input' },
+        { field: 'agent.tts.indextts.emotionMode', label: '情绪模式', bottomHelpMessage: 'same=沿用音色参考情绪 / audio=情绪参考音频 / vector=8 维情绪向量', component: 'Select', componentProps: { options: OPT.emoMode } },
+        { field: 'agent.tts.indextts.tier', label: '情绪档位', bottomHelpMessage: 'pro=整段一套 / max=按需拆分逐段', component: 'Select', componentProps: { options: OPT.tier } },
+        { field: 'agent.tts.indextts.timeoutMs', label: '合成超时(ms)', bottomHelpMessage: '默认 300000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+        { field: 'agent.tts.indextts.model', label: 'IndexTTS 情绪判定模型', bottomHelpMessage: '留空=tts.judgeModel→utilityModel→主模型', component: 'Input', componentProps: { placeholder: "留空=utilityModel" } },
+        { field: 'agent.tts.doubao.endpoint', label: '豆包 TTS 地址', bottomHelpMessage: '默认 openspeech.bytedance.com/api/v3/tts/unidirectional', component: 'Input' },
+        { field: 'agent.tts.doubao.apiKey', label: '豆包 API Key', bottomHelpMessage: '火山引擎 API Key', component: 'Input' },
+        { field: 'agent.tts.doubao.resourceId', label: '豆包资源 ID', bottomHelpMessage: 'seed-tts-2.0 | seed-tts-1.0 | seed-tts-1.0-concurr', component: 'Select', componentProps: { options: OPT.doubaoRes } },
+        { field: 'agent.tts.doubao.speaker', label: '豆包音色 ID', bottomHelpMessage: '控制台 voice_type', component: 'Input' },
+        { field: 'agent.tts.doubao.model', label: '豆包模型', bottomHelpMessage: '留空=默认 / seed-tts-2.0-standard / seed-tts-2.0-expressive', component: 'Input' },
+        { field: 'agent.tts.doubao.format', label: '豆包输出格式', bottomHelpMessage: '', component: 'Select', componentProps: { options: OPT.wavmp3 } },
+        { field: 'agent.tts.doubao.timeoutMs', label: '豆包超时(ms)', bottomHelpMessage: '默认 120000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+        { field: 'agent.tts.minimax.endpoint', label: 'MiniMax TTS 地址', bottomHelpMessage: '国际站 https://api.minimax.io/v1/t2a_v2', component: 'Input' },
+        { field: 'agent.tts.minimax.apiKey', label: 'MiniMax API Key', bottomHelpMessage: '平台 → 接口密钥', component: 'Input' },
+        { field: 'agent.tts.minimax.model', label: 'MiniMax 模型', bottomHelpMessage: 'speech-2.8-hd / 2.8-turbo / 2.6-*', component: 'Input' },
+        { field: 'agent.tts.minimax.voiceId', label: 'MiniMax 音色 ID', bottomHelpMessage: '系统音色或复刻音色', component: 'Input' },
+        { field: 'agent.tts.minimax.format', label: 'MiniMax 输出格式', bottomHelpMessage: '', component: 'Select', componentProps: { options: OPT.wavmp3flac } },
+        { field: 'agent.tts.minimax.timeoutMs', label: 'MiniMax 超时(ms)', bottomHelpMessage: '默认 120000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+        { field: 'agent.tts.mimo.endpoint', label: 'MiMo TTS 地址', bottomHelpMessage: '默认 https://api.xiaomimimo.com/v1', component: 'Input' },
+        { field: 'agent.tts.mimo.apiKey', label: 'MiMo API Key', bottomHelpMessage: '开放平台 Key', component: 'Input' },
+        { field: 'agent.tts.mimo.model', label: 'MiMo 模型', bottomHelpMessage: 'mimo-v2.5-tts | mimo-v2.5-tts-voicedesign', component: 'Input' },
+        { field: 'agent.tts.mimo.voice', label: 'MiMo 预置音色', bottomHelpMessage: 'mimo_default / 冰糖 / 茉莉 / 苏打 / 白桦 等', component: 'Input' },
+        { field: 'agent.tts.mimo.format', label: 'MiMo 输出格式', bottomHelpMessage: '', component: 'Select', componentProps: { options: OPT.wavmp3 } },
+        { field: 'agent.tts.mimo.timeoutMs', label: 'MiMo 超时(ms)', bottomHelpMessage: '默认 120000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+
+        // —— Stagehand（补充） ——
+        { label: 'Stagehand（补充）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.stagehand.stealth', label: '真机化指纹', bottomHelpMessage: '随机设备 UA/视口/语言/触屏 + 去自动化 flag', component: 'Switch' },
+        { field: 'agent.stagehand.userAgent', label: '固定 UA', bottomHelpMessage: '留空=按设备指纹池随机', component: 'Input' },
+        { field: 'agent.stagehand.maxSessions', label: '并发浏览器会话上限', bottomHelpMessage: '默认 3', component: 'InputNumber', componentProps: { min: 1, max: 20 } },
+        { field: 'agent.stagehand.opTimeoutMs', label: '单次操作截止(ms)', bottomHelpMessage: '默认 60000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+        { field: 'agent.stagehand.llmTimeoutMs', label: '单次 LLM 推理截止(ms)', bottomHelpMessage: '默认 30000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+        { field: 'agent.stagehand.maxCallsPerMinute', label: '每会员每分钟上限', bottomHelpMessage: '默认 10', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.stagehand.maxCallsPerDay', label: '每会员每日上限', bottomHelpMessage: '默认 200', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.stagehand.domSettleTimeoutMs', label: 'act 前 DOM 稳定等待(ms)', bottomHelpMessage: '默认 3000', component: 'InputNumber', componentProps: { min: 0, step: 500 } },
+        { field: 'agent.stagehand.blockedHosts', label: '额外禁访主机(每行一个)', bottomHelpMessage: '默认内网/元数据黑名单之外再追加', component: 'InputTextArea', componentProps: { rows: 2, placeholder: "example.com" } },
+
+        // —— 沙箱 / 多模态（补充） ——
+        { label: '沙箱 / 多模态（补充）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.sandbox.toolEvoVerifyTimeoutMs', label: 'toolEvo 用例验证超时(ms)', bottomHelpMessage: '沙箱模式单用例（默认 5000）', component: 'InputNumber', componentProps: { min: 500, step: 500 } },
+        { field: 'agent.media.caps', label: '能力覆盖(JSON)', bottomHelpMessage: '如 { "vision": true, "video": true }；留空=按协议+模型名自动判定', component: 'InputTextArea', componentProps: { autosize: { minRows: 2, maxRows: 6 }, placeholder: "{}" } },
+
+        // —— 群聊小世界（补充） ——
+        { label: '群聊小世界（补充）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.groupWorld.analysis.schedule', label: '分析 cron（热加载）', bottomHelpMessage: '小时增量分析（默认 7 * * * *）；改后即时生效，无需重启', component: 'Input' },
+        { field: 'agent.groupWorld.analysis.minSegmentMessages', label: '片段最小消息数', bottomHelpMessage: '低于该值的片段跳过分析（默认 4）', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.groupWorld.analysis.maxSegmentsPerRun', label: '每轮最多分析片段数', bottomHelpMessage: '默认 50', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.groupWorld.analysis.modelProfile', label: '分析模型(可选)', bottomHelpMessage: '留空=主模型/utilityModel；可跨厂商', component: 'Input', componentProps: { placeholder: "留空=主模型" } },
+        { field: 'agent.groupWorld.analysis.maxDailyCallsPerGroup', label: '每群每日调用预算', bottomHelpMessage: '默认 100（熔断；0=停用分析）', component: 'InputNumber', componentProps: { min: 0 } },
+        { field: 'agent.groupWorld.analysis.maxTokens', label: '分析输出上限(tokens)', bottomHelpMessage: '默认 1200', component: 'InputNumber', componentProps: { min: 100, step: 100 } },
+        { field: 'agent.groupWorld.retrieval.plannerTokenBudget', label: 'Planner 现场 token 预算', bottomHelpMessage: '默认 800', component: 'InputNumber', componentProps: { min: 100, step: 100 } },
+        { field: 'agent.groupWorld.retrieval.replyerTokenBudget', label: 'Replyer 现场 token 预算', bottomHelpMessage: '默认 500', component: 'InputNumber', componentProps: { min: 100, step: 100 } },
+
+        // —— 自我认知（补充） ——
+        { label: '自我认知（补充）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.selfState.eventDetection.minEventConfidence', label: '事件最低置信度', bottomHelpMessage: '默认 0.55', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.05 } },
+        { field: 'agent.selfState.emotion.maxActiveEmotions', label: '并存情绪上限', bottomHelpMessage: '默认 8', component: 'InputNumber', componentProps: { min: 1, max: 20 } },
+        { field: 'agent.selfState.emotion.minVisibleIntensity', label: '最低可见强度', bottomHelpMessage: '低于该强度不进投影（默认 0.18）', component: 'InputNumber', componentProps: { min: 0, max: 1, step: 0.01 } },
+        { field: 'agent.selfState.resentment.maxSingleEventDelta', label: '单次怨气增量上限', bottomHelpMessage: '默认 0.05', component: 'InputNumber', componentProps: { min: 0, max: 0.5, step: 0.01 } },
+        { field: 'agent.selfState.planner.maxStateTokens', label: '状态投影 token 上限', bottomHelpMessage: '默认 220', component: 'InputNumber', componentProps: { min: 50, step: 10 } },
+        { field: 'agent.selfState.stability.maxNegativeMoodHours', label: '负心境恢复上限(小时)', bottomHelpMessage: '默认 24（≤48）', component: 'InputNumber', componentProps: { min: 1, max: 48 } },
       ],
       // 获取配置数据（前端展示）
       getConfigData() {
@@ -587,6 +798,8 @@ export function supportGuoba() {
         setPath(data, 'agent.persona.styleExamples', JSON.stringify(Array.isArray(se) ? se : [], null, 2))
         const go = data?.agent?.humanize?.groupsOverride
         setPath(data, 'agent.humanize.groupsOverride', go && typeof go === 'object' && !Array.isArray(go) && Object.keys(go).length ? JSON.stringify(go, null, 2) : '')
+        const mc = data?.agent?.media?.caps
+        setPath(data, 'agent.media.caps', mc && typeof mc === 'object' && !Array.isArray(mc) && Object.keys(mc).length ? JSON.stringify(mc, null, 2) : '')
         // thinking：provider 原生 {type,budget_tokens}|null → 面板友好 {enable,budget_tokens}
         const tk = data?.agent?.thinking
         data.agent.thinking = { enable: !!tk && tk?.type !== 'disabled', budget_tokens: tk?.budget_tokens || 16000 }
