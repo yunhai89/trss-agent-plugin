@@ -639,7 +639,7 @@ agent:
   groupWorld:
     enabled: false                 # 总开关（即便 true，groups 为空也不开启）
     groups: []                     # 显式白名单群号；空数组=不开启
-    online: false                  # 在线影响 Planner/Replyer（默认关：先观察再上线）
+    online: false                  # 在线注入伪人 Planner/Replyer（默认关：先观察再上线）；注意消费方只有伪人链路，需 humanize.enable=true 且群在 humanize.groups 白名单内才有效
 
     ingestion:
       rawMessageRetentionDays: 30  # 原始消息保留天数（超过由每日维护清理）
@@ -692,7 +692,7 @@ agent:
   #      禁卖惨/跨用户扩散/功能报复；负状态超时恢复。数据与 GroupWorld 同库（data/groupworld/gw.db，ss_ 前缀表）。
   selfState:
     enabled: false              # 总开关（关=整层 no-op）
-    shadowMode: true            # 计算入库但不影响发言（观察期）；false 才注入 Planner/Replyer
+    shadowMode: true            # 计算入库但不影响发言（观察期）；false 才注入伪人 Planner/Replyer（需 humanize.enable=true，否则单开无效果）
     groups: []                  # 可选：定时反思/维护的群号白名单；留空=复用 groupWorld.groups → humanize.groups
 
     scope:

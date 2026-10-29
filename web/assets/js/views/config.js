@@ -129,8 +129,6 @@
       const formReady = ref(false)
       let dirtySuppressed = true
       watch(form, () => { if (!dirtySuppressed) dirty.value = true }, { deep: true })
-      // 思考自动决策开启时，自动关闭手动「深度思考」（agent.thinking=null），两者互斥
-      watch(() => form.thinkingAuto && form.thinkingAuto.enable, (v) => { if (v) form.thinking = null })
       // preset → baseURL 自动联动：选厂商预设时自动填对应 baseURL（syncForm 加载时不覆盖，保留 config 已有值）
       const PRESET_URLS = {
         deepseek: 'https://api.deepseek.com',
@@ -276,7 +274,6 @@
         if (form.thinkingAuto.budgets.low == null) form.thinkingAuto.budgets.low = 4096
         if (form.thinkingAuto.budgets.medium == null) form.thinkingAuto.budgets.medium = 8192
         if (form.thinkingAuto.budgets.high == null) form.thinkingAuto.budgets.high = 16384
-        if (form.thinkingAuto.enable) form.thinking = null // 互斥：自动决策开启时关闭手动深度思考（载入即归一）
         // Jev（TypeSafe 判断模型，opt-in）兜底：UI 绑定需完整对象树。Jev 现作为「厂商+模型」注册。
         if (!form.jev) form.jev = {}
         if (form.jev.enable == null) form.jev.enable = false

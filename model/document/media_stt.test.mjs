@@ -124,6 +124,8 @@ await test('工具层：mode=e2b 但沙箱未就绪 → 拒绝转录（不在宿
   // 工具先校验 STT apiKey：测试注入（config 进程内 set，不落盘）
   Config.set('agent', { ...(Config.get().agent || {}), stt: { apiKey: 'test-key' } })
   // 同上：夹具必须在插件 data/temp 内（路径白名单），否则测不到沙箱 fail-closed 分支
+  // 插件运行时由 Config 初始化建目录；离线测试在全新 checkout 下没有 data/temp，需自建
+  fs.mkdirSync(Config.path.temp, { recursive: true })
   const dir = fs.mkdtempSync(path.join(Config.path.temp, 'stt-fc-'))
   const input = path.join(dir, 'clip.mp4')
   fs.writeFileSync(input, 'fake video')
@@ -136,6 +138,7 @@ await test('工具层：mode=e2b 但沙箱未就绪 → 拒绝转录（不在宿
 
 // ───────── 回归：超大文件必须给出「过大」原因（而非 text.slice is not a function） ─────────
 await test('宿主档：超过 100MB 直接拒绝，并给出可读原因', async () => {
+  fs.mkdirSync(Config.path.temp, { recursive: true })
   const dir = fs.mkdtempSync(path.join(Config.path.temp, 'stt-big-'))
   const input = path.join(dir, 'big.mp3')
   // 稀疏文件：瞬间创建 101MB，不占实际磁盘

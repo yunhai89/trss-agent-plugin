@@ -92,6 +92,8 @@ await test('沙箱档：模板缺 soffice → 探测即失败，不上传输入'
 await test('工具层：mode=e2b 但沙箱未就绪 + docx → 拒绝在宿主跑 soffice', async () => {
   // 夹具放插件 data/temp 内：转档/读取类工具只允许读该目录（v1.26.30 审计 A1 路径白名单），
   // 放 os.tmpdir() 会在路径校验处提前失败，测不到本用例真正要验的「沙箱未就绪 → fail-closed」。
+  // 全新 checkout 下 data/temp 尚不存在（运行时才建），离线测试自建
+  fs.mkdirSync(Config.path.temp, { recursive: true })
   const dir = fs.mkdtempSync(path.join(Config.path.temp, 'topdf-fc-'))
   const input = path.join(dir, 'report.docx')
   fs.writeFileSync(input, 'fake docx')
