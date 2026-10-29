@@ -110,7 +110,8 @@ agent:
   rootTokenBudget: 0        # F13 根任务 token 预算上限（0=不限）：主/编排/子代理/反思合计；嵌套工作开始前预留
   render:                   # 卡片图渲染（帮助/聊天列表/人设列表；回复图由 reply.mode 控制）
     card: true              # 帮助/列表卡片图开关；弱服务器可置 false 直接回文本，避免渲染卡死
-    timeoutMs: 15000        # 单张卡片图渲染总超时（毫秒）：超时/失败降级文本，不让指令永久卡住
+    timeoutMs: 15000        # 单张卡片图（列表类）渲染总超时（毫秒）：超时/失败降级文本，不让指令永久卡住
+    helpTimeoutMs: 300000   # 帮助图渲染总超时（毫秒，默认 5 分钟）：帮助卡片最长、弱机器/冷缓存首次渲染常超过 15s；超时降级文本并进入冷却
     replyTimeoutMs: 30000   # 回复图渲染总超时（毫秒）
   cacheControl: "off"      # Anthropic 协议显式 prompt 缓存断点三态：off | auto（官方端点自动开）| explicit（强制）；OpenAI 兼容端自动前缀缓存无需开
   promptCacheKey: false    # OpenAI 官方 prompt_cache_key 稳定会话路由（仅 OpenAI 官方端点/支持该能力的模型下发，兼容网关绝不发）

@@ -664,7 +664,8 @@ export function supportGuoba() {
         { label: '工具 / 渲染', component: 'SOFT_GROUP_BEGIN' },
         { field: 'agent.tools.builtin', label: '内置工具包', bottomHelpMessage: '群信息/群管/米游社/Enka 等（默认开）', component: 'Switch' },
         { field: 'agent.tools.dir', label: '自定义工具包目录', bottomHelpMessage: '相对插件根（默认 tools）', component: 'Input' },
-        { field: 'agent.render.timeoutMs', label: '卡片图渲染超时(ms)', bottomHelpMessage: '超时降级文本（默认 15000）', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+        { field: 'agent.render.helpTimeoutMs', label: '帮助图渲染超时(ms)', bottomHelpMessage: '帮助卡片最长，弱机器/冷缓存首次渲染常超过普通卡片；默认 300000（5 分钟），超时降级文本并进入冷却', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
+        { field: 'agent.render.timeoutMs', label: '卡片图渲染超时(ms)', bottomHelpMessage: '普通列表卡片；超时降级文本（默认 15000）', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
         { field: 'agent.render.replyTimeoutMs', label: '回复图渲染超时(ms)', bottomHelpMessage: '默认 30000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
 
         // —— 记忆召回（补充） ——

@@ -175,6 +175,7 @@
         else if (form.cacheControl === true) form.cacheControl = 'explicit'
         else if (form.cacheControl == null) form.cacheControl = 'off'
         if (form.commandPassThrough == null) form.commandPassThrough = true
+        if (form.render && form.render.helpTimeoutMs == null) form.render.helpTimeoutMs = 300000
         if (!form.webApi) form.webApi = {}
         if (form.webApi.enable == null) form.webApi.enable = true
         if (form.webApi.port == null) form.webApi.port = 6098
@@ -1702,7 +1703,10 @@
             <cfg-row name="帮助/列表卡片图" desc="关=直接回文本（弱服务器可关，避免卡片渲染卡死）">
               <v-switch v-model="form.render.card"/>
             </cfg-row>
-            <cfg-row name="卡片图渲染超时" desc="render.timeoutMs 毫秒；超时降级文本，防指令卡住">
+            <cfg-row name="帮助图渲染超时" desc="render.helpTimeoutMs 毫秒（默认 300000=5 分钟）：帮助卡片最长，弱机器/冷缓存首次渲染常超过普通卡片；超时降级文本并进入冷却">
+              <input type="number" class="inp" style="width:130px" min="1000" step="1000" v-model.number="form.render.helpTimeoutMs">
+            </cfg-row>
+            <cfg-row name="卡片图渲染超时" desc="render.timeoutMs 毫秒（普通列表卡片）；超时降级文本，防指令卡住">
               <input type="number" class="inp" style="width:130px" min="1000" v-model.number="form.render.timeoutMs">
             </cfg-row>
             <cfg-row name="回复图渲染超时" desc="render.replyTimeoutMs 毫秒">

@@ -225,6 +225,16 @@ await test('③ renderHd：page.screenshot 收到 ≥30000ms 总超时且 fullPa
   eq(b2, null, '截图抛错（超时）→ null')
 })
 
+await test('④ 帮助图渲染超时：默认 5 分钟，可配 helpTimeoutMs（不拖累普通卡片）', async () => {
+  eq(render.HELP_RENDER_TIMEOUT_DEFAULT_MS, 300000, '默认 300000ms（5 分钟）')
+  eq(render.helpRenderTimeoutMs({}), 300000, '未配置 → 默认 300000')
+  eq(render.helpRenderTimeoutMs(undefined), 300000, 'undefined → 默认 300000')
+  eq(render.helpRenderTimeoutMs({ helpTimeoutMs: 60000 }), 60000, '显式配置生效')
+  eq(render.helpRenderTimeoutMs({ helpTimeoutMs: 0 }), 300000, '0/非法 → 默认 300000')
+  eq(render.helpRenderTimeoutMs({ helpTimeoutMs: -1 }), 300000, '负数 → 默认 300000')
+  eq(render.helpRenderTimeoutMs({ timeoutMs: 8000 }), 300000, '普通卡片 timeoutMs 不影响帮助图（各自独立预算）')
+})
+
 cleanupTmp()
 
 console.log('\n========================================')

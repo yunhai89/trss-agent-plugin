@@ -4,7 +4,7 @@ import crypto from 'node:crypto'
 import plugin from '../../../lib/plugins/plugin.js'
 import Config from '../utils/Config.js'
 import { buildHelpHtml } from '../model/agent/index.js'
-import { renderCardBuffer } from './render.js'
+import { renderCardBuffer, helpRenderTimeoutMs } from './render.js'
 import { installMasterGate } from '../model/qqofficial/guard.js'
 
 /** 帮助卡片渲染失败后的冷却：弱服务器渲染卡死时，冷却期内直接走文本，避免每次指令都等超时。 */
@@ -189,7 +189,8 @@ export class Help extends plugin {
       if (buf?.length) return segment.image(`base64://${buf.toString('base64')}`)
     } catch { /* 未命中缓存 */ }
 
-    const buf = await renderCardBuffer(html, { scale: 3, timeoutMs: Number(render.timeoutMs) > 0 ? Number(render.timeoutMs) : 15000 })
+    // 帮助图默认给 5 分钟（agent.render.helpTimeoutMs）：弱机器/冷缓存首次渲染常超过普通卡片的 15s
+    const buf = await renderCardBuffer(html, { scale: 3, timeoutMs: helpRenderTimeoutMs(render) })
     if (!buf) {
       _helpCardCooldownUntil = Date.now() + HELP_CARD_COOLDOWN_MS // 渲染失败/超时 → 冷却期内走文本
       return null

@@ -26,6 +26,22 @@ function renderTimeoutMs() {
   return t > 0 ? t : 15000
 }
 
+/** 帮助图渲染默认总超时（毫秒）：帮助卡片是最长的一张图（全量指令/区块），
+ *  弱机器/冷缓存下首次渲染可能远超普通卡片图，默认给足 5 分钟，避免「首次打开帮助永远是文本」。 */
+export const HELP_RENDER_TIMEOUT_DEFAULT_MS = 300000
+
+/**
+ * 帮助图渲染总超时（毫秒）：`agent.render.helpTimeoutMs`（默认 300000；<=0 视为未配置）。
+ * 与 `render.timeoutMs`（普通卡片图，默认 15s）分开：帮助图更重，不能用同一预算，
+ * 否则弱服务器上要么帮助超时、要么为了帮助把所有列表卡片都拖到 5 分钟。
+ * @param {object} [render] agent.render 配置块
+ * @returns {number}
+ */
+export function helpRenderTimeoutMs(render = {}) {
+  const t = Number(render?.helpTimeoutMs)
+  return t > 0 ? t : HELP_RENDER_TIMEOUT_DEFAULT_MS
+}
+
 /** 给任意 Promise 加总超时：超时 resolve(null)，不阻塞调用方（底层 Promise 仍会自行收尾）。 */
 function withTimeout(promise, ms, tag) {
   if (!(ms > 0)) return promise

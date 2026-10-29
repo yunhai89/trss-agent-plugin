@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.45.7-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.45.8-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -45,7 +45,7 @@
 - **前缀缓存友好**：上下文 token 双水位压缩 + 工具数组恒定 + 稳定 system 前缀，长对话命中率可达 90%+（见「缓存经济性」）。
 - **文件即真相的记忆**：`MEMORY.md` / `USER.md` 人可读可编辑 + `memory_search` 主动召回 + 用户画像 + 知识库 RAG，跨会话不失忆、不串档。
 - **安全纵深**：工具 RBAC + 主人审批 + 注入防御（不可信内容边界）+ 高危执行面隔离（E2B microVM），高危动作不裸奔。
-- **三种配置入口、一套真源**：Web 配置中心（全量）/ 锅巴面板（382 字段常用+安全项）/ `config.yaml`；配置保存只写差异、升级新默认值自动生效。
+- **三种配置入口、一套真源**：Web 配置中心（全量）/ 锅巴面板（383 字段常用+安全项）/ `config.yaml`；配置保存只写差异、升级新默认值自动生效。
 - **热加载**：改配置即生效，重建时取消在途任务、回收资源。
 - **QQ 官方机器人就绪**：自实现适配器（AppID+AppSecret）+ 官方协议能力（Markdown / keyboard / 被动回复），并提供 `/uid`、`/groupid` 排障指令。
 - **🧬 工具进化**：LLM 生成 → AST 静态门 → 隔离验证 → 主人审批 → 版本化上线/淘汰，工具库可持续变强。
@@ -120,7 +120,7 @@
 | 协议端 | OneBot/ICQQ（NapCat 等）；QQ 官方机器人（自实现适配器 / Yunzai-QQBot-Plugin）；QQ 频道 | ✅ |
 | QQ 官方机器人 | 只需 AppID+AppSecret；Markdown 直发、inline keyboard、被动回复窗口；`/uid`、`/groupid` | ✅ |
 | Web 管理面板 | 22 个页面：概览/配置中心/机器人账号/记忆/召回/画像/人设/技能/知识库/会话/日志/定时/账本/审批/进化/工具/群世界/伪人/自状态/表情包/TTS/外置工具 | ✅ |
-| 锅巴面板 | 382 字段 / 52 分组：常用项 + 安全/行为总开关 + 各子系统常用调参 | ✅ |
+| 锅巴面板 | 383 字段 / 52 分组：常用项 + 安全/行为总开关 + 各子系统常用调参 | ✅ |
 | 配置热加载 | 保存配置自动重建运行时（provider/model/tools/skills/mcp） | ✅ |
 
 ### 安全与可观测
@@ -469,8 +469,8 @@ qqOfficial:
 
 | 入口 | 覆盖 | 适合 |
 | --- | --- | --- |
-| **Web 配置中心** | 全量字段（565 个配置叶子） | 首次配置模型、改任何细项 |
-| **锅巴面板（Guoba）** | 382 字段 / 52 分组：常用项 + 安全/行为总开关 + 各子系统常用调参 | 已在用锅巴、只想改常用项 |
+| **Web 配置中心** | 全量字段（566 个配置叶子） | 首次配置模型、改任何细项 |
+| **锅巴面板（Guoba）** | 383 字段 / 52 分组：常用项 + 安全/行为总开关 + 各子系统常用调参 | 已在用锅巴、只想改常用项 |
 | **`config.yaml`** | 全量（真源） | 批量/脚本化/版本管理；热加载 |
 
 > 保存时只写「与默认值的差异」，且厂商/模型/回退等结构会被统一归一（`utils/Config.js`），三个入口改同一份数据。
@@ -583,7 +583,7 @@ qqOfficial:
 ---
 ## ⚙️ 配置总览
 
-配置文件：`plugins/agents-plugin/config/config.yaml`（**565 个配置叶子**，全部带注释；Web 配置中心可全量编辑）。
+配置文件：`plugins/agents-plugin/config/config.yaml`（**566 个配置叶子**，全部带注释；Web 配置中心可全量编辑）。
 下面按主题列出 `agent.*` 下的配置块，字段细节见 「详细配置参考」 与 Web 配置中心。
 
 | 主题 | 配置块（点路径） | 说明 |
@@ -1540,7 +1540,7 @@ audit/                配置审计报告与修复记录（历史决策留档）
 
 **配置真源与治理**
 
-- 四类配置面：`config.yaml` 默认值 + Web 配置中心（全量）+ 锅巴（382 字段常用项）+ README/开发指南；
+- 四类配置面：`config.yaml` 默认值 + Web 配置中心（全量）+ 锅巴（383 字段常用项）+ README/开发指南；
   运行时读取统一经 `utils/Config.js`：`deepMerge 默认值 → normalizeConfig 归一 → 差异落盘 → 热加载`。
 - 保存只写差异（不改默认值的键不落盘），老版本全量快照启动时自动压缩（备份 `.bak`）→ 升级后的新默认值自动生效。
 - 供应商/模型引用、fallback、`cacheControl`/`thinking` 类型、官方机器人账号等结构由归一逻辑统一收敛，三个入口不会互相打架。
@@ -1720,6 +1720,7 @@ v1.45.4 起已修：以前 `@机器人 + #指令` 会被本插件的 AI catch-al
 
 **Q3：回复变成纯文本 / 图片渲染失败？**
 `reply.mode=image` 需要 Chromium（Yunzai 自带 puppeteer）；渲染失败会自动退文本。官方机器人下本就走 Markdown，不是故障。弱服务器可设 `render.card=false`。
+帮助图（`#agents帮助`）有独立超时 `agent.render.helpTimeoutMs`（默认 **300000ms = 5 分钟**）；若首次渲染仍超时（之后会进入冷却、暂时直接回文本），可在 Web 配置中心「进度 / 回复渲染」或锅巴调整该项，或把 `render.card=false` 直接走文本。
 
 **Q4：Token 消耗/费用偏高？**
 ① 配置 `contextWindow` 让前缀缓存生效（命中率可达 90%+，见「缓存经济性」）；② 长任务看 `agent.loop.tokenBudget` 与 `maxTurns`；③ 旁路功能（记忆/评审/伪人）配 `utilityModel` 小模型；④ `#任务状态` 看 turns 与 stop 原因。
@@ -1748,6 +1749,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.45.8** | 帮助图渲染超时默认改为 **300000ms（5 分钟）**：新增 `agent.render.helpTimeoutMs`，与普通卡片图 `render.timeoutMs`（默认 15s）分开——帮助卡片最长，弱机器/冷缓存首次渲染常超过 15s，此前会直接降级成文本；超时仍按原策略降级并进入冷却 |
 | **v1.45.7** | 修复按钮卡片「本人点自己的按钮提示无权限操作」：群聊 `specify_user_ids` 未剥 `<appId>:` 前缀（平台只认原始 openid）；私聊 C2C/频道私信客户端不支持 `type:0` 指定用户按钮 → 自动降级 `type:2`（私聊仅对方一人，安全等价） |
 | **v1.45.6** | QQBot 叶子级加固：被动回复严格按 5 分钟窗口（长任务不再用过期 msg_id 白发送失败）；Markdown 回复正确 @ 回复人（`<qqbot-at-user>`，此前被静默丢弃）；API 401 自动刷新 token 重试、start 阶段 token 5xx 退避重试；媒体 >10MB 跳过不读入内存；频道私信 ID/源频道修正；READY 迟到补挂载、断连中断连接等待、`_attachBot` 幂等；网络类 token 失败继续重连（此前一次抖动永久掉线）；回填 bot.fl/gl/gml 并对齐 login/logout 契约 |
 | **v1.45.5** | 修复官方机器人下指令文本翻倍：适配器预设了 `data.msg`，而 TRSS `dealEvent` 会把 `message` 里的 text 段再累加一次 → `e.msg` 变成「#设置主人#设置主人」，导致 `^#设置主人$` / `^#agents更新$` 这类精确匹配规则失效（`^#状态` 前缀规则却正常，表现为「有的指令能用有的不能」）。现已不预设 `msg`，交由框架从消息段构建 |
