@@ -10,6 +10,10 @@
  *
  * 本模块按「显式配置 → 环境变量 → Puppeteer 自带 → 缓存目录 → 常见系统路径」顺序探测，
  * 找到后由 browser.js 作为 `executablePath` 传给 Stagehand（不再依赖 CHROME_PATH 猜测）。
+ *
+ * v1.45.11 补充：Puppeteer v19+ 的缓存根是 `chrome/linux-<ver>/chrome-linux64/chrome`，
+ * Playwright 新版是 `chromium-<rev>/chrome-linux64/chrome`；旧实现按纯数字目录 + `chrome-linux`
+ * 匹配会全部漏掉，虽然本机装了 Chromium 仍报「未找到」。
  */
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -42,12 +46,61 @@ async function isFile(filePath) {
   } catch { return false }
 }
 
+/** 从目录名提取版本号（`linux-156.0.8078.47` / `chromium-1248` / `131.0.6778.204`） */
+function versionParts(name) {
+  const found = String(name).match(/\d+(?:\.\d+)*/g)
+  if (!found) return []
+  return found[found.length - 1].split('.').map(Number)
+}
+
+/** 版本号倒序（新的优先），无版本号的按名称倒序 */
+function compareVersionDesc(a, b) {
+  const A = versionParts(a)
+  const B = versionParts(b)
+  for (let i = 0; i < Math.max(A.length, B.length); i++) {
+    const x = A[i] ?? -1
+    const y = B[i] ?? -1
+    if (x !== y) return y - x
+  }
+  return String(b).localeCompare(String(a))
+}
+
 /** 列出目录下匹配前缀的子目录（缓存目录探测用；读不到返回 []） */
 async function listDirs(dir, prefixRe) {
   try {
     const names = await fs.readdir(dir)
-    return names.filter((n) => prefixRe.test(n)).sort().reverse().map((n) => path.join(dir, n))
+    return names.filter((n) => prefixRe.test(n)).sort(compareVersionDesc).map((n) => path.join(dir, n))
   } catch { return [] }
+}
+
+/** 单个 Puppeteer 版本目录内的 Chromium 可执行文件（含 Chrome for Testing 的 mac 目录名） */
+function puppeteerLayout(verDir) {
+  return [
+    path.join(verDir, 'chrome-linux64', 'chrome'),
+    path.join(verDir, 'chrome-linux', 'chrome'),
+    path.join(verDir, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+    path.join(verDir, 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+    path.join(verDir, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+    path.join(verDir, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+    path.join(verDir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+    path.join(verDir, 'chrome-win64', 'chrome.exe'),
+    path.join(verDir, 'chrome-win32', 'chrome.exe'),
+    path.join(verDir, 'chrome-win', 'chrome.exe'),
+  ]
+}
+
+/** 单个 Playwright Chromium 版本目录内的可执行文件 */
+function playwrightLayout(verDir) {
+  return [
+    path.join(verDir, 'chrome-linux64', 'chrome'),
+    path.join(verDir, 'chrome-linux', 'chrome'),
+    path.join(verDir, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+    path.join(verDir, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+    path.join(verDir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+    path.join(verDir, 'chrome-win64', 'chrome.exe'),
+    path.join(verDir, 'chrome-win32', 'chrome.exe'),
+    path.join(verDir, 'chrome-win', 'chrome.exe'),
+  ]
 }
 
 /**
@@ -71,31 +124,38 @@ async function puppeteerExecutable(loader = null) {
 
 /**
  * 扫描 Puppeteer / Playwright 缓存里的 Chromium（自装 puppeteer 但 PATH 无 chrome 时常见）。
+ *
+ * 注意版本目录名：Puppeteer v19+ 是 `chrome/linux-<ver>/chrome-linux64/chrome`（不是旧文档里的
+ * `chrome/<ver>/chrome-linux/chrome`），Playwright 新版本也改成了 `chrome-linux64`；只按数字/
+ * `chrome-linux` 匹配会全部漏掉，正是 v1.45.10 仍然探测不到本机已装 Chromium 的原因。
+ *
  * @param {string} home 用户目录
+ * @param {object} env 环境变量（支持自定义缓存目录）
  */
-async function cacheCandidates(home) {
+async function cacheCandidates(home, env = {}) {
   const out = []
-  const cacheRoots = [
+
+  // Puppeteer：默认 ~/.cache/puppeteer，可用 PUPPETEER_CACHE_DIR 覆盖
+  const ppRoots = [
+    env.PUPPETEER_CACHE_DIR && String(env.PUPPETEER_CACHE_DIR).trim(),
     path.join(home, '.cache', 'puppeteer'),
-    path.join(home, '.cache', 'puppeteer', 'chrome'),
-  ]
-  // ~/.cache/puppeteer/chrome/<version>/chrome-linux64/chrome
-  for (const root of cacheRoots) {
-    for (const verDir of await listDirs(root, /^\d+/)) {
-      out.push(path.join(verDir, 'chrome-linux64', 'chrome'))
-      out.push(path.join(verDir, 'chrome-linux', 'chrome'))
-      out.push(path.join(verDir, 'chrome-mac-arm64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'))
-      out.push(path.join(verDir, 'chrome-mac-x64', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'))
-      out.push(path.join(verDir, 'chrome-win64', 'chrome.exe'))
-      out.push(path.join(verDir, 'chrome-win32', 'chrome.exe'))
+  ].filter(Boolean)
+  for (const root of ppRoots) {
+    for (const verDir of await listDirs(path.join(root, 'chrome'), /./)) {
+      out.push(...puppeteerLayout(verDir))
     }
   }
-  // ~/.cache/ms-playwright/chromium-<rev>/chrome-linux/chrome
-  const pwRoot = path.join(home, '.cache', 'ms-playwright')
-  for (const revDir of await listDirs(pwRoot, /^chromium-/)) {
-    out.push(path.join(revDir, 'chrome-linux', 'chrome'))
-    out.push(path.join(revDir, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'))
-    out.push(path.join(revDir, 'chrome-win', 'chrome.exe'))
+
+  // Playwright：默认 ~/.cache/ms-playwright，可用 PLAYWRIGHT_BROWSERS_PATH 覆盖（"0" 表示随包安装，跳过）
+  const pwRoot = String(env.PLAYWRIGHT_BROWSERS_PATH || '').trim()
+  const pwRoots = [
+    pwRoot && pwRoot !== '0' ? path.resolve(pwRoot) : '',
+    path.join(home, '.cache', 'ms-playwright'),
+  ].filter(Boolean)
+  for (const root of pwRoots) {
+    for (const revDir of await listDirs(root, /^chromium-/)) {
+      out.push(...playwrightLayout(revDir))
+    }
   }
   return out
 }
@@ -126,7 +186,7 @@ export async function resolveChromeExecutable(cfg = {}, opts = {}) {
   if (pp && await isFile(pp)) return { path: pp, source: 'puppeteer' }
 
   // 4) Puppeteer / Playwright 缓存
-  for (const p of await cacheCandidates(home)) {
+  for (const p of await cacheCandidates(home, env)) {
     if (await isFile(p)) return { path: p, source: 'cache' }
   }
 

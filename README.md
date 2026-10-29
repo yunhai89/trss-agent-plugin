@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.45.10-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.45.11-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -1447,7 +1447,7 @@ stagehand:
 
 - **LLM**：Stagehand 每次原语调用要一次 LLM 推理。`modelName` 留空时**复用插件已配的 OpenAI 兼容 provider**（deepseek/openai/mimo 等，走 json_schema 结构化输出），并复用主 provider 已配置的代理；插件协议为 anthropic 或想用更强模型，填 `modelName`（五大 provider：openai/anthropic/google/groq/cerebras）。
 - **依赖**：`@browserbasehq/stagehand` v4 + `zod-stagehand`（Zod 4 别名，仅 Stagehand extract 用；其余模块仍用根依赖 Zod 3）。`zod-stagehand` 缺失时会回退复用 Stagehand 自带的同版本 Zod 4，因此不会导致插件加载失败；建议仍在云崽根 `pnpm install` 装入插件。本地模式另需 chromium + 系统库（`libnss3 libatk-bridge2.0-dev libgtk-3-dev libxss1 libasound2`）。
-- **本地 Chrome 自动探测（v1.45.10）**：Stagehand v4 在未给 `executablePath` 时只认**系统 Chrome**，找不到就报 `The CHROME_PATH environment variable must be set…`（服务器上通常只有 Yunzai 的 Puppeteer 自带 Chromium）。现在插件按顺序自动探测并传给 SDK：`agent.stagehand.executablePath` → 环境变量 `CHROME_PATH` / `PUPPETEER_EXECUTABLE_PATH` → **Puppeteer 自带 Chromium**（`puppeteer.executablePath()`）→ `~/.cache/puppeteer/chrome/*/chrome-linux64/chrome`、`~/.cache/ms-playwright/chromium-*` → 系统常见路径（`/usr/bin/chromium`、`/usr/bin/google-chrome`、`/snap/bin/chromium`、macOS/Windows 默认安装位）。全部落空时返回**可执行的排查提示**（apt/yum 安装、`npx puppeteer browsers install chrome`、显式配置、或改用云端模式），不再抛 SDK 原文。
+- **本地 Chrome 自动探测（v1.45.10 / v1.45.11）**：Stagehand v4 在未给 `executablePath` 时只认**系统 Chrome**，找不到就报 `The CHROME_PATH environment variable must be set…`（服务器上通常只有 Yunzai 的 Puppeteer 自带 Chromium）。现在插件按顺序自动探测并传给 SDK：`agent.stagehand.executablePath` → 环境变量 `CHROME_PATH` / `PUPPETEER_EXECUTABLE_PATH` → **Puppeteer 自带 Chromium**（`puppeteer.executablePath()`）→ **Puppeteer 缓存**（`~/.cache/puppeteer/chrome/linux-<ver>/chrome-linux64/chrome`，兼容旧版 `chrome-linux`；支持 `PUPPETEER_CACHE_DIR`）→ **Playwright 缓存**（`~/.cache/ms-playwright/chromium-<rev>/chrome-linux64/chrome`；支持 `PLAYWRIGHT_BROWSERS_PATH`）→ 系统常见路径（`/usr/bin/chromium`、`/usr/bin/google-chrome`、`/snap/bin/chromium`、macOS/Windows 默认安装位）。多版本按数字倒序取最新；v1.45.11 修复了只匹配纯数字版本目录/`chrome-linux` 导致本机已装的 Puppeteer/Playwright Chromium 全部漏探测。全部落空时返回**可执行的排查提示**（apt/yum 安装、`npx puppeteer browsers install chrome`、显式配置、或改用云端模式），不再抛 SDK 原文。
 - **兼容性影响**：早期版本把 SDK 返回值直接展开到结果根（数组会变成数字键、`result.title` 是原始 SDK 字段）；现统一为 `goto` 顶层 `url/title/status`、`observe/extract/act` 的载荷在 `result.data`（`goto` 同时提供 `result.data` 别名）。外部脚本请改读 `result.data`。
 - **安全边界**：入口对顶层导航做协议/IP/域名解析校验（含混淆 IPv4、尾点、空 DNS、取消/超时），并在请求级安装 Stagehand DomainPolicy（精确域名 + 子域通配 + IPv4 字面量）；IPv6/CIDR/单标签主机无法表达为域名规则，仅入口校验兜底；DNS 重绑定与"子资源访问私有 IP"不被 DomainPolicy 覆盖。因此**不宣称完整 SSRF 出口隔离**。
 - 云模式（Browserbase）不在主机跑浏览器、无需本地 chromium，但需 apiKey + 外网。
@@ -1753,6 +1753,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.45.11** | 修复 Stagehand 仍探测不到本机 Chromium：Puppeteer v19+ 缓存目录是 `chrome/linux-<ver>/chrome-linux64/chrome`、Playwright 新版是 `chromium-<rev>/chrome-linux64/chrome`，此前只匹配纯数字目录与 `chrome-linux`，导致 v1.45.10 的自动探测在真实机器上全部落空。现兼容新旧布局、支持 `PUPPETEER_CACHE_DIR`/`PLAYWRIGHT_BROWSERS_PATH`、多版本按数字取最新 |
 | **v1.45.10** | 修复 `stagehand__goto` 报 `The CHROME_PATH environment variable must be set…`：Stagehand v4 未给 `executablePath` 时只认系统 Chrome。新增本地 Chromium 自动探测（配置 → 环境变量 → **Puppeteer 自带 Chromium** → `~/.cache` 缓存 → 系统路径），找不到时给出安装/配置建议而非 SDK 晦涩报错 |
 | **v1.45.9** | 修复 Web 面板登录后所有页面报 `Failed to execute 'fetch' … String contains non ISO-8859-1 code point`：用户把 `#agents登录` 返回的整段内容（含中文）粘进登录框时会原样存进 localStorage 并拼进 `Authorization` 请求头。现统一归一化 token（支持直接粘贴**完整登录链接**、自动抽取 48 位 token、剥离中文/脏字符），历史脏值读取时自愈，非法输入明确提示 |
 | **v1.45.8** | 帮助图渲染超时默认改为 **300000ms（5 分钟）**：新增 `agent.render.helpTimeoutMs`，与普通卡片图 `render.timeoutMs`（默认 15s）分开——帮助卡片最长，弱机器/冷缓存首次渲染常超过 15s，此前会直接降级成文本；超时仍按原策略降级并进入冷却 |

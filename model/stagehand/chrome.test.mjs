@@ -10,8 +10,8 @@
  *  ① 优先级：显式配置 → 环境变量 → Puppeteer 自带 → 缓存目录（puppeteer/playwright）→ 系统路径；
  *  ② 显式配置了但文件不存在 → 返回 null（不让用户误以为生效）；
  *  ③ 空环境 → null，且 missingChromeMessage 给出可执行安装/配置建议；
- *  ④ 缓存目录扫描（~/.cache/puppeteer/chrome/<ver>/chrome-linux64/chrome、
- *     ~/.cache/ms-playwright/chromium-<rev>/chrome-linux/chrome）。
+ *  ④ 缓存目录扫描（~/.cache/puppeteer/chrome/linux-<ver>/chrome-linux64/chrome、
+ *     ~/.cache/ms-playwright/chromium-<rev>/chrome-linux64/chrome，及自定义缓存目录）。
  *
  * 运行：node model/stagehand/chrome.test.mjs
  */
@@ -68,6 +68,32 @@ console.log('\n[4] 缓存目录扫描')
   const p2 = path.join(h2, '.cache', 'ms-playwright', 'chromium-1148', 'chrome-linux', 'chrome')
   fs.mkdirSync(path.dirname(p2), { recursive: true }); fs.writeFileSync(p2, 'x')
   eq(await resolveChromeExecutable({}, { env: {}, home: h2, puppeteerLoader: async () => '' }), { path: p2, source: 'cache' }, 'playwright 缓存目录命中（chromium-*）')
+
+  // 真实布局（v1.45.10 漏探测的两种）：Puppeteer v19+ 带平台前缀，Playwright 新版 chrome-linux64
+  const h3 = path.join(tmp, 'home3')
+  const p3 = path.join(h3, '.cache', 'puppeteer', 'chrome', 'linux-156.0.8078.47', 'chrome-linux64', 'chrome')
+  fs.mkdirSync(path.dirname(p3), { recursive: true }); fs.writeFileSync(p3, 'x')
+  eq(await resolveChromeExecutable({}, { env: {}, home: h3, puppeteerLoader: async () => '' }), { path: p3, source: 'cache' }, 'puppeteer 真实布局命中（linux-<ver>/chrome-linux64）')
+
+  const h4 = path.join(tmp, 'home4')
+  const p4 = path.join(h4, '.cache', 'ms-playwright', 'chromium-1248', 'chrome-linux64', 'chrome')
+  fs.mkdirSync(path.dirname(p4), { recursive: true }); fs.writeFileSync(p4, 'x')
+  eq(await resolveChromeExecutable({}, { env: {}, home: h4, puppeteerLoader: async () => '' }), { path: p4, source: 'cache' }, 'playwright 真实布局命中（chrome-linux64）')
+
+  // 多版本按数字取最新（避免 linux-99 排在 linux-156 前面）
+  const h5 = path.join(tmp, 'home5')
+  for (const ver of ['linux-99.0.0.0', 'linux-156.0.8078.47']) {
+    const p = path.join(h5, '.cache', 'puppeteer', 'chrome', ver, 'chrome-linux64', 'chrome')
+    fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, 'x')
+  }
+  const newest = path.join(h5, '.cache', 'puppeteer', 'chrome', 'linux-156.0.8078.47', 'chrome-linux64', 'chrome')
+  eq(await resolveChromeExecutable({}, { env: {}, home: h5, puppeteerLoader: async () => '' }), { path: newest, source: 'cache' }, '多版本按数字选最新')
+
+  // 自定义缓存目录（PUPPETEER_CACHE_DIR / PLAYWRIGHT_BROWSERS_PATH）
+  const custom = path.join(tmp, 'custom-puppeteer')
+  const p6 = path.join(custom, 'chrome', 'linux-156.0.8078.47', 'chrome-linux64', 'chrome')
+  fs.mkdirSync(path.dirname(p6), { recursive: true }); fs.writeFileSync(p6, 'x')
+  eq(await resolveChromeExecutable({}, { env: { PUPPETEER_CACHE_DIR: custom }, home: path.join(tmp, 'empty-home'), puppeteerLoader: async () => '' }), { path: p6, source: 'cache' }, 'PUPPETEER_CACHE_DIR 生效')
 }
 
 console.log('\n[5] 系统常见路径与完全找不到')
