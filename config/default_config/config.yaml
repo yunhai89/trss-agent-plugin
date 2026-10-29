@@ -122,6 +122,24 @@ agent:
     quote: true             # 群聊回复时引用触发消息（私聊不引用）；人多时便于定位回复对象，可与 atSender 同开
     narrate: true           # 中途播报：模型调工具时附带的思路/进展文本自动转发给用户（OpenClaw 式）
     renderScale: 3          # 回复图片渲染倍率（deviceScaleFactor，3=超清默认；2=高清；1=普通；越大越清晰但越耗内存/体积）
+  # ── QQ 官方机器人：本插件自实现适配器（AppID + AppSecret 直连）──
+  # 目的：TRSS 官方 QQBot 适配器（Yunzai-QQBot-Plugin）仍要求「机器人QQ号:AppID:Token:AppSecret」
+  # 四段连接串（Token 是 QQ 频道 v1 时代遗留）；现行开放平台只需 AppID + AppSecret 换 access_token。
+  # 本适配器直接实现网关 + v2 REST，并原生支持 Markdown 消息与 inline keyboard。
+  # ⚠️ 与 Yunzai-QQBot-Plugin 二选一：同一条机器人同时连两个适配器会重复收发。
+  # 启用后可用 #qqbot状态 / #qqbot重连 / #qqbot账号 查看与重连。
+  qqBot:
+    enable: false              # 总开关（关=不注册适配器、不连接）
+    appId: ""                  # 机器人 AppID（QQ 开放平台 → 开发设置）
+    appSecret: ""              # 机器人 AppSecret（★敏感：回复发送前会脱敏）
+    accounts: []               # 多账号：[{ name, appId, appSecret, sandbox, intents, markdown }]（与上面扁平字段二选一）
+    intents: 0                 # 事件订阅位图（0=默认：群@消息 + 私聊C2C + 按钮交互；频道/频道私信需显式填 1073741825 = GUILDS|PUBLIC_GUILD_MESSAGES）
+    markdown: auto             # auto=先试 Markdown、无权限自动降级纯文本并记忆 | true=总是 | false=纯文本
+    preferMarkdownText: false  # true=纯文本回复也走 Markdown 消息（平台支持时更美观）
+    sandbox: false             # true=连沙箱环境（api 域名 sandbox.）
+    apiBase: ""                # 覆盖 OpenAPI 基址（默认 https://api.sgroup.qq.com，自建代理时填）
+    tokenUrl: ""               # 覆盖 access_token 端点（默认 https://bots.qq.com/app/getAppAccessToken）
+
   # ── QQ 官方机器人（QQBot / QQ 频道适配器）──
   # 官方协议与 OneBot 不同：消息 ID 是 openid（<self_id>:<openid> / qg_...）而不是 QQ 号/群号，
   # 且支持原生 Markdown 消息与 inline keyboard 按钮。发 /uid、/groupid 可打印可直接粘贴的原始 ID。

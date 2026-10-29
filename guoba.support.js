@@ -618,6 +618,18 @@ export function supportGuoba() {
 
         // —— QQ 官方机器人（QQBot / QQ 频道）——
         { label: 'QQ 官方机器人（QQBot / 频道）', component: 'SOFT_GROUP_BEGIN' },
+        { label: 'QQ 官方机器人 · 自实现适配器（AppID + AppSecret）', component: 'SOFT_GROUP_BEGIN' },
+        { field: 'agent.qqBot.enable', label: '启用自实现适配器', bottomHelpMessage: '本插件直接连 QQ 官方网关，只需 AppID + AppSecret（不需要机器人 QQ 号与 Token）。⚠️ 与 Yunzai-QQBot-Plugin 二选一，否则重复收发', component: 'Switch' },
+        { field: 'agent.qqBot.appId', label: 'AppID', bottomHelpMessage: 'QQ 开放平台 → 开发设置 → 机器人 AppID', component: 'Input', componentProps: { placeholder: '如 102012345' } },
+        { field: 'agent.qqBot.appSecret', label: 'AppSecret', bottomHelpMessage: 'QQ 开放平台 → 开发设置 → AppSecret（敏感：回复发送前会脱敏）', component: 'Input', componentProps: { placeholder: 'AppSecret' } },
+        { field: 'agent.qqBot.markdown', label: 'Markdown 能力', bottomHelpMessage: 'auto=先试 Markdown、无权限自动降级纯文本并记忆（推荐）| true=总是 | false=纯文本', component: 'Select', componentProps: { options: [{ label: 'auto（推荐）', value: 'auto' }, { label: 'true 总是 Markdown', value: 'true' }, { label: 'false 纯文本', value: 'false' }] } },
+        { field: 'agent.qqBot.preferMarkdownText', label: '纯文本也走 Markdown', bottomHelpMessage: '平台支持时，纯文本回复也用 Markdown 消息渲染', component: 'Switch' },
+        { field: 'agent.qqBot.sandbox', label: '沙箱环境', bottomHelpMessage: '连开放平台沙箱（api 域名 sandbox.）', component: 'Switch' },
+        { field: 'agent.qqBot.intents', label: '事件订阅位图(intents)', bottomHelpMessage: '0=默认（群@消息 + C2C + 按钮交互；频道需显式配置 1073741825）；一般不用改', component: 'InputNumber', componentProps: { min: 0 } },
+        { field: 'agent.qqBot.accounts', label: '多账号(JSON)', bottomHelpMessage: '数组：[{name,appId,appSecret,sandbox,intents,markdown}]；与上面扁平字段二选一（留空用扁平）', component: 'InputTextArea', componentProps: { autosize: { minRows: 2, maxRows: 8 }, placeholder: '[]' } },
+        { field: 'agent.qqBot.apiBase', label: 'OpenAPI 基址(可选)', bottomHelpMessage: '默认 https://api.sgroup.qq.com；自建代理时填', component: 'Input', componentProps: { placeholder: '留空=官方' } },
+        { field: 'agent.qqBot.tokenUrl', label: 'token 端点(可选)', bottomHelpMessage: '默认 https://bots.qq.com/app/getAppAccessToken', component: 'Input', componentProps: { placeholder: '留空=官方' } },
+
         { field: 'agent.qqOfficial.markdown.enable', label: 'Markdown 直发', bottomHelpMessage: '仅 QQ 官方机器人适配器生效：回复用原生 Markdown 消息（不再渲染成图片）；平台拒绝时自动降级纯文本。OneBot/ICQQ 不受影响', component: 'Switch' },
         { field: 'agent.qqOfficial.markdown.maxChars', label: 'Markdown 单条上限(字符)', bottomHelpMessage: '超出按行分片发送（官方上限约 4000，默认 3500）', component: 'InputNumber', componentProps: { min: 500, max: 4000, step: 100 } },
         { field: 'agent.qqOfficial.markdown.templateId', label: 'Markdown 模板 ID(可选)', bottomHelpMessage: 'QQ 后台申请的模板 ID；填了走模板消息（忽略正文直接渲染）', component: 'Input', componentProps: { placeholder: '留空=原始 Markdown' } },

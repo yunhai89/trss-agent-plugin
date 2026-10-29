@@ -126,6 +126,57 @@
 > 适用：协议端为 **TRSS-Yunzai + [Yunzai-QQBot-Plugin](https://github.com/TimeRainStarSky/Yunzai-QQBot-Plugin)**（QQ 群机器人 / C2C）或 QQ 频道适配器。
 > OneBot/ICQQ（NapCat 等）用户不需要本节的任何配置，行为与以前完全一致。
 
+### 自实现适配器：只需 AppID + AppSecret（推荐）
+
+TRSS 官方 QQBot 适配器（[Yunzai-QQBot-Plugin](https://github.com/TimeRainStarSky/Yunzai-QQBot-Plugin)）的连接串是
+「机器人 QQ 号 : AppID : Token : AppSecret」四段——其中 **Token 是 QQ 频道 v1 时代的遗留鉴权**。
+现行开放平台只需要 **AppID + AppSecret** 换取 access_token（`POST bots.qq.com/app/getAppAccessToken`），
+因此本插件内置了一套完整适配器（网关 WebSocket + v2 REST），**填两段密钥即可连**，不依赖第三方适配器插件：
+
+```yaml
+agent:
+  qqBot:
+    enable: true
+    appId: "102012345"        # QQ 开放平台 → 开发设置 → 机器人 AppID
+    appSecret: "xxxxxxxx"     # 开发设置 → AppSecret（敏感：回复发送前会脱敏）
+    # 多账号（可选，与上面扁平字段二选一）：
+    # accounts:
+    #   - { name: 主号, appId: "102012345", appSecret: "xxx" }
+    #   - { name: 二号, appId: "102054321", appSecret: "yyy", sandbox: true }
+    markdown: auto            # auto=先试 Markdown、无权限自动降级纯文本并记忆
+    intents: 0                # 0=默认（群@消息 + C2C + 按钮交互；频道需显式配置 1073741825）
+```
+
+**启用步骤**
+
+1. `agent.qqBot.enable: true`，填 `appId` + `appSecret`（**不要**再用 Yunzai-QQBot-Plugin 的同一机器人）；
+2. 重启 Yunzai（适配器在框架 Listener 阶段注册；之后改配置可用 `#qqbot重连` 热重连）；
+3. 群里 @ 机器人发一句话即可对话；发 `/uid`、`/groupid` 配主人与白名单（见下节）。
+
+**管理指令**（主人）：
+
+| 指令 | 作用 |
+| --- | --- |
+| `#qqbot状态` | 各账号连接状态、session、Markdown 是否可用 |
+| `#qqbot重连` | 断开并按当前配置重连全部账号（改完配置不用重启） |
+| `#qqbot账号` | 当前配置的账号列表（AppID 与沙箱标记，不打印密钥） |
+
+**能力与边界**
+
+| 项 | 支持情况 |
+| --- | --- |
+| QQ 群 @消息 / 私聊（C2C） / 频道消息 / 频道私信 | ✅ 收发（频道私信首次自动建 DM 会话） |
+| 被动回复 | ✅ 5 分钟窗口内自动带 `msg_id`，同一 `msg_id` 最多 5 条，超出降级主动消息 |
+| Markdown 消息 | ✅ `markdown: auto` 先试；机器人没开通权限（`304036`）自动改纯文本并记忆，不刷错误 |
+| inline keyboard 按钮 | ✅ `send_keyboard` 工具；回调点击当作「用户发了一句话」投递（命令/权限全复用） |
+| 图片/文件 | ✅ 群与私聊走富媒体上传（URL 或本地文件 base64）→ `msg_type=7`；**频道暂不支持富媒体**（会跳过并记日志） |
+| 长文本 | ✅ 3800 字一段分片发送 |
+| 主动消息 | ⚠️ 受平台配额限制；本插件在窗口内优先被动回复 |
+| 断线重连 | ✅ 按官方关闭码处理（4004 鉴权失败不重连、4008 频控 60s、4006/4007/4009 清 session 重连），指数退避 |
+
+> ⚠️ **与 Yunzai-QQBot-Plugin 二选一**：两个适配器同时连同一条机器人会各收一份事件、各发一份消息（重复回复）。
+> 想切回官方适配器：先停用本插件适配器（`agent.qqBot.enable: false` 并重启），再恢复对方的 token 配置。
+
 ### 协议差异：ID 不是 QQ 号
 
 官方机器人返回的 ID 是 **openid**，不是 QQ 号/群号：
@@ -403,6 +454,12 @@ agent:
 | `qqOfficial.keyboard.enable` | `true` | 注册 `send_keyboard` 工具（Markdown + inline keyboard，≤5×5，单轮 ≤3 张） |
 | `qqOfficial.progress` | `false` | 官方协议下是否发「思考中…」等进度（默认关，官方主动推送有频控） |
 | `qqOfficial.narrate` | `false` | 官方协议下是否中途播报（默认关） |
+| `qqBot.enable` / `qqBot.appId` / `qqBot.appSecret` | `false` / 空 / 空 | **自实现 QQBot 适配器**：只需 AppID + AppSecret 直连官方网关（不需要机器人 QQ 号/Token）。与 Yunzai-QQBot-Plugin 二选一 |
+| `qqBot.accounts` | `[]` | 多账号：`[{name,appId,appSecret,sandbox,intents,markdown}]`（与扁平字段二选一） |
+| `qqBot.markdown` | `auto` | `auto`=先试 Markdown、无权限自动降级纯文本并记忆；`true`/`false` 强制 |
+| `qqBot.preferMarkdownText` | `false` | 纯文本回复也走 Markdown 消息 |
+| `qqBot.sandbox` | `false` | 连开放平台沙箱环境 |
+| `qqBot.intents` | `0` | 事件订阅位图（0=默认：群@ + C2C + 按钮交互（频道需配置 1073741825）） |
 | `thinking` | 空 | 思考模式（手动），provider 原生形状：`{ type: "enabled", budget_tokens: 16000 }`（`type` 可为 `enabled`/`disabled`，留空=不开启；`budget_tokens` 上限统一到 **128000**，各协议按同一 clamp）。锅巴面板用「开启深度思考 + 思考预算」两个控件读写同一字段 |
 | `thinkingAuto` | 关 | 思考自动决策：`{ enable, classifier, model, timeoutMs, maxBudget, budgets:{low,medium,high}, style }`。判档方式 `classifier`：`auto`=规则不确定时用小模型判（省调用）/`always`=总是小模型/`off`=纯规则/`jev`=由 Jev 判档（需开启 Jev）；小模型带超时、缓存，失败自动回退规则，不阻塞对话。档位→厂商原生字段（MiMo/Kimi/GLM/豆包→`thinking`、DeepSeek→`thinking`+`reasoning_effort`、Qwen→`enable_thinking`+`thinking_budget`、MiniMax→`adaptive`、Anthropic→`budget_tokens`、o/GPT-5→`reasoning_effort`、Gemini→`thinking_level`）。模型级 `thinking` 显式覆盖仍优先。**能力自适应**：能力表没明确表态的（新）型号默认乐观启用思考——厂商若拒绝思考字段，请求层自动剥离重试一次并记忆（之后自动判为不支持，`[chat]` 日志随之转 off，无需重启）；明确判为不支持的模型（如 gpt-4o）启动时有 `[thinking]` 警告，可设 `agent.media.caps.thinking=true` 强制 |
 | `memoryLimits` | 空 | 声明式记忆字符上限，如 `{ memory: 2200, user: 1375 }` |

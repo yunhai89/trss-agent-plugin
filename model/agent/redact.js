@@ -50,6 +50,9 @@ function collectSecrets() {
   push(cfg.stagehand?.apiKey)
   push(cfg.stagehand?.modelApiKey)
   push(cfg.comfyui?.apiKey)
+  // QQ 官方机器人自实现适配器：AppSecret 与 access_token 同等敏感（泄露可冒充机器人发消息）
+  push(cfg.qqBot?.appSecret)
+  for (const a of cfg.qqBot?.accounts || []) push(a?.appSecret)
   push(cfg.tools?.pixiv?.refreshToken) // Pixiv 已迁为外置工具：值存 agent.tools.pixiv
   push(cfg.miyoushe?.cookie)
   // mcp servers 的 env / headers 值（常含 API Key），以及部分服务端的鉴权 token

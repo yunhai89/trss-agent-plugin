@@ -174,6 +174,17 @@
         if (form.cacheControl === false) form.cacheControl = 'off'
         else if (form.cacheControl === true) form.cacheControl = 'explicit'
         else if (form.cacheControl == null) form.cacheControl = 'off'
+        if (!form.qqBot) form.qqBot = {}
+        if (form.qqBot.enable == null) form.qqBot.enable = false
+        if (form.qqBot.appId == null) form.qqBot.appId = ''
+        if (form.qqBot.appSecret == null) form.qqBot.appSecret = ''
+        if (!Array.isArray(form.qqBot.accounts)) form.qqBot.accounts = []
+        if (form.qqBot.intents == null) form.qqBot.intents = 0
+        if (form.qqBot.markdown == null) form.qqBot.markdown = 'auto'
+        if (form.qqBot.preferMarkdownText == null) form.qqBot.preferMarkdownText = false
+        if (form.qqBot.sandbox == null) form.qqBot.sandbox = false
+        if (form.qqBot.apiBase == null) form.qqBot.apiBase = ''
+        if (form.qqBot.tokenUrl == null) form.qqBot.tokenUrl = ''
         if (!form.qqOfficial) form.qqOfficial = {}
         if (!form.qqOfficial.markdown) form.qqOfficial.markdown = {}
         if (form.qqOfficial.markdown.enable == null) form.qqOfficial.markdown.enable = true
@@ -1699,6 +1710,42 @@
                 本卡配置仅在官方协议下生效，OneBot/ICQQ 不受影响。
               </div>
             </div>
+            <div class="cf-sub"><v-icon name="cpu"/>自实现适配器（AppID + AppSecret 直连，替代 Yunzai-QQBot-Plugin）</div>
+            <div class="full" style="padding:10px 12px;border:1px dashed var(--line);border-radius:10px;margin:0 0 6px">
+              <div class="mut2" style="font-size:12px">
+                本插件自带一套 QQBot 适配器：只需 <b>AppID + AppSecret</b>（无需机器人 QQ 号与 Token）。
+                开启后请<b>停用 Yunzai-QQBot-Plugin 的同一机器人</b>，否则会重复收发消息。
+                连接后可用 <code>#qqbot状态</code> / <code>#qqbot重连</code> 排查。
+              </div>
+            </div>
+            <cfg-row name="启用自实现适配器" desc="qqBot.enable：本插件直接连 QQ 官方网关（WebSocket）">
+              <v-switch v-model="form.qqBot.enable"/>
+            </cfg-row>
+            <cfg-row name="AppID" desc="QQ 开放平台 → 开发设置 → 机器人 AppID">
+              <input class="inp mono" style="width:220px" v-model="form.qqBot.appId" placeholder="如 102012345">
+            </cfg-row>
+            <cfg-row name="AppSecret" desc="QQ 开放平台 → 开发设置 → AppSecret（敏感：回复发送前脱敏）">
+              <input class="inp mono" type="password" style="width:300px" v-model="form.qqBot.appSecret" placeholder="AppSecret">
+            </cfg-row>
+            <cfg-row name="Markdown 能力" desc="auto=先试 Markdown、无权限自动降级纯文本并记忆 | true=总是 | false=纯文本">
+              <select class="sel" style="width:170px" v-model="form.qqBot.markdown">
+                <option value="auto">auto（推荐）</option>
+                <option value="true">true（总是 Markdown）</option>
+                <option value="false">false（纯文本）</option>
+              </select>
+            </cfg-row>
+            <cfg-row name="纯文本也走 Markdown" desc="preferMarkdownText：平台支持时纯文本回复也用 Markdown 消息渲染">
+              <v-switch v-model="form.qqBot.preferMarkdownText"/>
+            </cfg-row>
+            <cfg-row name="沙箱环境" desc="sandbox：连开放平台沙箱（api 域名 sandbox.）">
+              <v-switch v-model="form.qqBot.sandbox"/>
+            </cfg-row>
+            <cfg-row name="事件订阅位图(intents)" desc="0=默认（群@消息 + C2C + 按钮交互；频道需显式填 1073741825）；一般不用改">
+              <input type="number" class="inp" style="width:150px" min="0" v-model.number="form.qqBot.intents">
+            </cfg-row>
+            <cfg-row name="多账号(JSON)" desc="accounts：[{name,appId,appSecret,sandbox,intents,markdown}]；与上面扁平字段二选一">
+              <textarea class="inp mono" style="width:360px;min-height:54px" :value="JSON.stringify(form.qqBot.accounts || [])" @change="updateJson('qqBot.accounts', $event.target.value)"></textarea>
+            </cfg-row>
             <cfg-row name="Markdown 直发" desc="官方机器人下回复用原生 Markdown 消息（不渲染图片）；平台拒绝时自动降级纯文本">
               <v-switch v-model="form.qqOfficial.markdown.enable"/>
             </cfg-row>

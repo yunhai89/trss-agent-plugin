@@ -92,3 +92,75 @@ TRSS-Yunzai 通过独立的适配器插件接入 QQ 官方机器人（`Yunzai-QQ
 - `send_keyboard` 在 OneBot 部署下仍会注册（执行期返回 unsupported_protocol），便于多协议混部；
   如只需 OneBot 可在面板关掉 `qqOfficial.keyboard.enable`。
 - Miao-Yunzai 等非 TRSS 框架没有 `segment.markdown/button`：自动退回纯文本/图片模式，功能不缺失、不报错。
+
+---
+
+# 附：自实现 QQBot 适配器（v1.43.0，AppID + AppSecret 直连）
+
+## 1. 动机
+
+TRSS 官方适配器（`Yunzai-QQBot-Plugin` + `qq-group-bot` SDK）的连接串是
+`机器人QQ号:AppID:Token:AppSecret` 四段。其中 **Token（`Bot {appid}.{token}`）是 QQ 频道 v1 时代的鉴权遗留**；
+现行开放平台鉴权只需 **AppID + AppSecret** 换 `access_token`：
+
+```
+POST https://bots.qq.com/app/getAppAccessToken
+Body: { "appId": "...", "clientSecret": "..." }
+Resp: { "access_token": "...", "expires_in": 7200 }
+```
+
+本插件因此自带一套完整适配器（零新增依赖：原生 `fetch` + 原生 `WebSocket`，Node<22 自动回退 `ws`）：
+协议层 `model/qqbot/`，框架桥接 `apps/qqbot.js`。
+
+## 2. 结构
+
+| 文件 | 职责 |
+| --- | --- |
+| `model/qqbot/token.js` | AppID+AppSecret → access_token；按 appId 缓存、并发单飞、提前 5 分钟刷新、错误人话化 |
+| `model/qqbot/api.js` | v2 REST：发消息（文本/markdown/富媒体）、撤回、富媒体上传、创建频道私信、交互应答、`msg_seq` 分配、错误码→人话 |
+| `model/qqbot/gateway.js` | WebSocket 网关：HELLO→IDENTIFY/RESUME、心跳、DISPATCH、关闭码语义与退避重连（4004 不重连 / 4008 60s / 4006 清 session） |
+| `model/qqbot/events.js` | 网关事件归一化（GROUP_AT/C2C/AT_MESSAGE/DIRECT/INTERACTION）→ 内部结构 |
+| `model/qqbot/payload.js` | Yunzai 消息段 → 官方消息体：文本/markdown（含模板）/inline keyboard/富媒体/引用；键盘 5×5 裁剪与默认权限（回调仅触发者） |
+| `model/qqbot/client.js` | 门面：start/stop/status、send（markdown 无权限自动降级并记忆）、媒体上传、事件分发 |
+| `apps/qqbot.js` | 适配器桥接：注册到 `Bot.adapter`、`load()` 连账号、`Bot[id]` + pickFriend/pickGroup/pickMember、事件投递（`message.group.normal` / `message.private.friend`）、被动回复 5 次/msg_id、`#qqbot状态/重连/账号` |
+
+ID 形态与既有 `qqofficial` 层完全一致：`<appId>:<openid>`（群/私聊）、`qg_<guild>-<channel>`（频道），
+所以 `/uid`、`/groupid`、Markdown 直发、keyboard 卡片、主人兜底全部直接复用。
+
+## 3. 配置（`agent.qqBot`）
+
+```yaml
+qqBot:
+  enable: true
+  appId: "102012345"
+  appSecret: "***"
+  accounts: []            # 多账号；与扁平字段二选一
+  intents: 0              # 0=默认（GROUP_AND_C2C | INTERACTION | PUBLIC_GUILD_MESSAGES | GUILDS）
+  markdown: auto          # auto / true / false
+  preferMarkdownText: false
+  sandbox: false
+  apiBase: ""             # 默认 https://api.sgroup.qq.com
+  tokenUrl: ""            # 默认官方 token 端点
+```
+
+## 4. 与旧适配器的关系
+
+- **二选一**：本适配器与 `Yunzai-QQBot-Plugin` 同时连同一条机器人会重复收发（两份事件 / 两份回复）。
+- 本适配器 `path=data/QQBotAgent/`（与对方的 `data/QQBot/` 不同），`Bot.adapter` 去重不会互相吞掉——
+  这是刻意为之（便于用户先并排验证再切换），但**必须只启用一个**。
+- 切换回官方插件：`agent.qqBot.enable: false` → 重启 → 恢复对方 token 配置。
+
+## 5. 已知边界
+
+- **频道富媒体**（图片/文件）暂不支持：跳过并记日志（QQ 群 / C2C 完整支持）。
+- **语音**：按 `file_type=3` 上传，平台要求 silk，wav/mp3 可能被拒（日志可见错误码）。
+- **主动消息**：受平台配额限制；同一 `msg_id` 被动回复最多 5 条，超出后降级主动消息（可能被拒）。
+- **网关事件**：默认只订阅 群@ + C2C + 频道消息 + 按钮交互；入群/退群等生命周期事件未映射成 Yunzai notice（不影响对话）。
+
+## 6. 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `node model/qqbot/test.mjs` | **105 断言**：token 缓存/单飞/错误、REST 路径与消息体、错误码人话、网关 IDENTIFY/RESUME/心跳/关闭码、事件归一化、键盘/媒体/分片、client 发送与 markdown 降级 |
+| `node --import ./stress/e2e/hooks.mjs stress/e2e/qqbot-adapter.mjs` | **39 断言**：模块加载注册适配器、账号归一化（扁平/多账号/缺密钥）、`Bot[id]`+pick*、事件字段（含 ID 拼接与 adapter_id）、被动回复 5 次上限、按钮回调投递、断连清理 |
+| `node scripts/run-tests.mjs` | 见仓库提交记录（全量通过） |
