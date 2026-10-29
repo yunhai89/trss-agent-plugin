@@ -112,6 +112,32 @@ console.log('\n[3] 连接：注册 Bot[id] + pickFriend/pickGroup/pickMember')
   await bot.pickFriend('APP1:U1').sendMsg('hi')
   const s2 = clients[0].sent.pop()
   eq([s2.scene, s2.target], ['c2c', 'U1'], '私聊消息发送到 user_openid')
+
+  // _attachBot 幂等：重复挂载不重复 emit connect（轮询与 ready 事件可能同时触发）
+  const connectEmits = harness.emCalls.filter((x) => x.name === 'connect.APP1').length
+  adapter._attachBot('APP1', adapter.clients.get('APP1'))
+  eq(harness.emCalls.filter((x) => x.name === 'connect.APP1').length, connectEmits, '重复 _attachBot 不再 emit connect')
+
+  // 连接等待期间被 disconnect：connect() 必须快速返回 false（不能干等 20s 再挂一个已删除的 bot）
+  {
+    const slowClients = []
+    const slowAdapter = createQQBotAdapter({
+      clientFactory: (account) => {
+        const c = new FakeClient(account)
+        c.start = async function () { this.started = true; this._state = 'connecting' } // 永不 ready
+        c.on = FakeClient.prototype.on
+        slowClients.push(c)
+        return c
+      },
+    })
+    const p = slowAdapter.connect({ appId: 'SLOW1', appSecret: 'S', name: '慢号' })
+    await new Promise((r) => setTimeout(r, 120))
+    slowAdapter.disconnect('SLOW1')
+    const t0 = Date.now()
+    const r = await Promise.race([p, new Promise((res) => setTimeout(() => res('timeout'), 3000))])
+    ok(r === false && Date.now() - t0 < 3000, '等待 READY 期间断连 → connect() 立即返回 false')
+    eq(slowAdapter.clients.size, 0, '断连后 clients 无残留')
+  }
   adapter.stopAll()
 }
 
@@ -218,6 +244,38 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
   const atMsg = harness.emCalls.pop().data
   eq(atMsg.message[0], { type: 'at', qq: 'APP2' }, '全量消息中被 @ 时补 at 段（正常触发）')
 
+  // 框架侧映射回填：fl / gl / gml
+  const botRef = harness.bots.APP2
+  ok(botRef.gl.has('APP2:GO'), '群消息回填 gl（群映射）')
+  ok(botRef.gml.get('APP2:GO')?.has('APP2:MO'), '群消息回填 gml（成员映射）')
+  ok(botRef.fl.size === 0 || botRef.fl.has('APP2:UO'), '好友映射按 c2c 消息回填（此前私聊已收到）')
+
+  // login / logout 生命周期与框架契约一致（#Bot下线 / #Bot上线）
+  await botRef.logout()
+  ok(!harness.bots.APP2 && adapter.clients.size === 0, 'logout 后 Bot[id] 与客户端都被清理')
+  await botRef.login()
+  ok(!!harness.bots.APP2 && adapter.clients.size === 1, 'login 后重新连接并挂载 Bot[id]')
+  adapter.stopAll()
+}
+
+console.log('\n[4b] 叶子修复：被动回复窗口 / 频道 ID 去前缀 / 私信源频道')
+{
+  const adapter = await import(pathToFileURL(path.join(here, '../../apps/qqbot.js')).href).then((m) => m.createQQBotAdapter({ clientFactory: (account) => new FakeClient(account) }))
+  adapter.clients.set('APP2', { account: { appId: 'APP2', name: '二号', appSecret: 'S' }, client: { status: () => ({ state: 'ready' }) }, connectedAt: Date.now() })
+  // 被动回复：窗口按触发消息时间计
+  eq(adapter._passiveMsgId('APP2', 'm1', Date.now() - 6 * 60 * 1000), '', '超过 5 分钟窗口 → 不带 msg_id（主动消息）')
+  eq(adapter._passiveMsgId('APP2', 'm2', Date.now() - 60 * 1000), 'm2', '窗口内 → 带 msg_id')
+  // 次数上限 5
+  const ids = [1, 2, 3, 4, 5, 6].map(() => adapter._passiveMsgId('APP2', 'm3', Date.now()))
+  eq(ids, ['m3', 'm3', 'm3', 'm3', 'm3', ''], '同一 msg_id 最多 5 次')
+  // openid / 群 / 频道 ID 前缀还原
+  eq(adapter._rawOpenid('APP2:UO'), 'UO', '剥 <appId>: 前缀')
+  eq(adapter._rawOpenid('qg_UO'), 'UO', '剥 qg_ 前缀（频道用户）')
+  eq(adapter._rawGroupOpenid('APP2:GO'), 'GO', '群 openid 去前缀')
+  eq(adapter._rawGroupOpenid('qg_GD-CH'), 'CH', '频道 group_id → channel_id')
+  eq(adapter._rawGuildId('qg_GD-CH'), 'GD', '频道 group_id → guild_id')
+  eq(adapter._rawGuildId('APP2:GO'), '', '普通群没有 guild_id')
+  // 清理：不留下的半初始化 client（不涉及）
   adapter.stopAll()
 }
 

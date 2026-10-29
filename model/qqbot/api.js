@@ -130,6 +130,21 @@ export class QQBotApi {
    * @returns {Promise<any>} 解析后的 JSON
    */
   async request(creds, method, path, body = null, { timeoutMs = null, upload = false } = {}) {
+    try {
+      return await this._doRequest(creds, method, path, body, { timeoutMs, upload })
+    } catch (e) {
+      // token 被提前失效（改密钥 / 平台侧注销 / 缓存时钟偏差）时：清缓存重取一次再重试。
+      // 不做这层的话所有发送/查询都会一直 401 直到 2h 后缓存自然过期，用户只能重启。
+      if (e?.status === 401 || e?.status === 403) {
+        this.logger('warn', '[qqbot:api] token 失效，重新获取后重试一次', `status=${e.status}`, `${method} ${path}`)
+        this.tokenManager.clearCache(creds.appId)
+        return await this._doRequest(creds, method, path, body, { timeoutMs, upload })
+      }
+      throw e
+    }
+  }
+
+  async _doRequest(creds, method, path, body = null, { timeoutMs = null, upload = false } = {}) {
     const token = await this.tokenManager.getAccessToken(creds.appId, creds.appSecret ?? creds.clientSecret)
     const bases = this._goodBase ? [this._goodBase, ...this.baseUrls.filter((b) => b !== this._goodBase)] : [...this.baseUrls]
     let lastErr = null

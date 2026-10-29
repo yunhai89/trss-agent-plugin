@@ -357,8 +357,19 @@ export class QQBotGateway {
     const interval = Number(hello?.heartbeat_interval) > 0 ? Number(hello.heartbeat_interval) : 40000
     let token
     try { token = await this.getToken() } catch (e) {
-      this.logger('error', '[qqbot:gateway] 取 token 失败，重连', e?.message || e)
-      this._handleClose({ code: 4004 })
+      const msg = String(e?.message || e)
+      // 区分「密钥错」与「网络抖动」：密钥错重连无意义（直接停止并提示），
+      // 网络/限流类必须继续退避重连（此前一律按 4004 处理 → 一次抖动就永久掉线，只能重启）。
+      if (/appid\/appsecret|不匹配|无权限|401|403|invalid appid|invalid appsecret/i.test(msg)) {
+        this.logger('error', '[qqbot:gateway] 取 token 失败（鉴权错误），停止重连', msg)
+        this._handleClose({ code: 4004, reason: msg })
+      } else {
+        this.logger('warn', '[qqbot:gateway] 取 token 失败（可重试），退避后重连', msg)
+        // 此时 IDENTIFY 还没发出去，旧 session 不可 RESUME；清掉避免用过期会话重连
+        this.sessionId = null
+        this.lastSeq = null
+        this._handleClose({ code: 1006, reason: 'token-fetch-failed' })
+      }
       return
     }
     if (this.sessionId && this.lastSeq != null) {

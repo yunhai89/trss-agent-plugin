@@ -19,12 +19,30 @@ import { buildMessageJobs, splitText, MAX_MARKDOWN_CHARS } from './payload.js'
 /** markdown 不被允许时平台返回的错误码（命中则自动转纯文本并记忆） */
 const MARKDOWN_UNSUPPORTED = new Set(['304036', '40034010', '40034008', '40034009', '40054005'])
 
-/** 读取本地文件为 base64（仅在需要上传本地图片时用；失败返回 null） */
-async function fileToBase64(path) {
+/** 单文件上传上限（base64 体积会膨胀 4/3；官方图片约 4MB、文件约 30MB，这里统一保守 10MB） */
+const MAX_MEDIA_BYTES = 10 * 1024 * 1024
+
+/** base64 实际字节数（不真正解码） */
+function base64Bytes(b64) {
+  if (!b64) return 0
+  const n = String(b64).length
+  const pad = String(b64).endsWith('==') ? 2 : String(b64).endsWith('=') ? 1 : 0
+  return Math.floor((n * 3) / 4) - pad
+}
+
+/**
+ * 读取本地文件为 base64（仅在需要上传本地图片时用）。
+ * 先 stat 再读，超过 maxBytes 直接拒绝——大视频/日志直接 base64 会撑爆内存与请求体。
+ * @returns {Promise<{b64:string, tooLarge:boolean}|null>} 读不到返回 null
+ */
+async function fileToBase64(filePath, maxBytes = MAX_MEDIA_BYTES) {
   try {
     const fs = await import('node:fs/promises')
-    const buf = await fs.readFile(path)
-    return buf.toString('base64')
+    const st = await fs.stat(filePath)
+    if (!st.isFile()) return null
+    if (st.size > maxBytes) return { b64: '', tooLarge: true, size: st.size }
+    const buf = await fs.readFile(filePath)
+    return { b64: buf.toString('base64'), tooLarge: false, size: buf.length }
   } catch {
     return null
   }
@@ -129,8 +147,22 @@ export class QQBotClient {
   async start() {
     if (!this.appId || !this.appSecret) throw new Error('QQ 官方机器人需要 appId 与 appSecret（AppID + AppSecret 即可，无需机器人 QQ 号/Token）')
     this.logger('info', '[qqbot:client] 启动', `appId=${this.appId}`, `name=${this.name}`)
-    // 先取一次 token：失败时直接抛出（配置错误不该静默重连几十次）
-    await this.tokenManager.getAccessToken(this.appId, this.appSecret)
+    // 先取一次 token：鉴权错误直接抛（配置错误不该静默重连几十次）；
+    // 网络抖动/平台 5xx 则短退避重试 3 次，避免一次抖动就让账号永远起不来。
+    let lastErr = null
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await this.tokenManager.getAccessToken(this.appId, this.appSecret)
+        lastErr = null
+        break
+      } catch (e) {
+        lastErr = e
+        const msg = String(e?.message || e)
+        if (/appid\/appsecret|不匹配|无权限|401|403|invalid appid|invalid appsecret/i.test(msg)) break
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
+      }
+    }
+    if (lastErr) throw lastErr
     await this.gateway.start()
   }
 
@@ -174,6 +206,7 @@ export class QQBotClient {
       msgId,
       ownerId,
       templateId,
+      appId: this.appId, // 用于把 at 段的 `<appId>:<openid>` 还原成平台原始 openid（Markdown mention）
       preferMarkdown: this.preferMarkdownText && this.markdownUsable,
     })
     if (!jobs.length) {
@@ -227,16 +260,27 @@ export class QQBotClient {
   async _sendMedia(scene, targetId, job) {
     const source = job.source || {}
     let body
-    if (source.url) body = { fileType: job.fileType, url: source.url }
-    else if (source.base64) body = { fileType: job.fileType, base64: source.base64 }
-    else if (source.path) {
-      const b64 = await fileToBase64(source.path)
-      if (!b64) {
-        // 本地文件读不到：降级为文本提示，不让整条回复失败
+    if (source.url) {
+      body = { fileType: job.fileType, url: source.url }
+    } else if (source.base64) {
+      const bytes = base64Bytes(source.base64)
+      if (bytes > MAX_MEDIA_BYTES) {
+        this.logger('warn', `[qqbot:client] 富媒体过大已跳过（${Math.round(bytes / 1024 / 1024)}MB > ${MAX_MEDIA_BYTES / 1024 / 1024}MB）`, job.mediaKind || '')
+        return null
+      }
+      body = { fileType: job.fileType, base64: source.base64 }
+    } else if (source.path) {
+      const f = await fileToBase64(source.path)
+      if (!f) {
+        // 本地文件读不到：跳过，不让整条回复失败
         this.logger('warn', '[qqbot:client] 本地媒体读取失败，跳过', source.path)
         return null
       }
-      body = { fileType: job.fileType, base64: b64 }
+      if (f.tooLarge) {
+        this.logger('warn', `[qqbot:client] 本地媒体过大已跳过（${Math.round((f.size || 0) / 1024 / 1024)}MB > ${MAX_MEDIA_BYTES / 1024 / 1024}MB）`, source.path)
+        return null
+      }
+      body = { fileType: job.fileType, base64: f.b64 }
     } else return null
 
     const up = await this.api.uploadMedia(this.creds(), scene, targetId, body)

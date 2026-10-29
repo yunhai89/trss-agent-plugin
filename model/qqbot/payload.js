@@ -140,6 +140,35 @@ export function resolveMediaSource(file) {
 }
 
 /**
+ * at 段 → 官方 Markdown mention 标签。
+ * 官方 Markdown 消息用 `<qqbot-at-user id="openid"/>` / `<qqbot-at-everyone />` 表示 @，
+ * 纯文本消息不支持 at 段；不转的话「@回复人」在 Markdown 直发模式下会静默丢失（QQ 官方群默认走 Markdown）。
+ * @param {Array} ats at 段的 qq 值（可能带 `<appId>:` 前缀）
+ * @param {string} [appId] 用于剥前缀，还原平台 openid
+ * @returns {string[]} 标签数组（去重）
+ */
+export function markdownMentionTags(ats = [], appId = '') {
+  const out = []
+  const seen = new Set()
+  for (const item of ats || []) {
+    let qq = str(item).trim()
+    if (!qq) continue
+    if (appId && qq.startsWith(`${appId}:`)) qq = qq.slice(appId.length + 1)
+    // 只保留 openid 合法字符：防止配置/第三方传入 `" /><xxx` 之类破坏 Markdown 结构（无效 id 直接丢弃）
+    qq = qq.replace(/[^A-Za-z0-9_:\-]/g, '')
+    if (!qq) continue
+    if (qq === 'all') {
+      if (!seen.has('all')) { seen.add('all'); out.push('<qqbot-at-everyone />') }
+      continue
+    }
+    if (seen.has(qq)) continue
+    seen.add(qq)
+    out.push(`<qqbot-at-user id="${qq}" />`)
+  }
+  return out
+}
+
+/**
  * 把 Yunzai 消息段数组拆成发送任务。
  * @param {Array|string|object} msg e.reply 的入参
  * @param {object} [opts]
@@ -149,12 +178,13 @@ export function resolveMediaSource(file) {
  * @param {boolean} [opts.stripAt] 文本模式是否丢弃 @ 段（官方文本消息不支持 at 段）
  * @returns {Array<object>} 发送任务列表
  */
-export function buildMessageJobs(msg, { msgId = '', preferMarkdown = false, ownerId = '', stripAt = true, templateId = '' } = {}) {
+export function buildMessageJobs(msg, { msgId = '', preferMarkdown = false, ownerId = '', stripAt = true, templateId = '', appId = '' } = {}) {
   const segs = Array.isArray(msg) ? msg : (msg && typeof msg === 'object' && msg.type ? [msg] : [{ type: 'text', text: str(msg) }])
   const texts = []
   const markdowns = []
   const keyboards = []
   const medias = []
+  const ats = []
   let replyId = ''
   let hasMarkdown = false
 
@@ -177,8 +207,8 @@ export function buildMessageJobs(msg, { msgId = '', preferMarkdown = false, owne
         }
         break
       case 'at':
-        // 文本消息不支持 at 段（官方会忽略/报错）；markdown 模式由上层拼 <qqbot-at-user/>
-        if (!stripAt) texts.push(seg.qq === 'all' ? '' : '')
+        // 文本消息不支持 at 段（官方会忽略/报错）；markdown 模式转成 <qqbot-at-user/> 标签（见下）
+        if (seg.qq) ats.push(seg.qq)
         break
       case 'reply':
         replyId = str(seg.id || seg.message_id || '')
@@ -211,10 +241,18 @@ export function buildMessageJobs(msg, { msgId = '', preferMarkdown = false, owne
   const plain = texts.join('').trim()
 
   if (hasMarkdown) {
+    // @ 转 Markdown mention 标签：模板消息（custom_template_id）无法塞自定义文本，跳过
+    const mentionTags = templateId ? [] : markdownMentionTags(ats, appId)
+    const withMentions = (md) => {
+      if (!md || !md.content || !mentionTags.length) return md
+      const missing = mentionTags.filter((tag) => !md.content.includes(tag))
+      return missing.length ? { ...md, content: `${md.content}\n${missing.join(' ')}` } : md
+    }
     const payload = templateId
       ? { markdown: { custom_template_id: templateId, params: [] } }
       : (mdText ? { markdown: { content: mdText } } : (markdowns[0] ? { markdown: markdowns[0] } : null))
-    if (payload) jobs.push({ kind: 'markdown', payload: withKeyboard(payload, keyboard), msgId: passiveId })
+    const payload2 = payload && payload.markdown ? { ...payload, markdown: withMentions(payload.markdown) } : payload
+    if (payload2) jobs.push({ kind: 'markdown', payload: withKeyboard(payload2, keyboard), msgId: passiveId })
   } else if (plain) {
     if (preferMarkdown) jobs.push({ kind: 'markdown', payload: withKeyboard({ markdown: { content: plain } }, keyboard), msgId: passiveId })
     else jobs.push({ kind: 'text', payload: withKeyboard({ content: plain }, keyboard), msgId: passiveId })
@@ -231,4 +269,4 @@ function withKeyboard(payload, keyboard) {
   return keyboard ? { ...payload, keyboard } : payload
 }
 
-export default { buildKeyboard, buildMessageJobs, splitText, markdownPayload, resolveMediaSource, MAX_TEXT_CHARS, MAX_MARKDOWN_CHARS, KEYBOARD_MAX_ROWS, KEYBOARD_MAX_PER_ROW }
+export default { buildKeyboard, buildMessageJobs, splitText, markdownPayload, resolveMediaSource, markdownMentionTags, MAX_TEXT_CHARS, MAX_MARKDOWN_CHARS, KEYBOARD_MAX_ROWS, KEYBOARD_MAX_PER_ROW }

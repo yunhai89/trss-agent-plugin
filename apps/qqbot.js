@@ -31,6 +31,19 @@ const VERSION = 'trss-agent-plugin/qqbot-adapter v1'
 /** 被动回复窗口：官方规定 5 分钟内可用 msg_id 回复，且同一 msg_id 最多 5 次 */
 const PASSIVE_WINDOW_MS = 5 * 60 * 1000
 const PASSIVE_MAX_PER_MSG = 5
+/** 频道私信会话缓存（guild_id）TTL：平台侧会话会过期，1h 后重建 */
+const DM_CACHE_TTL_MS = 60 * 60 * 1000
+
+/** 官方时间戳（ISO / 秒 / 毫秒）→ 毫秒；解析失败返回 0（调用方按当前时间处理） */
+function TimeSecondsToMs(ts) {
+  if (!ts) return 0
+  if (/^\d+$/.test(String(ts))) {
+    const n = Number(ts)
+    return n > 1e12 ? n : n * 1000
+  }
+  const t = Date.parse(ts)
+  return Number.isFinite(t) ? t : 0
+}
 
 /** 账号配置归一化（支持 accounts[] 或扁平 appId/appSecret 单账号） */
 export function normalizeAccounts(cfg = {}) {
@@ -98,7 +111,7 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
     clients: new Map(),
     /** @type {Map<string, Map<string, number>>} appId → msgId → 已用被动回复次数 */
     _passiveUsed: new Map(),
-    /** @type {Map<string, string>} `${appId}:${openid}` → 频道私信会话 guild_id */
+    /** @type {Map<string, {guildId:string, at:number}>} `${appId}:${openid}` → 频道私信会话 */
     _dmCache: new Map(),
     _inflight: null,
 
@@ -149,18 +162,33 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
         if (info?.state === 'closed' && info?.reason === 'auth_failed') {
           log('error', '[qqbot] 鉴权失败，请检查 AppID/AppSecret', appId, info?.hint || '')
         }
+        // READY 可能晚于 connect() 的 20s 等待（慢网/平台抖动）。若不在这里补挂载，
+        // 会出现「网关心跳正常但 Bot[id] 从未注册 → 收不到任何消息」的哑连接。
+        if (info?.state === 'ready' && !entry.connectedAt && !entry._aborted) {
+          entry.connectedAt = Date.now()
+          adapter._attachBot(appId, entry)
+        }
       })
 
       const entry = { client, account, connectedAt: 0, bot: null }
       adapter.clients.set(appId, entry)
-      await client.start()
+      try {
+        await client.start()
+      } catch (e) {
+        // token 获取失败等启动期错误：清掉半初始化 client（否则 clients 表残留、状态查询误导）
+        try { client.stop?.() } catch { /* noop */ }
+        adapter.clients.delete(appId)
+        throw e
+      }
       // 等 READY（最多 20s）；失败仍保留客户端由网关自行重连
       const startedAt = Date.now()
       while (!entry.connectedAt && Date.now() - startedAt < 20_000) {
         await new Promise((r) => setTimeout(r, 200))
+        if (entry._aborted) return false
         if (client.status?.().state === 'ready') entry.connectedAt = Date.now()
         if (client.status?.().state === 'closed') break
       }
+      if (entry._aborted) return false
       if (!entry.connectedAt) {
         const st = client.status?.() || {}
         if (st.reason === 'invalid_intents') {
@@ -180,9 +208,11 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
     disconnect(appId) {
       const entry = adapter.clients.get(appId)
       if (!entry) return
+      entry._aborted = true // connect() 的等待循环 / 迟到 READY 据此放弃挂载
       try { entry.client.stop?.() } catch { /* noop */ }
       adapter.clients.delete(appId)
       adapter._passiveUsed.delete(appId)
+      for (const k of [...adapter._dmCache.keys()]) if (k.startsWith(`${appId}:`)) adapter._dmCache.delete(k)
       const B = getBot()
       if (B?.bots?.[appId]) {
         delete B.bots[appId]
@@ -216,6 +246,8 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
     _attachBot(appId, entry) {
       const B = getBot()
       if (!B) return
+      // 幂等：connect() 轮询与 state 事件可能对同一个 READY 都触发挂载
+      if (entry.bot && B.bots?.[appId] === entry.bot) return
       const account = entry.account
       if (!B.bots) B.bots = {}
       const adapterRef = adapter
@@ -238,8 +270,10 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
         fl: new Map(),
         gl: new Map(),
         gml: new Map(),
-        login: async () => { await entry.client.start(); return true },
-        logout: async () => { entry.client.stop(); return true },
+        // 与原生适配器契约对齐：#Bot下线 会调 logout()，期望 Bot[id] 从 bots/uin 消失；
+        // #Bot上线 调 login()，期望重新连接并重新挂载 Bot[id]。
+        login: async () => { try { return await adapter.connect(entry.account) } catch (e) { log('error', '[qqbot] 上线失败', appId, e?.message || e); return false } },
+        logout: async () => { adapter.disconnect(appId); return true },
         pickFriend: (userId) => adapterRef._pickFriend(appId, entry, userId),
         get pickUser() { return this.pickFriend },
         pickGroup: (groupId) => adapterRef._pickGroup(appId, entry, groupId),
@@ -261,20 +295,37 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
       log('mark', `[qqbot] ${ADAPTER_NAME}(${ADAPTER_ID}) ${account.name} 已连接`, appId)
     },
 
-    /** 被动回复 msg_id：5 分钟内 + 同一 msg_id 次数未超限才带；否则返回空（主动消息） */
-    _passiveMsgId(appId, msgId) {
+    /**
+     * 被动回复 msg_id：**距触发消息 ≤5 分钟** 且同一 msg_id 次数未超限才带；否则返回空（主动消息）。
+     * 窗口按「触发消息时间」算而不是首次回复时间：长任务/队列/延迟回复超过 5 分钟后
+     * 旧 msg_id 已失效（平台报 304103/40034005），继续带只会整条发送失败。
+     * @param {string} appId
+     * @param {string} msgId 触发消息 id
+     * @param {number} [msgAtMs] 触发消息时间（毫秒）；缺省用当前时间
+     */
+    _passiveMsgId(appId, msgId, msgAtMs = 0) {
       if (!msgId) return ''
+      const now = Date.now()
+      const at = Number(msgAtMs) > 0 ? Number(msgAtMs) : now
+      if (now - at > PASSIVE_WINDOW_MS) return ''
       if (!adapter._passiveUsed.has(appId)) adapter._passiveUsed.set(appId, new Map())
       const used = adapter._passiveUsed.get(appId)
-      const n = used.get(msgId) || 0
+      const rec = used.get(msgId)
+      if (rec && now - rec.at > PASSIVE_WINDOW_MS) { used.delete(msgId); return '' }
+      const n = rec?.n || 0
       if (n >= PASSIVE_MAX_PER_MSG) return ''
-      used.set(msgId, n + 1)
+      used.set(msgId, { n: n + 1, at: rec?.at ?? at })
+      // 防 Map 无限增长：条目多了就清掉早已过窗口的
+      if (used.size > 2000) {
+        for (const [k, v] of used) if (now - v.at > PASSIVE_WINDOW_MS) used.delete(k)
+      }
       return msgId
     },
 
-    /** 去掉 `<appId>:` 前缀 */
+    /** 去掉 `<appId>:` / `qg_` 前缀，得到平台原始 openid（频道用户是 author.id，不是 openid） */
     _rawOpenid(userId) {
-      const s = String(userId ?? '')
+      let s = String(userId ?? '')
+      if (s.startsWith('qg_')) s = s.slice(3)
       for (const appId of adapter.clients.keys()) {
         if (s.startsWith(`${appId}:`)) return s.slice(appId.length + 1)
       }
@@ -349,15 +400,27 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
       }
     },
 
-    /** 频道私信：先建 DM 会话再发 */
-    async _sendGuildDm(appId, entry, userOpenid, msg, quote) {
-      const key = `${appId}:${userOpenid}`
-      let guildId = adapter._dmCache.get(key)
+    /**
+     * 频道私信：先建 DM 会话再发。
+     * source_guild_id 必须是**与目标用户在同一个频道**的 guild_id：优先用本次事件的 guildId，
+     * 其次用按用户缓存的 guildId，最后才回退「最近一条频道事件」。
+     * （此前直接用 entry._lastGuild：多频道场景可能拿错源频道，createDms 失败或建错会话。）
+     */
+    async _sendGuildDm(appId, entry, userOpenid, msg, quote, sourceGuildId = '') {
+      const userId = adapter._rawOpenid(userOpenid)
+      const key = `${appId}:${userId}`
+      const now = Date.now()
+      let rec = adapter._dmCache.get(key)
+      if (rec && now - rec.at > DM_CACHE_TTL_MS) { adapter._dmCache.delete(key); rec = null }
+      let guildId = rec?.guildId || ''
       if (!guildId) {
-        const ev = entry._lastGuild || {}
-        const r = await entry.client.api.createDms(entry.client.creds(), { recipientId: userOpenid, sourceGuildId: ev.guildId })
-        guildId = r?.guild_id
-        if (guildId) adapter._dmCache.set(key, guildId)
+        const source = String(sourceGuildId || entry._guildByUser?.get(userId) || entry._lastGuild?.guildId || '')
+        if (!source) {
+          return { message_id: [], data: [], error: [new Error('频道私信缺少 source_guild_id（尚未收到该用户的频道消息）')] }
+        }
+        const r = await entry.client.api.createDms(entry.client.creds(), { recipientId: userId, sourceGuildId: source })
+        guildId = r?.guild_id || ''
+        if (guildId) adapter._dmCache.set(key, { guildId, at: now })
       }
       if (!guildId) return { message_id: [], data: [], error: [new Error('频道私信会话创建失败')] }
       return entry.client.send('guild_dm', guildId, msg, { msgId: '', ownerId: '' })
@@ -369,8 +432,13 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
       if (!entry) return
       const B = getBot()
       if (!B) return
-      entry._lastGuild = ev
-      if (ev.scene === 'guild_dm' || ev.scene === 'guild') entry._lastGuild = ev
+      if (ev.scene === 'guild' || ev.scene === 'guild_dm') {
+        entry._lastGuild = ev
+        if (ev.guildId) {
+          if (!entry._guildByUser) entry._guildByUser = new Map()
+          entry._guildByUser.set(String(ev.userId), ev.guildId)
+        }
+      }
       entry._ownerOpenid = ev.userId
 
       const isGroup = ev.scene === 'group' || ev.scene === 'guild'
@@ -424,17 +492,30 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
         _qqbot: { scene: ev.scene, appId, openid: ev.userId, groupOpenid: ev.groupOpenid, guildId: ev.guildId, channelId: ev.channelId, atBot: ev.atBot === true, eventName: ev.eventName },
       }
       data.reply = (msg, quote, opts) => {
-        const passive = adapter._passiveMsgId(appId, ev.messageId)
+        const passive = adapter._passiveMsgId(appId, ev.messageId, TimeSecondsToMs(ev.timestamp))
         if (ev.scene === 'guild_dm') {
           // 频道私信需要先建 DM 会话（guild_id），不能直接拿 user_openid 当 guild_id
-          return adapter._sendGuildDm(appId, entry, ev.userId, msg, quote)
+          return adapter._sendGuildDm(appId, entry, ev.userId, msg, quote, ev.guildId)
         }
         const target = ev.scene === 'group' ? ev.groupOpenid : ev.userId
         const scene = ev.scene === 'c2c' ? 'c2c' : ev.scene
         return entry.client.send(scene, target, msg, { msgId: passive, ownerId: ev.userId, ...(opts || {}) })
       }
 
+      // 回填框架侧的 好友/群/成员 映射（框架与第三方插件会读 bot.fl / gl / gml，
+      // 官方适配器没有好友列表接口，只能靠收到的消息增量补齐）
       try {
+        const bot = entry.bot
+        if (bot) {
+          const uinfo = { user_id: userId, nickname: data.sender.nickname }
+          if (ev.scene === 'c2c') bot.fl.set(String(userId), uinfo)
+          if (groupId) {
+            if (!bot.gl.has(String(groupId))) bot.gl.set(String(groupId), { group_id: String(groupId), group_name: '' })
+            let members = bot.gml.get(String(groupId))
+            if (!members) { members = new Map(); bot.gml.set(String(groupId), members) }
+            members.set(String(userId), uinfo)
+          }
+        }
         B.bots[appId] = B.bots[appId] || entry.bot
         B.em('message', data)
       } catch (e) {

@@ -16,7 +16,7 @@ import { TokenManager, TOKEN_URL, TOKEN_URLS } from './token.js'
 import { QQBotApi, MSG_TYPE, FILE_TYPE, messagePath, mediaPath, explainError, MsgSeqAllocator, API_BASE, API_BASES } from './api.js'
 import { QQBotGateway, INTENTS, DEFAULT_INTENTS, OP, resolveWebSocket, CLOSE_CODE_HINT, nextIntents } from './gateway.js'
 import { normalizeEvent, normalizeAttachments, GATEWAY_EVENTS, mentionsBot } from './events.js'
-import { buildKeyboard, buildMessageJobs, splitText, markdownPayload, resolveMediaSource } from './payload.js'
+import { buildKeyboard, buildMessageJobs, splitText, markdownPayload, resolveMediaSource, markdownMentionTags } from './payload.js'
 import { QQBotClient, markdownToPlain } from './client.js'
 
 let passed = 0
@@ -351,6 +351,36 @@ console.log('\n[3b] intents：默认最小集 / 4013 自动降级 / 关闭去重
     gw.stop()
   }
 
+  // 取 token 失败：网络类可重试（退避重连），鉴权类停止
+  {
+    const FWS = makeFake()
+    let tokenCalls = 0
+    const gw = new QQBotGateway({
+      appId: 'A', appSecret: 'S',
+      // 第一次 connect 取 token 成功（建 WS），HELLO 后 IDENTIFY 再取 token 时失败
+      getToken: async () => { tokenCalls++; if (tokenCalls === 1) return 'T'; throw new Error('网络错误：ECONNRESET') },
+      getGatewayUrl: async () => 'wss://gw', WebSocketImpl: FWS, reconnectDelays: [5],
+    })
+    await gw.start(); await sleep(5); hello(FWS.instance); await sleep(10)
+    ok(gw.reconnectAttempts >= 1, '取 token 网络失败 → 继续退避重连（不再一次性判死）')
+    ok(gw.status().state !== 'closed', '网络失败不进入 closed/auth_failed')
+    gw.stop()
+  }
+  {
+    const FWS = makeFake()
+    let authCalls = 0
+    const gw = new QQBotGateway({
+      appId: 'A', appSecret: 'S',
+      getToken: async () => { authCalls++; if (authCalls === 1) return 'T'; throw new Error('获取 access_token 失败（HTTP 401）：AppID/AppSecret 不匹配') },
+      getGatewayUrl: async () => 'wss://gw', WebSocketImpl: FWS, reconnectDelays: [5],
+    })
+    await gw.start(); await sleep(5); hello(FWS.instance); await sleep(10)
+    eq(gw.status().state, 'closed', '鉴权类 token 失败 → 停止重连')
+    eq(gw.status().reason, 'auth_failed', '状态 reason=auth_failed')
+    eq(gw.reconnectAttempts, 0, '鉴权失败不排重连')
+    gw.stop()
+  }
+
   // 关闭码提示表覆盖 4013/4914
   ok(CLOSE_CODE_HINT[4013].includes('intents'), '4013 有中文说明')
   ok(CLOSE_CODE_HINT[4914].includes('intents'), '4914 有中文说明')
@@ -440,7 +470,7 @@ console.log('\n[5] payload：段 → 官方消息体')
     { type: 'text', text: '补充' },
   ], { ownerId: 'UO' })
   eq(jobs2[0].kind, 'markdown', '含 markdown 段 → markdown 任务')
-  eq(jobs2[0].payload.markdown, { content: '# 标题' }, 'markdown 内容')
+  eq(jobs2[0].payload.markdown.content, '# 标题\n<qqbot-at-user id="A" />', 'markdown 内容 + at 段转 mention 标签（@回复人不再丢失）')
   ok(jobs2[0].payload.keyboard, '键盘挂在同一条消息上')
   eq(jobs2[0].msgId, 'evt9', '引用段作为被动回复 msg_id')
 
@@ -462,6 +492,25 @@ console.log('\n[5] payload：段 → 官方消息体')
   const chunks = splitText('a'.repeat(9000), 3800)
   eq(chunks.map((c) => c.length), [3800, 3800, 1400], '超长文本按上限切分')
   eq(splitText('', 100), [], '空文本返回空数组')
+  // at → Markdown mention 标签（QQ 群默认走 Markdown 直发，不转就丢 @）
+  eq(markdownMentionTags(['A'], 'APP'), ['<qqbot-at-user id="A" />'], '普通 at → qqbot-at-user 标签')
+  eq(markdownMentionTags(['APP:UO'], 'APP'), ['<qqbot-at-user id="UO" />'], '剥掉 <appId>: 前缀还原 openid')
+  eq(markdownMentionTags(['all'], 'APP'), ['<qqbot-at-everyone />'], '@全体 → qqbot-at-everyone')
+  eq(markdownMentionTags(['A', 'A', '', 'all', 'all'], ''), ['<qqbot-at-user id="A" />', '<qqbot-at-everyone />'], '去重且跳过空值')
+  eq(markdownMentionTags([], 'APP'), [], '无 at → 空数组')
+  // 脏/恶意 at 值不能破坏 Markdown 结构
+  eq(markdownMentionTags(['APP:UO"><script>'], 'APP'), ['<qqbot-at-user id="UOscript" />'], '非法字符被清洗（防标签注入）')
+  eq(markdownMentionTags(['"\'><>', '  '], 'APP'), [], '只剩非法字符的 at 被丢弃')
+  const jobsAt = buildMessageJobs([{ type: 'at', qq: 'APP:UO' }, { type: 'markdown', data: '**结果**' }], { appId: 'APP' })
+  ok(jobsAt[0].payload.markdown.content.includes('<qqbot-at-user id="UO" />'), 'buildMessageJobs 把 at 拼进 markdown')
+  const jobsAtDup = buildMessageJobs([{ type: 'at', qq: 'UO' }, { type: 'markdown', data: 'hi <qqbot-at-user id="UO" />' }], { appId: 'APP' })
+  eq(jobsAtDup[0].payload.markdown.content, 'hi <qqbot-at-user id="UO" />', '内容已手动含标签时不重复追加')
+  const jobsTpl = buildMessageJobs([{ type: 'at', qq: 'UO' }, { type: 'markdown', data: 'x' }], { appId: 'APP', templateId: 'tpl' })
+  ok(!JSON.stringify(jobsTpl[0].payload).includes('qqbot-at-user'), '模板消息不塞自定义 mention（平台不支持）')
+  // 纯文本消息不支持 at 段：内容保持原文，不拼标签
+  const jobsTextAt = buildMessageJobs([{ type: 'at', qq: 'UO' }, { type: 'text', text: 'hi' }], { appId: 'APP' })
+  eq(jobsTextAt[0].payload, { content: 'hi' }, '文本模式不拼 at（官方文本消息不支持 at 段）')
+
   eq(markdownPayload('plain'), { content: 'plain' }, 'markdown 段字符串')
   ok(buildMessageJobs([]).length === 0, '空段数组 → 无任务')
   ok(!buildMessageJobs([{ type: 'face', id: 1 }]).length, '不支持的段被忽略（不报错）')
@@ -514,6 +563,94 @@ console.log('\n[6] client：发送（含 markdown 降级 / 富媒体上传）与
   client._dispatch('GROUP_AT_MESSAGE_CREATE', { id: 'm1', content: 'hi', group_openid: 'GO', author: { member_openid: 'MO' } }, 1)
   eq(messages.length, 1, 'client 分发 message 事件')
   eq(messages[0].groupId || messages[0].groupOpenid, 'GO', '事件带群 openid')
+
+
+  // start 阶段 token 网络抖动：短退避重试，避免一次抖动账号永远起不来
+  {
+    class FWS2 { constructor() { this.listeners = {}; setTimeout(() => this.emit('open', {}), 0) } addEventListener(n, fn) { (this.listeners[n] ||= []).push(fn) } emit(n, ev) { for (const fn of this.listeners[n] || []) fn(ev) } send() {} close() {} }
+    let tokenAttempts = 0
+    const flaky = makeFetchStub(({ url }) => {
+      if (String(url).includes('getAppAccessToken')) {
+        tokenAttempts++
+        if (tokenAttempts < 3) return { status: 503, body: 'upstream busy' }
+        return { body: { access_token: 'T', expires_in: 7200 } }
+      }
+      if (String(url).includes('/gateway')) return { body: { url: 'wss://gw' } }
+      return { body: {} }
+    })
+    const cRetry = new QQBotClient({ appId: 'A', appSecret: 'S', fetchImpl: flaky, WebSocketImpl: FWS2, logger: () => {} })
+    await cRetry.start()
+    eq(tokenAttempts, 3, 'start 阶段 token 5xx 自动重试（第 3 次成功）')
+    cRetry.stop()
+  }
+  {
+    class FWS3 { constructor() { this.listeners = {}; setTimeout(() => this.emit('open', {}), 0) } addEventListener(n, fn) { (this.listeners[n] ||= []).push(fn) } emit(n, ev) { for (const fn of this.listeners[n] || []) fn(ev) } send() {} close() {} }
+    let authAttempts = 0
+    const authBad = makeFetchStub(({ url }) => {
+      if (String(url).includes('getAppAccessToken')) { authAttempts++; return { status: 401, body: { code: 100016, message: 'invalid appid or secret' } } }
+      if (String(url).includes('/gateway')) return { body: { url: 'wss://gw' } }
+      return { body: {} }
+    })
+    const cAuth = new QQBotClient({ appId: 'A', appSecret: 'S', fetchImpl: authBad, WebSocketImpl: FWS3, logger: () => {} })
+    let err = null
+    try { await cAuth.start() } catch (e) { err = e }
+    // 鉴权错误只在「token 端点回退」里各试一次（最多 2 个端点），不进入 3 次退避重试
+    ok(err && authAttempts <= 2, `鉴权错误快速失败（不进入退避重试，实际请求 ${authAttempts} 次）`)
+  }
+
+  // 401：token 被提前失效 → 清缓存重取并重试一次
+  {
+    let tokenCalls = 0
+    let msgCalls = 0
+    const fetch401 = makeFetchStub(({ url }) => {
+      if (url.includes('getAppAccessToken')) { tokenCalls++; return { body: { access_token: 'T' + tokenCalls, expires_in: 7200 } } }
+      if (url.includes('/files')) return { body: { file_info: 'FI' } }
+      if (url.includes('/gateway')) return { body: { url: 'wss://gw' } }
+      msgCalls++
+      if (msgCalls === 1) return { status: 401, body: { code: 11244, message: 'invalid token' } }
+      return { body: { id: 'MID_OK' } }
+    })
+    const c401 = new QQBotClient({ appId: 'A', appSecret: 'S', fetchImpl: fetch401, logger: () => {} })
+    const r = await c401.send('group', 'GO', 'hi')
+    eq(r.message_id, ['MID_OK'], '401 时自动刷新 token 后重试成功')
+    eq(tokenCalls, 2, 'token 被清缓存并重新获取')
+    c401.stop()
+  }
+
+  // Markdown mention：@ 段转 <qqbot-at-user/>
+  {
+    const requests2 = []
+    const fetchMd = makeFetchStub(({ url, body }) => {
+      requests2.push({ url: String(url), body })
+      if (String(url).includes('getAppAccessToken')) return { body: { access_token: 'T', expires_in: 7200 } }
+      if (String(url).includes('/gateway')) return { body: { url: 'wss://gw' } }
+      return { body: { id: 'M1' } }
+    })
+    const cMd = new QQBotClient({ appId: 'APP', appSecret: 'S', fetchImpl: fetchMd, logger: () => {} })
+    await cMd.send('group', 'GO', [{ type: 'at', qq: 'APP:UO' }, { type: 'markdown', data: '# 结果' }])
+    const sent = requests2.filter((r) => r.url.includes('/v2/groups/GO/messages')).pop()
+    ok(sent.body.markdown.content.includes('<qqbot-at-user id="UO" />'), 'Markdown 消息里 @ 回复人（剥 appId 前缀）')
+    ok(sent.body.msg_type === 2, '仍以 msg_type=2 发送')
+    cMd.stop()
+  }
+
+  // 富媒体体积守卫：超过 10MB 的 base64 直接跳过（不发上传请求）
+  {
+    const requests3 = []
+    const fetchBig = makeFetchStub(({ url }) => {
+      requests3.push(String(url))
+      if (String(url).includes('getAppAccessToken')) return { body: { access_token: 'T', expires_in: 7200 } }
+      if (String(url).includes('/files')) return { body: { file_info: 'FI' } }
+      if (String(url).includes('/gateway')) return { body: { url: 'wss://gw' } }
+      return { body: { id: 'M' } }
+    })
+    const cBig = new QQBotClient({ appId: 'A', appSecret: 'S', fetchImpl: fetchBig, logger: () => {} })
+    const huge = 'base64://' + 'A'.repeat(14 * 1024 * 1024) // ≈10.5MB 原始字节
+    const r = await cBig.send('group', 'GO', [{ type: 'image', file: huge }])
+    eq(r.message_id, [], '超大媒体跳过（不返回消息 id）')
+    ok(!requests3.some((u) => u.includes('/files')), '超大媒体不发起上传请求')
+    cBig.stop()
+  }
 
   ok(/标题/.test(markdownToPlain('# 标题\n**加粗**')), 'markdownToPlain 去标记')
   eq(QQBotClient.splitMarkdown('x'.repeat(100), 50).length, 2, '静态分片方法可用')

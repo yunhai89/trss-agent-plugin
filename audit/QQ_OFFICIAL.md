@@ -308,3 +308,27 @@ case "text": e.msg = (e.msg || "") + this.dealText(i.text)
 回归断言：`stress/e2e/qqbot-adapter.mjs` 模拟 `dealEvent` 累加后 `e.msg === '#设置主人'`，且 `^#设置主人$` 可命中。
 
 **教训**：适配器只提供「原始消息段 + raw_message」；`msg` 是 TRSS 的派生物，预设会造成双写。
+
+
+---
+
+# 附：QQBot 适配器叶子级审计与加固（v1.45.6）
+
+在修完「触发/指令透传/文本翻倍」后，按调用链向下追到叶子函数，又发现并修复 9 处问题：
+
+| # | 叶子 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| 1 | `apps/qqbot.js: _passiveMsgId` | 只数次数、不看时间：长任务/队列回复超过 5 分钟后仍带过期 `msg_id` → 平台 304103/40034005，整条回复失败 | 按**触发消息时间**判 5 分钟窗口；Map 条目带 `{n,at}` 并清理过期项（防泄漏） |
+| 2 | `_rawOpenid` | 不认 `qg_` 前缀：频道用户 `qg_U` 被当 openid 传给 `createDms` | 同时剥 `<appId>:` 与 `qg_` |
+| 3 | `_sendGuildDm` | `source_guild_id` 取 `entry._lastGuild`（最近一条频道事件）：多频道下可能拿错源频道 | 优先本次事件 `guildId` → 按用户缓存 → 最后才回退最近事件；缓存 1h 过期 |
+| 4 | `connect` / `_attachBot` | ① start 抛错留下半初始化 client；② 等待期间 disconnect 仍会挂载；③ READY 晚于 20s 超时后永不挂载（哑连接）；④ 轮询与事件双触发重复 attach | 失败清理；`_aborted` 中断等待；`state=ready` 事件补挂载；`_attachBot` 幂等 |
+| 5 | `model/qqbot/api.js: request` | token 提前失效后所有请求 401 直到缓存自然过期（2h），只能重启 | 401/403 清 token 缓存重取并重试一次 |
+| 6 | `client.start` | token 端点 5xx/网络抖动一次就抛 → 账号起不来 | 网络类退避重试 3 次；鉴权类快速失败 |
+| 7 | `payload.buildMessageJobs` | Markdown 直发模式下 `atSender` 段被忽略 → 群里回复**不 @ 回复人** | at 段转 `<qqbot-at-user id="…"/>` / `<qqbot-at-everyone />` 拼进 markdown；id 字符白名单清洗防标签注入 |
+| 8 | `client._sendMedia` | 本地大文件直接 `readFile` + base64（10MB→13MB 字符串）可能撑爆内存/请求 | 先 `stat`、base64 先算字节，>10MB 跳过并告警；不发起上传 |
+| 9 | `gateway._identifyOrResume` | 取 token 失败一律按 4004「鉴权失败」→ 一次网络抖动永久掉线 | 网络/5xx 类继续退避重连并清旧 session；仅鉴权类停止并提示 |
+| 10 | `_attachBot` | `fl/gl/gml` 永远为空（框架/第三方插件读这些映射）；`logout()` 不从 `Bot.uin` 摘除 | 收到消息增量回填好友/群/成员映射；`logout` 走 `disconnect`、`login` 走 `connect`（对齐 `#Bot下线/#Bot上线` 契约） |
+
+**验证**：`model/qqbot/test.mjs` 168 断言（新增 401 刷新重试、start 重试/鉴权快失败、Markdown mention、
+媒体体积守卫、网关 token 失败分类、被动窗口）；`stress/e2e/qqbot-adapter.mjs` 68 断言（新增被动窗口/ID 去前缀、
+`_attachBot` 幂等、等待期断连快速返回、fl/gl/gml 回填、login/logout 生命周期）。
