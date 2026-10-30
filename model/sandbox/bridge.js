@@ -53,7 +53,7 @@ export function sandboxUnavailableError(label = '本工具') {
   return {
     error: `沙箱不可用，已拒绝在宿主执行（fail-closed）：${label} 需要 E2B 沙箱执行面，`
       + '当前沙箱未就绪（agent.sandbox.mode=e2b 但初始化失败/连不上）。'
-      + '请检查配置与 E2B 连通性，保存配置或 #agents重载 重建运行时后重试。',
+      + '请检查配置与 E2B 连通性，保存配置或 #agent重载 重建运行时后重试。',
   }
 }
 

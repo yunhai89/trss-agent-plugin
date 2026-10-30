@@ -111,11 +111,11 @@ function runtimeStatus(runtime, cfg) {
     // 区分「没配置」与「配置了但没起来」——后者必须透出真实原因，否则用户以为配置没生效
     const sbx = runtime?.sandbox
     if (sbx?.enabled && sbx?.error) {
-      lines.push(`- 终端执行：❌已配置 E2B 沙箱但初始化失败，工具未注册（fail-closed）。原因：${String(sbx.error.message || sbx.error).slice(0, 160)}。请修复后在面板重存配置或发 #agents重载 重建运行时。`)
+      lines.push(`- 终端执行：❌已配置 E2B 沙箱但初始化失败，工具未注册（fail-closed）。原因：${String(sbx.error.message || sbx.error).slice(0, 160)}。请修复后在面板重存配置或发 #agent重载 重建运行时。`)
     } else if (sbx?.enabled) {
-      lines.push('- 终端执行：❌沙箱已配置但工具未注册（可能运行时未重建）：让用户发 #agents重载 或重新保存配置后再试')
+      lines.push('- 终端执行：❌沙箱已配置但工具未注册（可能运行时未重建）：让用户发 #agent重载 或重新保存配置后再试')
     } else {
-      lines.push('- 终端执行：❌未启用（配置 agent.sandbox.mode: e2b 并填 apiKey 后 #agents重载 开启；未启用则无法执行命令/装软件）')
+      lines.push('- 终端执行：❌未启用（配置 agent.sandbox.mode: e2b 并填 apiKey 后 #agent重载 开启；未启用则无法执行命令/装软件）')
     }
   }
 

@@ -149,10 +149,12 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
   await adapter.load()
   harness.emCalls.length = 0
 
+  // 被动回复窗口按事件 timestamp 计算：必须用当前时间，固定日期会让测试隔天失效。
+  const NOW_ISO = new Date().toISOString()
   // 群 @ 消息
   client.emit('message', {
     type: 'message', scene: 'group', appId: 'APP2', eventName: 'GROUP_AT_MESSAGE_CREATE', atBot: true,
-    messageId: 'm1', content: '你好', timestamp: '2026-10-29T10:00:00Z',
+    messageId: 'm1', content: '你好', timestamp: NOW_ISO,
     userId: 'MO', groupOpenid: 'GO', username: '小明', mentions: [], attachments: [], msgElements: [], raw: {},
   })
   const g = harness.emCalls.pop()
@@ -165,7 +167,7 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
   eq(d.message[1], { type: 'text', text: '你好' }, '正文段')
   ok(typeof d.reply === 'function', '提供 reply')
   eq(d.raw_message, '你好', 'raw_message')
-  // 回归（线上「#设置主人/#agents更新 无反应、#状态 却能用」）：
+  // 回归（线上「#设置主人/#agent更新 无反应、#状态 却能用」）：
   // 适配器不能预设 data.msg —— TRSS loader.dealEvent 会把 message 的 text 段累加到 e.msg，
   // 若这里已有初值就会变成「#设置主人#设置主人」，精确匹配（$ 结尾）的规则全失效，前缀规则却照常。
   ok(!('msg' in d), '不设置 data.msg（避免框架累加后文本翻倍）')
@@ -179,7 +181,7 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
   // 精确匹配命令完整链路：群 @ + #设置主人 → 框架 e.msg 恰为 #设置主人
   client.emit('message', {
     type: 'message', scene: 'group', appId: 'APP2', eventName: 'GROUP_AT_MESSAGE_CREATE', atBot: true,
-    messageId: 'm1x', content: '#设置主人', timestamp: '2026-10-29T10:00:00Z',
+    messageId: 'm1x', content: '#设置主人', timestamp: NOW_ISO,
     userId: 'MO', groupOpenid: 'GO', username: '小明', mentions: [], attachments: [], msgElements: [], raw: {},
   })
   const cmdData = harness.emCalls.pop().data
@@ -198,7 +200,7 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
   // 私聊
   client.emit('message', {
     type: 'message', scene: 'c2c', appId: 'APP2', eventName: 'C2C_MESSAGE_CREATE', atBot: false,
-    messageId: 'm2', content: 'hi', timestamp: '2026-10-29T10:00:00Z',
+    messageId: 'm2', content: 'hi', timestamp: NOW_ISO,
     userId: 'UO', groupOpenid: null, username: 'u', mentions: [], attachments: [], msgElements: [], raw: {},
   })
   const c2c = harness.emCalls.pop().data
@@ -208,7 +210,7 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
   // 频道
   client.emit('message', {
     type: 'message', scene: 'guild', appId: 'APP2', eventName: 'AT_MESSAGE_CREATE', atBot: true,
-    messageId: 'm3', content: 'hi', timestamp: '2026-10-29T10:00:00Z',
+    messageId: 'm3', content: 'hi', timestamp: NOW_ISO,
     userId: 'GU', groupOpenid: null, guildId: 'GD', channelId: 'CH', username: 'u', mentions: [], attachments: [], msgElements: [], raw: {},
   })
   const guild = harness.emCalls.pop().data
@@ -218,7 +220,7 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
   client.emit('interaction', {
     type: 'interaction', scene: 'group', appId: 'APP2', eventName: 'INTERACTION_CREATE', atBot: true, interactionId: 'i1', messageId: 'm0',
     content: '#确认 12', buttonId: 'b1', userId: 'MO', groupOpenid: 'GO', guildId: null, channelId: null,
-    timestamp: '2026-10-29T10:00:00Z', username: '', mentions: [], attachments: [], msgElements: [], raw: {},
+    timestamp: NOW_ISO, username: '', mentions: [], attachments: [], msgElements: [], raw: {},
   })
   const inter = harness.emCalls.pop().data
   eq([inter.message_type, inter.message[1]?.text], ['group', '#确认 12'], '按钮回调文本当作一条用户消息投递')
@@ -228,7 +230,7 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
   // 否则框架 trigger=at 会把每条群聊都当 @ 机器人而回复。
   client.emit('message', {
     type: 'message', scene: 'group', appId: 'APP2', eventName: 'GROUP_MESSAGE_CREATE', atBot: false,
-    messageId: 'm4', content: '随便聊聊', timestamp: '2026-10-29T10:00:00Z',
+    messageId: 'm4', content: '随便聊聊', timestamp: NOW_ISO,
     userId: 'MO', groupOpenid: 'GO', username: '小明', mentions: [], attachments: [], msgElements: [], raw: {},
   })
   const plain = harness.emCalls.pop().data
@@ -238,7 +240,7 @@ console.log('\n[4] 事件归一化：群 / 私聊 / 频道 / 按钮')
 
   client.emit('message', {
     type: 'message', scene: 'group', appId: 'APP2', eventName: 'GROUP_MESSAGE_CREATE', atBot: true,
-    messageId: 'm5', content: '在吗', timestamp: '2026-10-29T10:00:00Z',
+    messageId: 'm5', content: '在吗', timestamp: NOW_ISO,
     userId: 'MO', groupOpenid: 'GO', username: '小明', mentions: [{ is_you: true, id: 'BOTOPENID' }], attachments: [], msgElements: [], raw: {},
   })
   const atMsg = harness.emCalls.pop().data

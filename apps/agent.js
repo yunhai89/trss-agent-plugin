@@ -556,8 +556,8 @@ async function buildRuntime() {
 
 async function _buildRuntime(scope) {
   const cfg = Config.get().agent || {}
-  // 每次运行时重建（含 #agents重载）清空 crawl4ai 可用性探测缓存：
-  // 用户跑完 scripts/install-crawl4ai.sh 后发 #agents重载 即可立即启用真浏览器抓取
+  // 每次运行时重建（含 #agent重载）清空 crawl4ai 可用性探测缓存：
+  // 用户跑完 scripts/install-crawl4ai.sh 后发 #agent重载 即可立即启用真浏览器抓取
   try { resetCrawl4aiProbe() } catch { /* noop */ }
   // 显式打印本轮生效的步数上限：便于确认配置是否已随运行时重建生效（出现过"改了配置仍是旧值"的困惑）
   Log.mark('[limits]', `maxTurns=${cfg.maxTurns ?? 200} · schedule.taskMaxTurns=${cfg.schedule?.taskMaxTurns ?? 200} · multiagent.workerMaxTurns=${cfg.multiagent?.workerMaxTurns ?? 200} · workerTimeBudget=${Math.round((cfg.multiagent?.workerTimeBudgetMs ?? 3600000) / 60000)}min · workerMaxTokens=${cfg.multiagent?.workerMaxTokens ?? 16384} · resultCap=${cfg.multiagent?.resultCap ?? 48000} · loop.timeBudget=${cfg.loop ? `${Math.round((cfg.loop.timeBudgetMs ?? 1800000) / 60000)}min` : 'off'}`)
@@ -1929,7 +1929,7 @@ const mcpAddPending = new Map() // userId(String) -> { at }
 export class Chat extends plugin {
   constructor() {
     super({
-      name: 'agents对话',
+      name: 'agent对话',
       dsc: 'AI Agent 对话（多轮/工具/记忆/安全/审批/MCP）',
       event: 'message',
       priority: 9999,
@@ -1944,7 +1944,7 @@ export class Chat extends plugin {
         { reg: '^#mcp$', fnc: 'mcpStatus', permission: 'master' },
         { reg: '^#沙箱诊断(?:\\s+(\\S+))?$', fnc: 'sandboxDiag', permission: 'master' },
         { reg: '^#添加[Mm][Cc][Pp]', fnc: 'addMcp', permission: 'master' },
-        { reg: '^#agents重载$', fnc: 'agentsReload', permission: 'master' },
+        { reg: '^#agent重载$', fnc: 'agentsReload', permission: 'master' },
         { reg: '^#进化工具\\s+([\\s\\S]+)', fnc: 'toolEvoEvolve', permission: 'master' },
         { reg: '^#工具进化列表$', fnc: 'toolEvoList', permission: 'master' },
         { reg: '^#采纳工具\\s+(\\S+)', fnc: 'toolEvoAdopt', permission: 'master' },

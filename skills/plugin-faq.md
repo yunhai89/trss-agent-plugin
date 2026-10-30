@@ -10,8 +10,8 @@ priority: 20
 ## 0. 通用排查入口（先做这三件）
 
 1. **拿现场证据**：让用户发 `#上报错误 <问题描述>`，会把最近会话日志打包给主人；或让主人看控制台与 `data/logs/`、`data/humanize-logs/`。
-2. **配置来源**：用户配置在插件目录 `config/config.yaml`；默认值在 `config/default_config/`。**改了配置若未热加载，发 `#agents重载`**。模型厂商/模型在 Web 面板「厂商配置」「模型列表」维护，`agent.providerId/modelId` 是它们的解析镜像——直接改 `agent.apiKey/model` 会在下次加载被覆盖。
-3. **确认版本**：`#agents` 面板或 `package.json` 的 `version`。下列「已修复」条目指对应版本起生效；**生产需把仓库同步部署到实际运行目录**（如 `/root/Yunzai/plugins/agents-plugin`）后重启/重载。
+2. **配置来源**：用户配置在插件目录 `config/config.yaml`；默认值在 `config/default_config/`。**改了配置若未热加载，发 `#agent重载`**。模型厂商/模型在 Web 面板「厂商配置」「模型列表」维护，`agent.providerId/modelId` 是它们的解析镜像——直接改 `agent.apiKey/model` 会在下次加载被覆盖。
+3. **确认版本**：`#agent版本` 或 `package.json` 的 `version`。下列「已修复」条目指对应版本起生效；**生产需把仓库同步部署到实际运行目录**（如 `/root/Yunzai/plugins/agents-plugin`）后重启/重载。
 
 ## 1. 启动 / 模型接入
 
@@ -59,11 +59,11 @@ priority: 20
 
 ## 7. Web 管理面板 / 登录
 
-- **取访问地址**：主人私聊发 `#agents登录`，会**分两条**返回 `🌐 公网地址` 与 `💻 本地地址(127.0.0.1)`；群聊里发会被要求去私聊。
+- **取访问地址**：主人私聊发 `#agent登录`，会**分两条**返回 `🌐 公网地址` 与 `💻 本地地址(127.0.0.1)`；群聊里发会被要求去私聊。
 - **本地地址固定**：服务端监听 `0.0.0.0`（同时覆盖公网与本地回环），本地 `http://127.0.0.1:<port>/?token=…` 始终可用、无需配置。
-- **端口被占用**：改 `agent.webApi.port` 后 `#agents重载`。
+- **端口被占用**：改 `agent.webApi.port` 后 `#agent重载`。
 - **打不开**：确认 `agent.webApi.enable: true`；云服务器安全组/防火墙放行端口；公网走 NAT 时优先用本地地址或配 `publicUrl`。
-- **token 失效**：24h 过期或进程重启，重新 `#agents登录`。
+- **token 失效**：24h 过期或进程重启，重新 `#agent登录`。
 
 ## 8. 权限 / 工具被拒
 
@@ -77,7 +77,7 @@ priority: 20
 
 ## 10. 其它常见配置点
 
-- **改配置不生效**：改 `config/config.yaml` 后多数热加载；模型/provider 结构变化建议 `#agents重载`。
+- **改配置不生效**：改 `config/config.yaml` 后多数热加载；模型/provider 结构变化建议 `#agent重载`。
 - **多模态总开关**：`agent.media.enable: false` 关闭图片/文件收集（纯文本处理）。
 - **人设/系统提示**：`#人设` 系列命令；人设只覆盖身份层，不覆盖工具与安全约束。
 - **上下文太长/变慢**：调 `agent.contextWindow`（token 高低水位压缩）与 `maxTurns`。

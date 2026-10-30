@@ -18,13 +18,13 @@
   })
 
   const TOKEN_KEY = 'agents_token'
-  /** 合法 token 形态：随机 hex/urlsafe（#agents登录 48 hex；控制台令牌同） */
+  /** 合法 token 形态：随机 hex/urlsafe（#agent登录 48 hex；控制台令牌同） */
   const TOKEN_RE = /^[A-Za-z0-9_-]{16,128}$/
 
   /**
    * 归一化登录 token：允许直接粘贴**整条登录地址**或带中文的整段消息。
    *
-   * 背景（线上故障）：用户把 `#agents登录` 返回的整段内容（含「🌐 公网地址：」等中文）粘进登录框，
+   * 背景（线上故障）：用户把 `#agent登录` 返回的整段内容（含「🌐 公网地址：」等中文）粘进登录框，
    * 旧代码原样存进 localStorage 并塞进 Authorization 头 → 浏览器直接抛
    * `Failed to execute 'fetch' ... String contains non ISO-8859-1 code point`，
    * 之后每个页面（人设库等）的所有接口都失败。

@@ -8,7 +8,7 @@
 
 1. [P1] `agent.proxy` 注释承诺 HTTP/SOCKS 双协议，实际只用 undici `ProxyAgent`（仅 http/https），`socks5://` 会抛错→**静默直连**。
 2. [P1] TTS 情绪判定超时有两个键且各只覆盖一半服务商：`tts.judgeTimeoutMs` 对默认的 IndexTTS **完全无效**，yaml「统一生效」不成立。
-3. [P1] `debug` 是**零读取死配置**（唯一读点是 `#agents状态` 展示文案），面板/README 承诺的「工具入参/每轮 token」不会出现（与 guoba C4 同源）。
+3. [P1] `debug` 是**零读取死配置**（唯一读点是 `#agent状态` 展示文案），面板/README 承诺的「工具入参/每轮 token」不会出现（与 guoba C4 同源）。
 4. [P1] `toolDiscovery.alwaysOn` 两套默认清单冲突：yaml 12 项永远压过代码 `DEFAULT_ALWAYS_ON` 13 项，代码注释声称「必须常驻」的 context_recall/schedule_task/reminder_set/kb_search 默认全不在常驻目录（与 guoba C1 同源）。
 5. [P1] `humanize.maxRepliesPer10Minutes` 同名双键，顶层（yaml:584）**永久失效**，生效的是 behaviorPolicy 副本（与 logic-precedence C1 同源）。
 6. [P1] `agent.media.passive` 死配置：代码只算出 `passiveEnabled` 无人消费，三个被动工具无条件注册（与 logic-precedence C4 同源）。
@@ -37,7 +37,7 @@
 
 ### C03 [P1] [N/X] `debug` 零读取死配置（yaml 键存在、代码从不消费）
 - 证据 A：`config.yaml:1` `debug: false`；`guoba.support.js:98` 面板字段「调试日志 · 打印工具入参/每轮 token/搜索词等」；`README.md:253`「`true` 打开详细日志」、`README.md:1180`「开启 `debug: true` 可看到 AI 每次调用工具的名称、入参……」。
-- 证据 B：全仓 `Config.get().debug` 唯一读点是 `apps/help.js:206-211`（`#agents状态` 里显示「调试日志：开/关」）。`utils/Log.js:14-30` 完全按 level 转 `Bot.makeLog`，从不读该配置；真正决定详细日志的是 `agent.devLog.enable`（`utils/DevLog.js:111` `if (cfg().enable === false) return`）。
+- 证据 B：全仓 `Config.get().debug` 唯一读点是 `apps/help.js:206-211`（`#agent状态` 里显示「调试日志：开/关」）。`utils/Log.js:14-30` 完全按 level 转 `Bot.makeLog`，从不读该配置；真正决定详细日志的是 `agent.devLog.enable`（`utils/DevLog.js:111` `if (cfg().enable === false) return`）。
 - 打架点：打开 `debug` 只改状态页一行文案，日志量/内容不变；用户按面板排查永远拿不到承诺的信息。
 - 影响面：所有用户（尤其按「排查时开启」操作的人）。
 - 建议：把 `Config.get().debug` 接到 Log 级别/DevLog 开关，或从 yaml+面板+README 一并删除并把文档改指 `devLog.enable`。
@@ -188,5 +188,5 @@
 ## 低优先级清单（未单独立项，供 Lead 取舍）
 - `agent.policy.categoryMin:`（`config.yaml:224`，空值无注释，`apps/agent.js:1154` `createPolicy({ categoryMin: cfg.policy?.categoryMin })` 与 `model/agent/policy.js:20-22` 内置 `CATEGORY_MIN` 合并）——「留空=内置」语义可接受，但 yaml 无任何说明/示例，且用户填任意 rank 无校验；属文档缺口（P2 边缘），不建议单列。
 - `agent.confirmTimeout: 300`（`config.yaml:212`）无单位注释，代码按「秒」×1000（`apps/agent.js:673`），面板/README 未标单位 → 易被当毫秒填 300000（P2 文档缺口，未单列）。
-- `agent.render.card` 仅 `#agents帮助` 读取（`apps/help.js:165`），与 yaml「帮助等卡片图」不符——已由 logic-precedence C15 覆盖，本文件不重复。
+- `agent.render.card` 仅 `#agent帮助` 读取（`apps/help.js:165`），与 yaml「帮助等卡片图」不符——已由 logic-precedence C15 覆盖，本文件不重复。
 - `agent.miyoushe.maxImages` 在补齐/子代理 ctx（`apps/agent.js:1251`）未透传，回落代码默认 9 = yaml 默认，当前无行为差，仅提示一致性。

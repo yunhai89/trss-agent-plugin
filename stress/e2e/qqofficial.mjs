@@ -184,7 +184,7 @@ console.log('\n[5] 官方 openid 主人：agent.masters 命中后主人指令可
   ok(heavy?.__masterGate === true && heavy?.permission === 'all', 'master 规则已下沉为插件内判定（masterGate）')
   // 非主人：拒绝并提示 /uid
   {
-    const { evt, calls } = officialGroupEvent({ user_id: `${SELF}:U_OTHER`, msg: '#agents重载' })
+    const { evt, calls } = officialGroupEvent({ user_id: `${SELF}:U_OTHER`, msg: '#agent重载' })
     const bot = new Chat({})
     bot.e = evt
     const res = await Object.getPrototypeOf(bot).agentsReload.call({ e: evt, reply: evt.reply })
@@ -193,7 +193,7 @@ console.log('\n[5] 官方 openid 主人：agent.masters 命中后主人指令可
   }
   // 主人：命中完整 openid → 放行（不出现拒绝文案）
   {
-    const { evt, calls } = officialGroupEvent({ user_id: `${SELF}:U_MASTER`, msg: '#agents重载' })
+    const { evt, calls } = officialGroupEvent({ user_id: `${SELF}:U_MASTER`, msg: '#agent重载' })
     const bot = new Chat({})
     bot.e = evt
     try { await Object.getPrototypeOf(bot).agentsReload.call({ e: evt, reply: evt.reply }) } catch { /* 运行时重建在桩环境可能抛错，这里只看是否被权限门拦下 */ }
@@ -203,7 +203,7 @@ console.log('\n[5] 官方 openid 主人：agent.masters 命中后主人指令可
 
 console.log('\n[6] 官方 ID 不产生非法落盘路径（scopeId / 日志文件名）')
 {
-  // 上一节的 #agents重载 会重建运行时 → 重新取引用并桩掉 LLM
+  // 上一节的 #agent重载 会重建运行时 → 重新取引用并桩掉 LLM
   const rtNow = await getRuntime()
   rtNow.provider.chat = async () => ({ role: 'assistant', content: 'ok', toolCalls: [], finishReason: 'stop', usage: null })
   const { evt } = officialGroupEvent()

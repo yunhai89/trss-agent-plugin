@@ -132,9 +132,9 @@
 - 建议：删除 README 的 `persona.dir` 行；若要支持自定义目录，在 yaml 增加 `agent.personaLore.dir` 并在 README 说明。
 - 置信度：高
 
-### C15 [P2] [L] `render.card` 只控 `#agents帮助`，yaml 注释承诺「帮助/列表/回复图」
+### C15 [P2] [L] `render.card` 只控 `#agent帮助`，yaml 注释承诺「帮助/列表/回复图」
 - 证据 A：`config/default_config/config.yaml:116-117` `render: # 卡片图渲染（帮助/列表/回复图）`、`card: true # 帮助等卡片图开关；弱服务器可置 false 直接回文本，避免渲染卡死`。
-- 证据 B：全仓仅 `apps/help.js:164-165` 读 `render.card !== false`（`#agents帮助`）；`#聊天列表` `apps/agent.js:2599` `const img = await screenshot('agents-plugin/chat-list', html)` 与 `#人设列表` `:3748` `screenshot('agents-plugin/persona-list', html)` 均无 `render.card` 判断；回复图由 `agent.reply.mode`(+`replyTimeoutMs`, `apps/agent.js:2422`/`apps/render.js:88`) 控制，也不看 `render.card`。
+- 证据 B：全仓仅 `apps/help.js:164-165` 读 `render.card !== false`（`#agent帮助`）；`#聊天列表` `apps/agent.js:2599` `const img = await screenshot('agents-plugin/chat-list', html)` 与 `#人设列表` `:3748` `screenshot('agents-plugin/persona-list', html)` 均无 `render.card` 判断；回复图由 `agent.reply.mode`(+`replyTimeoutMs`, `apps/agent.js:2422`/`apps/render.js:88`) 控制，也不看 `render.card`。
 - 打架点：弱服务器按注释把 `render.card` 置 false 后，只有帮助图退化为文本，两个列表指令仍会走图片渲染（可能正是「渲染卡死」来源）；回复图与 render 段无直接关系，「回复图」注释不成立。
 - 影响面：弱设备/无 puppeteer 环境；按注释做降级的用户。
 - 建议：让 `#聊天列表`/`#人设列表` 同样尊重 `render.card`（失败/关闭时回退文本），注释改为如实描述。
@@ -145,7 +145,7 @@
 - 证据 B：`apps/groupworld.js:127-132` `// analysis.schedule 接线（曾为死配置键，cron 硬编码）：构造期读取，改后需重启生效`、`const hourlyCron = (() => { const s = String(cfgNow().analysis?.schedule…); return …})( )`，随后 `this.task = [{ cron: hourlyCron, fnc: this.hourlyTask… }]`；`model/groupworld/default-config.js` 无热重载重建逻辑。
 - 打架点：用户按 README 期望热改 `agent.groupWorld.analysis.schedule` 后即时生效，实际要重启 Yunzai；配置注释本身也没写这个例外。
 - 影响面：调整 GW 分析频率的用户；排障时会误判「配置没生效」。
-- 建议：把 cron 注册包进 `Config.onChange` 重排（或 `#agents重载` 时重建），并在 yaml 注释注明当前行为。
+- 建议：把 cron 注册包进 `Config.onChange` 重排（或 `#agent重载` 时重建），并在 yaml 注释注明当前行为。
 - 置信度：高
 
 ### C17 [P2] [D/L] `media.enable` 不是「多模态总开关」：只关主对话，视觉/表情发现/媒体工具照旧可用

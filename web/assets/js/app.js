@@ -97,7 +97,7 @@
             title: '登录 token 格式不对',
             icon: 'warn',
             message: '应形如 <b>48 位字母数字</b>，或直接粘贴<b>完整登录链接</b>（含 <code>?token=</code>）。<br>'
-              + '请私聊 bot 重新发送 <b>#agents登录</b> 获取。',
+              + '请私聊 bot 重新发送 <b>#agent登录</b> 获取。',
           })
           return
         }
@@ -112,7 +112,7 @@
             window.UI.alert({
               title: '登录失败',
               icon: 'warn',
-              message: `Token 校验未通过：${msg}<br>请私聊 bot 重新发送 <b>#agents登录</b> 获取新链接，或核对粘贴的 token 是否完整。`,
+              message: `Token 校验未通过：${msg}<br>请私聊 bot 重新发送 <b>#agent登录</b> 获取新链接，或核对粘贴的 token 是否完整。`,
             })
           } else {
             window.api.setToken(t) // 保留 token：认证已通过，只是部分接口暂时不可用
@@ -135,7 +135,7 @@
       <div class="login-card">
         <div class="login-logo"><v-icon name="bot"/></div>
         <h2 style="margin:16px 0 4px;font-size:20px">agents-plugin <span class="grad-t">管理面板</span></h2>
-        <p class="mut2" style="font-size:12.5px;margin:0 0 18px">私聊 bot 发送 <b>#agents登录</b>，会分别返回【公网地址】与【本地地址】两条链接；直接点开链接即可，或把链接里的 token 粘贴到下方</p>
+        <p class="mut2" style="font-size:12.5px;margin:0 0 18px">私聊 bot 发送 <b>#agent登录</b>，会分别返回【公网地址】与【本地地址】两条链接；直接点开链接即可，或把链接里的 token 粘贴到下方</p>
         <input class="inp" v-model="loginInput" placeholder="粘贴登录 token 或完整登录链接" style="margin-bottom:12px;text-align:left" @keyup.enter="doLogin"/>
         <button class="btn b-pri" style="width:100%;padding:11px" @click="doLogin"><v-icon name="key"/>登 录</button>
       </div>

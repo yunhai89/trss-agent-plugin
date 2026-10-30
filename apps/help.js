@@ -99,12 +99,12 @@ const SECTIONS = [
       { cmd: '#启用mcp +名', desc: '启用某个 MCP 服务端' },
       { cmd: '#停止mcp +名', desc: '停止某个 MCP 服务端' },
       { cmd: '#mcp', desc: '查看 MCP 连接状态' },
-      { cmd: '#agents更新', desc: '更新插件（有改动自动重启）' },
-      { cmd: '#agents版本', desc: '查看当前插件版本号' },
-      { cmd: '#agents更新日志', desc: '查看近期版本更新日志' },
-      { cmd: '#agents重载', desc: '热重载配置（免重启）' },
-      { cmd: '#agents状态', desc: '查看插件运行状态（触发模式/模型/调试日志）' },
-      { cmd: '#agents登录', desc: '获取 Web 管理面板地址（带 token，24h 有效；主人私聊发送）' },
+      { cmd: '#agent更新', desc: '更新插件（有改动自动重启）' },
+      { cmd: '#agent版本', desc: '查看当前插件版本号' },
+      { cmd: '#agent更新日志', desc: '查看近期版本更新日志' },
+      { cmd: '#agent重载', desc: '热重载配置（免重启）' },
+      { cmd: '#agent状态', desc: '查看插件运行状态（触发模式/模型/调试日志）' },
+      { cmd: '#agent登录', desc: '获取 Web 管理面板地址（带 token，24h 有效；主人私聊发送）' },
       { cmd: '#伪人状态', desc: '主人：查看伪人模式运行状态（白名单群/活跃运行时）' },
       { cmd: '#伪人决策 +n', desc: '主人：查看最近 n 条伪人门控/规划 trace' },
       { cmd: '#伪人记忆 +群号', desc: '主人：查看伪人独立记忆库（印象/事件/群梗，每日自动整合）' },
@@ -148,13 +148,13 @@ const SECTIONS = [
 export class Help extends plugin {
   constructor() {
     super({
-      name: 'agents帮助',
+      name: 'agent帮助',
       dsc: '查看 agents-plugin 帮助（图片）',
       event: 'message',
       priority: 500,
       rule: [
-        { reg: '^#agents帮助$', fnc: 'help' },
-        { reg: '^#agents状态$', fnc: 'status', permission: 'master' },
+        { reg: '^#agent帮助$', fnc: 'help' },
+        { reg: '^#agent状态$', fnc: 'status', permission: 'master' },
       ],
     })
     // QQ 官方机器人：规则级 permission:master 改为插件内判定（openid 不是 QQ 号）
@@ -170,7 +170,7 @@ export class Help extends plugin {
       if (img) return this.e.reply(img), true
     }
     // 文本回退（puppeteer 不可用 / 渲染超时 / 主动关闭时）
-    const lines = ['#agents帮助']
+    const lines = ['#agent帮助']
     for (const s of SECTIONS) {
       lines.push(`【${s.title}】`)
       for (const c of s.commands) lines.push(`${c.cmd}  ${c.desc}`)

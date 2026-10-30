@@ -12,7 +12,7 @@ import { getStickerManager } from '../model/sticker/manager.js'
 export class StickerCmd extends plugin {
   constructor() {
     super({
-      name: 'agents_表情包',
+      name: 'agent_表情包',
       dsc: '表情包（自动发现 + 开关）',
       event: 'message',
       priority: 1000,

@@ -10,22 +10,22 @@ const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '.
 
 /**
  * agents-plugin 更新命令（参考 TRSS 标准更新模式，用 Bot.exec）。
- *   #agents更新 / #agents强制更新   拉取当前分支最新代码（强制=reset 到远端）；有改动时自动重启
- *   #agents版本                     最近一次提交时间
- *   #agents更新日志                 本次更新的提交记录
+ *   #agent更新 / #agent强制更新   拉取当前分支最新代码（强制=reset 到远端）；有改动时自动重启
+ *   #agent版本                     最近一次提交时间
+ *   #agent更新日志                 本次更新的提交记录
  * 仅主人可用。插件目录名 agents-plugin。
  */
 export class AgentsUpdate extends plugin {
   constructor() {
     super({
-      name: 'agents_更新',
+      name: 'agent_更新',
       dsc: 'agents-plugin 更新',
       event: 'message',
       priority: 1000,
       rule: [
-        { reg: '^#*(agents)(插件)?(强制)?更新$', fnc: 'update' },
-        { reg: '^#?(agents)(插件)?版本$', fnc: 'pluginVersion' },
-        { reg: '^#?(agents)(插件)?更新日志$', fnc: 'updateLog' },
+        { reg: '^#*(agent)(插件)?(强制)?更新$', fnc: 'update' },
+        { reg: '^#?(agent)(插件)?版本$', fnc: 'pluginVersion' },
+        { reg: '^#?(agent)(插件)?更新日志$', fnc: 'updateLog' },
       ],
     })
   }
@@ -91,9 +91,9 @@ export class AgentsUpdate extends plugin {
         `⚠️ 更新被本地未跟踪文件挡住（共 ${collisions.length} 个，与本次新增的上游文件同名）：\n`
         + collisions.map((f) => `· ${f}`).join('\n') + '\n'
         + '未跟踪文件不在 git 版本控制里，`git stash`（不带 `-u`）不会暂存它们，必须显式处理：\n'
-        + '· 想保住：在插件目录执行 `git stash push -u -m agents-update`，再发送 #agents更新（之后 `git stash pop`）\n'
+        + '· 想保住：在插件目录执行 `git stash push -u -m agents-update`，再发送 #agent更新（之后 `git stash pop`）\n'
         + '· 确认可丢：`git clean -n -- <上面的路径>` 预览，再用 `git clean -f -- <路径>` 删除\n'
-        + '· 或发 #agents强制更新（会覆盖这些文件；插件会先备份到 data/backup/，但仍请自行核对）',
+        + '· 或发 #agent强制更新（会覆盖这些文件；插件会先备份到 data/backup/，但仍请自行核对）',
       )
       logger.mark(`[agents-plugin] 预检：${collisions.length} 个未跟踪文件与上游新增文件同名，已中止`)
       return false
@@ -281,25 +281,25 @@ export class AgentsUpdate extends plugin {
       await this.reply(`远程仓库地址/鉴权错误：${this.gitErrUrl(errStr)}`)
     } else if (/be overwritten by merge|被合并操作覆盖/.test(errStr)) {
       // 工作区有未提交改动、且这些文件正好被本次更新改动：git 会中止（不会丢数据）。
-      // 必须显式警告 #agents强制更新 会 git reset --hard 丢改动，否则用户容易顺手强更导致代码丢失。
+      // 必须显式警告 #agent强制更新 会 git reset --hard 丢改动，否则用户容易顺手强更导致代码丢失。
       const files = this.overwriteFiles(stdout, errStr)
       const list = files.length ? `\n会被覆盖的本地改动：\n${files.map((f) => `· ${f}`).join('\n')}` : ''
       await this.reply(
         `更新已中止：工作区有未提交改动/未跟踪文件，且这些文件本次更新也会改动。${list}\n`
         + '已中止，未改动任何文件。处理方式：\n'
-        + '· 保留改动（推荐）：在插件目录执行 git stash push -u -m "本地改动"，再发送 #agents更新，之后 git stash pop\n'
+        + '· 保留改动（推荐）：在插件目录执行 git stash push -u -m "本地改动"，再发送 #agent更新，之后 git stash pop\n'
         + '  （`-u` 会连未跟踪文件一起暂存；若上面列出的文件是未跟踪的本地文件，不加 `-u` 的 stash 救不了）\n'
         + '· 确认某些未跟踪文件可丢：先 git clean -n -- <路径> 预览，再 git clean -f -- <路径>\n'
-        + '· 放弃改动：#agents强制更新（会执行 git reset --hard；未提交改动永久丢失，未跟踪同名文件会被覆盖，插件会先备份到 data/backup/）',
+        + '· 放弃改动：#agent强制更新（会执行 git reset --hard；未提交改动永久丢失，未跟踪同名文件会被覆盖，插件会先备份到 data/backup/）',
       )
     } else if (/Merge conflict|合并冲突/.test(stdout)) {
-      await this.reply(`${errStr}\n${stdout}\n合并冲突：请在插件目录手动解决后重新 #agents更新`)
+      await this.reply(`${errStr}\n${stdout}\n合并冲突：请在插件目录手动解决后重新 #agent更新`)
     } else if (/divergent branches|偏离的分支|not possible to fast-forward|fast-forward/.test(errStr)) {
       const ret = await this.exec('git pull --rebase')
       if (!ret.error && /Successfully rebased|成功变基/.test(ret.stdout + ret.stderr)) return true
-      await this.reply(`${errStr}\n${stdout}\n若修改过文件请手动更新，否则发送 #agents强制更新`)
+      await this.reply(`${errStr}\n${stdout}\n若修改过文件请手动更新，否则发送 #agent强制更新`)
     } else {
-      await this.reply(`${errStr}\n${stdout}\n未知错误，可尝试发送 #agents强制更新`)
+      await this.reply(`${errStr}\n${stdout}\n未知错误，可尝试发送 #agent强制更新`)
     }
   }
 

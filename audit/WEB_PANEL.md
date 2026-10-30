@@ -6,7 +6,7 @@
 `Failed to execute 'fetch' on 'Window': Failed to read the 'headers' property from 'RequestInit': String contains non ISO-8859-1 code point`，
 所有接口全挂。
 
-**原因**：用户把 `#agents登录` 返回的**整段消息**（含「🌐 公网地址：」等中文）粘进登录框；
+**原因**：用户把 `#agent登录` 返回的**整段消息**（含「🌐 公网地址：」等中文）粘进登录框；
 旧前端原样存入 `localStorage.agents_token`，之后每次请求都塞进 `Authorization: Bearer <整段中文>`。
 浏览器的 `RequestInit.headers` 只接受 ISO-8859-1，直接抛 TypeError（请求根本没发出）。
 

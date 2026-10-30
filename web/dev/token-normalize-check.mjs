@@ -4,7 +4,7 @@
  * 背景（线上故障 2026-10）：Web 人设页打开即报
  *   `Failed to execute 'fetch' on 'Window': Failed to read the 'headers' property from
  *    'RequestInit': String contains non ISO-8859-1 code point`
- * 原因：用户把 `#agents登录` 返回的整段内容（含「🌐 公网地址：」等中文）粘进登录框，
+ * 原因：用户把 `#agent登录` 返回的整段内容（含「🌐 公网地址：」等中文）粘进登录框，
  * 旧代码原样存进 localStorage 并塞进 Authorization 头 → 浏览器拒绝该 RequestInit，
  * 之后所有页面（人设库等）的接口全失败。
  *

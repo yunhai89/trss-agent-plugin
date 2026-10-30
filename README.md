@@ -8,7 +8,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.45.14-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.46.0-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
@@ -25,9 +25,9 @@
 ## 🌿 分支与更新（先看）
 
 - **`master` 是唯一主分支**：新功能、底层改动、bug 修复都直接提交到 `master`；历史上的 `beta` 分支已于 v1.21.0 全量合并并停用。
-- 更新：主人发 **`#agents更新`**，或手动 `cd plugins/agents-plugin && git pull origin master`（package.json 有变动时 `#agents更新` 会自动 `pnpm install`）。
-- **代码改动必须重启进程**（`#重启`，或等 `#agents更新` 自动重启）；**只改配置**用 `#agents重载` 即可（它按新配置重建运行时，但不重新加载已改动的代码文件）。
-- 本地有未提交改动时更新会中止并列出冲突文件名（不会丢改动）；`#agents强制更新` 会 `git reset --hard`，未提交改动将永久丢失。
+- 更新：主人发 **`#agent更新`**，或手动 `cd plugins/agents-plugin && git pull origin master`（package.json 有变动时 `#agent更新` 会自动 `pnpm install`）。
+- **代码改动必须重启进程**（`#重启`，或等 `#agent更新` 自动重启）；**只改配置**用 `#agent重载` 即可（它按新配置重建运行时，但不重新加载已改动的代码文件）。
+- 本地有未提交改动时更新会中止并列出冲突文件名（不会丢改动）；`#agent强制更新` 会 `git reset --hard`，未提交改动将永久丢失。
 
 > ⚠️ **重要提示**
 > - ✅ 核心能力（多模型对话 / 工具调用 / 记忆 / 人设 / 图片渲染 / MCP / 群管 / Web 面板）稳定可用。
@@ -149,27 +149,27 @@ git clone https://github.com/yunhai89/trss-agent-plugin.git ./plugins/agents-plu
 cd ./plugins/agents-plugin && pnpm install   # markdown 渲染依赖（用 npm 亦可，但会多出 package-lock.json）
 ```
 
-> 其余依赖随 Yunzai 提供（`ws` / `sharp` / `puppeteer` 等）。`#agents更新` 检测到 `package.json` 变动会自动 `pnpm install`。
+> 其余依赖随 Yunzai 提供（`ws` / `sharp` / `puppeteer` 等）。`#agent更新` 检测到 `package.json` 变动会自动 `pnpm install`。
 > 重启 Yunzai 后，插件会在**自己的** `plugins/agents-plugin/config/config.yaml` 生成配置（不在 Yunzai 根；旧的 `Yunzai/config/agents-plugin.yaml` 会自动迁移）。
 
 ### 1.5 首次启动：先拿到面板地址（无需协议端）
 
-**这一步解决了「没有协议端 → 发不了 `#agents登录` → 进不去面板」的死锁**：
+**这一步解决了「没有协议端 → 发不了 `#agent登录` → 进不去面板」的死锁**：
 
 - 插件启动时，日志会直接打印**带 token 的面板访问地址**（本地 / 内网 / 可探测到的公网）：
   ```
-  [web] 面板默认访问地址（带 token，无需 #agents登录；协议端未配置时也能进面板配模型）
+  [web] 面板默认访问地址（带 token，无需 #agent登录；协议端未配置时也能进面板配模型）
   [web]   本地  http://127.0.0.1:6098/?token=xxxxxxxx
   [web]   内网  http://192.168.1.7:6098/?token=xxxxxxxx
   ```
 - 同一份地址也写到插件目录 **`data/web/console-url.txt`**（权限 600），方便事后找回；
 - **面板服务不依赖 QQ 连接，也不依赖模型运行时**：即使一行配置都没有，也能打开面板 → 配置中心填模型，保存即热加载；
 - 令牌默认 30 天有效（使用中自动续期，过期后下次启动自动换新）；不想在日志里出现，可设 `agent.webApi.printTokenOnStart: false` 关闭，或删 `data/web/console-token.json` 让下次启动重新生成；
-- 已配好协议端后，仍可私聊机器人发 **`#agents登录`** 获取 24h 会话令牌（两条消息分别给公网/本地地址）。
+- 已配好协议端后，仍可私聊机器人发 **`#agent登录`** 获取 24h 会话令牌（两条消息分别给公网/本地地址）。
 
 ### 2. 配模型（引用制）
 
-**推荐**：主人私聊机器人发 **`#agents登录`**，打开 Web 面板「配置中心」：
+**推荐**：主人私聊机器人发 **`#agent登录`**，打开 Web 面板「配置中心」：
 **厂商配置**（接口地址 + Key）→ **模型列表**（在该厂商下挂模型）→ **基础 / 模型**（选中厂商与模型）。保存即热加载。
 
 手写 yaml 的等价写法：
@@ -212,7 +212,7 @@ agent:
 
 - 群里 **@机器人** 或发 **`#ai 你好`** 即可对话（`agent.trigger` 可配 `at` / `command` / `both`）；
 - **私聊默认关闭**（`agent.privateChat=false`），需要私聊对话时打开；
-- 发 **`#人设`** 切人设、**`#new`** 新建对话、**`#记忆`** 看记忆、**`#agents帮助`** 看指令卡片；
+- 发 **`#人设`** 切人设、**`#new`** 新建对话、**`#记忆`** 看记忆、**`#agent帮助`** 看指令卡片；
 - 官方机器人用户先发 **`/uid`** 把主人 ID 加进 `agent.masters`，否则主人指令不可用（见下节）。
 
 ### 图片回复（默认开启）
@@ -223,7 +223,7 @@ agent:
 ### 配置文件与热加载
 
 - 配置在插件目录内（`config/config.yaml`）；保存即**热加载**（下次对话自动重建运行时）。
-- 也可发 **`#agents重载`**（主人）立即重建；**改代码**则需重启（ESM 模块缓存）。
+- 也可发 **`#agent重载`**（主人）立即重建；**改代码**则需重启（ESM 模块缓存）。
 - **保存只写差异**：与默认值相同的键不落盘 → 升级后的新默认值会对老用户自动生效；历史全量快照会在启动时压缩（备份 `config.yaml.bak`）。
 
 ---
@@ -272,7 +272,7 @@ agent:
 
 **启用步骤**
 
-1. **推荐用 Web 面板「机器人账号」页**（`#agents登录` → 左侧「系统 → 机器人账号」）：
+1. **推荐用 Web 面板「机器人账号」页**（`#agent登录` → 左侧「系统 → 机器人账号」）：
    点「添加账号」填 AppID + AppSecret 即保存并自动连接；页面还提供连接/断开/编辑/删除、实时状态与排障提示。
    也可直接改 yaml（见上）或用聊天指令 `#qqbot账号` 只读查看。
 2. 首次启用需重启 Yunzai（适配器在框架 Listener 阶段注册；之后改配置可在页面点「重连全部」或发 `#qqbot重连` 热重连）；
@@ -438,7 +438,7 @@ qqOfficial:
 **两种进入方式**：
 
 1. **首次启动 / 还没有协议端**：看启动日志里打印的默认地址，或打开插件目录 `data/web/console-url.txt` —— 里面是**带 token 的固定地址**（本地 `127.0.0.1:6098` + 内网 + 可探测的公网）。面板服务不依赖 QQ 连接与模型运行时，可直接进去完成首次配置。配置中心「Web 面板」卡片里也能一键「获取默认登录地址」并复制。
-2. **已连上协议端**：主人私聊机器人发 **`#agents登录`**，会分两条消息返回【公网地址】与【本地地址】（token 24h 有效，使用中滑动续期）。登录框可**直接粘贴完整链接**（会自动抽取 token），粘贴整段带中文的消息也可以；非法内容会明确提示而不是写入本地。
+2. **已连上协议端**：主人私聊机器人发 **`#agent登录`**，会分两条消息返回【公网地址】与【本地地址】（token 24h 有效，使用中滑动续期）。登录框可**直接粘贴完整链接**（会自动抽取 token），粘贴整段带中文的消息也可以；非法内容会明确提示而不是写入本地。
 
 > 默认地址令牌由 `agent.webApi.consoleTokenTtlHours` 控制（默认 720h = 30 天）；不想要启动日志出现 token，设 `agent.webApi.printTokenOnStart: false`。
 
@@ -476,7 +476,7 @@ qqOfficial:
 > 保存时只写「与默认值的差异」，且厂商/模型/回退等结构会被统一归一（`utils/Config.js`），三个入口改同一份数据。
 
 **安全提示**：面板是主人级控制台（可见 API Key 等），`agent.webApi.publicUrl` 暴露公网时请务必用反代加 HTTPS + 访问控制。
-启动地址中的 token 落盘在 `data/web/console-token.json`（`chmod 600`）、地址副本在 `data/web/console-url.txt`（`chmod 600`）——**别提交到仓库、别发群**；泄露时删掉令牌文件并重启即可换新（`#agents登录` 的 24h 会话令牌不受影响）。
+启动地址中的 token 落盘在 `data/web/console-token.json`（`chmod 600`）、地址副本在 `data/web/console-url.txt`（`chmod 600`）——**别提交到仓库、别发群**；泄露时删掉令牌文件并重启即可换新（`#agent登录` 的 24h 会话令牌不受影响）。
 
 ---
 
@@ -569,10 +569,10 @@ qqOfficial:
 ### 管理与运维（主人）
 | 指令 | 说明 |
 | --- | --- |
-| `#agents登录` | 私聊返回 Web 面板登录链接（公网 + 本地，token 24h） |
-| `#agents帮助` / `#agents状态` | 帮助卡片 / 运行状态 |
-| `#agents重载` | 按新配置重建运行时（不重启进程） |
-| `#agents更新` / `#agents强制更新` / `#agents版本` / `#agents更新日志` | 插件更新与版本 |
+| `#agent登录` | 私聊返回 Web 面板登录链接（公网 + 本地，token 24h） |
+| `#agent帮助` / `#agent状态` | 帮助卡片 / 运行状态 |
+| `#agent重载` | 按新配置重建运行时（不重启进程） |
+| `#agent更新` / `#agent强制更新` / `#agent版本` / `#agent更新日志` | 插件更新与版本 |
 | `#模型切换 +模型ID` | 切换基础模型（引用制下改 modelId） |
 | `#确认 +id` / `#拒绝 +id` / `#待确认` | 审批高危工具调用 |
 | `#沙箱诊断 [预览/修复/实测]` | 沙箱出口网络自检 / 旧配置清理 / 实测 |
@@ -903,7 +903,7 @@ Bot：（时序图图片）用户/Agent/工具 三方消息序列
 
 > 子代理的默认值（v1.30.0 起）：**轮数 200、时间 60 分钟、单轮输出 16384、结果回传 48000 字符**；任务结束后的结果保留 60 分钟（期间随时 `check_subagent` 取回）。根任务整体预算（`agent.loop.timeBudgetMs` 默认 **60 分钟**，已与 `multiagent.workerTimeBudgetMs` 对齐；`agent.loop.tokenBudget` 默认 480000）在「推理参数」调整——想让根任务等满一个满预算子代理，根预算不要低于子代理预算。
 >
-> **取消语义**（v1.30.1 修）：只有真正的取消（`#取消任务`/主动停止、`#agents重载`/退出）才会连带取消在跑子代理；**根任务时间预算到点只是本轮进收尾，不牵连子代理**——子代理按自身预算继续跑完，结果经后台回推（此前会被误杀成「已中止：未知原因」）。非正常结束的子代理一律带可读原因（超时=时间预算耗尽、中止=父任务取消/运行时关闭）。
+> **取消语义**（v1.30.1 修）：只有真正的取消（`#取消任务`/主动停止、`#agent重载`/退出）才会连带取消在跑子代理；**根任务时间预算到点只是本轮进收尾，不牵连子代理**——子代理按自身预算继续跑完，结果经后台回推（此前会被误杀成「已中止：未知原因」）。非正常结束的子代理一律带可读原因（超时=时间预算耗尽、中止=父任务取消/运行时关闭）。
 
 ### `agent.mcp` —— MCP 服务端
 
@@ -1170,7 +1170,7 @@ node scripts/cache-hit-report.mjs --dir /path/to/plugins/agents-plugin/data/logs
 `contextWindow` 调参 / 刚上线缓存修复，不想被历史污染），在概览 → **Token 缓存** 卡点「**清空统计**」：
 确认弹窗会明示影响面，执行后**两处一起清**（日统计键全删 + 日志文件全删，并失效 overview 的 60s 聚合缓存），
 下次对话从零累计。记忆/人设/会话/定时/配置一律不动；此操作不可恢复，且**日志时间线会同时清空**——
-若只想保留日志排查，请手工 `#agents` 侧改 `agent.devLog.dir` 或先备份 `data/logs`。
+若只想保留日志排查，请手工在配置里改 `agent.devLog.dir` 或先备份 `data/logs`。
 
 ---
 
@@ -1513,7 +1513,7 @@ apps/                 事件分发与回复编排（Yunzai plugin 入口）
   ├─ humanize.js      伪人模式 app（旁听/门控/决策/发送 + 配置校验）
   ├─ groupworld.js    群聊小世界 app（旁听摄入/定时分析/隐私指令）
   ├─ research.js      深度研究入口
-  ├─ web.js           Web 面板 HTTP 服务 + #agents登录
+  ├─ web.js           Web 面板 HTTP 服务 + #agent登录
   ├─ help.js / render.js / sticker*.js / comfyui-draw.js / update.js
 model/                纯逻辑层（零 Yunzai 依赖，可离线测试）
   ├─ agent/           ReAct 内核、循环终止器、工具注册/策略/审批、会话、记忆、压缩归档、回复队列
@@ -1712,7 +1712,7 @@ node scripts/run-tests.mjs --help 2>/dev/null || true
 ① 看日志 `[trigger]` 是否有触发记录；② `agent.trigger=at` 时确认是 @ 且消息含文字或媒体；③ 私聊需要 `agent.privateChat=true`；④ QQ 官方机器人需先 `/uid` 配 `agent.masters`；⑤ `agent.chatPermission` 会限制群内 `#ai` 命令（@ 对话不受限）。
 
 **Q1.1：Web 面板登录后打开任意页面报 `Failed to execute 'fetch' … String contains non ISO-8859-1 code point`？**
-说明浏览器 localStorage 里存的 token 不是纯 ASCII（典型：把 `#agents登录` 的整段回执含「🌐 公网地址：」等中文一起粘进了登录框）。v1.45.9 起已修复：登录框支持粘贴完整链接并自动抽取 token，历史脏值读取时会自愈。若你的面板还是旧前端（缓存），强刷页面（Ctrl/Cmd+Shift+R）后重新 `#agents登录` 粘贴一次即可。
+说明浏览器 localStorage 里存的 token 不是纯 ASCII（典型：把 `#agent登录` 的整段回执含「🌐 公网地址：」等中文一起粘进了登录框）。v1.45.9 起已修复：登录框支持粘贴完整链接并自动抽取 token，历史脏值读取时会自愈。若你的面板还是旧前端（缓存），强刷页面（Ctrl/Cmd+Shift+R）后重新 `#agent登录` 粘贴一次即可。
 
 **Q1.2：官方机器人连上了，但 `#设置主人` / `#重启` 等云崽指令没反应？**
 v1.45.4 起已修：以前 `@机器人 + #指令` 会被本插件的 AI catch-all 抢先处理。现在以 `#`/`/` 开头且不是本插件触发词的消息会**透传**给 Yunzai 与其它插件（`agent.commandPassThrough` 默认开）。注意：① 群里没开「全量消息」权限时必须 **@机器人 + 指令**；② 私聊需 `agent.privateChat` 或直接 `#设置主人`（框架指令不受 privateChat 影响）；③ 若仍有插件级权限问题，先按提示走完 `#设置主人` 验证码流程。
@@ -1725,7 +1725,7 @@ v1.45.4 起已修：以前 `@机器人 + #指令` 会被本插件的 AI catch-al
 
 **Q3：回复变成纯文本 / 图片渲染失败？**
 `reply.mode=image` 需要 Chromium（Yunzai 自带 puppeteer）；渲染失败会自动退文本。官方机器人下本就走 Markdown，不是故障。弱服务器可设 `render.card=false`。
-帮助图（`#agents帮助`）有独立超时 `agent.render.helpTimeoutMs`（默认 **300000ms = 5 分钟**）；若首次渲染仍超时（之后会进入冷却、暂时直接回文本），可在 Web 配置中心「进度 / 回复渲染」或锅巴调整该项，或把 `render.card=false` 直接走文本。
+帮助图（`#agent帮助`）有独立超时 `agent.render.helpTimeoutMs`（默认 **300000ms = 5 分钟**）；若首次渲染仍超时（之后会进入冷却、暂时直接回文本），可在 Web 配置中心「进度 / 回复渲染」或锅巴调整该项，或把 `render.card=false` 直接走文本。
 
 **Q4：Token 消耗/费用偏高？**
 ① 配置 `contextWindow` 让前缀缓存生效（命中率可达 90%+，见「缓存经济性」）；② 长任务看 `agent.loop.tokenBudget` 与 `maxTurns`；③ 旁路功能（记忆/评审/伪人）配 `utilityModel` 小模型；④ `#任务状态` 看 turns 与 stop 原因。
@@ -1740,10 +1740,10 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 官方群 ID 是 `<appId>:<openid>` 而非 QQ 群号，用 `/groupid` 取值；提醒按用户、定时任务链按会话。
 
 **Q8：改了配置没生效？**
-配置保存会自动热加载；若仍不生效：确认改的是**插件目录** `config/config.yaml`；`#agents重载` 强制重建；**改代码**必须重启进程（ESM 模块缓存）。
+配置保存会自动热加载；若仍不生效：确认改的是**插件目录** `config/config.yaml`；`#agent重载` 强制重建；**改代码**必须重启进程（ESM 模块缓存）。
 
-**Q9：`#agents更新` 失败/冲突？**
-说明本地改动与上游冲突，按提示 `git stash push -u` 后重试；未跟踪文件冲突用 `git clean -n` 预览再删；`#agents强制更新` 会丢弃未提交改动。
+**Q9：`#agent更新` 失败/冲突？**
+说明本地改动与上游冲突，按提示 `git stash push -u` 后重试；未跟踪文件冲突用 `git clean -n` 预览再删；`#agent强制更新` 会丢弃未提交改动。
 
 **Q10：沙箱连不上网 / DNS 不通？**
 发 `#沙箱诊断`（`预览` 看实际下发、`实测` 沙箱内探测、`修复` 清旧版 `denyOut` 全拒）；自托管需确认 NAT/DNS；`sandbox.network.allowInternet` 与 `allowOut` 白名单会限制出口。
@@ -1754,16 +1754,17 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.46.0** | 指令统一：`#agents帮助/状态/登录/更新/版本/更新日志/重载` 全部改为 `#agent帮助/状态/登录/更新/版本/更新日志/重载`；插件显示名同步为 `agent*`（仓库/配置路径仍为 `agents-plugin`）。旧 `#agents*` 不再匹配，请更新收藏与脚本 |
 | **v1.45.14** | 修复 QQ 官方机器人 `get_chat_history` 必然失败（官方 OpenAPI 没有群历史接口）：新增进程内群消息环形缓存（每群 200 条 / 24h，按 message_id 去重），`get_chat_history` 在协议端不支持/返回空/调用失败时自动回退本地缓存；空缓存返回可读 `note` 而不是 error，避免模型无意义重试。开启官方平台「全量消息」可积累更多历史 |
 | **v1.45.13** | 修复 Web 配置中心「主人列表」只接受 5-11 位 QQ 号：QQ 官方机器人主人 ID 是 openid（如 `807AC1596B40D96591A5ACBEB3CFFA4D`、`1903797111:807AC…`、`qg_807AC…`），此前输入框直接提示「QQ 号需 5-11 位数字」无法添加。现兼容 QQ 号与官方 openid 三种形态，锅巴/yaml/README 提示同步 |
 | **v1.45.12** | 修复 `stagehand__extract/observe/act` 报 `400 MissingSessionID: Request is missing x-opencode-session`：goto 正常但 Stagehand 内部 LLM 请求只带了 `Authorization`，未带主 provider preset 的 UA 与会话头。现透传 `User-Agent` + `x-opencode-session`（值绑定浏览器会话 key），OpenCode Zen/Go 下三个原语恢复可用 |
 | **v1.45.11** | 修复 Stagehand 仍探测不到本机 Chromium：Puppeteer v19+ 缓存目录是 `chrome/linux-<ver>/chrome-linux64/chrome`、Playwright 新版是 `chromium-<rev>/chrome-linux64/chrome`，此前只匹配纯数字目录与 `chrome-linux`，导致 v1.45.10 的自动探测在真实机器上全部落空。现兼容新旧布局、支持 `PUPPETEER_CACHE_DIR`/`PLAYWRIGHT_BROWSERS_PATH`、多版本按数字取最新 |
 | **v1.45.10** | 修复 `stagehand__goto` 报 `The CHROME_PATH environment variable must be set…`：Stagehand v4 未给 `executablePath` 时只认系统 Chrome。新增本地 Chromium 自动探测（配置 → 环境变量 → **Puppeteer 自带 Chromium** → `~/.cache` 缓存 → 系统路径），找不到时给出安装/配置建议而非 SDK 晦涩报错 |
-| **v1.45.9** | 修复 Web 面板登录后所有页面报 `Failed to execute 'fetch' … String contains non ISO-8859-1 code point`：用户把 `#agents登录` 返回的整段内容（含中文）粘进登录框时会原样存进 localStorage 并拼进 `Authorization` 请求头。现统一归一化 token（支持直接粘贴**完整登录链接**、自动抽取 48 位 token、剥离中文/脏字符），历史脏值读取时自愈，非法输入明确提示 |
+| **v1.45.9** | 修复 Web 面板登录后所有页面报 `Failed to execute 'fetch' … String contains non ISO-8859-1 code point`：用户把 `#agent登录` 返回的整段内容（含中文）粘进登录框时会原样存进 localStorage 并拼进 `Authorization` 请求头。现统一归一化 token（支持直接粘贴**完整登录链接**、自动抽取 48 位 token、剥离中文/脏字符），历史脏值读取时自愈，非法输入明确提示 |
 | **v1.45.8** | 帮助图渲染超时默认改为 **300000ms（5 分钟）**：新增 `agent.render.helpTimeoutMs`，与普通卡片图 `render.timeoutMs`（默认 15s）分开——帮助卡片最长，弱机器/冷缓存首次渲染常超过 15s，此前会直接降级成文本；超时仍按原策略降级并进入冷却 |
 | **v1.45.7** | 修复按钮卡片「本人点自己的按钮提示无权限操作」：群聊 `specify_user_ids` 未剥 `<appId>:` 前缀（平台只认原始 openid）；私聊 C2C/频道私信客户端不支持 `type:0` 指定用户按钮 → 自动降级 `type:2`（私聊仅对方一人，安全等价） |
 | **v1.45.6** | QQBot 叶子级加固：被动回复严格按 5 分钟窗口（长任务不再用过期 msg_id 白发送失败）；Markdown 回复正确 @ 回复人（`<qqbot-at-user>`，此前被静默丢弃）；API 401 自动刷新 token 重试、start 阶段 token 5xx 退避重试；媒体 >10MB 跳过不读入内存；频道私信 ID/源频道修正；READY 迟到补挂载、断连中断连接等待、`_attachBot` 幂等；网络类 token 失败继续重连（此前一次抖动永久掉线）；回填 bot.fl/gl/gml 并对齐 login/logout 契约 |
-| **v1.45.5** | 修复官方机器人下指令文本翻倍：适配器预设了 `data.msg`，而 TRSS `dealEvent` 会把 `message` 里的 text 段再累加一次 → `e.msg` 变成「#设置主人#设置主人」，导致 `^#设置主人$` / `^#agents更新$` 这类精确匹配规则失效（`^#状态` 前缀规则却正常，表现为「有的指令能用有的不能」）。现已不预设 `msg`，交由框架从消息段构建 |
+| **v1.45.5** | 修复官方机器人下指令文本翻倍：适配器预设了 `data.msg`，而 TRSS `dealEvent` 会把 `message` 里的 text 段再累加一次 → `e.msg` 变成「#设置主人#设置主人」，导致 `^#设置主人$` / `^#agent更新$` 这类精确匹配规则失效（`^#状态` 前缀规则却正常，表现为「有的指令能用有的不能」）。现已不预设 `msg`，交由框架从消息段构建 |
 | **v1.45.4** | 修复官方机器人下**云崽框架指令被 AI 抢占**（`@机器人 + #设置主人` 无反应）：新增「指令透传」——以 `#`/`＃`/`/` 等开头且不是本插件触发词的消息 `return false` 交给后续插件处理（`agent.commandPassThrough` 默认开，可关）；面板/锅巴/文档同步 |
 | **v1.45.3** | 修复 QQ 群机器人「不管发什么都回复」：开启全量消息权限后 `GROUP_MESSAGE_CREATE`（非 @）也被无条件补 `at` 段 → `e.atBot=true` → `trigger=at` 全量触发。现按事件类型 + `mentions.is_you` 判定，只对真正 @ 回复；按钮点击仍正常触发；非 @ 群消息保留投递供伪人/群世界旁听 |
 | **v1.45.2** | 修复 toolEvo seed 全量失败：内置工具 `diagram_render` 的 `sideEffects:['file_write']` 不在枚举内 → 整批内置工具无法入库（埋点/健康检测失效）。现改正为 `write`，并在 seed 入口做副作用归一化（别名纠正 + 未知值剔除告警 + 无版本空壳工具自愈补建） |
@@ -1786,7 +1787,7 @@ openid 不是 QQ 号，框架 master 判定不命中。发 `/uid`，把「完整
 | v1.28.0 | Web：自绘确认/输入弹窗、配置中心搜索、命中率统计清空 |
 | v1.27.0 | 思考能力乐观默认 + 运行时自适应学习 |
 
-> 完整历史见 `#agents更新日志` 或 `git log`。
+> 完整历史见 `#agent更新日志` 或 `git log`。
 
 ---
 

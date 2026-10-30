@@ -301,7 +301,7 @@
       <!-- 脚注 -->
       <div class="lg-foot">
         <span>E2B 沙箱 <b class="mono">{{ sandbox }}</b>（连不上即拒绝执行，绝不回退宿主）</span>
-        <span class="mono">#agents登录 · 24h 滑动续期</span>
+        <span class="mono">#agent登录 · 24h 滑动续期</span>
       </div>
 
       <!-- 账目（账簿行：点开看明细） -->

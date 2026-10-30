@@ -1918,7 +1918,7 @@
         <div :id="'cfg-web'" class="card cf-sec" :class="{open: open.web}">
           <div class="cf-sh" @click="open.web = !open.web">
             <span class="ct-ico" style="background:var(--grad)"><v-icon name="config"/></span>
-            <div><div class="ct-t">Web 面板</div><div class="ct-s">管理面板服务 · 启动默认访问地址（带 token，无需 #agents登录）</div></div>
+            <div><div class="ct-t">Web 面板</div><div class="ct-s">管理面板服务 · 启动默认访问地址（带 token，无需 #agent登录）</div></div>
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.web"><div class="cf-grid">
@@ -1931,7 +1931,7 @@
             <cfg-row name="对外地址(可选)" desc="publicUrl：留空自动探测公网/LAN IP；填 http://1.2.3.4:6098 覆盖（本地地址固定 127.0.0.1）">
               <input class="inp mono" style="width:250px" v-model="form.webApi.publicUrl" placeholder="留空=自动探测">
             </cfg-row>
-            <cfg-row name="启动时打印访问地址" desc="printTokenOnStart：启动日志打印带 token 的默认地址并写 data/web/console-url.txt。首次部署还没有协议端（发不了 #agents登录）时靠它进面板">
+            <cfg-row name="启动时打印访问地址" desc="printTokenOnStart：启动日志打印带 token 的默认地址并写 data/web/console-url.txt。首次部署还没有协议端（发不了 #agent登录）时靠它进面板">
               <v-switch v-model="form.webApi.printTokenOnStart"/>
             </cfg-row>
             <cfg-row name="启动地址令牌有效期(小时)" desc="consoleTokenTtlHours：默认 720（30 天）；使用中滑动续期，过期后下次启动自动换新">

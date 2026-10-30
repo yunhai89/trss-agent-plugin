@@ -42,7 +42,7 @@
 
 ### C3 [P0] [X] 沙箱 terminal 权限：yaml 注释「仅主人 + 验证码认领」vs 代码「全员可用」
 
-- 证据 A：`config/default_config/config.yaml:468-472` —— 「`terminal` 工具的唯一执行面 / **仅 terminal 主人可用（验证码认领：#agents设置主人 → 控制台打印验证码 → 直接把码发到会话）**；沙箱化后不再有 #确认 审批与命令黑名单」。
+- 证据 A：`config/default_config/config.yaml:468-472` —— 「`terminal` 工具的唯一执行面 / **仅 terminal 主人可用（验证码认领：#agent设置主人 → 控制台打印验证码 → 直接把码发到会话）**；沙箱化后不再有 #确认 审批与命令黑名单」。
 - 证据 B：`model/terminal/exec.js:33` —— `category: 'query', // rank 0：所有用户 allow（工具内部不再有身份门槛）`；`apps/agent.js:800-802` 注册时日志写「全员可用」；`guoba.support.js:305` 面板 bottomHelp 也写「**全员可用**（按会话隔离沙箱…无需认领主人）」；README:130/940 同样明写全员可用。
 - 打架点：yaml 默认配置是用户手改 yaml 时最常看的真源，它仍在宣传「仅主人 + 验证码认领」的旧权限模型；实际上只要 `sandbox.mode=e2b`，任何群成员都能执行 shell（出口默认全放通、按会话计费）。同一文件内还自相矛盾：既说「仅主人」，又说「不再有 #确认 审批」（审批对象正是主人）。
 - 影响面：按 yaml 注释理解安全边界的运维者；开启 e2b 后陌生群成员可执行命令、外发数据、烧 E2B 配额。

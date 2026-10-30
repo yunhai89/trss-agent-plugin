@@ -28,6 +28,14 @@ await test('versionLabel：master=稳定版 / beta=beta 版 / 其他=分支名',
   eq(o.versionLabel(''), '未知版本', '空 → 未知版本')
 })
 
+await test('命令前缀：只认 #agent*，#agents* 已移除', async () => {
+  const o = inst()
+  const regs = o.rule.map((r) => new RegExp(r.reg))
+  const hit = (msg) => regs.some((re) => re.test(msg))
+  ok(hit('#agent更新') && hit('#agent强制更新') && hit('#agent版本') && hit('#agent更新日志'), '#agent* 四个更新/版本命令可匹配')
+  ok(!hit('#agents更新') && !hit('#agents版本') && !hit('#agents更新日志'), '旧 #agents* 不再匹配')
+})
+
 await test('sendLogForward：每条日志独立节点 + 卡片/昵称标注版本', async () => {
   const o = inst()
   let captured = null
@@ -83,7 +91,7 @@ await test('gitErr：本地改动会被覆盖时，给出文件清单 + 暂存�
   ok(msg.includes('apps/comfyui-draw.js'), '列出会被覆盖的文件')
   ok(msg.includes('git stash push'), '给出保留改动的暂存指引')
   ok(msg.includes('永久丢失'), '警告强制更新会丢改动')
-  ok(!/否则发送 #agents强制更新$/.test(msg.trim()), '不再无警告地引导强更')
+  ok(!/否则发送 #agent强制更新$/.test(msg.trim()), '不再无警告地引导强更')
 })
 
 await test('untrackedCollisions：只挑出「未跟踪 ∩ 目标新增」文件（2026-10-17 审计 high）', async () => {

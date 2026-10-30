@@ -1,5 +1,5 @@
 /**
- * Web 面板鉴权：主人私聊 #agents登录 → 发 token（24h，滑动续期）→ 前端 URL ?token= 转 localStorage → Authorization Bearer。
+ * Web 面板鉴权：主人私聊 #agent登录 → 发 token（24h，滑动续期）→ 前端 URL ?token= 转 localStorage → Authorization Bearer。
  *
  * 纯内存 Map（模块级单例，Yunzai 热重载不丢；进程重启需重新登录）。
  * 故意不依赖 getRuntime()/KV——apiKey 未配时用户仍能登录面板填配置（运行时恢复前置）。
@@ -25,7 +25,7 @@ export function issueToken(masterId) {
 /**
  * 校验 token；命中且未过期则滑动续期 24h，返回 { masterId }；否则 null。
  * 除会话令牌外，也接受「控制台令牌」（启动时打印的固定地址用，见 ensureConsoleToken）——
- * 这让**还没有协议端**的首次部署也能直接打开面板填配置（此前只能先连 QQ 发 #agents登录）。
+ * 这让**还没有协议端**的首次部署也能直接打开面板填配置（此前只能先连 QQ 发 #agent登录）。
  */
 export function verifyToken(token) {
   if (!token) return null
@@ -157,7 +157,7 @@ function publicHostOf(cfg) {
 /**
  * 启动时输出带 token 的面板地址，并写一份到 data/web/console-url.txt。
  *
- * 解决「首次部署还没有协议端（QQ 未连）→ 发不了 #agents登录 → 进不去面板 → 配不了模型」的死锁：
+ * 解决「首次部署还没有协议端（QQ 未连）→ 发不了 #agent登录 → 进不去面板 → 配不了模型」的死锁：
  * 面板服务本身不依赖协议端与运行时，启动日志直接给出可用地址即可完成首次配置。
  *
  * @param {object} [opts]
@@ -185,7 +185,7 @@ export async function announceConsoleAccess(opts = {}) {
   const first = formatConsoleUrls({ token: rec.token, port, localHost: loopback, lanHost, publicHost: knownPublic })
 
   const lines = [
-    '[web] 面板默认访问地址（带 token，无需 #agents登录；协议端未配置时也能进面板配模型）',
+    '[web] 面板默认访问地址（带 token，无需 #agent登录；协议端未配置时也能进面板配模型）',
     `[web]   本地  ${first.local}`,
     first.lan ? `[web]   内网  ${first.lan}` : '',
     first.public ? `[web]   公网  ${first.public}` : '',
@@ -235,7 +235,7 @@ export async function announceConsoleAccess(opts = {}) {
 export async function authMiddleware(req, res, next) {
   const tok = (req.header('Authorization') || '').replace(/^Bearer\s+/i, '').trim() || String(req.query.token || '')
   const r = verifyToken(tok)
-  if (!r) return res.status(401).json({ code: 4010, data: null, msg: '未认证或 token 已失效，请重新 #agents登录' })
+  if (!r) return res.status(401).json({ code: 4010, data: null, msg: '未认证或 token 已失效，请重新 #agent登录' })
   req.master = r.masterId
   return next()
 }
@@ -306,11 +306,11 @@ export function localHost() {
   return '127.0.0.1'
 }
 
-/** #agents登录 命令处理（permission:'master' 已挡权限；群聊提示去私聊） */
+/** #agent登录 命令处理（permission:'master' 已挡权限；群聊提示去私聊） */
 export async function handleAgentsLogin(e) {
   const cfg = Config.get().agent?.webApi || {}
   if (cfg.enable === false) { await e.reply('Web 面板未启用（config: agent.webApi.enable）'); return true }
-  if (e.isGroup) { await e.reply('为安全，请在私聊对我发送 #agents登录'); return true }
+  if (e.isGroup) { await e.reply('为安全，请在私聊对我发送 #agent登录'); return true }
   const port = Number(cfg.port) || 6098
   const host = await resolveHost(cfg)
   const token = issueToken(e.user_id)

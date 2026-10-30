@@ -1,7 +1,7 @@
 /**
  * Web 面板「启动默认访问地址（带 token）」离线自检。
  *
- * 背景：首次部署还没有协议端（QQ 未连）时发不了 #agents登录，若只能靠聊天命令取地址，
+ * 背景：首次部署还没有协议端（QQ 未连）时发不了 #agent登录，若只能靠聊天命令取地址，
  * 用户会被锁在面板外（也就配不了模型）。因此启动时打印一个持久化「控制台令牌」地址。
  *
  * 覆盖：
@@ -140,7 +140,7 @@ console.log('\n[6] announceConsoleAccess：启动横幅 + 地址副本文件')
     dir: d6,
     logger: (l) => lines.push(l),
   })
-  ok(lines.some((l) => l.includes('无需 #agents登录')), '提示语说明无需 #agents登录（协议端未配置也能进）')
+  ok(lines.some((l) => l.includes('无需 #agent登录')), '提示语说明无需 #agent登录（协议端未配置也能进）')
   ok(lines.some((l) => l.includes('127.0.0.1:6098/?token=')), '输出本地地址')
   ok(lines.some((l) => l.includes('203.0.113.9:6098/?token=')), '配置 publicUrl 时输出公网地址')
   ok(lines.some((l) => l.includes('printTokenOnStart=false')), '给出关闭开关提示')

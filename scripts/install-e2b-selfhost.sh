@@ -320,7 +320,7 @@ main() {
   log "  1) 插件里确认 agent.sandbox.mode=e2b（上面已给配置片段/可用 --write-config 写入）"
   log "  2) 跑真连接集成测试："
   log "     ${C_DIM}E2B_INTEGRATION=1 node model/sandbox/e2b.integration.test.mjs${C_END}"
-  log "  3) 认领 terminal 主人后让 Agent 执行命令：#agents设置主人 → 控制台验证码 → 直接发码"
+  log "  3) 认领 terminal 主人后让 Agent 执行命令：#agent设置主人 → 控制台验证码 → 直接发码"
 }
 
 main "$@"

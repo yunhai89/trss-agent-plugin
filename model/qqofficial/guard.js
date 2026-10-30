@@ -4,7 +4,7 @@
  * 问题：TRSS-Yunzai 的 `permission: 'master'` 由框架判定（`cfg.master[self_id].includes(String(e.user_id))`），
  * 而 QQ 官方机器人的 `e.user_id` 是 `<self_id>:<openid>` / `qg_<openid>`，不是 QQ 号——
  * 除非把 openid 原样写进框架 master 配置，否则**所有 `permission:'master'` 指令在官方机器人下永远不可用**
- * （插件里 45 条主人指令全部受影响，`#agents重载`、`#知识库添加` 等会直接回「暂无权限」）。
+ * （插件里 45 条主人指令全部受影响，`#agent重载`、`#知识库添加` 等会直接回「暂无权限」）。
  *
  * 方案：把规则级 master 校验下沉到插件内——规则改为 `permission: 'all'`，方法入口用
  * `agent.masters`（支持完整/去前缀 openid）或框架 `e.isMaster` 复核；两处代码集中在

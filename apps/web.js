@@ -1,7 +1,7 @@
 /**
  * Web 管理面板入口（Yunzai plugin）。
  *  - 构造时幂等启动 HTTP server（webApi.enable !== false）
- *  - #agents登录（permission:master）：私聊发带 token 的登录地址（24h 有效）
+ *  - #agent登录（permission:master）：私聊发带 token 的登录地址（24h 有效）
  *  - webApi.enable/port 变化时重启 server（常规配置热加载不重启）
  */
 import plugin from '../../../lib/plugins/plugin.js'
@@ -39,11 +39,11 @@ Config.onChange(async () => {
 export class WebAdmin extends plugin {
   constructor() {
     super({
-      name: 'agents管理面板',
-      dsc: 'Web 管理面板 HTTP 服务 + #agents登录',
+      name: 'agent管理面板',
+      dsc: 'Web 管理面板 HTTP 服务 + #agent登录',
       event: 'message',
       priority: 0,
-      rule: [{ reg: '^#agents登录$', fnc: 'login', permission: 'master' }],
+      rule: [{ reg: '^#agent登录$', fnc: 'login', permission: 'master' }],
     })
     // QQ 官方机器人：规则级 permission:master 改为插件内判定（openid 不是 QQ 号）
     installMasterGate(this)

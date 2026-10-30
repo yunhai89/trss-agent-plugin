@@ -37,7 +37,7 @@ const lastRun = new Map()
 export class ComfyDraw extends plugin {
   constructor() {
     super({
-      name: 'agents_画图',
+      name: 'agent_画图',
       dsc: 'ComfyUI 指令画图 / 提示词反推（#画图列表、#画图1 关键字、#反推）',
       event: 'message',
       priority: 1000,

@@ -1,5 +1,5 @@
 /**
- * 回归测试：#agents登录 必须分别返回【公网地址】与【本地地址】两条独立消息，不合并。
+ * 回归测试：#agent登录 必须分别返回【公网地址】与【本地地址】两条独立消息，不合并。
  * 本地地址固定 127.0.0.1（不读配置）。运行：node model/web/auth.test.mjs
  */
 import Config from '../../utils/Config.js'

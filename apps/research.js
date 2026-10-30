@@ -36,7 +36,7 @@ function tempDir() {
 export class Research extends plugin {
   constructor() {
     super({
-      name: 'agents研究',
+      name: 'agent研究',
       dsc: '深度研究（#研究 <主题>）→ PDF / 高清图 / 分段文本',
       event: 'message',
       priority: 9000,
