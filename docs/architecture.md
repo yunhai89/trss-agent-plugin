@@ -35,7 +35,6 @@ skills/               技能说明书（SKILL.md 生态）
 tools/                外置工具包（自动加载 + tool.config.js 声明配置）
 utils/                Config（读写/归一/差异保存/热加载）、Log、DevLog、path
 stress/               E2E 接线回归（真实入口 + 桩协议/模型）
-audit/                配置审计报告与修复记录（历史决策留档）
 ```
 
 **配置真源与治理**
@@ -44,7 +43,7 @@ audit/                配置审计报告与修复记录（历史决策留档）
   运行时读取统一经 `utils/Config.js`：`deepMerge 默认值 → normalizeConfig 归一 → 差异落盘 → 热加载`。
 - 保存只写差异（不改默认值的键不落盘），老版本全量快照启动时自动压缩（备份 `.bak`）→ 升级后的新默认值自动生效。
 - 供应商/模型引用、fallback、`cacheControl`/`thinking` 类型、官方机器人账号等结构由归一逻辑统一收敛，三个入口不会互相打架。
-- 历史审计：`audit/配置互搏排查报告.md`（73 条配置冲突与修复）、`audit/QQ_OFFICIAL.md`（官方机器人实现与边界）、`audit/tools/inventory2.py`（配置真源对账脚本）。
+- 历史审计与修复记录按维护策略移出仓库（本地保留，不入版本控制）。
 
 **扩展点**
 

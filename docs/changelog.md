@@ -6,6 +6,7 @@
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.46.5** | `audit/` 移出版本控制（本地保留）并加入 `.gitignore`；README/架构文档移除审计目录链接 |
 | **v1.46.4** | 项目地址迁移：GitHub 仓库更新为 `yunhai89/yunzai-agent-plugin`；README clone URL、package homepage/repository/bugs、Enka UA 链接同步 |
 | **v1.46.3** | 项目名称去 TRSS：package name/UA/工具作者标识改为 `yunzai-agent-plugin`；README 增加英文定位；仓库 slug/clone URL 仍为 `trss-agent-plugin`，需在 GitHub/Gitee 手动改名后同步 |
 | **v1.46.2** | SEO / 品牌标签优化：主标题与 package keywords 不再以 TRSS 为主标签，改为 Yunzai AI Agent Plugin；补充 AI Agent / QQ Bot badges、适用场景与 repository/homepage/bugs 元数据 |

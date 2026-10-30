@@ -9,8 +9,7 @@ node_modules/
 !/开发指南.md
 !skills/*.md
 !skills/**/*.md
-# 审计报告/修复记录（docs 性内容，随仓库走便于追溯配置决策）
-!audit/**/*.md
+# 审计报告/修复记录：本地保留，不入库
 # 拆分后的项目文档（主 README / 开发指南之外的专题文档随仓库走）
 !docs/**/*.md
 
@@ -62,3 +61,6 @@ data/context-archive/
 __pycache__/
 *.pyc
 docs/deploy/.env
+
+# 历史审计与修复记录（本地保留，不入库）
+audit/
