@@ -1,16 +1,18 @@
 <div align="center">
 
-# 🤖 TRSS AI Agent Plugin
+# 🤖 Yunzai AI Agent Plugin
 
-**TRSS-Yunzai / Miao-Yunzai 的模块化 AI Agent 运行时** —— 不只是聊天插件：
+**Yunzai / Miao-Yunzai 的模块化 AI Agent 插件** —— 不只是聊天机器人：
 多模型对话 · 工具调用 · 长期记忆 · 人设 · 多模态 · MCP · 群管 · E2B 沙箱 ·
 **工具进化（Tool Evolution）** · **QQ 官方机器人适配（Markdown / 按钮卡片）** · **Web 管理面板**。
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.46.1-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.46.2-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
-<img src="https://img.shields.io/badge/platform-TRSS%2FMiao--Yunzai-9cf" alt="Platform">
+<img src="https://img.shields.io/badge/platform-Yunzai-9cf" alt="Yunzai Plugin">
+<img src="https://img.shields.io/badge/AI-Agent-7c3aed" alt="AI Agent">
+<img src="https://img.shields.io/badge/QQ-Bot-12b7f5" alt="QQ Bot">
 <img src="https://img.shields.io/badge/Node-ESM%20%7C%20%E2%89%A518-success" alt="Runtime">
 <img src="https://img.shields.io/badge/QQ%E7%BE%A4-960179589-green" alt="QQ Group">
 
@@ -24,7 +26,7 @@
 
 ## 这是什么
 
-一个跑在 TRSS-Yunzai / Miao-Yunzai 里的 AI Agent 插件：把大模型对话、工具调用、长期记忆、人设、多模态、MCP、群管、沙箱和 Web 面板做成一套完整运行时。
+一个跑在 Yunzai / Miao-Yunzai 里的 AI Agent 插件：把大模型对话、工具调用、长期记忆、人设、多模态、MCP、群管、沙箱和 Web 管理面板做成一套完整运行时。
 
 - **对话与工具**：ReAct 多轮、并行工具、按需工具发现、结果截断、预算与终止器。
 - **模型接入**：OpenAI / Anthropic / Gemini 三协议；厂商 + 模型引用制；跨厂商回退。
@@ -32,6 +34,15 @@
 - **官方机器人**：自实现 QQ 官方适配器（AppID + AppSecret），支持 Markdown / inline keyboard / 被动回复。
 - **执行面**：E2B 沙箱终端、crawl4ai 网页抓取、Stagehand 浏览器自动化（可选）。
 - **工程化**：配置热加载、工具 RBAC、审批、注入防御、离线测试、Web 配置中心。
+
+## 适合哪些场景
+
+- **QQ 群 / 私聊 AI 机器人**：接入 OneBot（NapCat / Lagrange）或 Yunzai 现有协议端。
+- **QQ 官方机器人**：AppID + AppSecret 直连，支持 Markdown、inline keyboard、被动回复。
+- **LLM 工具调用与自动化**：多轮 ReAct、并行工具、MCP、定时任务、子代理、E2B 沙箱终端。
+- **长期记忆与知识库**：`MEMORY.md` / `USER.md`、用户画像、RAG、语义召回。
+- **人设与多模态**：人设库、图片理解、语音合成、表情包、示意图、ComfyUI 画图。
+- **多模型管理**：OpenAI / Anthropic / Gemini 兼容端点，厂商 + 模型引用制，Web 面板统一配置。
 
 > ⚠️ **状态说明**
 > - ✅ 核心能力（多模型 / 工具 / 记忆 / 人设 / 图片渲染 / MCP / 群管 / Web 面板）稳定可用。

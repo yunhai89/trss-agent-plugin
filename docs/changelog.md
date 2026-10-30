@@ -6,6 +6,7 @@
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.46.2** | SEO / 品牌标签优化：主标题与 package keywords 不再以 TRSS 为主标签，改为 Yunzai AI Agent Plugin；补充 AI Agent / QQ Bot badges、适用场景与 repository/homepage/bugs 元数据 |
 | **v1.46.1** | 文档重构：主 README 仅保留项目介绍、安装与快速排障；能力地图、协议接入、Web 面板、指令、配置、安全、执行面、运维、完整 FAQ、更新日志、鸣谢等拆到 `docs/`，新增文档索引 |
 | **v1.46.0** | 指令统一：`#agents帮助/状态/登录/更新/版本/更新日志/重载` 全部改为 `#agent帮助/状态/登录/更新/版本/更新日志/重载`；插件显示名同步为 `agent*`（仓库/配置路径仍为 `agents-plugin`）。旧 `#agents*` 不再匹配，请更新收藏与脚本 |
 | **v1.45.14** | 修复 QQ 官方机器人 `get_chat_history` 必然失败（官方 OpenAPI 没有群历史接口）：新增进程内群消息环形缓存（每群 200 条 / 24h，按 message_id 去重），`get_chat_history` 在协议端不支持/返回空/调用失败时自动回退本地缓存；空缓存返回可读 `note` 而不是 error，避免模型无意义重试。开启官方平台「全量消息」可积累更多历史 |
