@@ -10,7 +10,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.46.3-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.46.4-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-Yunzai-9cf" alt="Yunzai Plugin">
 <img src="https://img.shields.io/badge/AI-Agent-7c3aed" alt="AI Agent">
@@ -64,7 +64,7 @@
 # Gitee（国内推荐）
 git clone https://gitee.com/YunXi-67/trss-agent-plugin.git ./plugins/agents-plugin
 # 或 GitHub
-git clone https://github.com/yunhai89/trss-agent-plugin.git ./plugins/agents-plugin
+git clone https://github.com/yunhai89/yunzai-agent-plugin.git ./plugins/agents-plugin
 
 cd ./plugins/agents-plugin && pnpm install   # markdown 渲染依赖（用 npm 亦可，但会多出 package-lock.json）
 ```
