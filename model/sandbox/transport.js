@@ -13,7 +13,7 @@ import path from 'node:path'
 import { SandboxError } from './errors.js'
 
 /** 沙箱 metadata 标记（用于运维在控制台辨认来源；不做孤儿回收，靠 TTL 自回收） */
-export const SANDBOX_METADATA_TAG = 'trss-agent-plugin'
+export const SANDBOX_METADATA_TAG = 'yunzai-agent-plugin'
 
 let _sdkPromise = null
 /** 懒加载 e2b；装载失败重抛为结构化 SandboxError（不缓存失败，允许装包后热恢复） */

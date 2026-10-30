@@ -241,7 +241,7 @@ export class QQBotGateway {
       const token = await this.getToken()
       const url = await this.getGatewayUrl()
       this.logger('info', '[qqbot:gateway] 连接', url)
-      ws = new WsCtor(url, { headers: { 'User-Agent': 'trss-agent-plugin/qqbot' } })
+      ws = new WsCtor(url, { headers: { 'User-Agent': 'yunzai-agent-plugin/qqbot' } })
     } catch (e) {
       this.logger('error', '[qqbot:gateway] 建立连接失败', e?.message || e)
       this._scheduleReconnect()

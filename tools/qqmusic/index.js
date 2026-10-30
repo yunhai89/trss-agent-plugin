@@ -252,7 +252,7 @@ const playlistTool = defineTool({
 export default defineToolPack({
   name: 'qqmusic',
   description: 'QQ 音乐检索/详情/歌词/榜单/歌单（逆向接口，只读）',
-  author: 'trss-agent-plugin',
+  author: 'yunzai-agent-plugin',
   version: '1.0.0',
   factory: () => (cfg().enable === false ? [] : [searchTool, songTool, lyricTool, topTool, playlistTool]),
 })

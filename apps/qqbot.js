@@ -26,7 +26,7 @@ const ADAPTER_ID = 'QQBot'
 const ADAPTER_NAME = 'QQBot'
 /** Bot.adapter 去重键（按 path 去重；与 Yunzai-QQBot-Plugin 的 data/QQBot/ 区分开，避免被跳过） */
 const ADAPTER_PATH = 'data/QQBotAgent/'
-const VERSION = 'trss-agent-plugin/qqbot-adapter v1'
+const VERSION = 'yunzai-agent-plugin/qqbot-adapter v1'
 
 /** 被动回复窗口：官方规定 5 分钟内可用 msg_id 回复，且同一 msg_id 最多 5 次 */
 const PASSIVE_WINDOW_MS = 5 * 60 * 1000

@@ -405,7 +405,7 @@ const userTool = defineTool({
 export default defineToolPack({
   name: 'bilibili',
   description: '哔哩哔哩检索/详情/分析/下载/字幕/评论/弹幕/榜单/热门/UP主（逆向接口，只读+下载）',
-  author: 'trss-agent-plugin',
+  author: 'yunzai-agent-plugin',
   version: '1.0.0',
   factory: () => (cfg().enable === false ? [] : [
     searchTool, videoTool, analyzeTool, downloadTool, subtitleTool,

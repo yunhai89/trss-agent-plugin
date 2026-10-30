@@ -8,7 +8,7 @@ export default {
   info: {
     title: 'QQ 音乐',
     description: 'QQ 音乐检索 / 详情 / 歌词 / 榜单 / 歌单（逆向只读接口：L-1124/QQMusicApi、sansenjian/qq-music-api）',
-    author: 'trss-agent-plugin',
+    author: 'yunzai-agent-plugin',
     version: '1.0.0',
     icon: 'music',
   },

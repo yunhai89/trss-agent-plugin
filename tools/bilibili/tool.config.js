@@ -6,7 +6,7 @@ export default {
   info: {
     title: '哔哩哔哩',
     description: 'B站视频搜索/详情/内容分析（多模态看视频）/下载/字幕/评论/弹幕/榜单/热门/UP主（逆向接口：SocialSisterYi/bilibili-API-collect）',
-    author: 'trss-agent-plugin',
+    author: 'yunzai-agent-plugin',
     version: '1.0.0',
     icon: 'play',
   },

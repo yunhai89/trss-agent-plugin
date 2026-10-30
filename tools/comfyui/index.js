@@ -374,7 +374,7 @@ const statusTool = defineTool({
 export default defineToolPack({
   name: 'comfyui',
   description: 'ComfyUI 图像/视频生成（自动发现服务器上的真实工作流，按用户选择或 LLM 自动选择执行）',
-  author: 'trss-agent-plugin',
+  author: 'yunzai-agent-plugin',
   version: '2.0.0',
   // enable:false 时不注册任何工具（零影响，仿 pixiv/sticker）
   // confirm:false 时生成免主人审批（agent.comfyui.confirm，面板可改，热加载生效）

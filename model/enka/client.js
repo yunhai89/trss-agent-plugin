@@ -20,7 +20,7 @@ import {
   GAME_LABELS,
 } from './data.js'
 
-export const ENKA_USER_AGENT = `trss-agent-plugin/${VERSION} (+https://github.com/yunhai89/trss-agent-plugin)`
+export const ENKA_USER_AGENT = `yunzai-agent-plugin/${VERSION} (+https://github.com/yunhai89/yunzai-agent-plugin)`
 export const ENKA_TIMEOUT_MS = Math.min(120000, Math.max(5000, Number(process.env.ENKA_TIMEOUT_MS) || 40000))
 
 export const ENKA_GAMES = {

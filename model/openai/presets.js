@@ -157,7 +157,7 @@ export const presets = {
     baseURL: 'https://opencode.ai/zen/v1',
     reasoningFields: [],
     // OpenCode Go/Zen 要求：真实客户端 UA + 每会话稳定 x-opencode-session（否则路由告警）
-    headers: { 'User-Agent': `trss-agent-plugin/${VERSION}` },
+    headers: { 'User-Agent': `yunzai-agent-plugin/${VERSION}` },
     sessionHeader: 'x-opencode-session',
   },
 
@@ -172,7 +172,7 @@ export const presets = {
     baseURL: 'https://opencode.ai/zen/go/v1',
     reasoningFields: [],
     // Go 明确要求客户端自报 UA + x-opencode-session 会话 id（缺省会被判"无法高效路由"）
-    headers: { 'User-Agent': `trss-agent-plugin/${VERSION}` },
+    headers: { 'User-Agent': `yunzai-agent-plugin/${VERSION}` },
     sessionHeader: 'x-opencode-session',
   },
 

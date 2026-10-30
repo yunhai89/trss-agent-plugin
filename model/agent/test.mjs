@@ -2283,10 +2283,10 @@ await test('provider：x-opencode-session / UA 头部下发（OpenCode Go）', a
   ok(/User-Agent/.test(JSON.stringify(anthropicPresets['opencode-go'].headers)), 'anthropic 预设带 UA')
 
   // client：opts.sessionId 优先，缺省用实例级稳定 id
-  const oc = createOpenAIClient({ baseURL: 'https://opencode.ai/zen/go/v1', apiKey: 'k', sessionHeader: 'x-opencode-session', headers: { 'User-Agent': 'trss-agent-plugin' } })
+  const oc = createOpenAIClient({ baseURL: 'https://opencode.ai/zen/go/v1', apiKey: 'k', sessionHeader: 'x-opencode-session', headers: { 'User-Agent': 'yunzai-agent-plugin' } })
   eq(oc.buildHeaders({ sessionId: 'conv-1' })['x-opencode-session'], 'conv-1', 'opts.sessionId → 会话头')
   ok(oc.buildHeaders()['x-opencode-session'], '无 sessionId 时用实例级稳定 id')
-  eq(oc.buildHeaders()['User-Agent'], 'trss-agent-plugin', 'UA 头透传')
+  eq(oc.buildHeaders()['User-Agent'], 'yunzai-agent-plugin', 'UA 头透传')
 
   // provider：sessionId 走 client opts，不泄漏进请求体
   let cap = null

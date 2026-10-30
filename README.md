@@ -6,9 +6,11 @@
 多模型对话 · 工具调用 · 长期记忆 · 人设 · 多模态 · MCP · 群管 · E2B 沙箱 ·
 **工具进化（Tool Evolution）** · **QQ 官方机器人适配（Markdown / 按钮卡片）** · **Web 管理面板**。
 
+*A modular AI Agent plugin for Yunzai with self-evolving tools.*
+
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.46.2-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.46.3-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-Yunzai-9cf" alt="Yunzai Plugin">
 <img src="https://img.shields.io/badge/AI-Agent-7c3aed" alt="AI Agent">

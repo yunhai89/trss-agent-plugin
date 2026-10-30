@@ -130,7 +130,7 @@ await test('makeGenerate：preset 的 UA + x-opencode-session 下发', async () 
   const providerHeaders = resolveProviderHeaders({ preset: 'opencode-go' })
   eq(providerHeaders.sessionHeader, 'x-opencode-session', 'opencode-go 预设解析出会话头')
   ok(/User-Agent/.test(JSON.stringify(providerHeaders.headers)), 'opencode-go 预设解析出 UA')
-  eq(providerHeaders.headers['User-Agent'], `trss-agent-plugin/${(await import('../../utils/version.js')).VERSION}`, 'UA 带插件版本')
+  eq(providerHeaders.headers['User-Agent'], `yunzai-agent-plugin/${(await import('../../utils/version.js')).VERSION}`, 'UA 带插件版本')
 
   let capturedHeaders
   const origFetch = globalThis.fetch
@@ -145,7 +145,7 @@ await test('makeGenerate：preset 的 UA + x-opencode-session 下发', async () 
     })
     await gen({ messages: [], responseFormat: { type: 'json_schema', name: 'r', schema: {} } })
     eq(capturedHeaders['x-opencode-session'], 'conv-42', '请求带 x-opencode-session（会话 key）')
-    ok(String(capturedHeaders['User-Agent']).startsWith('trss-agent-plugin/'), '请求带真实客户端 UA')
+    ok(String(capturedHeaders['User-Agent']).startsWith('yunzai-agent-plugin/'), '请求带真实客户端 UA')
     eq(capturedHeaders.Authorization, 'Bearer sk-x', 'Authorization 未被自定义头覆盖')
   } finally { globalThis.fetch = origFetch }
 })

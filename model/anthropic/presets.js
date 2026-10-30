@@ -70,7 +70,7 @@ export const presets = {
     baseURL: 'https://opencode.ai/zen',
     version: '2023-06-01',
     authHeader: 'x-api-key',
-    headers: { 'User-Agent': `trss-agent-plugin/${VERSION}` },
+    headers: { 'User-Agent': `yunzai-agent-plugin/${VERSION}` },
     sessionHeader: 'x-opencode-session',
   },
 
@@ -83,7 +83,7 @@ export const presets = {
     baseURL: 'https://opencode.ai/zen/go',
     version: '2023-06-01',
     authHeader: 'x-api-key',
-    headers: { 'User-Agent': `trss-agent-plugin/${VERSION}` },
+    headers: { 'User-Agent': `yunzai-agent-plugin/${VERSION}` },
     sessionHeader: 'x-opencode-session',
   },
 

@@ -144,7 +144,7 @@ await test('原神：请求 URL/UA 与归一化', async () => {
   const r = await fetchShowcase('genshin', '618285856', { fetcher: f })
   eq(f.calls.length, 1, '一次请求')
   eq(f.calls[0].url, 'https://enka.network/api/uid/618285856/', '原神端点')
-  ok(String(f.calls[0].opts.headers['User-Agent']).includes('trss-agent-plugin'), '带 User-Agent')
+  ok(String(f.calls[0].opts.headers['User-Agent']).includes('yunzai-agent-plugin'), '带 User-Agent')
   eq(r.player.nickname, '旅行者', '昵称')
   eq(r.player.level, 57, '等级')
   eq(r.player.extra.join(','), '世界等级 8,成就 600', '玩家附加信息')
