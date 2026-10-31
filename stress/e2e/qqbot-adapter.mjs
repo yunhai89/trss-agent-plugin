@@ -267,6 +267,11 @@ console.log('\n[4b] 叶子修复：被动回复窗口 / 频道 ID 去前缀 / �
   // 被动回复：窗口按触发消息时间计
   eq(adapter._passiveMsgId('APP2', 'm1', Date.now() - 6 * 60 * 1000), '', '超过 5 分钟窗口 → 不带 msg_id（主动消息）')
   eq(adapter._passiveMsgId('APP2', 'm2', Date.now() - 60 * 1000), 'm2', '窗口内 → 带 msg_id')
+  // 事件缺 timestamp：按首次收到该 msg_id 的时间判断（长任务 9 分钟后不能再带旧 msg_id）
+  adapter._passiveSeen.set('m4', Date.now() - 6 * 60 * 1000)
+  eq(adapter._passiveMsgId('APP2', 'm4'), '', '缺 timestamp 时按首次收到时间判断过期')
+  adapter._passiveSeen.set('m5', Date.now() - 60 * 1000)
+  eq(adapter._passiveMsgId('APP2', 'm5'), 'm5', '缺 timestamp 但窗口内仍带 msg_id')
   // 次数上限 5
   const ids = [1, 2, 3, 4, 5, 6].map(() => adapter._passiveMsgId('APP2', 'm3', Date.now()))
   eq(ids, ['m3', 'm3', 'm3', 'm3', 'm3', ''], '同一 msg_id 最多 5 次')

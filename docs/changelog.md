@@ -6,6 +6,7 @@
 
 | 版本 | 内容 |
 | --- | --- |
+| **v1.47.1** | 修复 QQ 官方机器人长任务回复失败（`40034005` 被动回复已过期）：事件缺 timestamp 时按首次收到消息时间判断 5 分钟窗口（预留 15s 余量）；客户端在平台仍返回过期错误时自动重发一次主动消息（不带 `msg_id`），文本/markdown/富媒体均覆盖 |
 | **v1.47.0** | 移除 ComfyUI 集成：删除 `tools/comfyui/`、`apps/comfyui-draw.js`、`skills/comfyui/` 及 `#画图/#反推` 指令；同步移除 Web 配置中心、锅巴、默认配置、脱敏字段、测试与文档中的 ComfyUI 配置项（不再显示/读取 `agent.comfyui.*`） |
 | **v1.46.9** | cuVS GPU 真机落地：新增 `cuvs.algorithm`（默认 `brute_force` GPU 精确检索，`cagra` 可选；`cagra` 单次 k 上限 64）、cuVS 持久化/增删改与 KnowledgeStore 集成真机测试；`cuvs-node` 保持手动安装（不写入默认依赖，避免普通用户下载 1.8GB）；新增 [GPU 向量检索部署文档](deploy/gpu-vector.md)，含 RTX 2080 实测基线与回滚 |
 | **v1.46.8** | 向量库新增可选 HNSW（hnswlib-node）与 NVIDIA GPU cuVS/CAGRA（cuvs-node）后端：`auto` 在装了 hnswlib-node 时用 HNSW，GPU 必须显式 `vectorBackend: cuvs` + `vectorGpuConsent: true` 才启用（启动只检测/提示，绝不自动占用 GPU）；ANN 候选统一用 Flat 向量精确重排，索引损坏/换模型自动回退或重建；新增 `#向量库状态` 与 `scripts/vector-benchmark.mjs` 性能自检 |

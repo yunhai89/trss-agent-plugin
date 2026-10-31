@@ -587,6 +587,22 @@ console.log('\n[6] client：发送（含 markdown 降级 / 富媒体上传）与
   const r4 = await client.send('group', 'GO', [{ type: 'image', file: '/nonexistent/x.png' }])
   eq(r4.message_id, [], '本地文件缺失时跳过（不报错）')
 
+  // 被动回复过期（40034005）→ 自动改发主动消息（不带 msg_id）
+  {
+    const expiredFetch = makeFetchStub(({ url, body }) => {
+      if (String(url).includes('getAppAccessToken')) return { body: { access_token: 'T2', expires_in: 7200 } }
+      if (body?.msg_id === 'evt-expired') return { status: 400, body: { code: 40034005, message: 'passive reply expired' } }
+      return { body: { id: 'ACTIVE-MID' } }
+    })
+    const c2 = new QQBotClient({ appId: 'A', appSecret: 'S', fetchImpl: expiredFetch, logger: () => {} })
+    const r = await c2.send('group', 'GO', 'late result', { msgId: 'evt-expired' })
+    eq(r.message_id, ['ACTIVE-MID'], '过期后主动消息发送成功')
+    const msgs = expiredFetch.calls.filter((x) => x.url.includes('/v2/groups/GO/messages'))
+    eq(msgs.length, 2, '先被动、失败后重试一次')
+    eq(msgs[0].body.msg_id, 'evt-expired', '第一次带过期 msg_id')
+    ok(!msgs[1].body.msg_id && !msgs[1].body.msg_seq, '重试主动消息不带 msg_id/msg_seq')
+  }
+
   // 事件分发
   const messages = []
   client.on('message', (ev) => messages.push(ev))

@@ -19,6 +19,9 @@ import { buildMessageJobs, splitText, MAX_MARKDOWN_CHARS } from './payload.js'
 /** markdown 不被允许时平台返回的错误码（命中则自动转纯文本并记忆） */
 const MARKDOWN_UNSUPPORTED = new Set(['304036', '40034010', '40034008', '40034009', '40054005'])
 
+/** 被动回复 msg_id 已过期（5 分钟窗口）——命中后改发主动消息（不带 msg_id） */
+const PASSIVE_EXPIRED = new Set(['304103', '40034005'])
+
 /** 单文件上传上限（base64 体积会膨胀 4/3；官方图片约 4MB、文件约 30MB，这里统一保守 10MB） */
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024
 
@@ -217,24 +220,12 @@ export class QQBotClient {
     for (const job of jobs) {
       try {
         if (job.kind === 'media') {
-          const r = await this._sendMedia(scene, targetId, job)
+          const r = await this._sendMediaJob(scene, targetId, job)
           if (r) rets.message_id.push(String(r?.id || r?.message_id || 'ok'))
           if (r) rets.data.push(r)
           continue
         }
-        let result
-        try {
-          result = await this.api.sendMessage(this.creds(), scene, targetId, job.payload, { msgId: job.msgId })
-        } catch (e) {
-          // markdown 不被允许 → 自动降级纯文本（并记住该账号不可用 markdown）
-          if (job.kind === 'markdown' && this._isMarkdownBlocked(e)) {
-            const plain = markdownToPlain(job.payload?.markdown?.content || '')
-            if (plain) {
-              this.logger('warn', '[qqbot:client] Markdown 不可用，降级纯文本', e?.message || e)
-              result = await this.api.sendMessage(this.creds(), scene, targetId, { content: plain, keyboard: job.payload?.keyboard }, { msgId: job.msgId })
-            } else throw e
-          } else throw e
-        }
+        const result = await this._sendTextJob(scene, targetId, job)
         const id = String(result?.id || result?.message_id || '')
         if (id) rets.message_id.push(id)
         rets.data.push(result || {})
@@ -244,6 +235,51 @@ export class QQBotClient {
       }
     }
     return rets
+  }
+
+  _isPassiveExpired(err) {
+    return PASSIVE_EXPIRED.has(String(err?.code ?? ''))
+  }
+
+  /** 文本/markdown 发送：markdown 无权限自动降级；被动回复过期自动改发主动消息。 */
+  async _sendTextJob(scene, targetId, job) {
+    const sendWith = async (msgId) => {
+      try {
+        return await this.api.sendMessage(this.creds(), scene, targetId, job.payload, { msgId })
+      } catch (e) {
+        // markdown 不被允许 → 自动降级纯文本（并记住该账号不可用 markdown）
+        if (job.kind === 'markdown' && this._isMarkdownBlocked(e)) {
+          const plain = markdownToPlain(job.payload?.markdown?.content || '')
+          if (!plain) throw e
+          this.logger('warn', '[qqbot:client] Markdown 不可用，降级纯文本', e?.message || e)
+          return await this.api.sendMessage(this.creds(), scene, targetId, { content: plain, keyboard: job.payload?.keyboard }, { msgId })
+        }
+        throw e
+      }
+    }
+    try {
+      return await sendWith(job.msgId || '')
+    } catch (e) {
+      // 长任务（如 9 分钟）超过平台 5 分钟被动回复窗口：msg_id 已失效，重发一次主动消息
+      if (this._isPassiveExpired(e) && job.msgId) {
+        this.logger('warn', '[qqbot:client] 被动回复已过期，改发主动消息', `msgId=${job.msgId}`, e?.message || e)
+        return await sendWith('')
+      }
+      throw e
+    }
+  }
+
+  /** 富媒体发送：被动回复过期同样重试主动消息。 */
+  async _sendMediaJob(scene, targetId, job) {
+    try {
+      return await this._sendMedia(scene, targetId, job)
+    } catch (e) {
+      if (this._isPassiveExpired(e) && job.msgId) {
+        this.logger('warn', '[qqbot:client] 富媒体被动回复已过期，改发主动消息', `msgId=${job.msgId}`, e?.message || e)
+        return await this._sendMedia(scene, targetId, { ...job, msgId: '' })
+      }
+      throw e
+    }
   }
 
   _isMarkdownBlocked(err) {
@@ -258,7 +294,7 @@ export class QQBotClient {
   }
 
   /** 富媒体：上传 → 发送 msg_type=7 */
-  async _sendMedia(scene, targetId, job) {
+  async _sendMedia(scene, targetId, job, msgId = job.msgId) {
     const source = job.source || {}
     let body
     if (source.url) {
@@ -290,7 +326,7 @@ export class QQBotClient {
       this.logger('warn', '[qqbot:client] 富媒体上传未返回 file_info', JSON.stringify(up || {}).slice(0, 200))
       return null
     }
-    return this.api.sendMessage(this.creds(), scene, targetId, { media: { file_info: fileInfo } }, { msgId: job.msgId })
+    return this.api.sendMessage(this.creds(), scene, targetId, { media: { file_info: fileInfo } }, { msgId })
   }
 
   /** 撤回 */

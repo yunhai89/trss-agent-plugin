@@ -30,6 +30,8 @@ const VERSION = 'yunzai-agent-plugin/qqbot-adapter v1'
 
 /** 被动回复窗口：官方规定 5 分钟内可用 msg_id 回复，且同一 msg_id 最多 5 次 */
 const PASSIVE_WINDOW_MS = 5 * 60 * 1000
+/** 留 15s 安全余量：任务收尾/网络耗时可能让「刚好 5 分钟」的请求在平台侧已过期 */
+const PASSIVE_SAFE_WINDOW_MS = PASSIVE_WINDOW_MS - 15 * 1000
 const PASSIVE_MAX_PER_MSG = 5
 /** 频道私信会话缓存（guild_id）TTL：平台侧会话会过期，1h 后重建 */
 const DM_CACHE_TTL_MS = 60 * 60 * 1000
@@ -111,6 +113,8 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
     clients: new Map(),
     /** @type {Map<string, Map<string, number>>} appId → msgId → 已用被动回复次数 */
     _passiveUsed: new Map(),
+    /** @type {Map<string, number>} msgId → 首次收到事件的时间（毫秒；平台事件缺 timestamp 时兜底） */
+    _passiveSeen: new Map(),
     /** @type {Map<string, {guildId:string, at:number}>} `${appId}:${openid}` → 频道私信会话 */
     _dmCache: new Map(),
     _inflight: null,
@@ -306,18 +310,25 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
     _passiveMsgId(appId, msgId, msgAtMs = 0) {
       if (!msgId) return ''
       const now = Date.now()
-      const at = Number(msgAtMs) > 0 ? Number(msgAtMs) : now
-      if (now - at > PASSIVE_WINDOW_MS) return ''
+      const rawAt = Number(msgAtMs) > 0 ? Number(msgAtMs) : 0
+      const seenAt = Number(adapter._passiveSeen.get(msgId)) || 0
+      // 事件缺 timestamp 时用「首次收到该 msg_id 的时间」兜底；有 timestamp 时取更早者（防时钟偏差）
+      const at = Math.min(rawAt || Infinity, seenAt || Infinity)
+      const effectiveAt = Number.isFinite(at) ? at : now
+      if (now - effectiveAt > PASSIVE_SAFE_WINDOW_MS) return ''
       if (!adapter._passiveUsed.has(appId)) adapter._passiveUsed.set(appId, new Map())
       const used = adapter._passiveUsed.get(appId)
       const rec = used.get(msgId)
-      if (rec && now - rec.at > PASSIVE_WINDOW_MS) { used.delete(msgId); return '' }
+      if (rec && now - rec.at > PASSIVE_SAFE_WINDOW_MS) { used.delete(msgId); return '' }
       const n = rec?.n || 0
       if (n >= PASSIVE_MAX_PER_MSG) return ''
-      used.set(msgId, { n: n + 1, at: rec?.at ?? at })
+      used.set(msgId, { n: n + 1, at: rec?.at ?? effectiveAt })
       // 防 Map 无限增长：条目多了就清掉早已过窗口的
       if (used.size > 2000) {
-        for (const [k, v] of used) if (now - v.at > PASSIVE_WINDOW_MS) used.delete(k)
+        for (const [k, v] of used) if (now - v.at > PASSIVE_SAFE_WINDOW_MS) used.delete(k)
+      }
+      if (adapter._passiveSeen.size > 2000) {
+        for (const [k, v] of adapter._passiveSeen) if (now - v > PASSIVE_SAFE_WINDOW_MS) adapter._passiveSeen.delete(k)
       }
       return msgId
     },
@@ -432,6 +443,7 @@ export function createQQBotAdapter({ clientFactory = null, bot = null, config = 
       if (!entry) return
       const B = getBot()
       if (!B) return
+      if (ev.messageId) adapter._passiveSeen.set(ev.messageId, Date.now())
       if (ev.scene === 'guild' || ev.scene === 'guild_dm') {
         entry._lastGuild = ev
         if (ev.guildId) {
