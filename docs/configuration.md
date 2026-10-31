@@ -17,7 +17,7 @@
 | **记忆** | `memoryLimits` `memory.*` `recall.*` `profile.*` `kb.*` | 声明式记忆、长期召回、用户画像、知识库 |
 | **自动化** | `schedule.*` `selfReview.*` `evolution.*` `toolEvo.*` | 定时任务、自评审进化、工具进化 |
 | **安全与权限** | `masters` `chatPermission` `masterSkipConfirm` `confirmTimeout` `guardAction` `guardSensitivity` `untrustedGuard` `redactSecrets` `policy.categoryMin` | 主人、审批、注入防御、脱敏、RBAC |
-| **多模态** | `media.*` `vision.*` `perception.*` `stt.*` `tts.*` `document.*` `diagram.*` `comfyui.*` `sticker.*` `download.*` | 媒体/识图/情境/语音/文档/示意图/画图/表情包/下载 |
+| **多模态** | `media.*` `vision.*` `perception.*` `stt.*` `tts.*` `document.*` `diagram.*` `sticker.*` `download.*` | 媒体/识图/情境/语音/文档/示意图/表情包/下载 |
 | **执行面** | `sandbox.*`（`mode`/`network`/`audit`/TTL/并发…） `stagehand.*` `tempFiles.*` `calc.*` | E2B 沙箱、浏览器自动化、临时文件、计算 |
 | **协作** | `multiagent.*` `research.*` `mcp.*` `skill.*` `tools.*` `miyoushe.*` | 子代理、深度研究、MCP、技能、工具包 |
 | **群聊智能（早期）** | `humanize.*` `groupWorld.*` `selfState.*` | 伪人 / 群世界 / 自我状态 |

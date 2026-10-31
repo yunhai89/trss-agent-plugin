@@ -327,25 +327,6 @@
       defaultGid: 2,
       maxImages: 9
     },
-    comfyui: {
-      enable: false,
-      host: "http://127.0.0.1:8188",
-      cloud: false,
-      apiKey: "",
-      workflowDir: "workflows",
-      workflowCacheTtl: 300,
-      confirm: true,
-      command: {
-        enable: true,
-        masterOnly: false,
-        cooldown: 30
-      },
-      timeout: 300,
-      pollInterval: 1.5,
-      pollMaxInterval: 8,
-      maxImages: 4,
-      outputDir: ""
-    },
     skill: {
       dir: "skills",
       historyCount: 15

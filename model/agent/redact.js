@@ -3,7 +3,7 @@
  *
  * 两层覆盖：
  *  1) 已知密钥值：从当前配置实时收集（agent.apiKey / fallback / 厂商·模型注册表 /
- *     vision / sandbox / recall.embed / search 各源 / stagehand / comfyui / pixiv /
+ *     vision / sandbox / recall.embed / search 各源 / stagehand / pixiv /
  *     miyoushe / mcp servers env·headers），命中即整体替换为 ***——最准、基本无误伤（密钥值长度≥16 才参与）。
  *  2) 常见密钥模式：sk-xxx / sk-ant- / Bearer xxx / ghp_ / AKIA / xox[bpoa]- / AIza / hf_ 等，正则兜底。
  *
@@ -49,7 +49,6 @@ function collectSecrets() {
   push(cfg.stagehand?.browserbaseApiKey) // Browserbase 云 key
   push(cfg.stagehand?.apiKey)
   push(cfg.stagehand?.modelApiKey)
-  push(cfg.comfyui?.apiKey)
   // QQ 官方机器人自实现适配器：AppSecret 与 access_token 同等敏感（泄露可冒充机器人发消息）
   push(cfg.qqBot?.appSecret)
   for (const a of cfg.qqBot?.accounts || []) push(a?.appSecret)

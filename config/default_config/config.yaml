@@ -301,23 +301,6 @@ agent:
     cookie: ""
     defaultGid: 2
     maxImages: 9              # miyoushe_post 单帖最多主动发图数（攻略图集帖，避免只发一张；默认 9）
-  comfyui:
-    enable: false             # ComfyUI 工具总开关（关则不注册 comfyui__* 工具，零影响）
-    host: "http://127.0.0.1:8188"   # ComfyUI 服务地址（本地/远程/Cloud）；本地默认 8188
-    cloud: false              # true=走 Comfy Cloud 路由（host 填 https://cloud.comfy.org，端点加 /api 前缀、/history→/history_v2、/view 跟 302）
-    apiKey: ""                # Cloud 的 X-API-Key（cloud:true 时必填；本地通常留空，反向代理加鉴权时填）
-    workflowDir: "workflows"  # 自动发现工作流的目录（ComfyUI user 目录下；默认 user/default/workflows，递归含子目录）
-    workflowCacheTtl: 300     # 工作流发现/转换缓存秒数（刚在 ComfyUI 里保存新工作流可让工具带 refresh 刷新）
-    confirm: true             # 生成需主人审批（#确认/#拒绝）；false=免审批直接生成（每次生成消耗 GPU，谨慎关闭）
-    command:                  # 指令画图（#画图列表 / #画图1 关键字；免 LLM 的快捷入口）
-      enable: true            # 关=不响应 #画图 指令（交给其它插件/LLM）；仅在 comfyui.enable=true 时有效
-      masterOnly: false       # true=仅主人可用
-      cooldown: 30            # 同用户两次画图最小间隔（秒；0=不限，防连点刷 GPU）
-    timeout: 300              # 单次生成最长等待秒（视频工作流自动放宽到 900）
-    pollInterval: 1.5         # 轮询初始间隔（秒，指数退避到 pollMaxInterval）
-    pollMaxInterval: 8        # 轮询最大间隔（秒）
-    maxImages: 4              # 单次最多发图数（防爆刷）
-    outputDir: ""             # 产物落盘目录（留空=插件 data/temp；视频/调试用）
   skill:
     dir: "skills"
     historyCount: 15

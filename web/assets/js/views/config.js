@@ -304,8 +304,6 @@
         if (!form.research) form.research = {}
         if (!form.calc) form.calc = {}
         if (!form.document) form.document = {}
-        if (!form.comfyui) form.comfyui = {}
-        if (!form.comfyui.command) form.comfyui.command = {}
         if (!form.miyoushe) form.miyoushe = {}
         if (!form.vision) form.vision = {}
         if (!form.tools) form.tools = {}
@@ -2329,24 +2327,6 @@
                 <cfg-row name="文档转 PDF soffice" desc="E2B 沙箱启用后在沙箱内执行（模板需含 LibreOffice）"><input class="inp mono" style="width:140px" v-model="form.document.soffice"></cfg-row>
                 <cfg-row name="深度研究并发"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.research.maxConcurrent"></cfg-row>
                 <cfg-row name="研究结果评估"><v-switch v-model="form.research.evaluation"/></cfg-row>
-              </div>
-              <div style="font-weight:800;color:var(--ink3);font-size:12px;margin:12px 0 6px">ComfyUI</div>
-              <div class="cf-grid">
-                <cfg-row name="启用 ComfyUI" desc="comfyui.enable"><v-switch v-model="form.comfyui.enable"/></cfg-row>
-                <cfg-row name="服务地址"><input class="inp mono" style="width:220px" v-model="form.comfyui.host"></cfg-row>
-                <cfg-row name="Cloud 模式"><v-switch v-model="form.comfyui.cloud"/></cfg-row>
-                <cfg-row name="Cloud API Key"><input class="inp mono" style="width:200px" v-model="form.comfyui.apiKey"></cfg-row>
-                <cfg-row name="工作流目录" desc="自动发现工作流的目录（ComfyUI user 目录下；默认 workflows，递归含子目录）"><input class="inp mono" style="width:220px" v-model="form.comfyui.workflowDir" placeholder="workflows"></cfg-row>
-                <cfg-row name="工作流缓存(秒)" desc="发现/转换结果缓存时长（刚在 ComfyUI 里保存新工作流可让工具带 refresh 立即刷新）"><input type="number" class="inp" style="width:110px" min="0" v-model.number="form.comfyui.workflowCacheTtl"></cfg-row>
-                <cfg-row name="生成需主人审批" desc="开=每次生成走 #确认/#拒绝（默认）；关=免审批直接生成（每次生成消耗 GPU，谨慎关闭）"><v-switch v-model="form.comfyui.confirm"/></cfg-row>
-                <cfg-row name="指令画图" desc="开=响应 #画图列表 / #画图1 关键字（免 LLM 快捷入口）；关=不拦截这类消息"><v-switch v-model="form.comfyui.command.enable"/></cfg-row>
-                <cfg-row name="指令仅主人" desc="开=只有主人能用 #画图 指令"><v-switch v-model="form.comfyui.command.masterOnly"/></cfg-row>
-                <cfg-row name="指令冷却(秒)" desc="同用户两次画图最小间隔（0=不限）"><input type="number" class="inp" style="width:110px" min="0" v-model.number="form.comfyui.command.cooldown"></cfg-row>
-                <cfg-row name="生成超时(秒)"><input type="number" class="inp" style="width:110px" min="10" v-model.number="form.comfyui.timeout"></cfg-row>
-                <cfg-row name="轮询初始间隔(秒)"><input type="number" class="inp" style="width:110px" min="0.5" step="0.5" v-model.number="form.comfyui.pollInterval"></cfg-row>
-                <cfg-row name="轮询最大间隔(秒)"><input type="number" class="inp" style="width:110px" min="1" v-model.number="form.comfyui.pollMaxInterval"></cfg-row>
-                <cfg-row name="单次最大图"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.comfyui.maxImages"></cfg-row>
-                <cfg-row name="产物目录(可选)"><input class="inp mono" style="width:220px" v-model="form.comfyui.outputDir" placeholder="留空=插件 temp"></cfg-row>
               </div>
               <div style="font-weight:800;color:var(--ink3);font-size:12px;margin:12px 0 6px">示意图 limits / Kroki</div>
               <div class="cf-grid">

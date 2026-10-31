@@ -12,7 +12,7 @@ apps/                 事件分发与回复编排（Yunzai plugin 入口）
   ├─ groupworld.js    群聊小世界 app（旁听摄入/定时分析/隐私指令）
   ├─ research.js      深度研究入口
   ├─ web.js           Web 面板 HTTP 服务 + #agent登录
-  ├─ help.js / render.js / sticker*.js / comfyui-draw.js / update.js
+  ├─ help.js / render.js / sticker*.js / update.js
 model/                纯逻辑层（零 Yunzai 依赖，可离线测试）
   ├─ agent/           ReAct 内核、循环终止器、工具注册/策略/审批、会话、记忆、压缩归档、回复队列
   ├─ llm/             模型能力注册表、思考判档、embedding、缓存与熔断
@@ -22,7 +22,7 @@ model/                纯逻辑层（零 Yunzai 依赖，可离线测试）
   ├─ web/             Web 面板 API 路由、鉴权、日志读取、脱敏
   ├─ memory|recall|profile|kb    记忆体系
   ├─ persona|personaLore|prompt  人设与提示词
-  ├─ media|vision|stt|tts|document|diagram|comfyui|sticker  多模态与表达
+  ├─ media|vision|stt|tts|document|diagram|sticker  多模态与表达
   ├─ search|tavily|crawl|research|miyoushe|enka  检索与内容
   ├─ sandbox|terminal|stagehand|toolkit|toolEvo  执行面、工具 SDK、工具进化
   ├─ multiagent|mcp|skill|schedule  协作与扩展

@@ -588,10 +588,6 @@ export function supportGuoba() {
         { field: 'agent.diagram.enable', label: '示意图生成工具', bottomHelpMessage: '默认开；未部署 Kroki 时工具返回结构化失败，不影响对话', component: 'Switch' },
         { field: 'agent.diagram.renderer', label: '渲染器', bottomHelpMessage: '默认 kroki（自托管 Kroki 容器渲染 D2）；内部部署细节见 docs/deploy/kroki-compose.yaml', component: 'Input', componentProps: { placeholder: 'kroki' } },
 
-        // —— ComfyUI ——
-        { label: 'ComfyUI', component: 'SOFT_GROUP_BEGIN' },
-        { field: 'agent.comfyui.enable', label: 'ComfyUI 工具总开关', bottomHelpMessage: '默认关；关则不注册 comfyui__* 工具', component: 'Switch' },
-
         // —— 米游社（miyoushe）——
         { label: '米游社（miyoushe）', component: 'SOFT_GROUP_BEGIN' },
         { field: 'agent.miyoushe.cookie', label: '米游社 cookie', bottomHelpMessage: '扫码/抓包获取；敏感信息已在回复脱敏中屏蔽', component: 'Input' },
@@ -707,23 +703,6 @@ export function supportGuoba() {
         { field: 'agent.sticker.discoverGroups', label: '采集群白名单(每行一个)', bottomHelpMessage: '空=所有群都采集', component: 'InputTextArea', componentProps: { rows: 3, placeholder: "123456789" } },
         { field: 'agent.sticker.maxDiscovered', label: '自动发现条目上限', bottomHelpMessage: '超限按 usageCount 升序淘汰（默认 256）', component: 'InputNumber', componentProps: { min: 1 } },
         { field: 'agent.sticker.discoverMaxSizeMB', label: '单张采集大小上限(MB)', bottomHelpMessage: '0=不限（默认 5）', component: 'InputNumber', componentProps: { min: 0 } },
-
-        // —— ComfyUI（补充） ——
-        { label: 'ComfyUI（补充）', component: 'SOFT_GROUP_BEGIN' },
-        { field: 'agent.comfyui.apiKey', label: 'Cloud X-API-Key', bottomHelpMessage: 'cloud=true 时必填', component: 'Input' },
-        { field: 'agent.comfyui.host', label: '服务地址', bottomHelpMessage: '本地/远程/Cloud（如 http://127.0.0.1:8188）', component: 'Input', componentProps: { placeholder: 'http://127.0.0.1:8188' } },
-        { field: 'agent.comfyui.cloud', label: 'Comfy Cloud 路由', bottomHelpMessage: 'true=走云端点（host 填 https://cloud.comfy.org；cloud 时 apiKey 必填）', component: 'Switch' },
-        { field: 'agent.comfyui.confirm', label: '生成需主人审批', bottomHelpMessage: '默认开（#确认/#拒绝）；false=免审批直接生成，每次消耗 GPU，谨慎关闭', component: 'Switch' },
-        { field: 'agent.comfyui.workflowDir', label: '工作流目录', bottomHelpMessage: 'ComfyUI user 目录下（默认 user/default/workflows，递归）', component: 'Input' },
-        { field: 'agent.comfyui.workflowCacheTtl', label: '工作流缓存(秒)', bottomHelpMessage: '默认 300', component: 'InputNumber', componentProps: { min: 0 } },
-        { field: 'agent.comfyui.timeout', label: '单次生成最长等待(秒)', bottomHelpMessage: '默认 300（视频工作流自动放宽到 900）', component: 'InputNumber', componentProps: { min: 10 } },
-        { field: 'agent.comfyui.pollInterval', label: '轮询初始间隔(秒)', bottomHelpMessage: '默认 1.5', component: 'InputNumber', componentProps: { min: 0.5, step: 0.5 } },
-        { field: 'agent.comfyui.pollMaxInterval', label: '轮询最大间隔(秒)', bottomHelpMessage: '默认 8', component: 'InputNumber', componentProps: { min: 1 } },
-        { field: 'agent.comfyui.maxImages', label: '单次最多发图数', bottomHelpMessage: '默认 4', component: 'InputNumber', componentProps: { min: 1, max: 10 } },
-        { field: 'agent.comfyui.outputDir', label: '产物落盘目录', bottomHelpMessage: '留空=data/temp', component: 'Input' },
-        { field: 'agent.comfyui.command.enable', label: '#画图 指令', bottomHelpMessage: '仅在 comfyui.enable=true 时有效', component: 'Switch' },
-        { field: 'agent.comfyui.command.masterOnly', label: '#画图 仅主人', bottomHelpMessage: '默认 false', component: 'Switch' },
-        { field: 'agent.comfyui.command.cooldown', label: '#画图 冷却(秒)', bottomHelpMessage: '0=不限（默认 30）', component: 'InputNumber', componentProps: { min: 0 } },
 
         // —— 示意图（补充） ——
         { label: '示意图（补充）', component: 'SOFT_GROUP_BEGIN' },

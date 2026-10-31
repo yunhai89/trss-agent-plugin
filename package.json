@@ -1,6 +1,6 @@
 {
   "name": "yunzai-agent-plugin",
-  "version": "1.46.9",
+  "version": "1.47.0",
   "description": "Yunzai 生态的 AI Agent 插件：LLM 对话、工具调用、长期记忆、人设、MCP、工具进化、QQ 官方机器人（Markdown/按钮卡片）与 Web 管理面板",
   "author": "云汐",
   "license": "GPL-3.0",

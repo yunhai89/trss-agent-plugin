@@ -79,12 +79,10 @@ const HOOKED_STRESS = new Set([
   'model/web/api.clearcache.test.mjs', // 清空 Token 缓存统计：真实 router + 真实 UsageStats + 桩 runtime
   'model/web/api.qqbot.test.mjs', // QQBot 账号 API：真实 router + 桩适配器/Config
   'model/web/api.web-console.test.mjs', // 启动默认地址 API：真实 router + 真实 auth 中间件
-  // 更新日志转发测试需要 Yunzai 桩（apps/update.js / lib 插件基类 + Bot）
-  'apps/update.test.mjs',
   // TTS 路由测试需要桩 Config（写配置不落盘真实 config.yaml）
   'model/web/tts.test.mjs',
-  // 指令画图插件测试需要桩插件基类 + 桩 Config
-  'apps/comfyui-draw.test.mjs',
+  // 更新日志转发测试需要 Yunzai 桩（apps/update.js / lib 插件基类 + Bot）
+  'apps/update.test.mjs',
 ])
 for (const t of tests) {
   const rel = t.replace(root, '')

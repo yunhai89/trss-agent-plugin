@@ -10,7 +10,7 @@
 
 一个插件，从「能回话」到「能干活、能记住、能进化」的完整闭环。
 
-<img src="https://img.shields.io/badge/version-v1.46.9-blueviolet" alt="Version">
+<img src="https://img.shields.io/badge/version-v1.47.0-blueviolet" alt="Version">
 <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
 <img src="https://img.shields.io/badge/platform-Yunzai-9cf" alt="Yunzai Plugin">
 <img src="https://img.shields.io/badge/AI-Agent-7c3aed" alt="AI Agent">
@@ -43,7 +43,7 @@
 - **QQ 官方机器人**：AppID + AppSecret 直连，支持 Markdown、inline keyboard、被动回复。
 - **LLM 工具调用与自动化**：多轮 ReAct、并行工具、MCP、定时任务、子代理、E2B 沙箱终端。
 - **长期记忆与知识库**：`MEMORY.md` / `USER.md`、用户画像、RAG、语义召回。
-- **人设与多模态**：人设库、图片理解、语音合成、表情包、示意图、ComfyUI 画图。
+- **人设与多模态**：人设库、图片理解、语音合成、表情包、示意图。
 - **多模型管理**：OpenAI / Anthropic / Gemini 兼容端点，厂商 + 模型引用制，Web 面板统一配置。
 
 > ⚠️ **状态说明**

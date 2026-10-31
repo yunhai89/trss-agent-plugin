@@ -1,7 +1,7 @@
 /**
  * Stagehand 浏览器启动 —— 本地(Playwright+chromium)或 Browserbase 云。
  *
- * 动态 import @browserbasehq/stagehand；未装则抛错（由调用方捕获降级，与 comfyui/pixiv 同模式）。
+ * 动态 import @browserbasehq/stagehand；未装则抛错（由调用方捕获降级，与 pixiv 同模式）。
  * 只负责拿到 browser 对象 + 一个 close 句柄；Stagehand.create 由 session.js 调。
  */
 import Log from '../../utils/Log.js'
