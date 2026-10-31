@@ -1,5 +1,5 @@
 /**
- * Stagehand 可靠性回归 —— 身份隔离 / 容量 / 生命周期 / 串行 / 取消 / SDK schema / 审批链。
+ * Stagehand 可靠性回归 —— 身份隔离 / 容量 / 生命周期 / 串行 / 取消 / SDK schema / act 免审批。
  * 运行：node model/stagehand/regression.test.mjs
  *
  * 全部离线：浏览器用注入 launcher 的 fake context/stagehand；LLM 用 mock fetch。
@@ -10,7 +10,7 @@ import { makeGenerate } from './llm.js'
 import { makeStagehand, jsonSchemaToZod } from './index.js'
 import { compileDomainPolicy, assertUrlAllowed, parseLooseIPv4, isPrivateIp } from './guard.js'
 import { ok } from '../toolkit/index.js'
-import { Agent, ToolRegistry, ConfirmStore } from '../agent/index.js'
+import { Agent, ToolRegistry } from '../agent/index.js'
 import { createPolicy } from '../agent/policy.js'
 
 let passed = 0
@@ -417,37 +417,36 @@ await test('LLM：复用代理 fetch + 保留 usage + 响应体读取超时 + �
   ok_(Date.now() - t0 < 400, '截止时间覆盖响应体读取')
 })
 
-// ───────────────────────── 真实审批链 ─────────────────────────
+// ───────────────────────── 免审批执行 ─────────────────────────
 const reply = (content = 'done') => ({ role: 'assistant', content, toolCalls: [], finishReason: 'stop' })
 const call = (name, id, args = {}) => ({ id, name, arguments: args })
 
-await test('真实审批链：act 经 ConfirmStore 批准后执行，tool-call/result 配对', async () => {
+await test('act 免单独审批：未装配 ConfirmStore 也可执行，tool-call/result 配对', async () => {
   const { launcher, state } = makeEnv()
   const { pack, sessionMgr } = makeStagehand({ cfg: { permission: 'all', idleTimeoutMs: 60000 }, agent: {}, launcher })
   const registry = new ToolRegistry()
   for (const t of pack.resolve({})) registry.register(t)
-  const confirm = new ConfirmStore({ timeout: 1000 })
   let turn = 0
   const provider = { async chat() {
     if (turn++) return reply()
     return { ...reply(''), toolCalls: [call('stagehand__goto', 'g1', { url: 'http://93.184.216.34/' }), call('stagehand__act', 'a1', { instruction: 'click login' })], finishReason: 'tool_calls' }
   } }
-  const agent = new Agent({ provider, tools: registry, confirm, policy: createPolicy(), reflect: 'off', governor: false })
-  const ctx = { selfId: 'bot1', userId: 'u1', conversationId: 'c1', role: 'master', isMaster: true, notify: (id) => confirm.resolve(id, true) }
+  // 刻意不传 confirm/notify：act 不依赖审批通道
+  const agent = new Agent({ provider, tools: registry, policy: createPolicy(), reflect: 'off', governor: false })
+  const ctx = { selfId: 'bot1', userId: 'u1', conversationId: 'c1', role: 'master', isMaster: true }
   await agent.run('打开并点击登录', { ctx, maxTurns: 3 })
-  // goto 与 act 都执行；act 需要审批但被 notify 批准
   eq(state.gotos.length, 1, 'goto 执行一次')
   const actMsgs = agent.messages.filter((m) => m.role === 'tool' && m.name === 'stagehand__act')
   ok_(actMsgs.length >= 1, 'act 产生 tool 结果（配对）')
   const actContent = JSON.parse(actMsgs[0].content)
-  eq(actContent.ok, true, '审批通过后 act 成功')
+  eq(actContent.ok, true, 'act 无审批直接成功')
   const toolCallIds = agent.messages.flatMap((m) => (m.tool_calls || []).map((tc) => tc.id))
   const toolResultIds = agent.messages.filter((m) => m.role === 'tool').map((m) => m.tool_call_id)
   ok_(toolCallIds.every((id) => toolResultIds.includes(id)), '每个 tool_call 都有配对 tool 结果')
   await sessionMgr.closeAll()
 })
 
-await test('真实审批链：无权限用户在启动浏览器之前被拒绝', async () => {
+await test('RBAC：无权限用户在启动浏览器之前被拒绝', async () => {
   const { launcher, state } = makeEnv()
   const { pack, sessionMgr } = makeStagehand({ cfg: { permission: 'master' }, agent: {}, launcher }) // category=system
   const registry = new ToolRegistry()

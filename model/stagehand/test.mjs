@@ -239,9 +239,11 @@ await test('guard：内网/环回/元数据地址拦截 + 公网放行', async (
 await test('makeStagehand：permission 控制 category；goto 拦内网；配额生效', async () => {
   const { makeStagehand } = await import('./index.js')
   const all = makeStagehand({ cfg: { permission: 'all' }, agent: {} })
-  const names = Object.fromEntries(all.pack.resolve({}).map((t) => [t.name, t.category]))
+  const allTools = all.pack.resolve({})
+  const names = Object.fromEntries(allTools.map((t) => [t.name, t.category]))
   eq(names['stagehand__goto'], 'query', 'permission=all：goto 归 query（全员可用）')
-  eq(names['stagehand__act'], 'query', 'permission=all：act 归 query（仍 alwaysConfirm）')
+  eq(names['stagehand__act'], 'query', 'permission=all：act 归 query')
+  eq(allTools.find((t) => t.name === 'stagehand__act')?.meta?.alwaysConfirm, undefined, 'act 不再要求单独审批')
   const master = makeStagehand({ cfg: { permission: 'master' }, agent: {} })
   eq(master.pack.resolve({}).find((t) => t.name === 'stagehand__goto').category, 'system', 'permission=master：system（仅主人）')
 

@@ -18,7 +18,7 @@
  *
  * 工具契约：{ name, description, parameters, execute(params, ctx), category?, meta? }
  *   - category 决定 RBAC：query(0) | personal(0) | message(1) | group_manage(2) | system(3)
- *   - meta.interactive=true 会强制串行 + 走 confirm 审批（危险动作用）
+ *   - meta.interactive=true 会强制串行；meta.alwaysConfirm=true 才会每次走 confirm 审批（危险动作用）
  *   - ctx 含：userId/groupId/role/isMaster/e(Yunzai事件)/bot(Bot句柄)/fetcher/media/miyoushe...
  *
  * 辅助（from '../model/toolkit/index.js'）：

@@ -14,6 +14,32 @@
 
 指令：`#记忆` 查看、`#忘掉 <关键词>` 遗忘；`#画像` 查看用户画像、`#忘记画像 <关键词>` 从画像移除。
 
+### 本地向量索引（知识库 RAG）
+
+知识库（`kb_search`）在 embedding 检索之上增加了一层**插件内嵌的本地向量库**：
+
+- 存储：`data/vectors/kb/vectors.bin`，单文件格式（magic + JSON 元数据 + Float32 向量），写入用 `tmp + rename` 原子替换。
+- 基线检索：Flat / exact cosine，Top-K 小顶堆；零 native 依赖。
+- 可选 ANN：`agent.kb.vectorBackend: auto` 时若装了 `hnswlib-node` 就用 HNSW（`data/vectors/kb/hnsw.bin`），否则退回 Flat。HNSW 参数 `m` / `efConstruction` / `efSearch` / `rerank` 可调；ANN 只负责取候选，最终统一用 Flat 向量精确重排，降低近似索引的召回损失。
+- GPU（可选）：`cuvs-node` + NVIDIA GPU 时可用 CAGRA（`data/vectors/kb/cuvs.bin`）。**不会自动启用**：必须同时设置 `vectorBackend: cuvs` 与 `vectorGpuConsent: true`，且建议先确认 GPU 空闲，避免抢占用户已有任务。未授权/模块缺失/GPU 不可用时自动回退 HNSW 或 Flat。
+- 一致性：KV 里的 `chunks[].embedding` 仍是事实源，向量文件只是可重建的加速层；索引缺失、损坏或与当前 embedding 模型签名不一致时会自动按 KV 重建，或降级为 BM25 词面检索。
+- 换 embedding 模型后，签名校验会阻止新旧向量混用；执行 `#知识库重建` 重新 embedding 并重建索引。
+- 关闭本地索引：`agent.kb.vectorStore: false`，退回 KV 内全量 cosine 扫描。
+
+安装可选后端：
+
+```bash
+pnpm add hnswlib-node                      # CPU HNSW（普通云服务器推荐）
+# GPU（Linux x86_64 + CUDA 12.x，安装包约 1.8GB）：
+pnpm add cuvs-node
+```
+
+> npm 11+ 默认阻止依赖的 install script；若安装后 `#向量库状态` 仍显示 Flat，执行 `npm install-scripts approve hnswlib-node && npm rebuild hnswlib-node`。`hnswlib-node` 编译失败不会影响插件加载，只是自动回退 Flat。
+>
+> 服务器性能自检：`node scripts/vector-benchmark.mjs --n=10000 --dim=128 --queries=50 --topk=5`（检测 GPU/后端并用合成向量测建库与查询延迟；`--cuvs` 需确认 GPU 空闲）。
+
+> 说明：个人召回记忆（`RecallStore`）每用户默认上限 200 条，线性扫描成本很低，暂不单独建向量索引；后续扩大上限或做跨用户全局检索时再复用同一套 `LocalVectorStore`。
+
 ---
 
 ## 💰 上下文压缩与缓存经济性

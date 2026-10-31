@@ -9,6 +9,10 @@
  *   docs:   { id, title, source, createdAt, chunkCount }
  *   chunks: { docId, idx, text, embedding?, createdAt }
  *
+ * 向量索引：可选 LocalVectorStore（data/vectors/kb/vectors.bin）作加速层；
+ * KV 里的 chunks.embedding 仍是事实源，索引缺失/损坏/换模型时可重建。
+ * 检索优先走向量索引，未配置 embedding 或索引不可用时回退 BM25。
+ *
  * embedFn 复用 recall 那份（agent.js 构造，基于 recall.embedProvider）；
  * embedFn 透传 embed()，支持数组输入（批量入库一次调用）。
  */
@@ -17,6 +21,7 @@ import { cosine } from './recall.js'
 import { BM25, tokenize, simhash, isNearDup } from '../llm/local-sim.js'
 import { crawlUrl } from '../crawl/index.js' // 网页抓取（ingestUrl/refreshDoc）
 import { createKeyedLock } from './store/lock.js'
+import { LocalVectorStore, VectorStoreError } from './vector-store.js'
 
 const DEFAULT_KEY = 'Yz:agent:kb:__global__'
 
@@ -61,7 +66,7 @@ function queryCoverage(qSet, docTokens) {
 }
 
 export class KnowledgeStore {
-  constructor({ kv, embedFn = null, key = DEFAULT_KEY, chunkSize = 500, chunkOverlap = 50, topK = 5, minScore = 0.3, logger = null } = {}) {
+  constructor({ kv, embedFn = null, key = DEFAULT_KEY, chunkSize = 500, chunkOverlap = 50, topK = 5, minScore = 0.3, logger = null, vectorStore = null, vectorDir = null, vectorSignature = null, vectorBackend = 'auto', vectorGpuConsent = false, hnsw = {}, cuvs = {} } = {}) {
     if (!kv) throw new Error('KnowledgeStore 需要 kv')
     this.kv = kv
     this.embedFn = embedFn
@@ -71,6 +76,24 @@ export class KnowledgeStore {
     this.topK = topK
     this.minScore = minScore
     this.logger = logger
+    // 本地向量索引（可选）：KV 仍是事实源，索引只做加速；失败时自动回退词面检索
+    this.vector = vectorStore || null
+    if (!this.vector && vectorDir) {
+      try {
+        this.vector = new LocalVectorStore({
+          dir: vectorDir,
+          signature: vectorSignature,
+          backend: vectorBackend,
+          gpuConsent: vectorGpuConsent,
+          hnsw,
+          cuvs,
+          logger: (...args) => this.logger?.(...args),
+        })
+      } catch (e) {
+        this.logger?.('warn', `[kb] 本地向量库初始化失败，回退词面检索：${e?.message || e}`)
+      }
+    }
+    this._vectorMismatch = false
     // 定时刷新（URL 文档周期 re-crawl）：scheduler 延后注入（见 attachScheduler）
     this.scheduler = null
     this._refreshJobs = new Map() // docId -> job handle
@@ -102,6 +125,76 @@ export class KnowledgeStore {
 
   async _save(data) { await this.kv.set(this.key, data) }
 
+  // ── 本地向量索引 ──
+
+  _chunkKey(c) { return `${c.docId}:${c.idx}` }
+
+  /** 可入索引的 chunk（必须有 embedding）；meta 只放定位字段，正文仍从 KV 读。 */
+  _vectorItems(chunks = []) {
+    return chunks
+      .filter((c) => Array.isArray(c.embedding) && c.embedding.length)
+      .map((c) => ({
+        id: this._chunkKey(c),
+        vector: c.embedding,
+        meta: { docId: c.docId, idx: c.idx },
+      }))
+  }
+
+  /** 索引文件损坏/换 embedding 模型/维度不一致时，按缓存内容重建或明确降级。 */
+  _ensureVectorIndex(data) {
+    if (!this.vector || this._vectorMismatch) return false
+    try {
+      this.vector.load()
+    } catch (e) {
+      if (e instanceof VectorStoreError && (e.code === 'signature_mismatch' || e.code === 'dimension_mismatch' || e.code === 'metric_mismatch')) {
+        this._vectorMismatch = true
+        this.logger?.('warn', `[kb] 向量索引与当前 embedding 模型不匹配，已回退词面检索；请执行 #知识库重建：${e.message}`)
+        try { this.vector.clear() } catch { /* noop */ }
+        return false
+      }
+      this.logger?.('warn', `[kb] 向量索引损坏，按 KV 内容重建：${e.message}`)
+      try { this.vector.clear() } catch { /* noop */ }
+    }
+    const items = this._vectorItems(data.chunks)
+    if (this.vector.size !== items.length) this._rebuildVectorIndex(items)
+    return this.vector.size > 0
+  }
+
+  _rebuildVectorIndex(items) {
+    if (!this.vector) return 0
+    try {
+      this.vector.rebuild(items)
+      return this.vector.size
+    } catch (e) {
+      this.logger?.('warn', `[kb] 向量索引重建失败，回退词面检索：${e?.message || e}`)
+      return 0
+    }
+  }
+
+  _indexChunks(chunks) {
+    if (!this.vector || this._vectorMismatch) return 0
+    try {
+      this.vector.upsertMany(this._vectorItems(chunks))
+      this.vector.save()
+      return this.vector.size
+    } catch (e) {
+      this.logger?.('warn', `[kb] 向量索引写入失败（下次检索会按 KV 重建）：${e?.message || e}`)
+      return 0
+    }
+  }
+
+  _unindexChunks(chunks) {
+    if (!this.vector || this._vectorMismatch) return 0
+    try {
+      const n = this.vector.removeMany(chunks.map((c) => this._chunkKey(c)))
+      if (n) this.vector.save()
+      return n
+    } catch (e) {
+      this.logger?.('warn', `[kb] 向量索引删除失败（下次检索会按 KV 重建）：${e?.message || e}`)
+      return 0
+    }
+  }
+
   /** 入库：文本 → SimHash 去重 → chunk → 批量 embedding → 存。返回 { id, chunkCount, embedded } */
   async ingest(text, { title, source, extra } = {}) {
     const chunks = chunkText(text, this.chunkSize, this.chunkOverlap)
@@ -109,6 +202,7 @@ export class KnowledgeStore {
 
     return this._lock.withLock(this.key, async () => {
       const data = await this._load()
+      this._ensureVectorIndex(data)
       // SimHash 近似去重（纯代码，hamming≤3 视为近似重复 → 拒绝入库，防重复）
       const docSim = simhash(await tokenize(text))
       const nearDup = data.docs.find((d) => d.simhash != null && isNearDup(d.simhash, docSim))
@@ -126,17 +220,19 @@ export class KnowledgeStore {
         createdAt: now, chunkCount: chunks.length, simhash: docSim,
         ...(extra || {}), // URL 入库时透传 url/refreshCron/lastCrawled
       })
-      data.chunks.push(...chunks.map((c, idx) => ({
+      const addedChunks = chunks.map((c, idx) => ({
         docId: id, idx, text: c,
         embedding: Array.isArray(embeddings) ? embeddings[idx] : null,
         createdAt: now,
-      })))
+      }))
+      data.chunks.push(...addedChunks)
       await this._save(data)
+      this._indexChunks(addedChunks)
       return { id, chunkCount: chunks.length, embedded: !!embeddings }
     })
   }
 
-  /** 检索：有 embedding → cosine；无 embedding → BM25 × 查询词覆盖率（纯代码，分数为绝对尺度 0~1） */
+  /** 检索：优先本地向量索引；索引不可用 → cosine；无 embedding → BM25 × 查询词覆盖率 */
   async retrieve(query, topK, minScore) {
     const k = Math.max(1, Number(topK) || this.topK)
     const min = Number.isFinite(Number(minScore)) ? Number(minScore) : this.minScore
@@ -147,9 +243,26 @@ export class KnowledgeStore {
     if (this.embedFn) { try { qvec = await this.embedFn(query) } catch { qvec = null } }
     const docsMap = new Map(data.docs.map((d) => [d.id, d]))
 
+    // 1) 本地向量索引（Flat exact）：索引缺失/损坏时 _ensure 会按 KV 里的 embedding 重建
+    if (this.vector && qvec && this._ensureVectorIndex(data)) {
+      try {
+        const hits = this.vector.search(qvec, k, { minScore: min })
+        const byId = new Map(data.chunks.map((c) => [this._chunkKey(c), c]))
+        return hits
+          .filter((h) => h.score > min)
+          .map((h) => {
+            const c = byId.get(h.id)
+            return c ? { text: c.text, docId: c.docId, idx: c.idx, doc: docsMap.get(c.docId), _score: h.score } : null
+          })
+          .filter(Boolean)
+      } catch (e) {
+        this.logger?.('warn', `[kb] 向量索引检索失败，回退词面检索：${e?.message || e}`)
+      }
+    }
+
     let scores
-    if (qvec && data.chunks.some((c) => c.embedding)) {
-      // 有 embedding：cosine 语义检索
+    if (qvec && !this._vectorMismatch && data.chunks.some((c) => c.embedding)) {
+      // 有 embedding 但未启用本地索引：保留原 cosine 线性扫描
       scores = data.chunks.map((c) => (c.embedding ? cosine(qvec, c.embedding) : 0))
     } else {
       // 无 embedding：BM25 纯代码检索（jieba 分词）。
@@ -177,10 +290,13 @@ export class KnowledgeStore {
     try { if (this._refreshJobs.has(docId)) await this.cancelRefresh(docId, false) } catch { /* noop */ }
     return this._lock.withLock(this.key, async () => {
       const data = await this._load()
+      this._ensureVectorIndex(data)
       const before = data.docs.length
+      const removedChunks = data.chunks.filter((c) => c.docId === docId)
       data.docs = data.docs.filter((d) => d.id !== docId)
       data.chunks = data.chunks.filter((c) => c.docId !== docId)
       await this._save(data)
+      this._unindexChunks(removedChunks)
       return before - data.docs.length
     })
   }
@@ -197,7 +313,9 @@ export class KnowledgeStore {
       catch (e) { return { error: `重建失败：${e?.message || e}` } }
       data.chunks.forEach((c, i) => { c.embedding = Array.isArray(embeddings) ? embeddings[i] : null })
       await this._save(data)
-      return { rebuilt: data.chunks.length }
+      this._vectorMismatch = false
+      const indexed = this.vector ? this._rebuildVectorIndex(this._vectorItems(data.chunks)) : null
+      return { rebuilt: data.chunks.length, indexed }
     })
   }
 
@@ -230,22 +348,27 @@ export class KnowledgeStore {
     // 也避免刷新与入库互相覆盖整份 KB。
     return this._lock.withLock(this.key, async () => {
       const data = await this._load()
+      this._ensureVectorIndex(data)
       const doc = data.docs.find((d) => d.id === docId)
       if (!doc || !doc.url) return { error: `文档 ${docId} 无 URL，不可刷新` }
       const r = await crawlUrl(doc.url)
       if (!r.success || !r.markdown) return { error: `抓取失败：${r.error || '无内容'}${r.hint ? `（${r.hint}）` : ''}` }
+      const oldChunks = data.chunks.filter((c) => c.docId === docId)
       data.chunks = data.chunks.filter((c) => c.docId !== docId) // 删旧 chunks
       const chunks = chunkText(r.markdown, this.chunkSize, this.chunkOverlap)
       if (!chunks.length) return { error: '抓取内容为空，无法分块' }
       let embeddings = null
       if (this.embedFn) { try { embeddings = await this.embedFn(chunks) } catch { /* embed 失败降级 BM25 */ } }
       const now = Date.now()
-      data.chunks.push(...chunks.map((c, idx) => ({
+      const addedChunks = chunks.map((c, idx) => ({
         docId, idx, text: c, embedding: Array.isArray(embeddings) ? embeddings[idx] : null, createdAt: now,
-      })))
+      }))
+      data.chunks.push(...addedChunks)
       doc.chunkCount = chunks.length; doc.lastCrawled = now
       try { doc.simhash = simhash(await tokenize(r.markdown)) } catch { /* noop */ }
       await this._save(data)
+      this._unindexChunks(oldChunks)
+      this._indexChunks(addedChunks)
       return { id: docId, chunkCount: chunks.length, via: r.via }
     })
   }
@@ -357,6 +480,7 @@ export class KnowledgeStore {
   shutdown() {
     for (const job of this._refreshJobs.values()) { try { this.scheduler?.cancelJob(job) } catch { /* noop */ } }
     this._refreshJobs.clear()
+    try { this.vector?.close?.() } catch { /* noop */ }
   }
 }
 

@@ -6,11 +6,13 @@
 
 > 基于 [@browserbasehq/stagehand](https://docs.stagehand.dev) v4。Agent 用自然语言驱动真实浏览器：打开页面、点击、填表、抽取动态渲染后的结构化数据（适合多步交互/登录态任务，弥补 `web_crawl` 单页只读抓取的局限）。
 
-**4 个工具**（访问权限由 `agent.stagehand.permission` 控制，**默认 `master` 仅框架主人**；`permission=all` 时 `category:'query'` 全员可用，`stagehand__act` 写动作始终需 `#确认`）：
+**4 个工具**（访问权限由 `agent.stagehand.permission` 控制，**默认 `master` 仅框架主人**；`permission=all` 时 `category:'query'` 全员可用，`stagehand__act` 作为多步浏览器任务的一部分**不单独审批**）：
 - `stagehand__goto({url})` — 打开 URL（多步任务起点，页面跨调用保持）。成功返回 `{ok:true, url, title, status?}`（同时提供 `data` 别名）
 - `stagehand__observe({instruction?})` — 列出可交互元素（只读）。成功返回 `{ok:true, data, metadata?}`
 - `stagehand__extract({instruction, schema})` — 按自然语言 + JSON Schema 抽结构化数据。成功返回 `{ok:true, data, metadata?}`
-- `stagehand__act({instruction})` — 点击/输入/提交（写动作，需 `#确认`）。仅 SDK 返回 `data.success===true` 才算成功，返回 `{ok:true, data}`
+- `stagehand__act({instruction})` — 点击/输入/提交（写动作，会改变页面状态；不单独审批）。仅 SDK 返回 `data.success===true` 才算成功，返回 `{ok:true, data}`
+
+> ⚠️ `permission: all` 时群成员可直接驱动宿主浏览器执行点击/输入/提交（act 无单独审批），仅建议在可信群开启。
 
 **会话**：按「机器人 + 群/私聊 + 真实操作者 + 对话」隔离懒启动 + 5min idle 自动关；同一会话复用同一页面并**串行**执行 goto/observe/extract/act（不同会话并行），支持"打开 A 站→登录→抓数据"多步任务。限流绑定「机器人 + 真实操作者」，切换对话不重置配额；缺少机器人/用户标识直接拒绝。并发启动前同步预约名额，全局容量含已启动/启动中/关闭中。
 
@@ -18,7 +20,7 @@
 ```yaml
 stagehand:
   enable: true
-  permission: master   # master(默认，仅框架主人) | all(全部成员可用 goto/observe/extract；act 写动作仍需 #确认)
+  permission: master   # master(默认，仅框架主人) | all(全部成员可用 goto/observe/extract/act；act 不单独审批)
   mode: local          # local(本地 Playwright+chromium，默认) | cloud(Browserbase)
   headless: true
   executablePath: ""   # 本地 Chrome/Chromium 路径；留空=自动探测（见下方「本地 Chrome 自动探测」）

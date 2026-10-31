@@ -29,7 +29,7 @@ agent:
   fallbackModels: []
   proxy: ""  # HTTP(S) 代理（如 http://127.0.0.1:7890）；国内服务器访问 GPT/Gemini 等海外 LLM 用，留空=直连。SOCKS 暂不支持（socks5:// 会被忽略并直连）
   reasoningFields: []
-  maxTurns: 200  # 单次对话工具调用轮次预算上限（默认 200；配合下方 loop.* 智能终止，实际很少触顶）
+  maxTurns: 200  # 单次对话工具调用轮次预算上限（默认 256；配合下方 loop.* 智能终止，实际很少触顶）
   loop:                       # 循环智能终止（审计 §2.1）：独立于 maxTurns 硬上限，额外检测死循环/停滞/预算耗尽
     maxSameAction: 2          # 同工具+相同参数连续允许次数（超出 → duplicate_action 终止，防 ping 死循环）
     maxConsecutiveFailures: 3 # 连续工具失败次数上限（超出 → consecutive_failures 终止）
@@ -210,6 +210,16 @@ agent:
     chunkOverlap: 50        # 分块重叠（保上下文连贯）
     topK: 5                 # kb_search 默认返回片段数
     minScore: 0.3           # 最低相似度（cosine；低于不返回）；embedding 复用上面的 recall.embedProvider
+    vectorStore: true       # 本地向量索引（data/vectors/kb/vectors.bin，纯 JS Flat 精确检索）；false=退回 KV 内全量 cosine 扫描
+    vectorBackend: auto     # auto=有 hnswlib-node 就用 HNSW，否则 Flat；flat=纯 JS；hnsw=强制 HNSW；cuvs=GPU（需授权+装 cuvs-node）
+    vectorGpuConsent: false # GPU 向量检索授权。默认 false：即使检测到 GPU 也不会启用 cuvs（避免抢占用户 GPU 任务）
+    hnsw:                   # CPU HNSW（hnswlib-node）；ANN 候选会再用 Flat 向量精确重排
+      m: 16                 # 每个节点最大出边（越大召回越高、内存/建库越慢）
+      efConstruction: 200   # 建库搜索宽度（越大质量越好、建库越慢）
+      efSearch: 256          # 查询搜索宽度（越大召回越高、查询越慢）
+      rerank: 4             # 候选倍数：candidateK = max(efSearch, topK*rerank)，再用 Flat 精确重排
+    cuvs:                   # GPU CAGRA（cuvs-node，Linux + CUDA 12.x；仅 vectorGpuConsent=true 时生效）
+      rerank: 4             # GPU 候选倍数；最终仍用 Flat 向量精确重排
   schedule:
     taskEnabled: true       # 定时任务链总开关（#定时任务 cron 重复 task；false 则拒绝创建）。注意：提醒按用户归属，定时任务链按会话（群级）归属
     taskMaxTurns: 200        # 任务链工具调用轮次上限（防失控烧 token；200=给足步数，靠 loop.* 智能终止兜底）
@@ -520,7 +530,7 @@ agent:
     toolEvoVerifyTimeoutMs: 5000  # toolEvo 候选行为验证：单用例超时（沙箱模式）
   stagehand:
     # Stagehand 浏览器自动化（act/extract/observe 自然语言原语，LLM 把指令映射到页面元素）。
-    # permission=master：仅主人（默认）；=all：全部成员可用 goto/observe/extract，act 写动作仍需主人 #确认。
+    # permission=master：仅主人（默认）；=all：全部成员可用 goto/observe/extract/act（act 不单独审批，直接改变页面状态）。
     # 安全：goto 强制拒绝内网/环回/元数据地址（防 SSRF），并按会员限流；本地浏览器跑在宿主进程，非沙箱。
     # 会话按「机器人+群/私聊+真实操作者+对话」隔离 + idle 自动关 + 全局会话上限；同会话操作串行。
     # 依赖 @browserbasehq/stagehand + zod-stagehand（云崽根 pnpm install 随 workspace 装入插件）；本地模式另需 chromium+系统库。

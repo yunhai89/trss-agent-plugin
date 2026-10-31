@@ -68,8 +68,10 @@ try {
     eq(d.printTokenOnStart, true, '返回启动打印开关')
     ok(d.expiresAt > Date.now(), '令牌未过期')
     ok(d.tokenFile.endsWith(path.join('web', 'console-token.json')), '返回令牌文件路径')
-    // 地址本身可直接登录（?token= 直跳）
-    const r2 = await fetch(`${d.local.replace('127.0.0.1', '127.0.0.1')}`)
+    // 地址本身可直接登录（?token= 直跳）；测试服务器监听随机端口，替换端口后再请求
+    const localUrl = new URL(d.local)
+    localUrl.port = String(server.address().port)
+    const r2 = await fetch(localUrl)
     ok(r2.status === 200 || r2.status === 404, '?token= 直跳路径可访问（静态首页/SPA 兜底）')
   }
 

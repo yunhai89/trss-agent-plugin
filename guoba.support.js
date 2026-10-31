@@ -268,7 +268,7 @@ export function supportGuoba() {
           componentProps: { autosize: { minRows: 3, maxRows: 12 }, placeholder: '[]' },
         },
         { field: 'agent.proxy', label: '代理(可选)', bottomHelpMessage: 'HTTP(S) 代理（http://host:port）；国内访问 GPT/Gemini 等海外 LLM 用，留空=直连。SOCKS 暂不支持', component: 'Input', componentProps: { placeholder: '留空=直连' } },
-        { field: 'agent.maxTurns', label: '工具调用轮次上限', bottomHelpMessage: '默认 200；上限 1000（旧面板上限 100 会把默认值静默截断）', component: 'InputNumber', componentProps: { min: 1, max: 1000 } },
+        { field: 'agent.maxTurns', label: '工具调用轮次上限', bottomHelpMessage: '默认 256；上限 1000（旧面板上限 100 会把默认值静默截断）', component: 'InputNumber', componentProps: { min: 1, max: 1000 } },
         { field: 'agent.temperature', label: '采样温度', bottomHelpMessage: '留空=厂商默认；yaml 默认 0.2（建议 0.1~0.3）', component: 'InputNumber', componentProps: { min: 0, max: 2, step: 0.1 } },
         { field: 'agent.maxTokens', label: '单次回复最大 token', bottomHelpMessage: '留空=厂商默认（Anthropic 默认 4096）', component: 'InputNumber', componentProps: { min: 1 } },
 
@@ -312,7 +312,7 @@ export function supportGuoba() {
         { field: 'agent.memory.enable', label: '声明式记忆', bottomHelpMessage: '注入 MEMORY.md/USER.md 到 system；默认开', component: 'Switch' },
         { field: 'agent.memory.threatScan', label: '记忆注入扫描', bottomHelpMessage: '写长期记忆前扫描指令注入（命中标 suspect，召回屏蔽，#记忆 仍可见原文）；默认开', component: 'Switch' },
         { field: 'agent.memoryLimits', label: '记忆字符上限(JSON)', bottomHelpMessage: '声明式记忆注入的字符上限示例：{ "memory": 2200, "user": 1375 }；留空=用内置默认', component: 'InputTextArea', componentProps: { autosize: { minRows: 2, maxRows: 6 }, placeholder: '{ "memory": 2200, "user": 1375 }' } },
-        { field: 'agent.recall.cap', label: '长期记忆条数上限', bottomHelpMessage: '每用户上限（默认 200）；超限按价值(confidence/level/时间)淘汰，非 FIFO', component: 'InputNumber', componentProps: { min: 10 } },
+        { field: 'agent.recall.cap', label: '长期记忆条数上限', bottomHelpMessage: '每用户上限（默认 256）；超限按价值(confidence/level/时间)淘汰，非 FIFO', component: 'InputNumber', componentProps: { min: 10 } },
         { field: 'agent.recall.extractEvery', label: 'LLM 抽取间隔(轮)', bottomHelpMessage: '每 N 轮触发一次 LLM 抽取（默认 10；意图词"记住/叫我"等仍即时触发）', component: 'InputNumber', componentProps: { min: 1 } },
         { field: 'agent.recall.model', label: '抽取用模型(可选)', bottomHelpMessage: '留空=utilityModel→主模型；可跨厂商（填模型 id 或已注册模型名）', component: 'Input', componentProps: { placeholder: '留空=主模型' } },
         { field: 'agent.recall.embedProvider', label: '语义召回 embedding(可选)', bottomHelpMessage: '填 embedding 模型 id 走 cosine 语义匹配；留空=关键词 jaccard 召回。独立 embedding 端点请用 Web 配置中心或 yaml 的 recall.embedBaseURL/embedApiKey', component: 'Input', componentProps: { placeholder: '留空=关键词召回' } },
@@ -343,7 +343,7 @@ export function supportGuoba() {
         { field: 'agent.selfReview.model', label: '评审用模型(可选)', bottomHelpMessage: '留空=utilityModel→主模型；建议廉价小模型降本；可跨厂商', component: 'Input', componentProps: { placeholder: '留空=主模型' } },
         { field: 'agent.selfReview.autoApplyMemory', label: '记忆自动应用', bottomHelpMessage: '记忆类 suggestion 自动写入（有回滚+威胁扫描+置信度闸）；默认开', component: 'Switch' },
         { field: 'agent.selfReview.autoApplyPrompt', label: 'prompt 自动应用【不建议】', bottomHelpMessage: 'prompt/技能类自动应用；默认关（落盘待审，#审阅进化 人工把关）', component: 'Switch' },
-        { field: 'agent.selfReview.dailyBudgetTokens', label: '日 token 预算', bottomHelpMessage: '自评审日 token 预算（默认 200000）；耗尽则只采迹不评审；0=关闭后台自评审（不再等于「不限」）', component: 'InputNumber', componentProps: { min: 0, step: 10000 } },
+        { field: 'agent.selfReview.dailyBudgetTokens', label: '日 token 预算', bottomHelpMessage: '自评审日 token 预算（默认 256000）；耗尽则只采迹不评审；0=关闭后台自评审（不再等于「不限」）', component: 'InputNumber', componentProps: { min: 0, step: 10000 } },
 
         // —— 工具进化（Tool Evolution）——
         { label: '工具进化（Tool Evolution）', component: 'SOFT_GROUP_BEGIN' },
@@ -413,7 +413,7 @@ export function supportGuoba() {
         {
           field: 'agent.masterSkipConfirm',
           label: '主人任务免确认【高危】',
-          helpMessage: '高危！开启后主人发起的确认类工具（如 stagehand act）跳过 #确认 直接执行。',
+          helpMessage: '高危！开启后主人发起的确认类工具（如 schedule_task）跳过 #确认 直接执行。',
           bottomHelpMessage: '⚠️ 高危：开启后主人的命令不再审批、直接执行（仅在控制台打印日志，不在聊天提示，防刷屏）。denylist 灾难命令仍硬拦。开启即视为你知晓风险、自担后果。默认关。',
           component: 'Switch',
         },
@@ -445,6 +445,14 @@ export function supportGuoba() {
         // —— 知识库与网页抓取 ——
         { label: '知识库与网页抓取', component: 'SOFT_GROUP_BEGIN' },
         { field: 'agent.kb.enable', label: '知识库总开关', bottomHelpMessage: '默认开；关则不注册 kb_search、不入库（下面的 chunk/topK/minScore 仅开启时生效）', component: 'Switch' },
+        { field: 'agent.kb.vectorStore', label: '本地向量索引', bottomHelpMessage: '默认开；纯 JS Flat 精确检索，落盘 data/vectors/kb；关=退回 KV 内全量 cosine 扫描', component: 'Switch' },
+        { field: 'agent.kb.vectorBackend', label: '向量后端', bottomHelpMessage: 'auto=有 hnswlib-node 就用 HNSW，否则 Flat；hnsw=强制 HNSW；flat=纯 JS；cuvs=GPU（需授权+装 cuvs-node）', component: 'Select', componentProps: { options: [{ label: 'auto（推荐）', value: 'auto' }, { label: 'HNSW（CPU）', value: 'hnsw' }, { label: 'Flat（纯 JS）', value: 'flat' }, { label: 'cuVS（GPU）', value: 'cuvs' }] } },
+        { field: 'agent.kb.vectorGpuConsent', label: 'GPU 向量检索授权', bottomHelpMessage: '默认关：即使检测到 GPU 也不会自动启用 cuVS，避免抢占用户 GPU 任务；确认显卡空闲后再开', component: 'Switch' },
+        { field: 'agent.kb.hnsw.m', label: 'HNSW m', bottomHelpMessage: '每个节点最大出边（默认 16；越大召回越高、内存/建库越慢）', component: 'InputNumber', componentProps: { min: 4 } },
+        { field: 'agent.kb.hnsw.efConstruction', label: 'HNSW efConstruction', bottomHelpMessage: '建库搜索宽度（默认 256；越大质量越好、建库越慢）', component: 'InputNumber', componentProps: { min: 4 } },
+        { field: 'agent.kb.hnsw.efSearch', label: 'HNSW efSearch', bottomHelpMessage: '查询搜索宽度（默认 256；越大召回越高、查询越慢）', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.kb.hnsw.rerank', label: 'ANN 候选重排倍数', bottomHelpMessage: '取 topK×倍数候选，再用 Flat 向量精确重排（默认 4）', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.kb.cuvs.rerank', label: 'cuVS 候选重排倍数', bottomHelpMessage: 'GPU 候选倍数（默认 4）；最终仍用 Flat 向量精确重排', component: 'InputNumber', componentProps: { min: 1 } },
         { field: 'agent.kb.crawlEnable', label: '网页抓取开关', bottomHelpMessage: '默认开；关则不注册 web_crawl 与 URL 入库/刷新（下面 crawl.* 仅在开启时生效）', component: 'Switch' },
         { field: 'agent.kb.crawl.engine', label: '抓取引擎', bottomHelpMessage: 'crawl4ai=真浏览器渲染（默认，需 scripts/install-crawl4ai.sh 装好）；fetch=纯 HTTP+cheerio', component: 'Select', componentProps: { options: [{ label: 'crawl4ai 浏览器', value: 'crawl4ai' }, { label: '纯 HTTP fetch', value: 'fetch' }] } },
         { field: 'agent.kb.crawl.execution', label: '抓取执行位置', bottomHelpMessage: 'local=宿主 venv crawl4ai（默认，与 sandbox.mode 无关）；sandbox=在 E2B 沙箱内跑（需模板预装 crawl4ai，未就绪降级纯 HTTP fetch）', component: 'Select', componentProps: { options: [{ label: '宿主(local，推荐)', value: 'local' }, { label: '沙箱(sandbox)', value: 'sandbox' }] } },
@@ -520,8 +528,8 @@ export function supportGuoba() {
 
         // —— Stagehand 浏览器自动化 ——
         { label: 'Stagehand 浏览器自动化', component: 'SOFT_GROUP_BEGIN' },
-        { field: 'agent.stagehand.enable', label: '启用浏览器自动化', bottomHelpMessage: 'act/extract/observe 自然语言原语；访问权限由下方「访问权限」控制（默认仅框架主人），act 写动作需 #确认。依赖 @browserbasehq/stagehand+zod（云崽根 pnpm install）', component: 'Switch' },
-        { field: 'agent.stagehand.permission', label: '访问权限', bottomHelpMessage: 'master=仅框架主人（默认）；all=全部成员可用 goto/observe/extract（act 写动作仍需 #确认）。开放给全员意味着群成员可驱动宿主浏览器并消耗 Browserbase/LLM 配额，慎用', component: 'Select', componentProps: { options: [{ label: '仅主人(master)', value: 'master' }, { label: '全部成员(all)', value: 'all' }] } },
+        { field: 'agent.stagehand.enable', label: '启用浏览器自动化', bottomHelpMessage: 'act/extract/observe 自然语言原语；访问权限由下方「访问权限」控制（默认仅框架主人），act 不单独审批。依赖 @browserbasehq/stagehand+zod（云崽根 pnpm install）', component: 'Switch' },
+        { field: 'agent.stagehand.permission', label: '访问权限', bottomHelpMessage: 'master=仅框架主人（默认）；all=全部成员可用 goto/observe/extract/act（act 直接改变页面状态，无单独审批）。开放给全员意味着群成员可驱动宿主浏览器并消耗 Browserbase/LLM 配额，慎用', component: 'Select', componentProps: { options: [{ label: '仅主人(master)', value: 'master' }, { label: '全部成员(all)', value: 'all' }] } },
         { field: 'agent.stagehand.mode', label: '浏览器模式', component: 'Select', componentProps: { options: [{ label: 'local 本地(默认)', value: 'local' }, { label: 'cloud Browserbase', value: 'cloud' }] } },
         { field: 'agent.stagehand.headless', label: '无头模式(本地)', bottomHelpMessage: '本地模式是否无头；服务器建议开', component: 'Switch' },
         { field: 'agent.stagehand.executablePath', label: 'chrome 路径(可选)', bottomHelpMessage: '本地 chrome 可执行路径；留空=自动探测（executablePath→CHROME_PATH/PUPPETEER_EXECUTABLE_PATH→Puppeteer 自带 Chromium→~/.cache 缓存→系统路径）。服务器上装了 chromium 或 Yunzai 自带 puppeteer 时通常无需填写', component: 'Input', componentProps: { placeholder: '留空=默认' } },
@@ -595,7 +603,7 @@ export function supportGuoba() {
         { field: 'agent.multiagent.topology', label: '编排拓扑', bottomHelpMessage: 'spawn=异步三件套 spawn/check/extend_subagent（默认）/ orchestrator=同步编排工具 orchestrate', component: 'Select', componentProps: { options: OPT.topology } },
         { field: 'agent.multiagent.maxConcurrent', label: '同时运行子代理上限', bottomHelpMessage: '默认 3', component: 'InputNumber', componentProps: { min: 1, max: 10 } },
         { field: 'agent.multiagent.maxSpawnsPerConversation', label: '单次对话最多创建数', bottomHelpMessage: '默认 5（topology=spawn 时生效）', component: 'InputNumber', componentProps: { min: 1 } },
-        { field: 'agent.multiagent.workerMaxTurns', label: '子代理工具轮次上限', bottomHelpMessage: '默认 200（防失控烧 token；上界 1000）', component: 'InputNumber', componentProps: { min: 1, max: 1000 } },
+        { field: 'agent.multiagent.workerMaxTurns', label: '子代理工具轮次上限', bottomHelpMessage: '默认 256（防失控烧 token；上界 1000）', component: 'InputNumber', componentProps: { min: 1, max: 1000 } },
         { field: 'agent.multiagent.workerModel', label: '子代理模型(可选)', bottomHelpMessage: '空=复用主模型；可填任意已注册厂商的模型降本（可跨厂商）', component: 'Input', componentProps: { placeholder: '留空=主模型' } },
 
         // —— 伪人模式（humanize）——
@@ -656,7 +664,7 @@ export function supportGuoba() {
         // —— 定时任务 / 任务账本 ——
         { label: '定时任务 / 任务账本', component: 'SOFT_GROUP_BEGIN' },
         { field: 'agent.schedule.taskEnabled', label: '定时任务链开关', bottomHelpMessage: 'false=拒绝创建 #定时任务（提醒按用户归属，任务链按会话/群级归属）', component: 'Switch' },
-        { field: 'agent.schedule.taskMaxTurns', label: '任务链轮次上限', bottomHelpMessage: '默认 200（防失控烧 token）', component: 'InputNumber', componentProps: { min: 1, max: 1000 } },
+        { field: 'agent.schedule.taskMaxTurns', label: '任务链轮次上限', bottomHelpMessage: '默认 256（防失控烧 token）', component: 'InputNumber', componentProps: { min: 1, max: 1000 } },
         { field: 'agent.taskStore.enable', label: '可恢复任务账本', bottomHelpMessage: '默认关（开发阶段）；开启后任务事件/检查点落 sqlite，#任务列表/#继续任务 可用', component: 'Switch' },
         { field: 'agent.taskStore.dir', label: '任务账本目录', bottomHelpMessage: '默认 data/tasks', component: 'Input' },
 
@@ -696,7 +704,7 @@ export function supportGuoba() {
         { label: '表情包（补充）', component: 'SOFT_GROUP_BEGIN' },
         { field: 'agent.sticker.autoDiscover', label: '自动发现总开关', bottomHelpMessage: '需 sticker.enable + agent.vision.enable（主模型无视觉时还需 vision.model）', component: 'Switch' },
         { field: 'agent.sticker.discoverGroups', label: '采集群白名单(每行一个)', bottomHelpMessage: '空=所有群都采集', component: 'InputTextArea', componentProps: { rows: 3, placeholder: "123456789" } },
-        { field: 'agent.sticker.maxDiscovered', label: '自动发现条目上限', bottomHelpMessage: '超限按 usageCount 升序淘汰（默认 200）', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.sticker.maxDiscovered', label: '自动发现条目上限', bottomHelpMessage: '超限按 usageCount 升序淘汰（默认 256）', component: 'InputNumber', componentProps: { min: 1 } },
         { field: 'agent.sticker.discoverMaxSizeMB', label: '单张采集大小上限(MB)', bottomHelpMessage: '0=不限（默认 5）', component: 'InputNumber', componentProps: { min: 0 } },
 
         // —— ComfyUI（补充） ——
@@ -739,7 +747,7 @@ export function supportGuoba() {
         { field: 'agent.tts.sovits.promptText', label: '参考音频逐字文本', bottomHelpMessage: '必须与音频一致，否则音色漂移', component: 'Input' },
         { field: 'agent.tts.sovits.promptLang', label: '参考音频语种', bottomHelpMessage: '', component: 'Select', componentProps: { options: OPT.lang5 } },
         { field: 'agent.tts.sovits.textLang', label: '默认合成语种', bottomHelpMessage: '', component: 'Select', componentProps: { options: OPT.lang5 } },
-        { field: 'agent.tts.sovits.maxChars', label: '单次朗读上限(字)', bottomHelpMessage: '默认 200', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.tts.sovits.maxChars', label: '单次朗读上限(字)', bottomHelpMessage: '默认 256', component: 'InputNumber', componentProps: { min: 1 } },
         { field: 'agent.tts.sovits.timeoutMs', label: '单次合成超时(ms)', bottomHelpMessage: '默认 120000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
         { field: 'agent.tts.indextts.endpoint', label: 'IndexTTS 接口地址', bottomHelpMessage: '如 http://127.0.0.1:7860', component: 'Input' },
         { field: 'agent.tts.indextts.lang', label: '合成语言', bottomHelpMessage: '', component: 'Select', componentProps: { options: OPT.ixLang } },
@@ -776,7 +784,7 @@ export function supportGuoba() {
         { field: 'agent.stagehand.opTimeoutMs', label: '单次操作截止(ms)', bottomHelpMessage: '默认 60000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
         { field: 'agent.stagehand.llmTimeoutMs', label: '单次 LLM 推理截止(ms)', bottomHelpMessage: '默认 30000', component: 'InputNumber', componentProps: { min: 1000, step: 1000 } },
         { field: 'agent.stagehand.maxCallsPerMinute', label: '每会员每分钟上限', bottomHelpMessage: '默认 10', component: 'InputNumber', componentProps: { min: 1 } },
-        { field: 'agent.stagehand.maxCallsPerDay', label: '每会员每日上限', bottomHelpMessage: '默认 200', component: 'InputNumber', componentProps: { min: 1 } },
+        { field: 'agent.stagehand.maxCallsPerDay', label: '每会员每日上限', bottomHelpMessage: '默认 256', component: 'InputNumber', componentProps: { min: 1 } },
         { field: 'agent.stagehand.domSettleTimeoutMs', label: 'act 前 DOM 稳定等待(ms)', bottomHelpMessage: '默认 3000', component: 'InputNumber', componentProps: { min: 0, step: 500 } },
         { field: 'agent.stagehand.blockedHosts', label: '额外禁访主机(每行一个)', bottomHelpMessage: '默认内网/元数据黑名单之外再追加', component: 'InputTextArea', componentProps: { rows: 2, placeholder: "example.com" } },
 

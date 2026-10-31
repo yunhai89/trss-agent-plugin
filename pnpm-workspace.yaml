@@ -1,5 +1,6 @@
 allowBuilds:
-  # 逐个审查结论：当前锁定图中的 install 生命周包都不需要执行。
+  # 逐个审查结论：native 产物缺失时插件必须有降级路径。
+  # hnswlib-node 需要 node-gyp 构建 HNSW 原生绑定；构建失败不会阻塞安装（optionalDependencies），运行时回退 Flat。
   # @google/genai 的 prepare 指向 npm 发布包中不存在的 scripts/prepare.js，允许会直接失败；
   # 其 dist/node/web 发布物已完整。
   '@google/genai': false
@@ -9,4 +10,5 @@ allowBuilds:
   '@karinjs/sqlite3': false
   '@napi-rs/canvas': false
   '@node-rs/jieba': false
+  hnswlib-node: true # HNSW 可选后端；构建失败时 optionalDependencies 允许安装继续，运行时回退 Flat
   esbuild: false

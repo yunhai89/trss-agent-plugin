@@ -6,7 +6,8 @@
  *   sessionMgr：SessionManager（closeAll 交 buildRuntime 在 runtime 失效时调）。
  *
  * RBAC：permission=master → category:'system'（框架 master 限定）；permission=all → category:'query'。
- * act 是写动作（点击/输入/提交）→ meta.alwaysConfirm + interactive（每条 #确认 + 串行）。
+ * act 是写动作（点击/输入/提交），但作为多步浏览器任务的一部分不做单独审批；仅由 permission/RBAC 控制可用范围。
+ * act 标记 interactive（串行），避免同一批工具调用并发操作同一页面。
  *
  * 身份隔离（可靠性审计）：
  *   sessionKey = 机器人 | 群/私聊 | 真实操作者 | 对话；限流绑定「机器人 + 真实操作者」，
@@ -41,7 +42,7 @@ export function makeStagehand(opt = {}) {
   const cfg = opt.cfg || {}
   const agent = opt.agent || {}
   const proxyFetch = typeof opt.fetch === 'function' ? opt.fetch : null
-  // 权限：'all' 开放给全部成员（goto/observe/extract 直接可用，act 仍每条 #确认）；'master' 仅主人（category=system）
+  // 权限：'all' 开放给全部成员（goto/observe/extract/act 直接可用，act 不单独审批）；'master' 仅主人（category=system）
   const category = String(cfg.permission || 'master').toLowerCase() === 'all' ? 'query' : 'system'
   // 配额（防成员滥用/成本失控）：每操作者每分钟调用数 + 每日调用数
   const maxPerMinute = Math.max(1, Number(cfg.maxCallsPerMinute) || 10)
@@ -190,8 +191,8 @@ export function makeStagehand(opt = {}) {
     defineTool({
       name: 'act',
       category,
-      description: '在当前页面上执行动作（点击/输入/选择/提交等）。用自然语言描述，如"在搜索框输入 deepseek 并回车"或"点击登录按钮"。写动作，每次需主人 #确认。成功返回 {ok:true, data}（含 success/message/actions），仅当 SDK 返回 success===true 才算成功。需先 stagehand__goto 打开页面。',
-      meta: { summary: '执行页面动作(点击/输入/提交)', alwaysConfirm: true, interactive: true },
+      description: '在当前页面上执行动作（点击/输入/选择/提交等）。用自然语言描述，如"在搜索框输入 deepseek 并回车"或"点击登录按钮"。写动作，会改变页面状态（可用范围由 stagehand.permission 控制，不单独审批）。成功返回 {ok:true, data}（含 success/message/actions），仅当 SDK 返回 success===true 才算成功。需先 stagehand__goto 打开页面。',
+      meta: { summary: '执行页面动作(点击/输入/提交)', interactive: true },
       parameters: param.object({ instruction: param.str('要执行的动作（自然语言）') }, ['instruction']),
       async execute(p, ctx) {
         const id = identityOf(ctx)

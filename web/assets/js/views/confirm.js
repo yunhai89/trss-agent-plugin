@@ -113,7 +113,7 @@
 
       <div class="ct" v-if="items.length" style="margin:18px 2px 10px">
         <span class="ct-ico" style="background:var(--cinnabar)"><v-icon name="confirm"/></span>
-        <div><div class="ct-t">工具确认</div><div class="ct-s">需二次确认的工具（stagehand act / 定时任务等）</div></div>
+        <div><div class="ct-t">工具确认</div><div class="ct-s">需二次确认的工具（定时任务等）</div></div>
       </div>
       <TransitionGroup name="list" tag="div" class="grid g2" :style="{marginTop: items.length ? '0' : '16px', position:'relative'}">
         <div v-for="(c, i) in items" :key="c.id" class="card lift pad" :style="{'--i': i + 1}">
@@ -148,7 +148,7 @@
           </div>
         </div>
       </TransitionGroup>
-      <empty-state v-if="!items.length && !adoptions.length" icon="confirm" text="暂无待审批项" sub="需二次确认的工具（如 stagehand act / 定时任务等）与人设资料采纳（#采纳补齐）发起时会出现在这里；终端命令已改在 E2B 沙箱内直接执行，不走审批"/>
+      <empty-state v-if="!items.length && !adoptions.length" icon="confirm" text="暂无待审批项" sub="需二次确认的工具（如定时任务等）与人设资料采纳（#采纳补齐）发起时会出现在这里；终端命令已改在 E2B 沙箱内直接执行，stagehand act 不单独审批"/>
     </div>`,
   }
 })()

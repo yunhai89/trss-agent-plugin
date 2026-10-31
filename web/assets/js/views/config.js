@@ -231,6 +231,16 @@
         if (!form.compaction) form.compaction = {}
         if (form.compaction.enable == null) form.compaction.enable = true
         if (!form.kb) form.kb = {}
+        if (form.kb.vectorStore == null) form.kb.vectorStore = true
+        if (form.kb.vectorBackend == null) form.kb.vectorBackend = 'auto'
+        if (form.kb.vectorGpuConsent == null) form.kb.vectorGpuConsent = false
+        if (!form.kb.hnsw) form.kb.hnsw = {}
+        if (form.kb.hnsw.m == null) form.kb.hnsw.m = 16
+        if (form.kb.hnsw.efConstruction == null) form.kb.hnsw.efConstruction = 200
+        if (form.kb.hnsw.efSearch == null) form.kb.hnsw.efSearch = 256
+        if (form.kb.hnsw.rerank == null) form.kb.hnsw.rerank = 4
+        if (!form.kb.cuvs) form.kb.cuvs = {}
+        if (form.kb.cuvs.rerank == null) form.kb.cuvs.rerank = 4
         if (!form.kb.crawl) form.kb.crawl = {}
         if (form.kb.crawl.engine == null) form.kb.crawl.engine = 'crawl4ai'
         if (form.kb.crawl.execution == null) form.kb.crawl.execution = 'local'
@@ -1434,7 +1444,7 @@
             <cfg-row name="单次对话上限" desc="单次对话最多创建几个子代理（防失控）">
               <input type="number" class="inp" style="width:90px" min="1" max="20" v-model.number="form.multiagent.maxSpawnsPerConversation">
             </cfg-row>
-            <cfg-row name="工具循环上限" desc="workerMaxTurns：子代理工具往返上限；须 ≥ 默认 200（旧面板 max=50 与默认值冲突，v1.29.0 修）">
+            <cfg-row name="工具循环上限" desc="workerMaxTurns：子代理工具往返上限；须 ≥ 默认 256（旧面板 max=50 与默认值冲突，v1.29.0 修）">
               <input type="number" class="inp" style="width:90px" min="1" max="1000" v-model.number="form.multiagent.workerMaxTurns">
             </cfg-row>
             <cfg-row name="时间预算(ms)" desc="workerTimeBudgetMs：默认 3600000=60 分钟；spawn 未传 timeBudgetMs 时用它，工具侧 2 小时封顶；根任务预算见「推理参数」">
@@ -2251,6 +2261,20 @@
               <div style="font-weight:800;color:var(--ink3);font-size:12px;margin:6px 0">知识库 KB</div>
               <div class="cf-grid">
                 <cfg-row name="启用知识库" desc="kb.enable"><v-switch v-model="form.kb.enable"/></cfg-row>
+                <cfg-row name="本地向量索引" desc="纯 JS Flat 检索，落盘 data/vectors/kb；关=退回 KV 全量 cosine 扫描"><v-switch v-model="form.kb.vectorStore"/></cfg-row>
+                <cfg-row name="向量后端" desc="auto=有 hnswlib-node 用 HNSW，否则 Flat；cuvs 需 GPU 授权 + 安装 cuvs-node">
+                  <select class="sel" style="width:180px" v-model="form.kb.vectorBackend">
+                    <option value="auto">auto（推荐）</option>
+                    <option value="hnsw">HNSW（CPU）</option>
+                    <option value="flat">Flat（纯 JS）</option>
+                    <option value="cuvs">cuVS（GPU）</option>
+                  </select>
+                </cfg-row>
+                <cfg-row name="GPU 向量检索授权" desc="默认关：即使检测到 GPU 也不会自动启用 cuVS，避免抢占用户 GPU 任务；开启前请确认显卡空闲"><v-switch v-model="form.kb.vectorGpuConsent"/></cfg-row>
+                <cfg-row name="HNSW m" desc="每个节点最大出边；越大召回越高、内存/建库越慢"><input type="number" class="inp" style="width:100px" min="4" v-model.number="form.kb.hnsw.m"></cfg-row>
+                <cfg-row name="HNSW efConstruction" desc="建库搜索宽度；越大质量越好、建库越慢"><input type="number" class="inp" style="width:100px" min="4" v-model.number="form.kb.hnsw.efConstruction"></cfg-row>
+                <cfg-row name="HNSW efSearch" desc="查询搜索宽度；越大召回越高、查询越慢"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.kb.hnsw.efSearch"></cfg-row>
+                <cfg-row name="ANN 候选重排倍数" desc="HNSW/cuVS 取回 topK×倍数候选，再用 Flat 向量精确重排"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.kb.hnsw.rerank"></cfg-row>
                 <cfg-row name="启用网页抓取" desc="kb.crawlEnable"><v-switch v-model="form.kb.crawlEnable"/></cfg-row>
                 <cfg-row name="抓取反检测" desc="crawl4ai stealth（默认开）"><v-switch v-model="form.kb.crawl.stealth"/></cfg-row>
                 <cfg-row name="被拦截自动升级" desc="undetected 强化重试一轮"><v-switch v-model="form.kb.crawl.retryBlocked"/></cfg-row>
@@ -2377,12 +2401,12 @@
             <v-icon class="cf-arrow" name="chevron"/>
           </div>
           <div class="cf-body" v-show="open.stagehand">
-            <div class="desc mb10">act/extract/observe 自然语言原语；permission 默认 master（仅主人），all=全部成员可用（act 写动作仍需 <code>#确认</code>）。goto 强制拒绝内网/元数据地址，并按会员限流；会话按「机器人+群/私聊+操作者+对话」隔离 + idle 自动关 + 同会话串行。</div>
+            <div class="desc mb10">act/extract/observe 自然语言原语；permission 默认 master（仅主人），all=全部成员可用（act 不单独审批，会直接改变页面状态）。goto 强制拒绝内网/元数据地址，并按会员限流；会话按「机器人+群/私聊+操作者+对话」隔离 + idle 自动关 + 同会话串行。</div>
             <div class="cf-grid">
               <cfg-row name="启用浏览器自动化" desc="依赖 @browserbasehq/stagehand+zod-stagehand（云崽根 pnpm install）">
                 <v-switch v-model="form.stagehand.enable"/>
               </cfg-row>
-              <cfg-row name="使用权限" desc="master=仅主人（默认）| all=全部成员（act 仍需 #确认）">
+              <cfg-row name="使用权限" desc="master=仅主人（默认）| all=全部成员（act 不单独审批）">
                 <select class="sel" style="width:150px" v-model="form.stagehand.permission">
                   <option value="master">仅主人（默认）</option>
                   <option value="all">全部成员</option>

@@ -8,6 +8,9 @@
  * 修复要点：注册前先取旧句柄，换 cron 时按**引用**取消旧 job，非法 cron 时保留旧 job。
  */
 import { KnowledgeStore } from './knowledge.js'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 let pass = 0; let fail = 0
 const ok = (c, m) => { c ? pass++ : (fail++, console.log(`  ✗ ${m}`)) }
@@ -126,6 +129,51 @@ function mkStore(doc = { id: 'd1', url: 'https://example.com/a', refreshCron: nu
   ok(chunks.length > 0 && chunks.length < 200, `overlap>size 不再死循环（chunks=${chunks.length}）`)
   const chunks2 = chunkText(text, 0, 0) // size=0
   ok(chunks2.length > 0 && chunks2.length < 200, `size=0 不再死循环（chunks=${chunks2.length}）`)
+}
+
+// 7) 本地向量索引：入库/检索/重载/删除/重建/签名不匹配降级
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kb-vec-'))
+  const kv = {
+    _v: null,
+    async get() { return this._v },
+    async set(k, v) { this._v = JSON.parse(JSON.stringify(v)) },
+  }
+  const toVec = (s) => [String(s).includes('猫') ? 1 : 0, String(s).includes('狗') ? 1 : 0, 0.1]
+  const embedFn = async (input) => Array.isArray(input) ? input.map(toVec) : toVec(input)
+  const opts = {
+    kv, embedFn, logger: () => {},
+    vectorDir: path.join(dir, 'vectors'), vectorSignature: 'test-embed',
+    chunkSize: 50, chunkOverlap: 0, minScore: 0.1,
+  }
+  try {
+    const store = new KnowledgeStore(opts)
+    const r = await store.ingest('猫咪喜欢晒太阳', { title: 'cat' })
+    ok(!r.error && r.embedded, '入库并生成 embedding')
+    ok(store.vector?.size === 1, '本地向量索引写入 1 条')
+    const hits = await store.retrieve('猫', 1)
+    ok(hits.length === 1 && hits[0].doc.title === 'cat', '向量索引检索命中 cat')
+
+    const store2 = new KnowledgeStore(opts)
+    const hits2 = await store2.retrieve('猫', 1)
+    ok(hits2.length === 1 && hits2[0].doc.title === 'cat', '重启后从 vectors.bin 加载并检索')
+
+    await store2.removeDoc(r.id)
+    ok(store2.vector?.size === 0, '删除文档后索引条目同步删除')
+
+    const store3 = new KnowledgeStore(opts)
+    await store3.ingest('狗狗喜欢散步', { title: 'dog' })
+    const rebuilt = await store3.rebuild()
+    ok(!rebuilt.error && rebuilt.indexed === 1, '重建 embedding 后索引同步重建')
+
+    const store4 = new KnowledgeStore({ ...opts, vectorSignature: 'new-embed' })
+    const fallback = await store4.retrieve('狗', 1)
+    ok(fallback.length === 1 && fallback[0].doc.title === 'dog', '签名不匹配时降级词面检索仍可用')
+    const rebuilt2 = await store4.rebuild()
+    ok(!rebuilt2.error && rebuilt2.indexed === 1, '换模型后 rebuild 恢复向量索引')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 console.log(`\nknowledge 定时刷新测试：通过 ${pass}，失败 ${fail}`)

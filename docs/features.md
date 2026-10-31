@@ -48,7 +48,7 @@
 | 声明式记忆 | `MEMORY.md` / `USER.md`（人可编辑）+ 注入 + 来源校验 | ✅ |
 | 长期记忆 | LLM 抽取沉淀 L2/L3/L4、`memory_search` 主动召回、多样性/使用率去重 | ✅ |
 | 用户画像 | 统一用户模型：分面/证据/置信/纠错，注入 Planner/Replyer | ✅ |
-| 知识库 | 全局文档库：chunk + embedding RAG、URL 入库与定时刷新 | ✅ |
+| 知识库 | 全局文档库：chunk + embedding RAG、本地 Flat/HNSW/cuVS 向量检索、URL 入库与定时刷新 | ✅ |
 | 人设系统 | 内置人设 + 自建人设 + 人设资料库（长尾知识补齐） | ✅ |
 
 ### 多模态与表达

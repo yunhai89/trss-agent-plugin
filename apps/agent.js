@@ -60,6 +60,7 @@ import { primeModelCaps } from '../model/llm/caps-source.js'
 import { buildEmbed } from '../model/llm/embed-wiring.js'
 import { thinkingLogFields as fmtThinkingLogFields } from '../model/llm/thinking.js'
 import { KnowledgeStore, makeKbSearchTool } from '../model/agent/knowledge.js'
+import { detectGpu } from '../model/agent/vector-backends.js'
 import { webCrawlTool, resetCrawl4aiProbe } from '../model/crawl/index.js' // web_crawl：抓取网页正文（常驻）
 import { CompactionArchive } from '../model/agent/compact/archive.js' // 无损压缩：原文内容寻址归档
 import { makeContextRecallTool } from '../model/agent/compact/recall.js' // context_recall：取回归档原文
@@ -610,7 +611,7 @@ async function _buildRuntime(scope) {
 
   // 可选 embedding 函数：填了 recall.embedProvider 才造（OpenAI 兼容 /embeddings 端点），供工具检索 + recall 语义召回共用。
   // 与 groupworld/humanize 共用同一装配 helper（曾两处手写重复——改一处漏一处）
-  const { embedFn } = buildEmbed({ provider })
+  const { embedFn, embedModel } = buildEmbed({ provider })
 
   // 回退 provider：每条独立 baseURL/apiKey/protocol（可跨厂商，如主 DeepSeek + 回退 GPT）
   const fallbackProviders = []
@@ -713,10 +714,27 @@ async function _buildRuntime(scope) {
     inferAfter: cfg.profile?.infer === false ? Infinity : cfg.profile?.inferAfter,
   })
   // 知识库（全局共享文档库）：复用 recall 的 embedFn，chunk+向量化存 KV，kb_search 检索（RAG）
+  // GPU 只做检测与提示，绝不自动启用：cuvs 需显式 backend + 用户授权，避免抢占用户 GPU 上正在跑的任务。
+  const kbCfg = cfg.kb || {}
+  const gpuInfo = kbCfg.enable === false ? { hasGpu: false, reason: 'kb_disabled' } : await detectGpu({ timeoutMs: 1200 })
+  if (gpuInfo.hasGpu) {
+    if (kbCfg.vectorBackend === 'cuvs' && kbCfg.vectorGpuConsent !== true) {
+      Log.warn(`[kb] 检测到 GPU（${gpuInfo.name}），但未获授权：已回退 CPU 向量检索。确认 GPU 空闲后可设 agent.kb.vectorGpuConsent: true + vectorBackend: cuvs`)
+    } else if (kbCfg.vectorBackend !== 'cuvs') {
+      Log.mark(`[kb] 检测到 NVIDIA GPU（${gpuInfo.name}，显存 ${gpuInfo.memoryMB || '?'}MB）：如需 GPU 向量检索，安装 cuvs-node 后设 vectorBackend: cuvs + vectorGpuConsent: true（需确认 GPU 空闲）`)
+    }
+  }
   const knowledge = new KnowledgeStore({
     kv: K, embedFn,
-    chunkSize: cfg.kb?.chunkSize, chunkOverlap: cfg.kb?.chunkOverlap,
-    topK: cfg.kb?.topK, minScore: cfg.kb?.minScore,
+    logger: Log.tag('kb'),
+    vectorDir: (kbCfg.vectorStore === false || !embedFn) ? null : path.join(Config.path.data, 'vectors', 'kb'),
+    vectorSignature: embedModel,
+    vectorBackend: kbCfg.vectorBackend || 'auto',
+    vectorGpuConsent: kbCfg.vectorGpuConsent === true,
+    hnsw: kbCfg.hnsw || {},
+    cuvs: kbCfg.cuvs || {},
+    chunkSize: kbCfg.chunkSize, chunkOverlap: kbCfg.chunkOverlap,
+    topK: kbCfg.topK, minScore: kbCfg.minScore,
   })
   scope.register(() => { try { knowledge?.shutdown?.() } catch { /* noop */ } }, { name: 'knowledge', order: 20 })
   // confirmTimeout 配置单位是「秒」，ConfirmStore 用「毫秒」，这里换算（默认 300 秒）
@@ -864,7 +882,7 @@ async function _buildRuntime(scope) {
     try { tools.register(makeDownloadTool()) } catch (e) { Log.warn('[download] 注册失败', e?.message || e) }
   }
 
-  // Stagehand 浏览器自动化（可选，默认关；goto/observe/extract/act；仅框架主人；act 需 #确认）
+  // Stagehand 浏览器自动化（可选，默认关；goto/observe/extract/act；仅框架主人；act 不单独审批）
   let stagehand = null
   if (cfg.stagehand?.enable) {
     try {
@@ -1565,7 +1583,7 @@ async function _buildRuntime(scope) {
     ['面板', cfg.webApi?.enable !== false ? `:${cfg.webApi?.port || 6098}` : 'off'],
   ])
 
-  return { agentConfig, makeAgent, completePersona, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, personaLore, personaAdoptionQueue, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore, scope, tts }
+  return { agentConfig, makeAgent, completePersona, tools, session, recall, profile, knowledge, memory, confirm, schedule, scheduler, mcp, provider, modelRouter, persona, personaStore, personaLore, personaAdoptionQueue, vision, skills, skillsDir, sticker: getStickerManager(), kv: K, usageStats, promptRegistry, traceStore, selfReview, promptDir, suggestionDir, toolEvo, stagehand, diagram, sandbox, multiagent, taskStore, scope, tts, gpuInfo }
 }
 
 const getRuntime = async () => {
@@ -1938,7 +1956,7 @@ export class Chat extends plugin {
         { reg: '^#启用mcp\\s+(.+)', fnc: 'enableMcp', permission: 'master' },
         { reg: '^#停止mcp\\s+(.+)', fnc: 'disableMcp', permission: 'master' },
         { reg: '^#模型切换\\s+(.+)', fnc: 'switchModel', permission: 'master' },
-        { reg: '^#确认\\s*(\\d+)', fnc: 'approve' }, // 审批（stagehand act / 定时任务等；terminal 已沙箱化无审批）
+        { reg: '^#确认\\s*(\\d+)', fnc: 'approve' }, // 审批（定时任务等；terminal 已沙箱化、stagehand act 不单独审批）
         { reg: '^#拒绝\\s*(\\d+)', fnc: 'reject' },
         { reg: '^#待确认$', fnc: 'pending' },
         { reg: '^#mcp$', fnc: 'mcpStatus', permission: 'master' },
@@ -1960,6 +1978,7 @@ export class Chat extends plugin {
         { reg: '^#知识库刷新\\s+(\\S+)', fnc: 'refreshKnowledge', permission: 'master' },
         { reg: '^#知识库定时\\s+(\\S+)\\s+([\\s\\S]+)', fnc: 'setKbRefresh', permission: 'master' },
         { reg: '^#知识库取消定时\\s+(\\S+)', fnc: 'cancelKbRefresh', permission: 'master' },
+        { reg: '^#向量库状态$', fnc: 'vectorStatus', permission: 'master' },
         { reg: '^#定时任务\\s+[\\s\\S]+', fnc: 'addCronTask', permission: 'master' },
         { reg: '^#定时任务列表$', fnc: 'listCronTask' },
         { reg: '^#取消定时任务\\s+(\\S+)', fnc: 'cancelCronTask', permission: 'master' },
@@ -3498,8 +3517,8 @@ export class Chat extends plugin {
     return true
   }
 
-  // —— 审批 ——（框架 ConfirmStore：stagehand act / schedule 等需要二次确认的工具）
-  // 注：terminal 已沙箱化，不再走审批（无 #确认 / 无 terminal 自包含审批队列）。
+  // —— 审批 ——（框架 ConfirmStore：schedule 等需要二次确认的工具）
+  // 注：terminal 已沙箱化、stagehand act 不单独审批，均不走审批（无 #确认 / 无自包含审批队列）。
   async approve() {
     const id = this.e.msg.match(/\d+/)?.[0]
     if (!this.e.isMaster) return this.e.reply('无权限：仅主人可审批'), true
@@ -3628,11 +3647,32 @@ export class Chat extends plugin {
     return true
   }
 
+  async vectorStatus() {
+    const rt = await getRuntime()
+    const kb = Config.get().agent?.kb || {}
+    const st = rt.knowledge?.vector?.stats?.() || null
+    const gpu = rt.gpuInfo || {}
+    const lines = [
+      '🧠 向量库状态',
+      `后端：${st?.backend || 'off'}${st?.requestedBackend ? `（请求：${st.requestedBackend}）` : ''}`,
+      st?.backendReason ? `降级原因：${st.backendReason}` : '',
+      `索引：${st?.size ?? 0} 条 / ${st?.dimension || 0} 维`,
+      `GPU：${gpu.hasGpu ? `${gpu.name}${gpu.memoryMB ? `（${gpu.memoryMB}MB）` : ''}${gpu.driver ? ` · 驱动 ${gpu.driver}` : ''}` : `未检测到${gpu.reason ? `（${gpu.reason}）` : ''}`}`,
+      `GPU 授权：${kb.vectorGpuConsent === true ? '已开启' : '未开启（auto 不会启用 GPU）'}`,
+    ].filter(Boolean)
+    if (gpu.hasGpu && kb.vectorBackend !== 'cuvs') {
+      lines.push('开启 GPU：安装 cuvs-node 后设 agent.kb.vectorBackend=cuvs、agent.kb.vectorGpuConsent=true（确认 GPU 空闲后再开）')
+    }
+    if (st?.hnsw) lines.push(`HNSW：m=${st.hnsw.m} efConstruction=${st.hnsw.efConstruction} efSearch=${st.hnsw.efSearch} rerank=${st.hnsw.rerank}`)
+    await this.e.reply(lines.join('\n'))
+    return true
+  }
+
   async rebuildKnowledge() {
     const rt = await getRuntime()
     await this.e.reply('开始重建知识库索引…')
     const r = await rt.knowledge.rebuild()
-    await this.e.reply(r.error ? r.error : `✓ 重建完成：${r.rebuilt} 块`)
+    await this.e.reply(r.error ? r.error : `✓ 重建完成：${r.rebuilt} 块${r.indexed != null ? `（向量索引 ${r.indexed} 条）` : ''}`)
     return true
   }
 

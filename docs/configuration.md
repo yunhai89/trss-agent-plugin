@@ -96,7 +96,7 @@
 | `chatPermission` | `master` | `#ai` 命令权限：`master`/`admin`/`owner`/`all` |
 | `privateChat` | `false` | 私聊是否触发对话；默认关（私聊不响应，仅群内 @/命令触发），设 `true` 开启 |
 | `masters` | `[]` | 主人/审批通知 ID 列表：QQ 号，或 QQ 官方机器人 openid（`/uid` 的完整 `user_id` / 去前缀值，如 `807AC…`） |
-| `masterSkipConfirm` | `false` | ⚠️高危：主人发起的确认类工具（stagehand act 等）免 `#确认` 直接执行（仅主人，控制台有日志不在聊天提示；denylist 仍硬拦）。注：terminal 已沙箱化，不走审批 |
+| `masterSkipConfirm` | `false` | ⚠️高危：主人发起的确认类工具（如 `schedule_task`）免 `#确认` 直接执行（仅主人，控制台有日志不在聊天提示；denylist 仍硬拦）。注：terminal 已沙箱化、stagehand act 不单独审批，均不走此门 |
 | `confirmTimeout` | `300` | 审批超时自动拒绝（秒） |
 | `guardAction` | `flag` | 注入防御动作：`block`(拦截)/`flag`(隔离标注)/`sanitize`(脱敏) |
 | `guardSensitivity` | `medium` | 防御灵敏度：`low`(0.95)/`medium`(0.7)/`high`(0.5) |
