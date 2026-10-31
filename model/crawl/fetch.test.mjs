@@ -14,6 +14,25 @@ async function test(name, fn) { console.log(`\n[${name}]`); try { await fn() } c
 const htmlResponse = (html, status = 200) => ({ ok: status >= 200 && status < 300, status, async text() { return html } })
 const HTML = '<html><head><title>标题</title></head><body><article><h1>H</h1><p>第一段内容足够长足够长足够长。</p><p>第二段内容足够长足够长足够长。</p></article></body></html>'
 
+/** 最小可解析 PDF（单页纯文本；测试 PDF 文本提取不依赖外部文件） */
+function tinyPdf(text = 'Hello PDF') {
+  const objs = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+    `<< /Length ${text.length + 31} >>\nstream\nBT /F1 18 Tf 30 150 Td (${text}) Tj ET\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ]
+  let out = '%PDF-1.4\n'
+  const offsets = [0]
+  objs.forEach((o, i) => { offsets.push(out.length); out += `${i + 1} 0 obj\n${o}\nendobj\n` })
+  const xref = out.length
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`
+  for (let i = 1; i < offsets.length; i++) out += String(offsets[i]).padStart(10, '0') + ' 00000 n \n'
+  out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`
+  return Buffer.from(out, 'latin1')
+}
+
 /** 带状态/头/字节体的响应桩（验证字符集与 Cookie 需要 arrayBuffer/headers） */
 function resp({ status = 200, headers = {}, body = '', ok = null, setCookie = null, combined = null } = {}) {
   const lower = {}
@@ -39,6 +58,23 @@ await test('成功：提取正文 + 保留段落换行', async () => {
   eq(r.title, '标题', 'title')
   okf(r.markdown.includes('第一段') && r.markdown.includes('第二段'), '正文两段都在')
   okf(/\n/.test(r.markdown), '保留换行（非单行挤压）')
+})
+
+await test('PDF：按 content-type/URL 识别并提取文本，不把 %PDF/FlateDecode 当正文', async () => {
+  const pdf = tinyPdf('Hello PDF from crawl')
+  const f = async () => resp({ body: pdf, headers: { 'content-type': 'application/pdf' } })
+  const r = await crawlWithFetch('https://x.test/doc.pdf', { fetcher: f, retries: 1 })
+  eq(r.success, true, 'success')
+  eq(r.via, 'pdf', 'via=pdf')
+  eq(r.pdf.pages, 1, '识别页数')
+  okf(r.markdown.includes('Hello PDF from crawl'), '提取出 PDF 文本')
+  okf(!r.markdown.includes('%PDF-') && !r.markdown.includes('FlateDecode'), '不返回原始 PDF 字节')
+  // URL .pdf 但实际返回 HTML：按 HTML 提取，不误判
+  const f2 = async () => resp({ body: HTML, headers: { 'content-type': 'text/html' } })
+  const r2 = await crawlWithFetch('https://x.test/not-really.pdf', { fetcher: f2, retries: 1 })
+  eq(r2.success, true, '非 PDF 内容仍按 HTML 处理')
+  eq(r2.via, 'fetch', 'via=fetch')
+  okf(r2.markdown.includes('第一段'), 'HTML 正文提取正常')
 })
 
 await test('403 → 重试后成功（UA 轮换）', async () => {

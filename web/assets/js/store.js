@@ -10,7 +10,7 @@
 
   // 覆盖为空 reactive（mock.js 若已加载则被覆盖；视图读取零改动，loadX 后填充）
   const MOCK = window.MOCK = reactive({
-    config: null, scopes: [], memories: {}, recall: {}, profile: {}, personas: [], personaLore: [], skills: [], tools: [], toolPacks: [], kb: [],
+    config: null, scopes: [], memories: {}, recall: {}, recallUsers: [], profile: {}, profileUsers: [], personas: [], personaLore: [], skills: [], tools: [], toolPacks: [], kb: [],
     conversations: [], sessions: {}, logFiles: [], logFilesTotal: 0, schedules: [], confirms: [], personaAdoptions: [],
     suggestions: [], perceptions: [], tokenTrend: [], requestTrend: [], toolTop: [],
     totalRequests: 0, totalToolCalls: 0, totalTokens: 0,
@@ -121,7 +121,9 @@
     async loadKb() { MOCK.kb = await api.get('/kb') },
     async loadMemories(scopeId) { MOCK.memories[scopeId] = await api.get('/memories', { scopeId }) },
     async loadRecall(userId) { MOCK.recall[userId] = await api.get('/recall', { userId }) },
+    async loadRecallUsers() { MOCK.recallUsers = await api.get('/recall/users') },
     async loadProfile(userId) { MOCK.profile[userId] = await api.get('/profile', { userId }) },
+    async loadProfileUsers() { MOCK.profileUsers = await api.get('/profile/users') },
     async loadPersonas() { MOCK.personas = await api.get('/personas') },
     async loadPersonaLore() { MOCK.personaLore = await api.get('/persona-lore') },
     async loadSkills() { MOCK.skills = await api.get('/skills') },

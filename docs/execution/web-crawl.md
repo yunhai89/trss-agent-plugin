@@ -36,6 +36,7 @@ kb:
 - **代理**：`agent.proxy` 同时作用于浏览器渲染与降级 fetch（配了代理则浏览器也走代理）；目标为本地/内网地址时始终直连。
 - **降级 fetch 的加固**：自动字符集（GBK/Big5 老站不乱码）、Cookie Jar（跳转携带会话）、反爬挑战页/JS 空壳识别（不把「Just a moment」「加载中」当正文）、Retry-After 退避重试。
 - **高级能力**（仅 crawl4ai 生效）：`wait_for` 等渲染完成、`js_code` 滚动/点击触发懒加载、`extract` CSS schema 结构化抽取、`links` 链接清单、`scroll` 虚拟滚动；降级纯 HTTP 时结果带 `degraded:true + skipped:[...]`（诚实标注）。
+- **PDF**：URL/content-type 识别为 PDF（或 crawl4ai 返回 `%PDF-` 原始字节）时，自动用 `pdfjs-dist` 提取文本，返回 `via: "pdf"` + `pdf.pages`；不会把 `%PDF-1.5` / `FlateDecode` 流当正文。扫描版/加密 PDF 无法提取文本时返回 `pdf_no_text` / `pdf_extract_failed` 明确提示。
 - **失败提示**：结果区分 `blocked`（403/429 反爬）、`challenge`（CF 等挑战页）、`js_required`（JS 空壳）、`empty`、`ssrf_blocked`，并给出下一步建议；crawl4ai 与 fetch 双路失败时附带两路错误。
 - **会话复用（抗反爬的关键一环）**：`sessionPersist` 打开时，该站点拿到的 cookie（含 Cloudflare `cf_clearance`/`__cf_bm` 等清关凭证）会按 host 存到 `data/crawl/sessions.json`，下次抓取（fetch 与浏览器两条路径）自动带上——不再"每次都是第一次访客"。fetch 路径是可靠的捕获通道（能拿到 HttpOnly 凭证），浏览器路径按 crawl4ai 版本尽力回传。清除会话：删 `data/crawl/` 下对应文件即可。
 - **站点难度记忆**：`siteMemory` 按 host 记住有效档位（上次纯 HTTP 就够 → 下次不再起浏览器；上次普通档被拦 → 下次直接用 `undetected`），避免反复用注定失败的档位去打同一站。

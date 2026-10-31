@@ -23,7 +23,10 @@
       const { toast, fmt } = window.UI
       const M = window.MOCK
 
-      const userIds = computed(() => [...new Set((M.scopes || []).map((s) => s.userId).filter(Boolean))])
+      const userIds = computed(() => [...new Set([
+        ...(M.profileUsers || []),
+        ...(M.scopes || []).map((s) => s.userId),
+      ].filter(Boolean))])
       const userId = ref('')
       const facet = ref('all')
       const showSuperseded = ref(false)
@@ -84,7 +87,7 @@
 
       onMounted(async () => {
         try {
-          await window.store.loadScopes()
+          await Promise.all([window.store.loadScopes(), window.store.loadProfileUsers()])
           if (!userId.value && userIds.value[0]) userId.value = userIds.value[0]
           if (userId.value) await window.store.loadProfile(userId.value)
         } catch (e) { toast(e.message, 'error') }

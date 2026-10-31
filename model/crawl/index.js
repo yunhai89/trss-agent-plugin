@@ -26,6 +26,7 @@ import Config from '../../utils/Config.js'
 import Log from '../../utils/Log.js'
 import { runCrawl4ai, isCrawl4aiAvailable, resetCrawl4aiProbe, runCrawl4aiInSandbox, probeCrawl4aiInSandbox } from './crawl4ai.js'
 import { assertUrlAllowed, hostIsBlocked, isPrivateIp, normalizeHost, parseLooseIPv4 } from '../stagehand/guard.js'
+import { extractPdfText } from '../document/pdf.js'
 import { toolSandbox, sandboxSelected } from '../sandbox/bridge.js'
 import { createCookieJar, getSetCookieLines } from './cookies.js'
 import { sessionStoreFor } from './session-store.js'
@@ -147,6 +148,8 @@ const hget = (res, name) => {
 /** 响应体读取上限：2xx 正文 2MB（超出截断）、非 2xx 错误页 256KB（只需识别挑战页），防单个大响应打爆内存 */
 const MAX_BODY_BYTES = 2 * 1024 * 1024
 const MAX_ERROR_BODY_BYTES = 256 * 1024
+/** PDF 上限：pdfjs 需整份读入内存；比普通 HTML 放宽，但防超大文件打爆宿主 */
+const MAX_PDF_BYTES = 32 * 1024 * 1024
 
 /**
  * 流式读响应体：按 maxBytes 边读边累计，超限立即 reader.cancel() 并返回已读片段
@@ -187,6 +190,81 @@ async function readBody(res, { maxBytes = MAX_BODY_BYTES } = {}) {
   }
   if (typeof res?.text === 'function') return { text: String((await res.text()) || ''), truncated: false }
   return { text: '', truncated: false }
+}
+
+/** 读取二进制响应体（PDF 等）；与 readBody 同样的流式上限保护 */
+async function readRawBody(res, { maxBytes = MAX_PDF_BYTES } = {}) {
+  const reader = res?.body?.getReader?.()
+  if (typeof reader?.read === 'function') {
+    const chunks = []
+    let total = 0
+    let truncated = false
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const chunk = Buffer.from(value)
+        if (total + chunk.length > maxBytes) {
+          chunks.push(chunk.subarray(0, Math.max(0, maxBytes - total)))
+          total = maxBytes
+          truncated = true
+          break
+        }
+        chunks.push(chunk)
+        total += chunk.length
+      }
+    } finally {
+      if (truncated) await reader.cancel().catch(() => {})
+    }
+    return { buffer: Buffer.concat(chunks, total), truncated }
+  }
+  if (typeof res?.arrayBuffer === 'function') {
+    const buf = Buffer.from(await res.arrayBuffer())
+    const truncated = buf.length > maxBytes
+    return { buffer: truncated ? buf.subarray(0, maxBytes) : buf, truncated }
+  }
+  const text = typeof res?.text === 'function' ? String((await res.text()) || '') : ''
+  return { buffer: Buffer.from(text), truncated: false }
+}
+
+/** 是否 PDF 响应（content-type 或 URL 后缀）；最终以 `%PDF-` magic 为准 */
+function looksLikePdfResponse(contentType, url) {
+  if (/application\/pdf/i.test(String(contentType || ''))) return true
+  try { return /\.pdf$/i.test(new URL(url).pathname) } catch { return /\.pdf(?:$|[?#])/i.test(String(url || '')) }
+}
+
+/** 把 PDF 字节转成可读正文；失败返回结构化错误，绝不把 `%PDF-...FlateDecode` 当正文喂给模型 */
+async function pdfToResult(buffer, { finalUrl, status, title } = {}) {
+  try {
+    const { pages, text } = await extractPdfText(buffer)
+    if (!text || text.length < 5) {
+      return {
+        success: false, code: 'pdf_no_text', status, finalUrl, title: title || '',
+        error: 'PDF 未提取到文本（可能是扫描件/纯图片 PDF）',
+        hint: '扫描版 PDF 需要 OCR：可下载后用 read_pdf 渲染页面图再识别，或换含文本层的 PDF',
+      }
+    }
+    const cap = text.length > 200000 ? text.slice(0, 200000) + '\n…(PDF 文本超长已截断)' : text
+    return { success: true, markdown: cap, title: title || pdfTitleFromUrl(finalUrl), via: 'pdf', status, finalUrl, pdf: { pages, chars: text.length } }
+  } catch (e) {
+    return {
+      success: false, code: 'pdf_extract_failed', status, finalUrl, title: title || '',
+      error: `PDF 解析失败：${e?.message || e}`,
+      hint: '文件可能损坏/加密/加密 PDF；可下载后尝试 read_pdf，或换普通网页/HTML 版本',
+    }
+  }
+}
+
+function pdfTitleFromUrl(url) {
+  try {
+    const name = decodeURIComponent(new URL(url).pathname.split('/').pop() || '')
+    return name.replace(/\.pdf$/i, '') || 'PDF 文档'
+  } catch { return 'PDF 文档' }
+}
+
+/** crawl4ai 偶尔会把 PDF 二进制原样当 markdown 返回；检测到就改走 fetch 解析 */
+function isRawPdfMarkdown(markdown) {
+  return /(^|\n)\s*%PDF-\d\.\d/.test(String(markdown || '').slice(0, 2048))
 }
 
 // Cookie Jar / Set-Cookie 解析已迁到 ./cookies.js（fetch 与浏览器两条路径共用同一套基础件，
@@ -334,7 +412,31 @@ export async function crawlWithFetch(url, { timeout = 30, fetcher, retries = 3, 
       const finalUrl = out.finalUrl || url
       const status = Number(res?.status) || 0
       if (res.ok || (status >= 200 && status < 300)) {
-        const { text: html, truncated } = await readBody(res)
+        const ct = hget(res, 'content-type')
+        const pdfish = looksLikePdfResponse(ct, finalUrl)
+        let html = ''
+        let truncated = false
+        if (pdfish) {
+          const raw = await readRawBody(res, { maxBytes: MAX_PDF_BYTES })
+          const magic = raw.buffer.subarray(0, 1024).toString('latin1').includes('%PDF-')
+          if (magic) {
+            if (raw.truncated) {
+              return {
+                success: false, code: 'pdf_too_large', status, finalUrl, title: '',
+                error: `PDF 过大（超过 ${MAX_PDF_BYTES / 1024 / 1024}MB），已中止解析`,
+                hint: '可下载到本地后用 read_pdf 读取，或换体积更小的 PDF',
+              }
+            }
+            return await pdfToResult(raw.buffer, { finalUrl, status })
+          }
+          // content-type/URL 像 PDF，但实际不是 PDF（如错误页/挑战页）→ 按 HTML 继续处理
+          html = decodeHtmlBuffer(raw.buffer, ct)
+          truncated = raw.truncated
+        } else {
+          const body = await readBody(res)
+          html = body.text
+          truncated = body.truncated
+        }
         const { title, text } = htmlToText(html)
         if (looksLikeChallenge({ status, html, title })) {
           return { success: false, code: 'challenge', status, finalUrl, title, error: '命中反爬挑战页（Cloudflare 等）', hint: '目标站点使用 JS 挑战/风控：需真浏览器渲染（crawl4ai 默认引擎，确认已跑 scripts/install-crawl4ai.sh）；仍失败可在 agent.proxy 配置出口代理' }
@@ -600,9 +702,13 @@ export async function crawlUrl(url, opts = {}) {
   const gate = host ? hostGateFor(policy) : null
   // 记忆档位：'fetch' 只在没有高级参数时才可插队（wait_for/js_code/extract 等 fetch 根本做不了）
   const remembered = (memory && host && memory.preferredTier(host)) || null
-  const startTier = remembered === 'undetected'
-    ? 'undetected'
-    : (remembered === 'fetch' && advancedUsed.length === 0 ? 'fetch' : null)
+  const startTier = (() => {
+    // URL 后缀明确是 PDF：直接走 fetch + PDF 文本提取，避免 crawl4ai 把二进制当 markdown 返回
+    if (/\.pdf(?:$|[?#])/i.test(u)) return 'fetch'
+    if (remembered === 'undetected') return 'undetected'
+    if (remembered === 'fetch' && advancedUsed.length === 0) return 'fetch'
+    return null
+  })()
   const release = gate ? await gate.acquire(host) : null
   // profile 档：持久 user_data_dir（显式 opt-in）——浏览器全局串行，避免 profile 锁冲突
   const profileDir = policy.sessionProfile ? path.join(policy.sessionDir || defaultCrawlDir(), 'profile') : null
@@ -687,6 +793,11 @@ export async function crawlUrl(url, opts = {}) {
         Log.warn(`[crawl] crawl4ai 不可用（${why}${py}；${fix}），走 fetch`)
       }
     }
+    // crawl4ai 把 PDF 二进制当正文返回时（未识别 content-type 的 PDF），改走 fetch 做文本提取
+    if (r?.success && isRawPdfMarkdown(r.markdown)) {
+      Log.warn(`[crawl] 检测到 PDF 原始字节（crawl4ai 未解析），改走 fetch + PDF 提取：${u}`)
+      r = await doFetch(u, { ...o, checkUrl: checkTarget, ...(fetchJar ? { jar: fetchJar } : {}) })
+    }
     if (!r?.success) {
       // 降级标注：本次请求的高级能力未生效（fetch 无浏览器/无 JS），调用方据 degraded 决定是否重试或提示
       r = await doFetch(u, { ...o, checkUrl: checkTarget, ...(fetchJar ? { jar: fetchJar } : {}) })
@@ -718,7 +829,7 @@ export async function crawlUrl(url, opts = {}) {
     if (memory && host) {
       try {
         if (r?.success) {
-          memory.note(host, { ok: true, tier: r.via === 'fetch' ? 'fetch' : (r.escalated ? 'undetected' : 'crawl4ai') })
+          memory.note(host, { ok: true, tier: (r.via === 'fetch' || r.via === 'pdf') ? 'fetch' : (r.escalated ? 'undetected' : 'crawl4ai') })
         } else {
           memory.note(host, { ok: false, tier: attempted.tier, code: attempted.blocked ? 'blocked' : (r?.code || r?.crawl4ai?.code || 'failed') })
         }
@@ -799,6 +910,7 @@ export const webCrawlTool = {
     }
     const cap = Math.max(1000, Number(maxLength) || 12000)
     const out = { ok: true, url: u, title: r.title || '', via: r.via || 'fetch' }
+    if (r.pdf) out.pdf = r.pdf
     if (r.escalated) out.escalated = true
     if (r.extracted) {
       out.extracted = r.extracted

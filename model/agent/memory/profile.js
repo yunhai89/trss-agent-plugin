@@ -305,6 +305,17 @@ export class ProfileStore {
     return out
   }
 
+  /** 扫描 KV 里实际存在画像的用户键（Web 面板用户列表用） */
+  async listUsers() {
+    try {
+      const keys = await this.kv.scan(this.prefix)
+      return (Array.isArray(keys) ? keys : [])
+        .map((k) => String(k).slice(this.prefix.length))
+        .filter(Boolean)
+        .sort()
+    } catch { return [] }
+  }
+
   /** 扁平列出全部条目 + 统计（Web 面板用） */
   async overview(userId) {
     const model = await this.load(userId)

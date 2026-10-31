@@ -18,8 +18,11 @@
       const { toast, fmt } = window.UI
       const M = window.MOCK
 
-      /* 用户清单来自 scope 列表(唯一 userId);recall 接口按单用户取 */
-      const userIds = computed(() => [...new Set((M.scopes || []).map((s) => s.userId).filter(Boolean))])
+      /* 用户清单：声明式记忆 scope + 长期记忆 KV 里实际存在的用户键（官方 openid 的 scope 目录是净化后的，不能只靠 scopes） */
+      const userIds = computed(() => [...new Set([
+        ...(M.recallUsers || []),
+        ...(M.scopes || []).map((s) => s.userId),
+      ].filter(Boolean))])
       const userId = ref('')
       const level = ref('all')
       const showSuspect = ref(true)
@@ -59,7 +62,7 @@
       /* 惰性加载:scope 列表定默认用户 → 拉该用户 recall;切用户重拉 */
       onMounted(async () => {
         try {
-          await window.store.loadScopes()
+          await Promise.all([window.store.loadScopes(), window.store.loadRecallUsers()])
           if (!userId.value && userIds.value[0]) userId.value = userIds.value[0]
           if (userId.value) await window.store.loadRecall(userId.value)
         } catch (e) { toast(e.message, 'error') }

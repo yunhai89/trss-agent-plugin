@@ -249,6 +249,13 @@ router.get('/recall', asyncHandler(async (req, res) => {
   return ok(res, list)
 }))
 
+// GET /api/recall/users —— 长期记忆里实际存在的用户键（Web 面板用户列表用）
+router.get('/recall/users', asyncHandler(async (_req, res) => {
+  const r = await getRt(res); if (!r) return
+  const users = await r.recall.listUsers().catch(() => [])
+  return ok(res, users)
+}))
+
 // GET /api/profile?userId= —— 统一用户画像（条目 + 统计）
 router.get('/profile', asyncHandler(async (req, res) => {
   const userId = String(req.query.userId || '')
@@ -257,6 +264,14 @@ router.get('/profile', asyncHandler(async (req, res) => {
   if (!r.profile) return ok(res, { entries: [], stats: {}, disabled: true })
   const d = await r.profile.overview(userId).catch(() => ({ entries: [], stats: {} }))
   return ok(res, d)
+}))
+
+// GET /api/profile/users —— 画像里实际存在的用户键（Web 面板用户列表用）
+router.get('/profile/users', asyncHandler(async (_req, res) => {
+  const r = await getRt(res); if (!r) return
+  if (!r.profile) return ok(res, [])
+  const users = await r.profile.listUsers().catch(() => [])
+  return ok(res, users)
 }))
 
 // GET /api/schedule —— 定时任务

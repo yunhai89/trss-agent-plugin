@@ -46,9 +46,37 @@ export const readPdfTool = {
   },
 }
 
+/**
+ * 仅提取 PDF 文本（不渲染、不发图）——供 web_crawl/knowledge 等抓取链路复用。
+ * @param {Buffer|Uint8Array} input PDF 字节
+ * @param {{maxPages?:number}} [opts] 最多提取页数（默认 200）
+ * @returns {Promise<{pages:number, text:string}>}
+ */
+export async function extractPdfText(input, { maxPages = MAX_TEXT_PAGES } = {}) {
+  const bytes = Buffer.isBuffer(input) ? input : Buffer.from(input || [])
+  if (!bytes.length) throw new Error('PDF 内容为空')
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(bytes), isEvalSupported: false, verbosity: 0 })
+  const doc = await loadingTask.promise
+  try {
+    const numPages = doc.numPages
+    const end = Math.min(numPages, Math.max(1, Number(maxPages) || MAX_TEXT_PAGES))
+    const parts = []
+    for (let i = 1; i <= end; i++) {
+      const page = await doc.getPage(i)
+      const tc = await page.getTextContent()
+      const pageText = tc.items.map((item) => item.str || '').join(' ').trim()
+      if (pageText) parts.push(pageText)
+      await page.cleanup()
+    }
+    return { pages: numPages, text: parts.join('\n\n').trim() }
+  } finally {
+    await loadingTask.destroy()
+  }
+}
+
 /** pdfjs-dist canvas factory（Node 端 @napi-rs/canvas） */
-function makeFactory() {
-  // 延迟导入（首次使用时加载）
+function makeFactory() {  // 延迟导入（首次使用时加载）
   return {
     async create() {
       const { createCanvas } = await import('@napi-rs/canvas')

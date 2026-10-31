@@ -493,6 +493,17 @@ export class RecallStore {
     })
   }
 
+  /** 扫描 KV 里实际存在长期记忆的用户键（Web 面板用户列表用；区别于声明式记忆目录） */
+  async listUsers() {
+    try {
+      const keys = await this.kv.scan(this.prefix)
+      return (Array.isArray(keys) ? keys : [])
+        .map((k) => String(k).slice(this.prefix.length))
+        .filter(Boolean)
+        .sort()
+    } catch { return [] }
+  }
+
   /** 按 id 精确删除单条（Web 面板用；forget 只能按 keyword 模糊删） */
   async removeById(userId, entryId) {
     return this._lock.withLock(this._key(userId), async () => {

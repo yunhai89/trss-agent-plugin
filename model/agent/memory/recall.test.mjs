@@ -141,6 +141,15 @@ await test('recall：用户隔离 + 基础召回不回归', async () => {
   eq(other.length, 0, '他人无记忆')
 })
 
+await test('listUsers：扫描 KV 实际用户键（Web 面板用户列表）', async () => {
+  const kv = memoryKv()
+  const r = new RecallStore({ kv })
+  await r.writeMemory({ content: '用户喜欢简洁的回复', level: 'L3', confidence: 0.8 }, 'u1')
+  await r.writeMemory({ content: '用户是工程师', level: 'L4', confidence: 0.9 }, '1903797111:807AC1596B40D96591A5ACBEB3CFFA4D')
+  eq(await r.listUsers(), ['1903797111:807AC1596B40D96591A5ACBEB3CFFA4D', 'u1'], '返回实际存在的用户键')
+  eq(await new RecallStore({ kv, prefix: 'none:' }).listUsers(), [], '无键返回空数组')
+})
+
 console.log(`\n========================================`)
 console.log(`recall 质量测试：通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)

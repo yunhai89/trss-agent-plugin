@@ -131,6 +131,15 @@ await test('威胁扫描：命中注入的画像不注入', async () => {
   ok(list.some((e) => e.suspect), '保留 suspect 供排查')
 })
 
+await test('listUsers：扫描 KV 实际画像用户键（Web 面板用户列表）', async () => {
+  const kv = memoryKv()
+  const p = new ProfileStore({ kv })
+  await p.upsert('u1', { facet: 'preference', claim: '用户喜欢深色模式' })
+  await p.upsert('1903797111:807AC1596B40D96591A5ACBEB3CFFA4D', { facet: 'identity', claim: '用户是工程师' })
+  eq(await p.listUsers(), ['1903797111:807AC1596B40D96591A5ACBEB3CFFA4D', 'u1'], '返回实际存在的用户键')
+  eq(await new ProfileStore({ kv, prefix: 'none:' }).listUsers(), [], '无键返回空数组')
+})
+
 console.log(`\n========================================`)
 console.log(`profile 测试：通过 ${passed}，失败 ${failed}`)
 console.log(`========================================`)

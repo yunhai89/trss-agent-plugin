@@ -1048,6 +1048,7 @@
   ]
   window.MOCK = Vue.reactive({
     config, scopes, memories, recall, profile, personas, personaLore, skills,
+    recallUsers: Object.keys(recall), profileUsers: Object.keys(profile),
     conversations, sessions, logFiles, schedules, confirms,
     suggestions, perceptions, tokenTrend, requestTrend, toolTop,
     totalRequests, totalToolCalls, totalTokens, tevoTools,
