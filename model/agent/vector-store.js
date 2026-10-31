@@ -454,7 +454,8 @@ export class LocalVectorStore {
       }
     } else if (this.backend === 'cuvs' && this._cuvs) {
       try {
-        const candidates = this._cuvs.search(q, this._candidateK(k), this._entries())
+        // 只有 dirty（upsert/remove 后）才需要把全量条目传给 cuVS 重建；正常查询不要每轮构造 1 万条 entries
+        const candidates = this._cuvs.search(q, this._candidateK(k), this._cuvs.dirty ? this._entries() : [])
         const hits = this._scoreRows(q, candidates.map((c) => c.row), k, filter, floor)
         if (hits.length || candidates.length || !this._count) return hits
         this._log('warn', '[vector] cuVS 候选为空，本次回退 Flat 精确检索')
@@ -473,6 +474,8 @@ export class LocalVectorStore {
     }
     if (this.backend === 'cuvs' && this._cuvs) {
       const s = this._cuvs.stats()
+      // BruteForce 是 GPU 精确检索，直接取 topK；CAGRA 受 k<=64 限制，至少取 64 个候选
+      if (s.algorithm === 'brute_force') return Math.min(this._count, k)
       return Math.min(this._count, Math.max(k, k * s.rerank, 64))
     }
     return k

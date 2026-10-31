@@ -21,6 +21,7 @@
 
 - [终端执行与 E2B 沙箱](execution/e2b.md) —— 云托管 / 自托管 / 网络策略
 - [网页抓取](execution/web-crawl.md) —— crawl4ai 与 HTTP 降级
+- [GPU 向量检索部署](deploy/gpu-vector.md) —— cuvs-node / cuVS BruteForce / CAGRA 真机验证与回滚
 - [Stagehand 浏览器自动化](execution/stagehand.md) —— goto / observe / extract / act
 - [表情包](sticker.md) —— 自动发现、视觉打标、频率管控
 

@@ -219,6 +219,7 @@ agent:
       efSearch: 256          # 查询搜索宽度（越大召回越高、查询越慢）
       rerank: 4             # 候选倍数：candidateK = max(efSearch, topK*rerank)，再用 Flat 精确重排
     cuvs:                   # GPU CAGRA（cuvs-node，Linux + CUDA 12.x；仅 vectorGpuConsent=true 时生效）
+      algorithm: brute_force # brute_force=GPU 精确检索（默认，质量优先，插件规模 <1ms）；cagra=图索引（更大规模，k 上限 64）
       rerank: 4             # GPU 候选倍数；最终仍用 Flat 向量精确重排
   schedule:
     taskEnabled: true       # 定时任务链总开关（#定时任务 cron 重复 task；false 则拒绝创建）。注意：提醒按用户归属，定时任务链按会话（群级）归属

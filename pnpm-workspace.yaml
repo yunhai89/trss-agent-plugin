@@ -11,4 +11,5 @@ allowBuilds:
   '@napi-rs/canvas': false
   '@node-rs/jieba': false
   hnswlib-node: true # HNSW 可选后端；构建失败时 optionalDependencies 允许安装继续，运行时回退 Flat
+  cuvs-node: true # GPU 可选后端；仅 Linux+GPU 用户需要，安装脚本下载约 1.8GB 预编译 CUDA 运行时
   esbuild: false

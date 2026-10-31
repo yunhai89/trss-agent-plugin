@@ -24,6 +24,7 @@ const dim = Math.max(8, Number(args.dim) || 128)
 const queries = Math.max(1, Number(args.queries) || 50)
 const topK = Math.max(1, Number(args.topk) || 5)
 const wantCuvs = args.cuvs === true || args.cuvs === 'true'
+const cuvsAlgorithm = args['cuvs-algorithm'] === 'cagra' ? 'cagra' : 'brute_force'
 
 let seed = 42
 const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2 ** 32 - 0.5 }
@@ -33,13 +34,29 @@ const queryVecs = Array.from({ length: queries }, () => Array.from({ length: dim
 function now() { return Number(process.hrtime.bigint()) / 1e6 }
 function fmt(ms) { return `${ms.toFixed(ms < 10 ? 2 : 1)}ms` }
 
+/** 每查询 topK 与 Flat 精确结果的重合率 */
+function overlapRate(flatResults, results) {
+  let hit = 0
+  let total = 0
+  for (let i = 0; i < results.length; i++) {
+    const exact = new Set(flatResults[i] || [])
+    const list = results[i] || []
+    total += list.length
+    for (const id of list) if (exact.has(id)) hit++
+  }
+  return total ? hit / total : 0
+}
+
 function bench(label, backend, opts = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `vecbench-${backend}-`))
   try {
     const s = new LocalVectorStore({ dir, backend, ...opts })
     const t0 = now()
     s.upsertMany(items)
+    s.save()
     const build = now() - t0
+    // 预热一次（首次查询含 GPU/索引惰性初始化），稳态延迟单独统计
+    try { s.search(queryVecs[0], topK) } catch { /* noop */ }
     const t1 = now()
     const results = queryVecs.map((q) => s.search(q, topK).map((h) => h.id))
     const search = now() - t1
@@ -65,15 +82,7 @@ console.log(`\nFlat：建库/插入 ${fmt(flat.buildMs)} · 平均查询 ${fmt(f
 let hnsw = null
 try {
   hnsw = bench('HNSW（CPU）', 'hnsw', { hnsw: { m: Number(args.m) || 16, efConstruction: Number(args.efConstruction) || 200, efSearch: Number(args.efSearch) || 256, rerank: Number(args.rerank) || 4 } })
-  let hit = 0
-  let total = 0
-  for (let i = 0; i < hnsw.results.length; i++) {
-    const exact = new Set(flat.results[i] || [])
-    const list = hnsw.results[i] || []
-    total += list.length
-    for (const id of list) if (exact.has(id)) hit++
-  }
-  const recall = total ? hit / total : 0
+  const recall = overlapRate(flat.results, hnsw.results)
   console.log(`HNSW：建库/插入 ${fmt(hnsw.buildMs)} · 平均查询 ${fmt(hnsw.avgMs)} · 相对 Flat 的 topK 重合率 ${(recall * 100).toFixed(1)}%`)
 } catch (e) {
   console.log(`HNSW：跳过（${e?.message || e}）`)
@@ -84,8 +93,9 @@ if (wantCuvs) {
     console.log('cuVS：跳过（未检测到 GPU）')
   } else {
     try {
-      const cuvs = bench('cuVS（GPU）', 'cuvs', { gpuConsent: true, cuvs: { rerank: Number(args.rerank) || 4 } })
-      console.log(`cuVS：建库/插入 ${fmt(cuvs.buildMs)} · 平均查询 ${fmt(cuvs.avgMs)} · 实际后端 ${cuvs.backend}`)
+      const cuvs = bench('cuVS（GPU）', 'cuvs', { gpuConsent: true, cuvs: { rerank: Number(args.rerank) || 4, algorithm: cuvsAlgorithm } })
+      const recall = overlapRate(flat.results, cuvs.results)
+      console.log(`cuVS（${cuvsAlgorithm}）：建库/插入 ${fmt(cuvs.buildMs)} · 平均查询 ${fmt(cuvs.avgMs)} · 相对 Flat 的 topK 重合率 ${(recall * 100).toFixed(1)}% · 实际后端 ${cuvs.backend}`)
     } catch (e) {
       console.log(`cuVS：跳过（${e?.message || e}）`)
     }

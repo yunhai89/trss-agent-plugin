@@ -55,10 +55,11 @@ export function loadCuvsSync() {
     const mod = require('cuvs-node')
     const Resources = mod?.Resources || mod?.default?.Resources
     const CagraIndex = mod?.CagraIndex || mod?.default?.CagraIndex
-    if (typeof Resources !== 'function' || typeof CagraIndex !== 'function') {
-      throw new Error('导出中缺少 Resources/CagraIndex')
+    const BruteForceIndex = mod?.BruteForceIndex || mod?.default?.BruteForceIndex
+    if (typeof Resources !== 'function' || typeof CagraIndex !== 'function' || typeof BruteForceIndex !== 'function') {
+      throw new Error('导出中缺少 Resources/CagraIndex/BruteForceIndex')
     }
-    return { Resources, CagraIndex }
+    return { Resources, CagraIndex, BruteForceIndex }
   } catch (e) {
     throw new VectorBackendError(`cuvs-node 不可用：${e?.message || e}`, 'cuvs_unavailable')
   }
@@ -304,17 +305,18 @@ export class HnswIndex {
  * 下一次 search/save 时用完整 Flat 向量重建。
  */
 export class CuvsIndex {
-  constructor({ dir, gpuConsent = false, rerank = 4, signature = null, logger = null } = {}) {
+  constructor({ dir, gpuConsent = false, rerank = 4, algorithm = 'brute_force', signature = null, logger = null } = {}) {
     if (!dir) throw new VectorBackendError('CuvsIndex 需要 dir', 'bad_dir')
     if (!gpuConsent) throw new VectorBackendError('GPU 向量库需要用户显式授权（kb.vectorGpuConsent=true）', 'cuvs_consent_required')
     this.dir = dir
     this.binFile = path.join(dir, 'cuvs.bin')
     this.metaFile = path.join(dir, 'cuvs.json')
     this.rerank = Math.max(1, Math.floor(Number(rerank) || 4))
+    this.algorithm = algorithm === 'cagra' ? 'cagra' : 'brute_force'
     this.signature = signature == null ? null : String(signature)
     this.logger = typeof logger === 'function' ? logger : null
-    const { Resources, CagraIndex } = loadCuvsSync()
-    this._CagraIndex = CagraIndex
+    const { Resources, CagraIndex, BruteForceIndex } = loadCuvsSync()
+    this._IndexClass = this.algorithm === 'cagra' ? CagraIndex : BruteForceIndex
     this._Resources = Resources
     this._resources = null
     this._index = null
@@ -355,7 +357,7 @@ export class CuvsIndex {
       data.set(e.vector, i * this._dim)
       return e.row
     })
-    this._index = this._CagraIndex.build(this._ensureResources(), data, { rows: entries.length, cols: this._dim })
+    this._index = this._IndexClass.build(this._ensureResources(), data, { rows: entries.length, cols: this._dim })
     this._dirty = false
     return this
   }
@@ -368,9 +370,9 @@ export class CuvsIndex {
     if (this.signature != null && meta.signature != null && String(meta.signature) !== this.signature) return false
     if (!entries.length) return false
     const dim = entries[0].vector.length
-    if (Number(meta.dim) !== dim || Number(meta.count) !== entries.length) return false
+    if (Number(meta.dim) !== dim || Number(meta.count) !== entries.length || (meta.algorithm || 'brute_force') !== this.algorithm) return false
     try {
-      this._index = this._CagraIndex.deserialize(this._ensureResources(), this.binFile)
+      this._index = this._IndexClass.deserialize(this._ensureResources(), this.binFile)
       this._rows = entries.map((e) => e.row)
       this._dim = dim
       this._dirty = false
@@ -387,7 +389,8 @@ export class CuvsIndex {
   search(query, topK, entries = []) {
     if (this._dirty) this.build(entries)
     if (!this._index || !this._rows.length) return []
-    const k = Math.max(1, Math.min(Math.floor(Number(topK) || 1), this._rows.length))
+    const maxK = this.algorithm === 'cagra' ? 64 : this._rows.length
+    const k = Math.max(1, Math.min(Math.floor(Number(topK) || 1), this._rows.length, maxK))
     const res = this._index.search(this._ensureResources(), Float32Array.from(query), { rows: 1, cols: this._dim, k })
     const out = []
     const indices = res?.indices || []
@@ -414,6 +417,7 @@ export class CuvsIndex {
       dim: this._dim,
       count: this._rows.length,
       signature: this.signature,
+      algorithm: this.algorithm,
     })
   }
 
@@ -424,6 +428,6 @@ export class CuvsIndex {
   }
 
   stats() {
-    return { backend: 'cuvs', rerank: this.rerank, count: this._rows.length, dim: this._dim, dirty: this._dirty }
+    return { backend: 'cuvs', algorithm: this.algorithm, rerank: this.rerank, count: this._rows.length, dim: this._dim, dirty: this._dirty }
   }
 }

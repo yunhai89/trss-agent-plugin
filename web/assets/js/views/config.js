@@ -240,6 +240,7 @@
         if (form.kb.hnsw.efSearch == null) form.kb.hnsw.efSearch = 256
         if (form.kb.hnsw.rerank == null) form.kb.hnsw.rerank = 4
         if (!form.kb.cuvs) form.kb.cuvs = {}
+        if (form.kb.cuvs.algorithm == null) form.kb.cuvs.algorithm = 'brute_force'
         if (form.kb.cuvs.rerank == null) form.kb.cuvs.rerank = 4
         if (!form.kb.crawl) form.kb.crawl = {}
         if (form.kb.crawl.engine == null) form.kb.crawl.engine = 'crawl4ai'
@@ -2271,6 +2272,12 @@
                   </select>
                 </cfg-row>
                 <cfg-row name="GPU 向量检索授权" desc="默认关：即使检测到 GPU 也不会自动启用 cuVS，避免抢占用户 GPU 任务；开启前请确认显卡空闲"><v-switch v-model="form.kb.vectorGpuConsent"/></cfg-row>
+                <cfg-row name="cuVS 算法" desc="brute_force=GPU 精确检索（默认，质量优先）；cagra=图索引，适合更大数据量">
+                  <select class="sel" style="width:180px" v-model="form.kb.cuvs.algorithm">
+                    <option value="brute_force">brute_force（精确）</option>
+                    <option value="cagra">CAGRA（图索引）</option>
+                  </select>
+                </cfg-row>
                 <cfg-row name="HNSW m" desc="每个节点最大出边；越大召回越高、内存/建库越慢"><input type="number" class="inp" style="width:100px" min="4" v-model.number="form.kb.hnsw.m"></cfg-row>
                 <cfg-row name="HNSW efConstruction" desc="建库搜索宽度；越大质量越好、建库越慢"><input type="number" class="inp" style="width:100px" min="4" v-model.number="form.kb.hnsw.efConstruction"></cfg-row>
                 <cfg-row name="HNSW efSearch" desc="查询搜索宽度；越大召回越高、查询越慢"><input type="number" class="inp" style="width:100px" min="1" v-model.number="form.kb.hnsw.efSearch"></cfg-row>

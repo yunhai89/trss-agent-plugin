@@ -448,6 +448,7 @@ export function supportGuoba() {
         { field: 'agent.kb.vectorStore', label: '本地向量索引', bottomHelpMessage: '默认开；纯 JS Flat 精确检索，落盘 data/vectors/kb；关=退回 KV 内全量 cosine 扫描', component: 'Switch' },
         { field: 'agent.kb.vectorBackend', label: '向量后端', bottomHelpMessage: 'auto=有 hnswlib-node 就用 HNSW，否则 Flat；hnsw=强制 HNSW；flat=纯 JS；cuvs=GPU（需授权+装 cuvs-node）', component: 'Select', componentProps: { options: [{ label: 'auto（推荐）', value: 'auto' }, { label: 'HNSW（CPU）', value: 'hnsw' }, { label: 'Flat（纯 JS）', value: 'flat' }, { label: 'cuVS（GPU）', value: 'cuvs' }] } },
         { field: 'agent.kb.vectorGpuConsent', label: 'GPU 向量检索授权', bottomHelpMessage: '默认关：即使检测到 GPU 也不会自动启用 cuVS，避免抢占用户 GPU 任务；确认显卡空闲后再开', component: 'Switch' },
+        { field: 'agent.kb.cuvs.algorithm', label: 'cuVS 算法', bottomHelpMessage: 'brute_force=GPU 精确检索（默认，质量优先，插件规模下延迟 <1ms）；cagra=图索引（更大规模，单次 k 上限 64）', component: 'Select', componentProps: { options: [{ label: 'brute_force（精确）', value: 'brute_force' }, { label: 'CAGRA（图索引）', value: 'cagra' }] } },
         { field: 'agent.kb.hnsw.m', label: 'HNSW m', bottomHelpMessage: '每个节点最大出边（默认 16；越大召回越高、内存/建库越慢）', component: 'InputNumber', componentProps: { min: 4 } },
         { field: 'agent.kb.hnsw.efConstruction', label: 'HNSW efConstruction', bottomHelpMessage: '建库搜索宽度（默认 256；越大质量越好、建库越慢）', component: 'InputNumber', componentProps: { min: 4 } },
         { field: 'agent.kb.hnsw.efSearch', label: 'HNSW efSearch', bottomHelpMessage: '查询搜索宽度（默认 256；越大召回越高、查询越慢）', component: 'InputNumber', componentProps: { min: 1 } },

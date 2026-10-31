@@ -3664,6 +3664,7 @@ export class Chat extends plugin {
       lines.push('开启 GPU：安装 cuvs-node 后设 agent.kb.vectorBackend=cuvs、agent.kb.vectorGpuConsent=true（确认 GPU 空闲后再开）')
     }
     if (st?.hnsw) lines.push(`HNSW：m=${st.hnsw.m} efConstruction=${st.hnsw.efConstruction} efSearch=${st.hnsw.efSearch} rerank=${st.hnsw.rerank}`)
+    if (st?.cuvs) lines.push(`cuVS：algorithm=${st.cuvs.algorithm} rerank=${st.cuvs.rerank}`)
     await this.e.reply(lines.join('\n'))
     return true
   }
