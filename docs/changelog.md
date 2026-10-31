@@ -6,7 +6,7 @@
 
 | 版本 | 内容 |
 | --- | --- |
-| **v1.46.9** | cuVS GPU 真机落地：新增 `cuvs.algorithm`（默认 `brute_force` GPU 精确检索，`cagra` 可选；`cagra` 单次 k 上限 64）、cuVS 持久化/增删改与 KnowledgeStore 集成真机测试；`cuvs-node` 改为可选 peer（不强制普通用户下载 1.8GB）；新增 [GPU 向量检索部署文档](deploy/gpu-vector.md)，含 RTX 2080 实测基线与回滚 |
+| **v1.46.9** | cuVS GPU 真机落地：新增 `cuvs.algorithm`（默认 `brute_force` GPU 精确检索，`cagra` 可选；`cagra` 单次 k 上限 64）、cuVS 持久化/增删改与 KnowledgeStore 集成真机测试；`cuvs-node` 保持手动安装（不写入默认依赖，避免普通用户下载 1.8GB）；新增 [GPU 向量检索部署文档](deploy/gpu-vector.md)，含 RTX 2080 实测基线与回滚 |
 | **v1.46.8** | 向量库新增可选 HNSW（hnswlib-node）与 NVIDIA GPU cuVS/CAGRA（cuvs-node）后端：`auto` 在装了 hnswlib-node 时用 HNSW，GPU 必须显式 `vectorBackend: cuvs` + `vectorGpuConsent: true` 才启用（启动只检测/提示，绝不自动占用 GPU）；ANN 候选统一用 Flat 向量精确重排，索引损坏/换模型自动回退或重建；新增 `#向量库状态` 与 `scripts/vector-benchmark.mjs` 性能自检 |
 | **v1.46.7** | 新增插件内嵌本地向量库：知识库改用纯 JS Flat 精确索引（`data/vectors/kb/vectors.bin`，单文件原子落盘 + Top-K 小顶堆），KV 仍是事实源；索引缺失/损坏/换 embedding 模型时自动重建或降级词面检索；新增 `agent.kb.vectorStore` 开关与 `LocalVectorStore` 单测 |
 | **v1.46.6** | Stagehand 浏览器自动化 `stagehand__act` 取消单独审批：移除 `meta.alwaysConfirm`，点击/输入/提交作为多步浏览器任务直接执行（仍受 `stagehand.permission`/RBAC 控制，保留同一会话串行）；文档、锅巴与 Web 面板提示同步 |
