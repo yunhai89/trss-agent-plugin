@@ -151,7 +151,7 @@ export function makeContextRecallTool({ archiveFor }) {
       if (!hits.length) return { ok: false, error: `归档中未命中关键词：${query}` }
       return {
         ok: true,
-        hits: hits.map((h) => ({ ref: h.ref, count: h.count, epoch: h.epoch, excerpt: h.excerpt.slice(0, 300) })),
+        hits: hits.map((h) => ({ ref: h.ref, count: h.count, epoch: h.epoch, score: h.score, excerpt: h.excerpt.slice(0, 300) })),
         hint: '需要完整原文时用其中的 ref 再次调用；结果过大时用 offset/limit 续读或用 ref+query 直接取命中片段',
       }
     },

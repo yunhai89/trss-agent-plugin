@@ -98,8 +98,25 @@ await test('buildLedger：确定性台账——facts/tool_state/completed_steps 
   const term = led.tool_state.find((t) => t.tool === 'terminal')
   ok(term && term.calls === 2 && term.failures === 1, `tool_state 统计 calls/failures（实际 ${JSON.stringify(term)}）`)
   ok(led.completed_steps.some((s) => String(s.text).includes('部署完成')), 'completed_steps 含 assistant 步骤摘录')
+  ok(led.errors.some((e) => e.tool === 'terminal' && e.text.includes('权限不足')), 'errors 保留工具失败原文')
   // 确定性：同输入两次构建结果逐字节一致（防漂移要求 ledger 是结构化提取物而非生成物）
   eq(JSON.stringify(buildLedger(dropped, { msgStart: 1 })), JSON.stringify(led), '同输入 → 同 ledger（确定性）')
+})
+
+await test('buildLedger：约束/决定/未决问题优先提取（主流 auto-compact 的 pinned state）', async () => {
+  const dropped = [
+    um('必须使用 2.3.2 版本，禁止再部署 2.3.1'),
+    um('这个接口需要保持向后兼容吗？'),
+    am('决定采用增量迁移方案，最终保留旧字段'),
+    am('下一步需要你确认是否清理旧数据'),
+    atmFlat([{ id: 'c1', name: 'terminal' }]),
+    tmFlat('c1', '{"error":"permission denied"}'),
+  ]
+  const led = buildLedger(dropped)
+  ok(led.constraints.some((x) => x.text.includes('2.3.2') && x.text.includes('禁止')), 'constraints 提取必须/禁止')
+  ok(led.decisions.some((x) => x.text.includes('增量迁移')), 'decisions 提取已确认方案')
+  ok(led.open_questions.some((x) => x.text.includes('确认') || x.text.includes('吗')), 'open_questions 提取待确认')
+  ok(led.errors.some((x) => x.text.includes('permission denied')), 'errors 提取工具失败')
 })
 
 await test('mergeLedger：多次压缩合并——prev facts 保留、archive_refs 追加、不重新总结', async () => {
@@ -128,7 +145,7 @@ await test('renderCompactionMessage：系统生成标注 + archive ref + context
 await test('CompactionArchive：内容寻址写入 + hash 校验往返 + 篡改检测 + 关键词检索', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'compact-arch-'))
   const arch = new CompactionArchive({ dir })
-  const originals = [um('查一下 Hermes 架构'), atmFlat([{ id: 'c1', name: 'web_crawl' }]), tmFlat('c1', 'Hermes 用可插拔 context engine')]
+  const originals = [um('查一下 Hermes 架构，顺便看 Kubernetes 滚动更新'), atmFlat([{ id: 'c1', name: 'web_crawl' }]), tmFlat('c1', 'Hermes 用可插拔 context engine')]
   const saved = await arch.save({ convKey: 'u1:p:c1', epoch: 1, messages: originals })
   ok(/^[0-9a-f]{16,}$/.test(saved.hash), `内容寻址 hash（实际 ${saved.hash}）`)
   ok(saved.ref && saved.count === 3, `ref + 条数（实际 ${saved.count}）`)
@@ -140,6 +157,9 @@ await test('CompactionArchive：内容寻址写入 + hash 校验往返 + 篡改�
   const hits = await arch.search('u1:p:c1', 'Hermes')
   ok(hits.some((h) => h.ref === saved.ref), '关键词检索命中含 Hermes 的归档')
   ok(hits.every((h) => h.ref !== s2.ref), '不含关键词的归档不命中')
+  const fuzzy = await arch.search('u1:p:c1', '滚动 更新')
+  ok(fuzzy.some((h) => h.ref === saved.ref), 'BM25 分词检索命中（不要求连续子串）')
+  ok(fuzzy[0].score > 0, '检索结果带相关度分数')
   // 篡改检测：改文件内容 → hash 校验失败
   const files = fs.readdirSync(path.join(dir, 'u1_p_c1'))
   const fp = path.join(dir, 'u1_p_c1', files[0])

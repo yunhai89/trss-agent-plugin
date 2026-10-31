@@ -88,22 +88,47 @@ export function sanitizeToolPairs(messages) {
 /**
  * 确定性台账：从被压缩消息**结构化提取**（非生成、非重总结）。
  * - facts：用户消息摘录（数字/纠正原样保留在摘录文本里）
+ * - constraints：用户明确要求/禁止/必须遵守的约束（优先级最高，压缩时先保留）
+ * - decisions：已确认的决定/方案（避免后续重复讨论）
+ * - errors：工具失败原文（避免重复踩坑；含工具名）
+ * - open_questions：待确认/未解决事项
  * - completed_steps：assistant 文本步骤摘录
  * - tool_state：每工具 calls/failures/最后结果摘录（错误识别用 Agent 错误结果协议 {"error":...}）
  * 确定性保证：同输入两次构建逐字节一致（无时间戳/随机数）——ledger 可作为权威状态防漂移。
  */
-export function buildLedger(dropped, { msgStart = 0, cap = { facts: 20, steps: 20, tools: 12 } } = {}) {
+export function buildLedger(dropped, { msgStart = 0, cap = {} } = {}) {
+  const c = { facts: 20, steps: 20, tools: 12, constraints: 12, decisions: 12, errors: 12, questions: 8, ...cap }
   const idToTool = new Map()
   for (const m of dropped) for (const tc of m.tool_calls || []) idToTool.set(tc.id, toolName(tc))
   const facts = []
   const steps = []
+  const constraints = []
+  const decisions = []
+  const errors = []
+  const openQuestions = []
   const tools = new Map()
+  const constraintRe = /(必须|不得|不要|不能|禁止|务必|一定要|只能|仅限|记住|以后都|每次|要求|约束|截止|deadline|before|must|never|only|always)/i
+  const decisionRe = /(决定|采用|改为|最终|结论|确定|方案|就用|选择|settled|decided|use )/i
+  const openRe = /(待确认|需要你|请确认|下一步|未解决|待定|todo|pending|confirm)/i
+  const pushUnique = (arr, item, capN) => {
+    const key = (item.text || '').trim()
+    if (!key || arr.some((x) => x.text === key)) return
+    arr.push(item)
+    if (arr.length > capN) arr.shift()
+  }
   dropped.forEach((m, i) => {
     const at = msgStart + i
-    if (m.role === 'user' && typeof m.content === 'string' && m.content.trim()) {
-      facts.push({ text: excerpt(m.content, 160), at })
+    const content = typeof m.content === 'string' ? m.content : ''
+    if (m.role === 'user' && content.trim()) {
+      facts.push({ text: excerpt(content, 160), at })
+      if (constraintRe.test(content)) pushUnique(constraints, { text: excerpt(content, 240), at }, c.constraints)
+      if (/[?？]\s*$/.test(content.trim()) || openRe.test(content)) pushUnique(openQuestions, { text: excerpt(content, 180), at }, c.questions)
     } else if (m.role === 'assistant') {
-      if (typeof m.content === 'string' && m.content.trim()) steps.push({ text: excerpt(m.content, 120), at })
+      if (content.trim()) {
+        steps.push({ text: excerpt(content, 120), at })
+        if (decisionRe.test(content)) pushUnique(decisions, { text: excerpt(content, 200), at }, c.decisions)
+        if (openRe.test(content)) pushUnique(openQuestions, { text: excerpt(content, 180), at }, c.questions)
+      }
       for (const tc of m.tool_calls || []) {
         const t = tools.get(toolName(tc)) || { tool: toolName(tc), calls: 0, failures: 0, lastExcerpt: '' }
         t.calls++
@@ -112,18 +137,25 @@ export function buildLedger(dropped, { msgStart = 0, cap = { facts: 20, steps: 2
     } else if (m.role === 'tool') {
       const name = idToTool.get(m.tool_call_id) || 'unknown'
       const t = tools.get(name) || { tool: name, calls: 0, failures: 0, lastExcerpt: '' }
-      const c = typeof m.content === 'string' ? m.content : ''
-      if (/^\s*\{\s*"error"/.test(c)) t.failures++
+      const c = content
+      const isError = /^\s*\{\s*"error"/.test(c) || /"errorClass"\s*:/.test(c)
+      if (isError) {
+        t.failures++
+        pushUnique(errors, { tool: name, text: excerpt(c, 240), at }, c.errors)
+      }
       if (c) t.lastExcerpt = excerpt(c, 100)
       tools.set(name, t)
     }
   })
   return {
-    v: 1,
-    facts: facts.slice(-cap.facts),
-    completed_steps: steps.slice(-cap.steps),
-    tool_state: [...tools.values()].slice(0, cap.tools),
-    open_questions: [],
+    v: 2,
+    facts: facts.slice(-c.facts),
+    constraints: constraints.slice(-c.constraints),
+    decisions: decisions.slice(-c.decisions),
+    errors: errors.slice(-c.errors),
+    open_questions: openQuestions.slice(-c.questions),
+    completed_steps: steps.slice(-c.steps),
+    tool_state: [...tools.values()].slice(0, c.tools),
     archive_refs: [],
     stats: { compactedMsgs: dropped.length, compactedTokens: 0, compactions: 1 },
   }
@@ -141,6 +173,18 @@ export function mergeLedger(prev, next) {
     facts.push(f)
     if (facts.length >= 24) break
   }
+  const uniq = (a, b, cap, keyOf) => {
+    const seen2 = new Set()
+    const out = []
+    for (const x of [...(a || []), ...(b || [])]) {
+      const k = keyOf(x)
+      if (!k || seen2.has(k)) continue
+      seen2.add(k)
+      out.push(x)
+      if (out.length >= cap) break
+    }
+    return out
+  }
   const tools = new Map()
   for (const t of [...(prev.tool_state || []), ...(next.tool_state || [])]) {
     const cur = tools.get(t.tool) || { tool: t.tool, calls: 0, failures: 0, lastExcerpt: '' }
@@ -150,11 +194,14 @@ export function mergeLedger(prev, next) {
   }
   for (const t of next.tool_state || []) tools.get(t.tool).lastExcerpt = t.lastExcerpt || tools.get(t.tool).lastExcerpt
   return {
-    v: 1,
+    v: 2,
     facts,
+    constraints: uniq(next.constraints, prev.constraints, 16, (x) => x.text),
+    decisions: uniq(next.decisions, prev.decisions, 16, (x) => x.text),
+    errors: uniq(next.errors, prev.errors, 16, (x) => `${x.tool || ''}\u0000${x.text || ''}`),
+    open_questions: uniq(next.open_questions, prev.open_questions, 10, (x) => x.text),
     completed_steps: [...(next.completed_steps || []), ...(prev.completed_steps || [])].slice(0, 24),
     tool_state: [...tools.values()].slice(0, 12),
-    open_questions: next.open_questions || [],
     archive_refs: [...(next.archive_refs || []), ...(prev.archive_refs || [])].slice(0, 50),
     stats: {
       compactedMsgs: (next.stats?.compactedMsgs || 0) + (prev.stats?.compactedMsgs || 0),
@@ -192,7 +239,11 @@ export function renderCompactionMessage({ ledger, nextRole, budgetTokens = null,
     : '需要细节时请基于上述台账与近期消息工作（当前未启用原文归档）。')
   const fits = (line) => budgetTokens == null || used + tok(line) <= budgetTokens
   const sections = [
+    { title: '## 必须遵守的约束（用户明确要求，优先保留）', items: (ledger.constraints || []).map((x) => `- ${x.text}`) },
+    { title: '## 未决问题 / 待确认', items: (ledger.open_questions || []).map((x) => `- ${x.text}`) },
     { title: '## 用户事实与纠正（按时间序，数字/否定原样）', items: (ledger.facts || []).map((f) => `- ${f.text}`) },
+    { title: '## 已确认的决定 / 方案', items: (ledger.decisions || []).map((x) => `- ${x.text}`) },
+    { title: '## 错误与失败（避免重复踩坑）', items: (ledger.errors || []).map((x) => `- ${x.tool ? `[${x.tool}] ` : ''}${x.text}`) },
     { title: '## 已完成步骤', items: (ledger.completed_steps || []).map((st) => `- ${st.text}`) },
     { title: '## 工具使用', items: (ledger.tool_state || []).map((t) => `- ${t.tool} ×${t.calls}${t.failures ? `（失败 ${t.failures}）` : ''}${t.lastExcerpt ? `：最后结果 ${t.lastExcerpt}` : ''}`) },
   ]

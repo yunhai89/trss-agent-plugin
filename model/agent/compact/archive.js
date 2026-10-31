@@ -13,12 +13,27 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { contentHash } from './index.js'
+import { BM25, tokenize } from '../../llm/local-sim.js'
 
 const safeKey = (k) => String(k || 'unknown').replace(/[^A-Za-z0-9_-]/g, '_')
 
 /** ref 形如 `${epoch}-${hash}.json`——按 epoch 数值降序（新归档优先）。
  *  不能用字典序 sort().reverse()：epoch>=10 时 '9-…' 会排在 '10-…' 之前，顺序反了。 */
 const byNewest = (a, b) => (parseInt(b, 10) || 0) - (parseInt(a, 10) || 0)
+
+/** 归档消息 → 可检索文本（保留 tool_calls 参数，方便按命令/文件名检索） */
+function messageText(m) {
+  if (!m || typeof m !== 'object') return ''
+  let text = ''
+  if (typeof m.content === 'string') text = m.content
+  else if (Array.isArray(m.content)) {
+    text = m.content.map((b) => (typeof b === 'string' ? b : (b?.text || ''))).filter(Boolean).join('\n')
+  }
+  if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
+    try { text += '\n' + JSON.stringify(m.tool_calls) } catch { /* noop */ }
+  }
+  return text
+}
 
 export class CompactionArchive {
   constructor({ dir } = {}) {
@@ -78,24 +93,45 @@ export class CompactionArchive {
     }
   }
 
-  /** 关键词检索（简单包含匹配，命中返回摘录 + ref）——context_recall 的 query 路径 */
+  /** 关键词/BM25 检索（中文分词 + 精确短语加权，命中返回摘录 + ref）——context_recall 的 query 路径 */
   async search(convKey, query, { limit = 3 } = {}) {
-    const kw = String(query || '').trim().toLowerCase()
+    const kw = String(query || '').trim()
     if (!kw) return []
     const d = path.join(this.dir, safeKey(convKey))
     if (!fs.existsSync(d)) return []
-    const hits = []
-    for (const ref of fs.readdirSync(d).filter((f) => f.endsWith('.json')).sort(byNewest)) { // 新归档优先
-      if (hits.length >= limit) break
+    const docs = []
+    for (const ref of fs.readdirSync(d).filter((f) => f.endsWith('.json')).sort(byNewest)) {
       let rec
       try { rec = JSON.parse(fs.readFileSync(path.join(d, ref), 'utf8')) } catch { continue }
-      const hay = JSON.stringify(rec.messages || []).toLowerCase()
-      const idx = hay.indexOf(kw)
-      if (idx < 0) continue
-      const around = hay.slice(Math.max(0, idx - 80), idx + 160).replace(/\\n/g, ' ')
-      hits.push({ ref, hash: rec.hash, count: rec.count, epoch: rec.epoch, excerpt: around })
+      const text = (rec.messages || []).map(messageText).join('\n')
+      docs.push({ ref, rec, text })
     }
-    return hits
+    if (!docs.length) return []
+    const qLower = kw.toLowerCase()
+    let scores = []
+    try {
+      const qTokens = await tokenize(kw)
+      if (qTokens.length) {
+        const bm = new BM25()
+        for (const doc of docs) bm.add(await tokenize(doc.text))
+        scores = bm.scoresNormalized(qTokens)
+      }
+    } catch { /* 分词失败降级为纯包含匹配 */ }
+    const hits = []
+    docs.forEach((doc, i) => {
+      const lower = doc.text.toLowerCase()
+      const idx = lower.indexOf(qLower)
+      const lexical = idx >= 0
+      const rel = scores[i] || 0
+      if (!lexical && rel <= 0) return
+      const at = lexical ? idx : Math.max(0, lower.indexOf(String(kw).slice(0, 1).toLowerCase()))
+      const around = doc.text.slice(Math.max(0, at - 80), at + 160).replace(/\s+/g, ' ').trim()
+      hits.push({
+        ref: doc.ref, hash: doc.rec.hash, count: doc.rec.count, epoch: doc.rec.epoch,
+        score: rel + (lexical ? 0.5 : 0), excerpt: around,
+      })
+    })
+    return hits.sort((a, b) => b.score - a.score || (b.epoch || 0) - (a.epoch || 0)).slice(0, limit)
   }
 
   /** 列出某会话的全部归档 ref（ newest 优先）——观测/清理用 */

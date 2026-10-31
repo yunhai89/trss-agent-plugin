@@ -465,7 +465,7 @@ export class Agent {
                 unresolved: afterFinalize > Math.max(1, Math.floor(this.contextWindow * this.contextHighRatio)),
                 reason: 'finalize',
                 archiveError: rr.archiveError || null,
-                ledger: this._compactLedger ? { facts: this._compactLedger.facts?.length || 0, archiveRefs: this._compactLedger.archive_refs?.length || 0, compactions: this._compactLedger.stats?.compactions || 0 } : null,
+                ledger: this._compactLedger ? { facts: this._compactLedger.facts?.length || 0, constraints: this._compactLedger.constraints?.length || 0, decisions: this._compactLedger.decisions?.length || 0, errors: this._compactLedger.errors?.length || 0, openQuestions: this._compactLedger.open_questions?.length || 0, archiveRefs: this._compactLedger.archive_refs?.length || 0, compactions: this._compactLedger.stats?.compactions || 0 } : null,
               }, taskId, ctx?.devScope)
             } else if (rr.archiveError) {
               this.logger('warn', `[finalize] 收尾前压缩失败：${rr.archiveError}（原文保留，请求可能超窗）`)
@@ -940,7 +940,7 @@ export class Agent {
             ? `[epoch] 上下文压力(est=${est}>${high})：压缩至低水位——归档 ${dropped} 条消息（另修剪 ${pruned} 条长工具结果，archive_refs=${archived}），cacheEpoch ${epoch - 1}→${epoch}`
             : `[epoch] 上下文压力(est=${est}>${high})：无法进一步压缩（${reason}${archiveError ? '：' + archiveError : ''}），保持原历史`
           this.logger(changed ? 'mark' : 'warn', head + (changed && unresolved ? `；压后完整请求仍 ${after} > 高水位 ${high}（未达标）` : ''))
-          this.devLog?.('cache_compact', { est, high, low, dropped, pruned, archived, cacheEpoch: epoch, msgsAfter: this.messages.length, unresolved, reason, archiveError, after, ledger: this._compactLedger ? { facts: this._compactLedger.facts?.length || 0, archiveRefs: this._compactLedger.archive_refs?.length || 0, compactions: this._compactLedger.stats?.compactions || 0 } : null }, taskId, ctx?.devScope)
+          this.devLog?.('cache_compact', { est, high, low, dropped, pruned, archived, cacheEpoch: epoch, msgsAfter: this.messages.length, unresolved, reason, archiveError, after, ledger: this._compactLedger ? { facts: this._compactLedger.facts?.length || 0, constraints: this._compactLedger.constraints?.length || 0, decisions: this._compactLedger.decisions?.length || 0, errors: this._compactLedger.errors?.length || 0, openQuestions: this._compactLedger.open_questions?.length || 0, archiveRefs: this._compactLedger.archive_refs?.length || 0, compactions: this._compactLedger.stats?.compactions || 0 } : null }, taskId, ctx?.devScope)
           if (changed) cb.onContextPressure?.({ estimate: est, threshold: high, dropped, pruned, archived, cacheEpoch: epoch, messages: this.messages })
         }
 
