@@ -33,6 +33,8 @@ pnpm add cuvs-node
 ```
 
 > `cuvs-node` 不写入插件的默认 `dependencies`/`optionalDependencies`，避免普通用户安装时被动下载 1.8GB。执行 `pnpm install --force`、删除 `node_modules` 或重建依赖后，需要重新执行 `pnpm add cuvs-node` 并确认 prebuilds 仍在。
+>
+> 插件升级（`#agent更新` / `git pull`）如果改动了 `package.json` 并触发 `pnpm install`，也可能清理手动安装的 `cuvs-node`；升级后请重跑一次 `node model/agent/vector-gpu.test.mjs`，失败则重新安装。
 
 如果 pnpm/npm 提示 install script 被忽略：
 
